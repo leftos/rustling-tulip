@@ -484,12 +484,8 @@
 - [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone · release vNext
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
 - [ ] RT-1650 Upgrade GPUI on feat/gpui-upgrade (MA.1 to MA.5) · release vNext
-  - [ ] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it · release vNext
-  - [ ] RT-1656 Close, retitle and move pop-out windows again on the GPUI upgrade · release vNext
-  - [ ] RT-1657 Clamp a multi-line text input's rows under device-pixel snapping on the GPUI upgrade · release vNext
-  - [ ] RT-1658 Classify and fix four Settings and Accounts specs on the GPUI upgrade · release vNext
+  - [/] RT-1524 MA.5: Pass the desktop checks on the GPUI upgrade and merge it · release vNext
   - [ ] RT-1660 Merge feat/gpui-upgrade to main (#207)
-  - [ ] RT-1662 Re-check the docs' gpui 0.2.2 behaviour claims against the pinned fork
 - [ ] RT-1525 MA.6: Build the phone app for the iOS simulator · release vNext
 - [ ] RT-1526 MA.7: Make TextInput work with the soft keyboard and Return · release vNext
 - [ ] RT-1527 MA.8: Give iOS its TLS roots, Keychain token store and config dir · release vNext
@@ -629,6 +625,7 @@
 - [ ] RT-1243 Draw the toast's typed-answer box on macOS
 - [ ] RT-1550 Reap the opener and browser processes the client starts on macOS and Linux
 - [ ] RT-1551 Read a leading // as a local path when building a page URL off Windows
+- [ ] RT-1671 Make the native client's specs pass on macOS · release vNext
 
 ## Dictation
 
@@ -738,7 +735,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, RT-1650, RT-1656, RT-1657, RT-1658, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1524, RT-1525, RT-1526, RT-1527, RT-1528, RT-1529, RT-1530, RT-1531, RT-1532, RT-1533, RT-1534, RT-1535, RT-1536, RT-1537, RT-1538, RT-1539, RT-1540, RT-1650, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
