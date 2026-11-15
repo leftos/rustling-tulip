@@ -11,7 +11,7 @@ use gpui::{
 
 use super::PhoneRoot;
 use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
-use super::hosts_view::phone_button;
+use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
 use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
@@ -224,8 +224,14 @@ impl PhoneRoot {
         let mut children: Vec<Div> = self.needs_you_tray(cx).into_iter().collect();
         for host in &home.hosts {
             if home.host_headers {
-                let state = self.root.read(cx).host_header_state(&host.host);
-                children.push(Self::host_header(host, state, &t, cx));
+                let (state, parts) = {
+                    let root = self.root.read(cx);
+                    (
+                        root.host_header_state(&host.host),
+                        row_parts(root, &host.host),
+                    )
+                };
+                children.push(Self::host_header(host, state, &parts, &t, cx));
             }
             for group in &host.groups {
                 children.push(Self::home_group(group, &t, cx));
@@ -371,15 +377,18 @@ impl PhoneRoot {
     /// `host`'s header, drawn only while more than one host is listed: its
     /// state's dot, its name, where its connection stands while not online
     /// and, while it has not approved this phone, `Pair`, as the desktop's
-    /// host header says them.
+    /// host header says them; under it the parts its connection calls for,
+    /// drawn as its row on the hosts screen draws them.
     fn host_header(
         host: &HomeHost,
         state: HostHeaderState,
+        parts: &RowParts,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
         let tag = host_tag(&host.host);
         let id = format!("phone-home-host-{tag}");
+        let name = saved_name(&host.host);
         let status = state.label().map(|text| {
             let status_id = format!("phone-home-host-status-{tag}");
             div()
@@ -402,14 +411,12 @@ impl PhoneRoot {
                 this.pair(&key, window, cx);
             }))
         });
-        div()
-            .driver_id(|| id)
+        let head = div()
             .flex()
             .items_center()
             .gap(px(8.0))
             .min_h(px(TOUCH_TARGET))
             .px(px(SIDE_PADDING))
-            .bg(gpui::rgb(t.raised))
             .child(dot(state.dot(t)))
             .child(
                 div()
@@ -420,7 +427,32 @@ impl PhoneRoot {
                     .child(host.label.clone()),
             )
             .children(status)
-            .children(pair)
+            .children(pair);
+        let mut extra = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(SIDE_PADDING))
+            .pb(px(6.0));
+        if let Some(fingerprint) = parts.prompt.as_deref() {
+            extra = extra.child(Self::host_key_prompt(name, &host.host, fingerprint, t, cx));
+        }
+        if let Some(reason) = parts.reason.as_deref() {
+            extra = extra.child(Self::reason_line(name, reason, t));
+        }
+        if parts.retry {
+            extra = extra.child(Self::retry_line(name, &host.host, cx));
+        }
+        div()
+            .driver_id(|| id)
+            .flex()
+            .flex_col()
+            .bg(gpui::rgb(t.raised))
+            .child(head)
+            .when(
+                parts.prompt.is_some() || parts.reason.is_some() || parts.retry,
+                |header| header.child(extra),
+            )
     }
 
     /// `group`'s heading, its banner when Detached, then its rows.

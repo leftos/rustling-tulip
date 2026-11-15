@@ -277,7 +277,7 @@ Risks: a new SSH dependency (`russh`, pure Rust, its licence and advisories chec
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma20-ssh.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --lib ssh_inproc`
 
   Waits on: MA.9. Owner's iPhone: not needed.
-- [ ] **MA.21 Add SSH hosts on the phone.** The phone's add form gains an SSH mode (`user@host[:port]`, remote command), shows the phone's public key with Copy, and on a first connection shows the host key's fingerprint with Trust and Cancel; a trusted fingerprint is saved in the host's `saved_hosts` record (an additive field).
+- [x] **MA.21 Add SSH hosts on the phone.** The phone's add form gains an SSH mode (`user@host[:port]`, remote command), shows the phone's public key with Copy, and on a first connection shows the host key's fingerprint with Trust and Cancel; a trusted fingerprint is saved in the host's `saved_hosts` record (an additive field).
 
   Then a hand check for the owner on the iPhone: add the PC over SSH, trust its key, see the session list, and see a changed host key refused.
 

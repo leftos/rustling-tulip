@@ -483,6 +483,13 @@ impl RootView {
             .collect()
     }
 
+    /// The phone's public SSH key as an `authorized_keys` line, or why it
+    /// cannot be read. Reading it reaches the Keychain, so the add form
+    /// asks once and keeps the answer.
+    pub(crate) fn phone_public_key(&self) -> Result<String, String> {
+        crate::ssh_inproc::public_key_line(self.tokens.as_ref()).map_err(|err| err.to_string())
+    }
+
     /// The saved tailnet hosts this PC holds no device token for. A host
     /// whose token cannot be read is left untagged; an SSH host has none.
     pub(crate) fn hosts_not_paired(&self, saved: &[SavedHost]) -> HashSet<String> {

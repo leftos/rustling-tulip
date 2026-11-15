@@ -17,11 +17,13 @@ use protocol::{
     SessionSnapshot,
 };
 use rustling_tulip_native::phone::PhoneRoot;
-use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::target::{HostKey, SshHost, Target};
+use rustling_tulip_native::{Connection, NetCommand, NetEvent};
 use serde_json::json;
 use std::time::Duration;
-use support::{Harness, REMOTE, TestDir, daemon_features, repo, saved_remote, seed_ui, session};
+use support::{
+    Harness, REMOTE, TestDir, daemon_features, repo, saved_remote, saved_ui, seed_ui, session,
+};
 
 /// The second tailnet host the two-host specs save.
 const DEN: &str = "den.tail1234.ts.net";
@@ -1056,4 +1058,122 @@ fn rows_do_not_move_when_a_card_leaves(cx: &mut TestAppContext) {
         before,
         "the rows keep their place"
     );
+}
+
+/// The SSH host Home's header specs report on.
+const SSH: &str = "me@box";
+
+/// The target [`SSH`] is.
+fn ssh_target() -> Target {
+    Target::parse_ssh(SSH, None).expect("an SSH host string")
+}
+
+/// A connection to `target` its daemon refused, as an SSH host refuses an
+/// unknown host key.
+fn refused(target: &Target) -> Connection {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_auth_failed("the host's key is not trusted".to_owned());
+    conn
+}
+
+/// A phone with [`REMOTE`] open and listing its sessions, and [`SSH`]
+/// saved beside it, so Home draws a header per host.
+fn phone_with_a_host_open_beside_an_ssh_host<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "kind": "ssh", "name": SSH },
+            ]
+        }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    open_host(&mut h, &saved_remote());
+    h
+}
+
+#[gpui::test]
+fn an_unknown_host_key_shows_on_home_while_another_host_is_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_a_host_open_beside_an_ssh_host(cx, &dir);
+    let ssh = ssh_target();
+    h.host(&ssh).event(NetEvent::HostKeyUnverified {
+        fingerprint: "SHA256:abc".to_owned(),
+    });
+    h.host(&ssh).event(NetEvent::State(refused(&ssh)));
+
+    assert!(drawn(&mut h, "phone-home"), "the open host's Home shows");
+    for selector in [
+        format!("phone-host-hostkey-{SSH}"),
+        format!("phone-host-trust-{SSH}"),
+        format!("phone-host-cancel-{SSH}"),
+    ] {
+        assert!(
+            drawn(&mut h, &selector),
+            "{selector} shows under the host's header"
+        );
+    }
+}
+
+#[gpui::test]
+fn trusting_from_home_saves_the_fingerprint_and_redials(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_a_host_open_beside_an_ssh_host(cx, &dir);
+    let ssh = ssh_target();
+    h.host(&ssh).event(NetEvent::HostKeyUnverified {
+        fingerprint: "SHA256:abc".to_owned(),
+    });
+    h.host(&ssh).event(NetEvent::State(refused(&ssh)));
+
+    h.click_on(&format!("phone-host-trust-{SSH}"));
+
+    let dialled = h
+        .opened_targets()
+        .pop()
+        .expect("Trust dials the host again");
+    assert_eq!(
+        dialled.ssh_host().and_then(SshHost::host_fingerprint),
+        Some("SHA256:abc"),
+        "the redial carries the trusted key"
+    );
+    assert_eq!(
+        saved_ui(&dir)["saved_hosts"][1]["host_fingerprint"],
+        "SHA256:abc",
+        "the saved record keeps the trusted key"
+    );
+    assert!(!drawn(&mut h, &format!("phone-host-hostkey-{SSH}")));
+}
+
+#[gpui::test]
+fn a_stopped_host_on_home_shows_its_reason_and_retry(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_a_host_open_beside_an_ssh_host(cx, &dir);
+    let ssh = ssh_target();
+    h.host(&ssh).event(NetEvent::State(refused(&ssh)));
+
+    assert!(
+        drawn(&mut h, &format!("phone-host-reason-{SSH}")),
+        "a stopped host's reason shows under its header"
+    );
+    assert!(
+        drawn(&mut h, &format!("phone-host-retry-{SSH}")),
+        "and its Retry"
+    );
+    let _ = h.host(&ssh).commands();
+
+    h.click_on(&format!("phone-host-retry-{SSH}"));
+
+    let restarts = h
+        .host(&ssh)
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, NetCommand::Restart))
+        .count();
+    assert_eq!(restarts, 1, "Retry restarts the host");
 }

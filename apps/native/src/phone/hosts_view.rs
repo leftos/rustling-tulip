@@ -7,22 +7,22 @@ use std::collections::HashSet;
 use std::mem::Discriminant;
 
 use gpui::{
-    ClickEvent, Context, Div, Entity, Focusable as _, FontWeight, MouseButton, MouseDownEvent,
+    App, ClickEvent, Context, Div, Entity, Focusable as _, FontWeight, MouseButton, MouseDownEvent,
     Stateful, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
 use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
-use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
 use crate::connection_picker::{
-    LiveState, RowFacts, RowHost, SavedHost, offers_pair, typed_target,
+    LiveState, RowFacts, RowHost, SavedHost, offers_pair, typed_ssh_target, typed_target,
 };
 use crate::driver_id::DriverId as _;
 use crate::target::{DEFAULT_TAILNET_PORT, HostKey, TailnetHost, Target};
 use crate::text_input::TextInput;
 use crate::ui_theme::{UiTheme, theme};
+use crate::{NetCommand, RootView};
 
 /// The form's title, and the label of the button that shows it again.
 const ADD_TITLE: &str = "Add a host";
@@ -32,20 +32,58 @@ const NAME_PLACEHOLDER: &str = "host name on your tailnet";
 const PORT_PLACEHOLDER: &str = "port";
 /// The form's submit button.
 const ADD_LABEL: &str = "Add";
+/// The form's mode switch: the tailnet name and port, or an SSH host.
+const MODE_TAILNET: &str = "Tailnet";
+const MODE_SSH: &str = "SSH";
+/// The SSH host field's placeholder.
+const SSH_PLACEHOLDER: &str = "user@host or user@host:port";
+/// The remote command field's placeholder.
+const COMMAND_PLACEHOLDER: &str = "remote command (optional)";
+/// The phone's key block: its label, the hint under the fingerprint and the
+/// button that copies the key.
+const KEY_LABEL: &str = "This phone's key";
+const KEY_HINT: &str = "Check that it matches the PC's key before you trust it.";
+const COPY_LABEL: &str = "Copy";
+/// The unknown host key prompt's title, and the buttons that answer it.
+const UNKNOWN_KEY_LABEL: &str = "Unknown host key";
+const TRUST_LABEL: &str = "Trust";
+const CANCEL_LABEL: &str = "Cancel";
+/// A stopped host's Retry button.
+const RETRY_LABEL: &str = "Retry";
 /// A row's Pair button.
 const PAIR_LABEL: &str = "Pair";
+/// Why the phone's add form refuses an SSH host with no `user@`.
+const SSH_NEEDS_USER: &str =
+    "Type it as user@host or user@host:port: the phone has no SSH config to look a name up in.";
 
 /// Each saved host's name with the kind of state its connection was last
 /// seen in (`None` while the window holds none).
 type SeenStates = Vec<(String, Option<Discriminant<State>>)>;
 
-/// The add form's state: its two fields, the last refusal and whether it
+/// Which kind of host the add form takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostMode {
+    /// A `MagicDNS` name and port on the tailnet.
+    Tailnet,
+    /// A `user@host[:port]` string and an optional remote command.
+    Ssh,
+}
+
+/// The add form's state: the mode it takes and each mode's fields, the last
+/// refusal, the phone's key once SSH mode has read it, and whether the form
 /// shows beside saved hosts (with none saved it always shows); and the
 /// saved tailnet hosts the phone holds no device token for, read from the
 /// token store only when a host's connection changes state, never per frame.
 pub(crate) struct PhoneHosts {
+    mode: HostMode,
     name: Entity<TextInput>,
     port: Entity<TextInput>,
+    ssh: Entity<TextInput>,
+    command: Entity<TextInput>,
+    /// The phone's public key line, or why it cannot be read: read once,
+    /// when the form first opens on SSH, since reading it reaches the
+    /// Keychain.
+    key: Option<Result<String, String>>,
     error: Option<String>,
     form_open: bool,
     not_paired: HashSet<String>,
@@ -53,13 +91,17 @@ pub(crate) struct PhoneHosts {
 }
 
 impl PhoneHosts {
-    /// An empty name and the desktop picker's default port, with the
-    /// not-paired hosts read from `root`'s token store.
+    /// An empty form on the tailnet mode and the desktop picker's default
+    /// port, with the not-paired hosts read from `root`'s token store.
     pub(crate) fn new(root: &Entity<RootView>, cx: &mut Context<PhoneRoot>) -> Self {
         let mut hosts = Self {
+            mode: HostMode::Tailnet,
             name: cx.new(|cx| TextInput::new(String::new(), NAME_PLACEHOLDER, cx)),
             port: cx
                 .new(|cx| TextInput::new(DEFAULT_TAILNET_PORT.to_string(), PORT_PLACEHOLDER, cx)),
+            ssh: cx.new(|cx| TextInput::new(String::new(), SSH_PLACEHOLDER, cx)),
+            command: cx.new(|cx| TextInput::new(String::new(), COMMAND_PLACEHOLDER, cx)),
+            key: None,
             error: None,
             form_open: false,
             not_paired: HashSet::new(),
@@ -67,6 +109,39 @@ impl PhoneHosts {
         };
         hosts.read_tokens(root.read(cx));
         hosts
+    }
+
+    /// The mode the form takes.
+    fn mode(&self) -> HostMode {
+        self.mode
+    }
+
+    /// The phone's public key, once SSH mode has read it.
+    fn key(&self) -> Option<&Result<String, String>> {
+        self.key.as_ref()
+    }
+
+    /// Keeps the key SSH mode read.
+    fn set_key(&mut self, key: Result<String, String>) {
+        self.key = Some(key);
+    }
+
+    /// The form switches to `mode`, keeping each mode's typed text; the
+    /// refusal goes with the mode it was typed in.
+    fn set_mode(&mut self, mode: HostMode) {
+        self.mode = mode;
+        self.error = None;
+    }
+
+    /// The target the form's fields name, or why the mode refuses them.
+    fn typed(&self, cx: &App) -> Result<Target, String> {
+        match self.mode {
+            HostMode::Tailnet => typed_target(self.name.read(cx).text(), self.port.read(cx).text())
+                .map_err(|refusal| refusal.to_string()),
+            HostMode::Ssh => {
+                typed_phone_ssh_target(self.ssh.read(cx).text(), self.command.read(cx).text())
+            }
+        }
     }
 
     /// Reads the not-paired hosts afresh from `root`'s token store.
@@ -89,14 +164,20 @@ impl PhoneHosts {
         self.error.as_deref()
     }
 
-    /// Back to an empty name, the default port and no refusal.
+    /// Back to an empty form on the tailnet mode and no refusal; a key
+    /// already read is kept.
     fn reset(&mut self, cx: &mut Context<PhoneRoot>) {
+        self.mode = HostMode::Tailnet;
         self.error = None;
         self.name
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.port.update(cx, |input, cx| {
             input.set_text(DEFAULT_TAILNET_PORT.to_string(), cx);
         });
+        self.ssh
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.command
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
     }
 }
 
@@ -104,8 +185,87 @@ impl PhoneHosts {
 struct HostRow {
     name: String,
     key: HostKey,
-    state: &'static str,
+    parts: RowParts,
     pair: bool,
+}
+
+/// What a host shows under its head: the state word always, and the parts
+/// only the states that call for them. A host's row on the hosts screen and
+/// its header on Home both draw these, so the two never disagree.
+pub(super) struct RowParts {
+    pub(super) state_word: &'static str,
+    /// Why the connection stopped, or failed.
+    pub(super) reason: Option<String>,
+    /// The host key the user has not trusted yet, as its fingerprint, while
+    /// one is pending.
+    pub(super) prompt: Option<String>,
+    /// Whether the row offers Retry.
+    pub(super) retry: bool,
+}
+
+impl RowParts {
+    /// The parts of a row for `state`, with `pending` the fingerprint the
+    /// user has not answered for. A pending host key takes the place of the
+    /// reason line and Retry: the prompt is the row's one answer.
+    fn of(state: Option<&State>, pending: Option<&str>) -> Self {
+        let state_word = state_words(state);
+        let parts = match state {
+            Some(State::AuthFailed { reason }) => Some((reason.clone(), true)),
+            Some(State::Error { reason }) => Some((reason.clone(), false)),
+            _ => None,
+        };
+        let Some((reason, stopped)) = parts else {
+            return Self {
+                state_word,
+                reason: None,
+                prompt: None,
+                retry: false,
+            };
+        };
+        match pending {
+            Some(fingerprint) => Self {
+                state_word,
+                reason: None,
+                prompt: Some(fingerprint.to_owned()),
+                retry: false,
+            },
+            None => Self {
+                state_word,
+                reason: Some(reason),
+                prompt: None,
+                retry: stopped,
+            },
+        }
+    }
+}
+
+/// What a host's row on the hosts screen, or its header on Home, shows
+/// besides its name: the parts its connection's state and any host key
+/// still waiting on the user call for.
+pub(super) fn row_parts(root: &RootView, key: &HostKey) -> RowParts {
+    RowParts::of(
+        root.conn_of(key).map(Connection::state),
+        root.unverified_fingerprint(key),
+    )
+}
+
+/// The name a host's saved record has: its key without the `ssh:` marker an
+/// SSH host carries, so both screens tag its parts alike.
+pub(super) fn saved_name(host: &HostKey) -> &str {
+    match host {
+        HostKey::Local => "This PC",
+        HostKey::Remote(key) => key.strip_prefix("ssh:").unwrap_or(key),
+    }
+}
+
+/// The SSH target the add form's fields name, or why it is refused. The
+/// phone has no `~/.ssh/config` to look a bare name up in, so the string
+/// must carry its user.
+fn typed_phone_ssh_target(host: &str, remote_command: &str) -> Result<Target, String> {
+    if !host.contains('@') {
+        return Err(SSH_NEEDS_USER.to_owned());
+    }
+    typed_ssh_target(host, remote_command).map_err(|refusal| refusal.to_string())
 }
 
 /// A connection's state in the words the sidebar's host header uses, with
@@ -115,9 +275,8 @@ fn state_words(state: Option<&State>) -> &'static str {
         Some(State::Open { .. }) => "Online",
         Some(State::Init | State::Connecting) => "Connecting…",
         Some(State::NotApproved { .. }) => "Not paired",
-        Some(State::Closed { .. } | State::AuthFailed { .. } | State::Error { .. }) | None => {
-            "Offline"
-        }
+        Some(State::AuthFailed { .. }) => "Stopped",
+        Some(State::Closed { .. } | State::Error { .. }) | None => "Offline",
     }
 }
 
@@ -216,10 +375,11 @@ fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> 
         remote_update: false,
         client_update: false,
     };
+    let parts = row_parts(root, &key);
     Some(HostRow {
         name: host.name.clone(),
         key,
-        state: state_words(state),
+        parts,
         pair: offers_pair(&facts),
     })
 }
@@ -282,7 +442,7 @@ impl PhoneRoot {
             .collect();
         let form_shows = rows.is_empty() || self.hosts.form_open;
         let t = theme(cx);
-        let row_elements: Vec<Div> = rows.into_iter().map(|row| Self::row(row, &t, cx)).collect();
+        let row_elements: Vec<Div> = rows.iter().map(|row| Self::row(row, &t, cx)).collect();
         let tail = self.hosts_tail(form_shows, &t, cx);
         div()
             .size_full()
@@ -397,38 +557,11 @@ impl PhoneRoot {
         }
     }
 
-    /// One saved host: its name, its state in words and, when it offers
-    /// one, its Pair button.
-    fn row(row: HostRow, t: &UiTheme, cx: &mut Context<Self>) -> Div {
-        let HostRow {
-            name,
-            key,
-            state,
-            pair,
-        } = row;
-        let pair_button = pair.then(|| {
-            phone_button(&format!("phone-host-pair-{name}"), ButtonKind::Primary, cx)
-                .child(PAIR_LABEL)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.pair(&key, window, cx);
-                }))
-        });
-        let row_id = format!("phone-host-row-{name}");
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().truncate().child(name))
-                    .child(div().text_color(gpui::rgb(t.muted)).child(state)),
-            )
-            .children(pair_button);
-        div()
+    /// One saved host: its head, the unknown host key prompt, its reason
+    /// line and its Retry button, as its state calls for them.
+    fn row(row: &HostRow, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let row_id = format!("phone-host-row-{}", row.name);
+        let mut card = div()
             .driver_id(|| row_id)
             .flex()
             .flex_col()
@@ -438,11 +571,135 @@ impl PhoneRoot {
             .border_1()
             .border_color(gpui::rgb(t.line))
             .bg(gpui::rgb(t.raised))
-            .child(head)
+            .child(Self::row_head(row, t, cx));
+        if let Some(fingerprint) = row.parts.prompt.as_deref() {
+            card = card.child(Self::host_key_prompt(
+                &row.name,
+                &row.key,
+                fingerprint,
+                t,
+                cx,
+            ));
+        }
+        if let Some(reason) = row.parts.reason.as_deref() {
+            card = card.child(Self::reason_line(&row.name, reason, t));
+        }
+        if row.parts.retry {
+            card = card.child(Self::retry_line(&row.name, &row.key, cx));
+        }
+        card
     }
 
-    /// The add form: its title, the name and port fields, a refusal under
-    /// them and the Add button.
+    /// A row's head: its name and state word, and its Pair button when it
+    /// offers one.
+    fn row_head(row: &HostRow, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let pair_button = row.pair.then(|| {
+            let key = row.key.clone();
+            phone_button(
+                &format!("phone-host-pair-{}", row.name),
+                ButtonKind::Primary,
+                cx,
+            )
+            .child(PAIR_LABEL)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.pair(&key, window, cx);
+            }))
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(row.name.clone()))
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(t.muted))
+                            .child(row.parts.state_word),
+                    ),
+            )
+            .children(pair_button)
+    }
+
+    /// The prompt on a host whose connection offered a key this phone has
+    /// not trusted: the fingerprint, and Trust and Cancel.
+    pub(super) fn host_key_prompt(
+        name: &str,
+        key: &HostKey,
+        fingerprint: &str,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let block_id = format!("phone-host-hostkey-{name}");
+        let trust_id = format!("phone-host-trust-{name}");
+        let cancel_id = format!("phone-host-cancel-{name}");
+        let trusted = key.clone();
+        let cancelled = key.clone();
+        let trust = phone_button(&trust_id, ButtonKind::Primary, cx)
+            .child(TRUST_LABEL)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.root
+                    .update(cx, |root, cx| root.trust_host_key(&trusted, window, cx));
+            }));
+        let cancel = phone_button(&cancel_id, ButtonKind::Outlined, cx)
+            .child(CANCEL_LABEL)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.root
+                    .update(cx, |root, cx| root.cancel_host_key(&cancelled, cx));
+            }));
+        div()
+            .driver_id(|| block_id)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(UNKNOWN_KEY_LABEL),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .font_family(crate::fonts::DEFAULT_FAMILY)
+                    .child(fingerprint.to_owned()),
+            )
+            .child(div().text_color(gpui::rgb(t.muted)).child(KEY_HINT))
+            .child(div().flex().gap(px(8.0)).child(trust).child(cancel))
+    }
+
+    /// A host's reason line: why its connection stopped or failed, wrapped
+    /// so the whole of it shows.
+    pub(super) fn reason_line(name: &str, reason: &str, t: &UiTheme) -> Div {
+        div()
+            .driver_id(|| format!("phone-host-reason-{name}"))
+            .min_w_0()
+            .text_color(gpui::rgb(t.muted))
+            .child(reason.to_owned())
+    }
+
+    /// A host's Retry button: dials it again.
+    pub(super) fn retry_line(name: &str, key: &HostKey, cx: &mut Context<Self>) -> Div {
+        let key = key.clone();
+        div().flex().justify_end().child(
+            phone_button(
+                &format!("phone-host-retry-{name}"),
+                ButtonKind::Outlined,
+                cx,
+            )
+            .child(RETRY_LABEL)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.retry(&key, cx);
+            })),
+        )
+    }
+
+    /// The add form: its title, the mode switch, the fields that mode
+    /// takes, the phone's key in SSH mode, a refusal under them and the Add
+    /// button.
     fn add_form(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let error = self.hosts.error.clone().map(|error| {
             div()
@@ -463,18 +720,145 @@ impl PhoneRoot {
                     .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(ADD_TITLE),
             )
-            .child(field_box("phone-host-name", &self.hosts.name, t, cx))
-            .child(field_box("phone-host-port", &self.hosts.port, t, cx))
+            .child(self.mode_switch(cx))
+            .children(self.mode_fields(t, cx))
+            .children(self.key_block(t, cx))
             .children(error)
-            .child(
-                div().flex().justify_end().child(
-                    phone_button("phone-host-add", ButtonKind::Primary, cx)
-                        .child(ADD_LABEL)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.add_typed_host(window, cx);
-                        })),
-                ),
-            )
+            .child(Self::add_row(cx))
+    }
+
+    /// The form's mode switch: Tailnet and SSH side by side, the current
+    /// one Primary.
+    fn mode_switch(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .gap(px(8.0))
+            .child(self.mode_button(
+                HostMode::Tailnet,
+                MODE_TAILNET,
+                "phone-host-mode-tailnet",
+                cx,
+            ))
+            .child(self.mode_button(HostMode::Ssh, MODE_SSH, "phone-host-mode-ssh", cx))
+    }
+
+    /// One mode button: `label` in `selector`, Primary while it is the
+    /// form's mode, and tall enough to tap.
+    fn mode_button(
+        &self,
+        mode: HostMode,
+        label: &'static str,
+        selector: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let kind = if self.hosts.mode() == mode {
+            ButtonKind::Primary
+        } else {
+            ButtonKind::Outlined
+        };
+        phone_button(selector, kind, cx)
+            .flex_1()
+            .justify_center()
+            .min_h(px(44.0))
+            .child(label)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.switch_host_mode(mode, cx);
+            }))
+    }
+
+    /// The fields the form's mode takes.
+    fn mode_fields(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<Div> {
+        match self.hosts.mode() {
+            HostMode::Tailnet => vec![
+                field_box("phone-host-name", &self.hosts.name, t, cx),
+                field_box("phone-host-port", &self.hosts.port, t, cx),
+            ],
+            HostMode::Ssh => vec![
+                field_box("phone-host-ssh", &self.hosts.ssh, t, cx),
+                field_box("phone-host-command", &self.hosts.command, t, cx),
+            ],
+        }
+    }
+
+    /// The phone's key in SSH mode, with Copy; nothing in Tailnet mode and
+    /// nothing before the key has been read.
+    fn key_block(&self, t: &UiTheme, cx: &mut Context<Self>) -> Option<Div> {
+        if self.hosts.mode() != HostMode::Ssh {
+            return None;
+        }
+        let key = self.hosts.key()?;
+        let block = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(div().text_color(gpui::rgb(t.muted)).child(KEY_LABEL));
+        let block = match key {
+            Ok(line) => {
+                let copy = phone_button("phone-host-copy-key", ButtonKind::Outlined, cx)
+                    .child(COPY_LABEL)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_phone_key(cx)));
+                block
+                    .child(
+                        div()
+                            .driver_id(|| "phone-host-key".to_owned())
+                            .min_w_0()
+                            .font_family(crate::fonts::DEFAULT_FAMILY)
+                            .child(line.clone()),
+                    )
+                    .child(div().flex().justify_end().child(copy))
+            }
+            Err(err) => block.child(
+                div()
+                    .driver_id(|| "phone-host-key-error".to_owned())
+                    .min_w_0()
+                    .text_color(gpui::rgb(t.danger))
+                    .child(format!("The phone's key could not be read: {err}")),
+            ),
+        };
+        Some(block)
+    }
+
+    /// The form's Add button.
+    fn add_row(cx: &mut Context<Self>) -> Div {
+        div().flex().justify_end().child(
+            phone_button("phone-host-add", ButtonKind::Primary, cx)
+                .child(ADD_LABEL)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.add_typed_host(window, cx);
+                })),
+        )
+    }
+
+    /// The add form switches to `mode`: its refusal goes, and the phone's
+    /// key is read the first time SSH opens.
+    fn switch_host_mode(&mut self, mode: HostMode, cx: &mut Context<Self>) {
+        if self.hosts.mode() == mode {
+            return;
+        }
+        self.hosts.set_mode(mode);
+        if mode == HostMode::Ssh && self.hosts.key().is_none() {
+            let key = self.root.read(cx).phone_public_key();
+            self.hosts.set_key(key);
+        }
+        cx.notify();
+    }
+
+    /// Copy on the key block: the key line goes to the clipboard.
+    fn copy_phone_key(&mut self, cx: &mut Context<Self>) {
+        let Some(Ok(line)) = self.hosts.key() else {
+            return;
+        };
+        let line = line.clone();
+        self.root
+            .update(cx, |root, cx| root.copy_to_clipboard(&line, cx));
+    }
+
+    /// Retry on `host`'s row: its network thread dials it again.
+    fn retry(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        self.root.update(cx, |root, cx| {
+            root.command_to(host, NetCommand::Restart);
+            cx.notify();
+        });
     }
 
     /// "Add a host" under the rows: the form shows, empty, with the
@@ -489,11 +873,7 @@ impl PhoneRoot {
     /// Add: the typed host is saved and connected, or the form says why it
     /// was refused.
     fn add_typed_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = typed_target(
-            self.hosts.name.read(cx).text(),
-            self.hosts.port.read(cx).text(),
-        );
-        match typed {
+        match self.hosts.typed(cx) {
             Ok(target) => {
                 tracing::info!(?target, "phone: adding a host");
                 self.hosts.reset(cx);
@@ -502,7 +882,7 @@ impl PhoneRoot {
                     .update(cx, |root, cx| root.add_saved_host(target, window, cx));
                 self.hosts.read_tokens(self.root.read(cx));
             }
-            Err(refusal) => self.hosts.error = Some(refusal.to_string()),
+            Err(refusal) => self.hosts.error = Some(refusal),
         }
         cx.notify();
     }
@@ -511,5 +891,75 @@ impl PhoneRoot {
     pub(super) fn pair(&self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.root
             .update(cx, |root, cx| root.pair_with_host(host, window, cx));
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test states the rule it exercises")]
+mod tests {
+    use super::*;
+    use crate::target::SshHost;
+
+    /// The refusal an SSH host with no `user@` gets.
+    const NEEDS_USER: &str =
+        "Type it as user@host or user@host:port: the phone has no SSH config to look a name up in.";
+
+    #[test]
+    fn an_ssh_host_without_user_at_is_refused() {
+        let refusal = typed_phone_ssh_target("box", "").expect_err("a bare host name is refused");
+        assert_eq!(refusal, NEEDS_USER);
+    }
+
+    #[test]
+    fn a_typed_ssh_host_keeps_its_command() {
+        let target = typed_phone_ssh_target("me@box", "hostname").expect("a typed SSH host");
+        assert_eq!(
+            target.ssh_host().and_then(SshHost::remote_command),
+            Some("hostname"),
+            "the remote command reaches the target"
+        );
+        assert_eq!(target.ssh_host().map(SshHost::name), Some("me@box"));
+    }
+
+    #[test]
+    fn an_auth_failed_row_says_stopped_with_its_reason_and_retry() {
+        let state = State::AuthFailed {
+            reason: "box refused this phone's key".to_owned(),
+        };
+        let parts = RowParts::of(Some(&state), None);
+        assert_eq!(parts.state_word, "Stopped");
+        assert_eq!(
+            parts.reason.as_deref(),
+            Some("box refused this phone's key")
+        );
+        assert!(parts.prompt.is_none(), "nothing is pending to trust");
+        assert!(parts.retry, "a stopped host offers Retry");
+    }
+
+    #[test]
+    fn an_error_row_says_offline_with_its_reason_and_no_retry() {
+        let state = State::Error {
+            reason: "no handshake".to_owned(),
+        };
+        let parts = RowParts::of(Some(&state), None);
+        assert_eq!(parts.state_word, "Offline");
+        assert_eq!(parts.reason.as_deref(), Some("no handshake"));
+        assert!(parts.prompt.is_none());
+        assert!(!parts.retry, "only a stopped host offers Retry");
+    }
+
+    #[test]
+    fn a_pending_host_key_shows_the_prompt_instead_of_the_reason() {
+        let state = State::AuthFailed {
+            reason: "box offered a host key this phone has not seen: SHA256:abc".to_owned(),
+        };
+        let parts = RowParts::of(Some(&state), Some("SHA256:abc"));
+        assert_eq!(parts.state_word, "Stopped");
+        assert_eq!(parts.prompt.as_deref(), Some("SHA256:abc"));
+        assert!(
+            parts.reason.is_none(),
+            "the prompt replaces the reason line"
+        );
+        assert!(!parts.retry, "the prompt replaces Retry");
     }
 }
