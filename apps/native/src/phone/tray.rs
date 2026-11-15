@@ -12,9 +12,10 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use gpui::ScrollHandle;
 use protocol::PromptChoice;
 
-use crate::dashboard_rows::AskBlock;
+use crate::dashboard_rows::{AskBlock, AskQuestion};
 use crate::needs_you::{self, NeedsYouRow};
 use crate::sidebar::SidebarModel;
 use crate::target::HostKey;
@@ -38,10 +39,14 @@ pub(crate) struct CardKey {
     pub(crate) session_id: String,
 }
 
-/// One answer button: its text and what a press sends.
+/// One answer button: its text, the option's description and what a press
+/// sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrayButton {
     pub(crate) label: String,
+    /// The option's description, drawn under its label; `None` when it has
+    /// none, and for a permission's choices.
+    pub(crate) description: Option<String>,
     pub(crate) choice: PromptChoice,
 }
 
@@ -71,6 +76,10 @@ pub(crate) struct TrayCard {
     pub(crate) command: Option<String>,
     /// When the wait began; `None` from a daemon that predates the stamp.
     pub(crate) since: Option<DateTime<Utc>>,
+    /// Every question the prompt asks, with each option's description,
+    /// which a card that cannot answer draws read-only; empty for a
+    /// permission and for a prompt with no questions.
+    pub(crate) questions: Vec<AskQuestion>,
     pub(crate) buttons: Buttons,
 }
 
@@ -102,6 +111,7 @@ fn card(row: &NeedsYouRow, ask: Option<&AskBlock>) -> TrayCard {
         text: ask.map_or_else(|| row.detail.clone(), |ask| ask.text.clone()),
         command: ask.and_then(|ask| ask.command.clone()),
         since: row.since,
+        questions: ask.map_or_else(Vec::new, |ask| ask.questions.clone()),
         buttons: ask.map_or(Buttons::Open, buttons),
     }
 }
@@ -120,6 +130,7 @@ fn buttons(ask: &AskBlock) -> Buttons {
         .filter(|choice| on_card(&choice.choice))
         .map(|choice| TrayButton {
             label: choice.label.clone(),
+            description: choice.description.clone(),
             choice: choice.choice.clone(),
         })
         .collect();
@@ -226,6 +237,9 @@ struct State {
     /// The touch down on the tray, while there is one; the order holds
     /// still meanwhile.
     swipe: Option<Swipe>,
+    /// The card whose body's scroll the tray tracks, and that body's
+    /// handle.
+    body: Option<(CardKey, ScrollHandle)>,
 }
 
 /// What the tray remembers between frames.
@@ -255,6 +269,21 @@ impl Tray {
         state.shown = cards.get(index).map(|card| card.key.clone());
         state.order = cards.iter().map(|card| card.key.clone()).collect();
         Arranged { cards, index }
+    }
+
+    /// `key`'s card body's scroll: a handle of its own, at the top, from the
+    /// first time the tray shows that card, so the next card never opens
+    /// part-way down the last one's body.
+    pub(crate) fn body_scroll(&self, key: &CardKey) -> ScrollHandle {
+        let mut state = self.state.borrow_mut();
+        if let Some((held, handle)) = state.body.as_ref()
+            && held == key
+        {
+            return handle.clone();
+        }
+        let handle = ScrollHandle::new();
+        state.body = Some((key.clone(), handle.clone()));
+        handle
     }
 
     /// How far the shown card is drawn off its place: the swipe's travel.
@@ -452,6 +481,17 @@ mod tests {
         }
     }
 
+    /// The descriptions of `card`'s answer buttons.
+    fn descriptions(card: &TrayCard) -> Vec<Option<&str>> {
+        match &card.buttons {
+            Buttons::Answer { buttons, .. } => buttons
+                .iter()
+                .map(|button| button.description.as_deref())
+                .collect(),
+            Buttons::Open => Vec::new(),
+        }
+    }
+
     fn ids(arranged: &Arranged) -> Vec<&str> {
         arranged
             .cards
@@ -596,6 +636,60 @@ mod tests {
             "questions": [{ "question": "Which?", "header": "", "options": ["a", "b"], "multi_select": true }],
         });
         assert_eq!(only_card(&multi).buttons, Buttons::Open, "multi-select");
+    }
+
+    #[test]
+    fn a_card_that_cannot_answer_lists_its_questions_for_reading() {
+        let several = json!({
+            "kind": "question",
+            "questions": [
+                {
+                    "question": "Keep the newest?",
+                    "header": "Migration",
+                    "options": ["Keep", "Merge"],
+                    "option_descriptions": ["the newest copy", "both copies"],
+                    "multi_select": false,
+                },
+                {
+                    "question": "Which checks?",
+                    "header": "Checks",
+                    "options": ["fmt", "test"],
+                    "multi_select": true,
+                },
+            ],
+        });
+        let card = only_card(&several);
+        assert_eq!(card.buttons, Buttons::Open, "several questions, Open");
+        assert_eq!(card.questions.len(), 2, "every question is listed");
+        assert_eq!(card.questions[0].header, "Migration");
+        assert_eq!(card.questions[0].options[1].label, "Merge");
+        assert_eq!(
+            card.questions[0].options[1].description.as_deref(),
+            Some("both copies")
+        );
+        assert_eq!(card.questions[1].options[1].label, "test");
+        assert_eq!(card.questions[1].options[1].description, None);
+
+        let mut unstamped = waiting("s", 1, &question(&["a", "b"]));
+        unstamped.status_since = None;
+        let card = cards_of(&model(vec![unstamped])).pop().expect("one card");
+        assert_eq!(card.buttons, Buttons::Open, "no stamp, no answer");
+        assert_eq!(card.questions.len(), 1, "its question is still listed");
+
+        assert_eq!(only_card(&permission()).questions, [], "no question");
+        let plan = json!({ "kind": "plan_approval", "plan": "Ship it" });
+        assert_eq!(only_card(&plan).questions, [], "nor a plan approval");
+    }
+
+    #[test]
+    fn an_answers_description_rides_on_its_button() {
+        let mut described = question(&["main", "dev"]);
+        described["questions"][0]["option_descriptions"] = json!(["the trunk", "the feature line"]);
+        let card = only_card(&described);
+        assert_eq!(
+            descriptions(&card),
+            [Some("the trunk"), Some("the feature line")]
+        );
     }
 
     #[test]

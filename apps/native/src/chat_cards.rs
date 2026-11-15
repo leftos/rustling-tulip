@@ -8,12 +8,13 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{AnyElement, App, ClickEvent, Div, Entity, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, ClickEvent, Div, Entity, Stateful, Window, div, prelude::*, px};
 use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage};
 
 use crate::UI_TEXT_SIZE;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
+use crate::dashboard_rows::AskQuestion;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::text_input::TextInput;
@@ -831,18 +832,21 @@ fn card_button(
         .text_box
         .filter(|_| button.answer == ButtonAnswer::TypedText);
     let base = match choice {
-        Some(option) => base
-            .when(text_box.is_none(), Styled::w_full)
-            .flex_col()
-            .items_start()
-            .child(button.label.clone())
-            .when_some(option.description.as_deref(), |row, description| {
-                let number = option.number;
-                row.child(
-                    small(offset, description, option_description_color(selected, t))
-                        .driver_id(move || format!("chat-card-option-desc-{number}")),
-                )
-            }),
+        Some(option) => option_row(
+            OptionRow {
+                offset,
+                shift,
+                selector: &selector,
+                label: &button.label,
+                description: option.description.as_deref(),
+                description_selector: Some(format!("chat-card-option-desc-{}", option.number)),
+                selected,
+                enabled: !busy,
+                min_height: None,
+            },
+            t,
+        )
+        .when(text_box.is_none(), Styled::w_full),
         None => base.child(button.label.clone()),
     };
     let base = base
@@ -870,6 +874,135 @@ fn card_button(
 /// secondary text colour.
 fn option_description_color(selected: bool, t: &UiTheme) -> u32 {
     if selected { t.on_accent } else { t.text_2 }
+}
+
+/// One option's row: its label with its description under it, drawn as a
+/// button the caller tags and, where it takes a tap, handles.
+pub(crate) struct OptionRow<'a> {
+    /// The UI text size offset and weight shift.
+    pub(crate) offset: i8,
+    pub(crate) shift: i8,
+    /// The button's selector.
+    pub(crate) selector: &'a str,
+    /// The option's label.
+    pub(crate) label: &'a str,
+    /// The description drawn under the label; `None` when it has none.
+    pub(crate) description: Option<&'a str>,
+    /// The selector the description line takes, where it needs one.
+    pub(crate) description_selector: Option<String>,
+    /// Whether the option is a selected multi-select choice, drawn filled.
+    pub(crate) selected: bool,
+    /// Whether the row takes a press.
+    pub(crate) enabled: bool,
+    /// The least height the row takes, for the phone's 44 pt target.
+    pub(crate) min_height: Option<f32>,
+}
+
+/// [`OptionRow`] drawn: its label, and under it its description in the
+/// colour a filled row's text takes.
+pub(crate) fn option_row(row: OptionRow<'_>, t: &UiTheme) -> Stateful<Div> {
+    let (offset, shift, selector) = (row.offset, row.shift, row.selector);
+    let base = if row.selected {
+        primary_button(
+            offset,
+            shift,
+            selector,
+            ButtonSize::Compact,
+            row.enabled,
+            Layer::Base,
+            t,
+        )
+    } else {
+        outlined_button(
+            offset,
+            shift,
+            selector,
+            ButtonSize::Compact,
+            row.enabled,
+            Layer::Base,
+            t,
+        )
+    };
+    let base = base.flex_col().items_start().child(row.label.to_owned());
+    let base = match row.description {
+        Some(description) => base.child(
+            small(
+                offset,
+                description,
+                option_description_color(row.selected, t),
+            )
+            .when_some(row.description_selector, |line, selector| {
+                line.driver_id(move || selector)
+            }),
+        ),
+        None => base,
+    };
+    match row.min_height {
+        Some(height) => base.min_h(px(height)),
+        None => base,
+    }
+}
+
+/// The tray card's questions, drawn read-only at the chat card's sizes: each
+/// question's heading and text, then each option's label with its
+/// description under it, tagged `phone-tray-question-<n>`,
+/// `phone-tray-option-<q>-<n>` and `phone-tray-option-desc-<q>-<n>`; nothing
+/// takes a tap.
+pub(crate) fn tray_questions(
+    offset: i8,
+    shift: i8,
+    questions: &[AskQuestion],
+    min_height: f32,
+    t: &UiTheme,
+) -> Vec<Div> {
+    questions
+        .iter()
+        .zip(1..)
+        .map(|(question, number)| tray_question(offset, shift, question, number, min_height, t))
+        .collect()
+}
+
+/// The `number`th question of [`tray_questions`]: its heading, its text and
+/// each option's row, at least `min_height` tall.
+fn tray_question(
+    offset: i8,
+    shift: i8,
+    question: &AskQuestion,
+    number: usize,
+    min_height: f32,
+    t: &UiTheme,
+) -> Div {
+    let heading = (!question.header.is_empty()).then(|| small(offset, &question.header, t.muted));
+    let subject = div()
+        .driver_id(move || format!("phone-tray-question-{number}"))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text))
+        .child(question.question.clone());
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.0))
+        .gap(px(CARD_GAP))
+        .children(heading)
+        .child(subject)
+        .children(question.options.iter().zip(1..).map(|(option, at)| {
+            let selector = format!("phone-tray-option-{number}-{at}");
+            let description_selector = format!("phone-tray-option-desc-{number}-{at}");
+            option_row(
+                OptionRow {
+                    offset,
+                    shift,
+                    selector: &selector,
+                    label: &option.label,
+                    description: option.description.as_deref(),
+                    description_selector: Some(description_selector),
+                    selected: false,
+                    enabled: true,
+                    min_height: Some(min_height),
+                },
+                t,
+            )
+        }))
 }
 
 /// The card's text box (`chat-card-box`), filling the rest of its row.

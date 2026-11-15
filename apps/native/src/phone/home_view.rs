@@ -3,10 +3,13 @@
 //! row's tap opens the session page `session_view` draws. It only renders
 //! and forwards taps.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use chrono::{DateTime, Utc};
 use gpui::{
-    App, ClickEvent, Context, Div, FontWeight, ScrollEvent, SharedString, Stateful, StyledText,
-    TouchPhase, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Div, FontWeight, Pixels, ScrollEvent, ScrollHandle, SharedString,
+    Stateful, StyledText, TouchPhase, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -15,10 +18,11 @@ use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
 use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
+use crate::chat_cards;
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
-use crate::fonts::ui_px;
+use crate::fonts::{ui_px, ui_text_size, ui_weight_shift};
 use crate::needs_you;
 use crate::sidebar::DETACHED_BANNER;
 use crate::sidebar_view::{HostHeaderState, leaf_key};
@@ -38,8 +42,11 @@ const PAIR_LABEL: &str = "Pair";
 /// What Home says with no session to list.
 const EMPTY_TEXT: &str = "No sessions yet";
 /// The Needs you card's height, whatever it holds, so the rows under the
-/// tray keep their place while cards come, go and change.
-const TRAY_CARD_HEIGHT: f32 = 232.0;
+/// tray keep their place while cards come, go and change: room for the
+/// session's line and three described answer rows, each a 44 pt target,
+/// under the header and above `Open`, with anything longer scrolling
+/// inside.
+const TRAY_CARD_HEIGHT: f32 = 356.0;
 /// The button of a card whose prompt is answered on the session's page.
 const OPEN_LABEL: &str = "Open";
 
@@ -56,9 +63,9 @@ fn line(id: &str, text: String) -> Div {
     truncating(id, StyledText::new(text)).driver_id(move || tag)
 }
 
-/// The card's text: the session, the prompt, its command, how long it has
-/// waited and, after a refused answer, why.
-fn card_text(facts: &CardFacts, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+/// The card's text: the session, the prompt while the card says it, its
+/// command, how long it has waited and, after a refused answer, why.
+fn card_text(facts: &CardFacts, prompt: bool, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
     let card = &facts.card;
     let small = ui_px(cx, STATUS_TEXT_SIZE);
     let session = div()
@@ -96,13 +103,15 @@ fn card_text(facts: &CardFacts, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
         .gap(px(4.0))
         .min_w_0()
         .child(session)
-        .child(
-            div()
-                .driver_id(|| "phone-tray-text".to_owned())
-                .line_clamp(2)
-                .overflow_hidden()
-                .child(card.text.clone()),
-        )
+        .when(prompt, |text| {
+            text.child(
+                div()
+                    .driver_id(|| "phone-tray-text".to_owned())
+                    .line_clamp(2)
+                    .overflow_hidden()
+                    .child(card.text.clone()),
+            )
+        })
         .children(command)
         .children(age)
         .children(refusal)
@@ -131,6 +140,23 @@ fn tray_header(arranged: &Arranged, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div
         .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
         .child(line("phone-tray-header-text", text).flex_1())
         .children(dots)
+}
+
+/// Whether `handle`'s body has room to scroll by `delta`: the offset runs
+/// from 0 at the top to `-max` at the bottom, so a negative delta heads for
+/// the bottom. A pan moves a body that has room that way, and passes at its
+/// top or bottom.
+fn has_room(handle: &ScrollHandle, delta: Pixels) -> bool {
+    if delta == px(0.0) {
+        return false;
+    }
+    let offset = handle.offset().y;
+    let max = handle.max_offset().y;
+    if delta < px(0.0) {
+        offset > -max
+    } else {
+        offset < px(0.0)
+    }
 }
 
 /// A dot of `color`.
@@ -274,8 +300,7 @@ impl PhoneRoot {
             .border_color(gpui::rgb(t.asking))
             .bg(gpui::rgba(t.ask_wash))
             .child(tray_header(&arranged, &t, cx))
-            .child(card_text(&facts, &t, cx))
-            .child(div().flex_1())
+            .child(self.tray_body(&facts, &t, cx))
             .child(Self::tray_buttons(&facts.card, cx));
         Some(
             div()
@@ -318,43 +343,150 @@ impl PhoneRoot {
         Some((arranged, CardFacts { card, now, refusal }))
     }
 
-    /// The card's row of buttons: one per answer, or `Open`.
-    fn tray_buttons(card: &TrayCard, cx: &mut Context<Self>) -> Div {
-        let row = div().flex().gap(px(8.0)).min_h(px(TOUCH_TARGET));
+    /// The card's scrolling body: the session and its wait, then the answer
+    /// rows of a card the tray can answer, or every question and option of
+    /// one it cannot. Its scroll is the shown card's own, and a vertical
+    /// pan in it moves it alone while it has room.
+    fn tray_body(&self, facts: &CardFacts, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let card = &facts.card;
+        let listed = matches!(card.buttons, Buttons::Open) && !card.questions.is_empty();
+        let handle = self.tray.body_scroll(&card.key);
+        let id = format!(
+            "phone-tray-body-{}-{}",
+            host_tag(&card.key.host),
+            card.key.session_id
+        );
+        let scrolled = handle.clone();
+        let sideways = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&sideways);
+        let body = div()
+            .id(id)
+            .driver_id(|| "phone-tray-body".to_owned())
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .overflow_y_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&handle)
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                this.tray_body_scrolled(&scrolled, &seen, event, window, cx);
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(card_text(facts, !listed, t, cx));
+        if listed {
+            body.children(chat_cards::tray_questions(
+                ui_text_size(cx),
+                ui_weight_shift(cx),
+                &card.questions,
+                TOUCH_TARGET,
+                t,
+            ))
+        } else {
+            body.children(Self::tray_answers(card, t, cx))
+        }
+    }
+
+    /// A pan over the card's body: a vertical move with the body's room left
+    /// in that direction scrolls the body alone, so Home's list holds still;
+    /// at the body's top or bottom the move goes on to the list, as does any
+    /// sideways travel, so the tray's swipe still sees the whole gesture. A
+    /// gesture that never travelled sideways ends the tray's swipe here when
+    /// the lift carries the last of its vertical travel, so the list takes
+    /// none of it.
+    fn tray_body_scrolled(
+        &mut self,
+        handle: &ScrollHandle,
+        sideways: &Cell<bool>,
+        event: &ScrollEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta = event.delta.pixel_delta(window.line_height());
+        match event.touch_phase {
+            TouchPhase::Started => {
+                sideways.set(false);
+                if delta.x == px(0.0) && has_room(handle, delta.y) {
+                    // The recogniser folds the gesture's first travel into
+                    // its start: the tray still begins the gesture, but the
+                    // list takes none of it.
+                    let at = cx.background_executor().now();
+                    self.tray.touch_started(0.0, at);
+                    cx.stop_propagation();
+                }
+            }
+            TouchPhase::Moved => {
+                if delta.x != px(0.0) {
+                    sideways.set(true);
+                } else if has_room(handle, delta.y) {
+                    cx.stop_propagation();
+                }
+            }
+            TouchPhase::Ended => {
+                if !sideways.get() && delta.x == px(0.0) && has_room(handle, delta.y) {
+                    self.tray.touch_cancelled();
+                    cx.stop_propagation();
+                }
+            }
+            TouchPhase::Cancelled => sideways.set(false),
+        }
+    }
+
+    /// A card's answer rows: one per button the tray can send, a full-width
+    /// row at the phone's touch target, its description under its label.
+    fn tray_answers(card: &TrayCard, t: &UiTheme, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         let Buttons::Answer { since, buttons } = &card.buttons else {
-            let host = card.key.host.clone();
-            let session_id = card.key.session_id.clone();
-            return row.child(
-                phone_button("phone-tray-open", ButtonKind::Primary, cx)
-                    .flex_1()
-                    .min_h(px(TOUCH_TARGET))
-                    .child(OPEN_LABEL)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.open_session(host.clone(), &session_id, cx);
-                    })),
-            );
+            return Vec::new();
         };
         let since = *since;
-        row.children(buttons.iter().enumerate().map(|(at, button)| {
-            let kind = if at == 0 {
-                ButtonKind::Primary
-            } else {
-                ButtonKind::Outlined
-            };
-            let session_id = card.key.session_id.clone();
-            let choice = button.choice.clone();
-            let id = format!("phone-tray-choice-{}", at + 1);
-            phone_button(&id, kind, cx)
-                .flex_1()
-                .min_w_0()
+        buttons
+            .iter()
+            .enumerate()
+            .map(|(at, button)| {
+                let id = format!("phone-tray-choice-{}", at + 1);
+                let session_id = card.key.session_id.clone();
+                let choice = button.choice.clone();
+                let description_selector = button
+                    .description
+                    .as_ref()
+                    .map(|_| format!("phone-tray-choice-desc-{}", at + 1));
+                let row = chat_cards::option_row(
+                    chat_cards::OptionRow {
+                        offset: ui_text_size(cx),
+                        shift: ui_weight_shift(cx),
+                        selector: &id,
+                        label: &button.label,
+                        description: button.description.as_deref(),
+                        description_selector,
+                        selected: false,
+                        enabled: true,
+                        min_height: Some(TOUCH_TARGET),
+                    },
+                    t,
+                );
+                row.w_full()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.root.update(cx, |root, cx| {
+                            root.answer_from_dashboard(&session_id, since, choice.clone(), cx);
+                        });
+                    }))
+            })
+            .collect()
+    }
+
+    /// The card's pinned footer: `Open`, which shows the session's page.
+    fn tray_buttons(card: &TrayCard, cx: &mut Context<Self>) -> Div {
+        let host = card.key.host.clone();
+        let session_id = card.key.session_id.clone();
+        div().flex().justify_end().min_h(px(TOUCH_TARGET)).child(
+            phone_button("phone-tray-open", ButtonKind::Primary, cx)
                 .min_h(px(TOUCH_TARGET))
-                .child(line(&format!("{id}-text"), button.label.clone()))
+                .child(OPEN_LABEL)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.root.update(cx, |root, cx| {
-                        root.answer_from_dashboard(&session_id, since, choice.clone(), cx);
-                    });
-                }))
-        }))
+                    this.open_session(host.clone(), &session_id, cx);
+                })),
+        )
     }
 
     /// A pan over the tray: its sideways travel feeds the swipe; a vertical

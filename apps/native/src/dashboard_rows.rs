@@ -525,6 +525,28 @@ pub struct AskChoice {
     pub description: Option<String>,
 }
 
+/// One option of a question, as a card that cannot answer it draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskOption {
+    /// The option's label.
+    pub label: String,
+    /// The option's description; `None` when it has none.
+    pub description: Option<String>,
+}
+
+/// One question a prompt asks, as a card that cannot answer it draws it
+/// read-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskQuestion {
+    /// The short heading the prompt shows above the question; empty when
+    /// the payload carried none.
+    pub header: String,
+    /// The question the agent asks.
+    pub question: String,
+    /// The choices it offers, in the prompt's order.
+    pub options: Vec<AskOption>,
+}
+
 /// The block under a waiting row: what the session asks, and the buttons
 /// that answer it from the Dashboard, the first of them primary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,6 +563,10 @@ pub struct AskBlock {
     /// The answer buttons; empty when the prompt cannot be answered from
     /// here, leaving `Go to pane` alone.
     pub choices: Vec<AskChoice>,
+    /// Every question the prompt asks, each with its options and their
+    /// descriptions, for a card that draws them read-only instead; empty
+    /// for a permission and for a prompt with no questions.
+    pub questions: Vec<AskQuestion>,
     /// The text box a toast draws under the choices for the prompt's
     /// type-your-own answer; read it through [`AskBlock::typed_box`].
     pub typed: Option<AskBox>,
@@ -648,7 +674,12 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
     if session.status != SessionStatus::AwaitingInput {
         return None;
     }
-    let (label, text, command, choices, typed) = match session.pending_input.as_ref()? {
+    let pending = session.pending_input.as_ref()?;
+    let questions = match pending {
+        PendingInput::Question { questions } => question_list(questions),
+        _ => Vec::new(),
+    };
+    let (label, text, command, choices, typed) = match pending {
         PendingInput::Question { questions } => (
             ASK_QUESTION.to_owned(),
             now_text(input),
@@ -680,6 +711,7 @@ pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
         command,
         since,
         choices: if since.is_some() { choices } else { Vec::new() },
+        questions,
         typed,
     })
 }
@@ -717,17 +749,43 @@ fn question_choices(questions: &[PendingQuestion]) -> Vec<AskChoice> {
         .enumerate()
         .map_while(|(index, label)| {
             let index = u16::try_from(index).ok()?;
-            let description = question
-                .option_descriptions
-                .get(usize::from(index))
-                .filter(|description| !description.is_empty())
-                .cloned();
+            let description = description_at(&question.option_descriptions, usize::from(index));
             Some(AskChoice {
                 label: label.clone(),
                 hint: Some((u32::from(index) + 1).to_string()),
                 choice: PromptChoice::Option { index },
                 description,
             })
+        })
+        .collect()
+}
+
+/// The description `descriptions` gives the option at `index`: none where
+/// it is empty or missing.
+fn description_at(descriptions: &[String], index: usize) -> Option<String> {
+    descriptions
+        .get(index)
+        .filter(|description| !description.is_empty())
+        .cloned()
+}
+
+/// Every question `questions` asks, each with its options and their
+/// descriptions, for a card that draws them read-only.
+fn question_list(questions: &[PendingQuestion]) -> Vec<AskQuestion> {
+    questions
+        .iter()
+        .map(|question| AskQuestion {
+            header: question.header.clone(),
+            question: question.question.clone(),
+            options: question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(index, label)| AskOption {
+                    label: label.clone(),
+                    description: description_at(&question.option_descriptions, index),
+                })
+                .collect(),
         })
         .collect()
 }

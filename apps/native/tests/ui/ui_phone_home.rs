@@ -371,6 +371,81 @@ fn question(options: &[&str]) -> serde_json::Value {
     })
 }
 
+/// A single single-choice question with `options`, each described by the
+/// entry at its place in `descriptions`.
+fn question_described(options: &[&str], descriptions: &[&str]) -> serde_json::Value {
+    json!({
+        "kind": "question",
+        "questions": [{
+            "question": "Which branch?",
+            "header": "Migration",
+            "options": options,
+            "option_descriptions": descriptions,
+            "multi_select": false,
+        }],
+    })
+}
+
+/// Two questions, the second one taking more than one choice.
+fn two_questions() -> serde_json::Value {
+    json!({
+        "kind": "question",
+        "questions": [
+            {
+                "question": "Keep the newest copy?",
+                "header": "Migration",
+                "options": ["Keep newest", "Merge both"],
+                "multi_select": false,
+            },
+            {
+                "question": "Which checks?",
+                "header": "Checks",
+                "options": ["fmt", "test"],
+                "multi_select": true,
+            },
+        ],
+    })
+}
+
+/// A single question of three options whose descriptions each run to three
+/// lines, taller than the card's room.
+fn long_question() -> serde_json::Value {
+    let description = "keep the newest copy and drop the older one from the migration's history, leaving \
+                       the branch pointer where it is";
+    question_described(
+        &["Keep newest", "Merge both", "Stop"],
+        &[description, description, description],
+    )
+}
+
+/// Three questions of three options each: a card the tray cannot answer,
+/// taller than its body's room.
+fn three_questions() -> serde_json::Value {
+    json!({
+        "kind": "question",
+        "questions": [
+            {
+                "question": "Which release does the phone app ride?",
+                "header": "Release",
+                "options": ["vNext", "Hold"],
+                "multi_select": false,
+            },
+            {
+                "question": "Which checks gate it?",
+                "header": "Checks",
+                "options": ["fmt and clippy", "the full suite"],
+                "multi_select": true,
+            },
+            {
+                "question": "Who signs off?",
+                "header": "Sign-off",
+                "options": ["the owner", "a reviewer"],
+                "multi_select": false,
+            },
+        ],
+    })
+}
+
 fn permission() -> serde_json::Value {
     json!({ "kind": "permission", "tool_name": "Bash", "summary": "gh pr merge 118 --squash" })
 }
@@ -565,6 +640,22 @@ fn swipe(h: &mut Harness<'_>, dx: Pixels, steps: usize) {
     h.cx.run_until_parked();
 }
 
+/// A finger's vertical pan up over `selector`: `moves` movements of `dy`
+/// each, then the lift.
+fn pan(h: &mut Harness<'_>, selector: &str, dy: Pixels, moves: usize) {
+    let start = h.center(selector);
+    h.touch(TouchPhase::Started, start);
+    for step in 1..=moves {
+        h.touch(TouchPhase::Moved, start - point(px(0.0), dy * step));
+    }
+    h.touch(TouchPhase::Ended, start - point(px(0.0), dy * moves));
+}
+
+/// How far the shown card's first option sits below its body's top.
+fn body_line_offset(h: &mut Harness<'_>) -> Pixels {
+    h.bounds("phone-tray-option-1-1").top() - h.bounds("phone-tray-body").top()
+}
+
 #[gpui::test]
 fn the_tray_shows_one_card_while_sessions_wait(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -657,6 +748,246 @@ fn open_shows_the_session_and_loads_its_chat(cx: &mut TestAppContext) {
             [ClientMessage::LoadChat { session_id, .. }] if session_id == "b"
         ),
         "Open sends only its chat's load: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tray_card_draws_each_answers_description_under_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting(
+            "b",
+            3,
+            question_described(&["main", "dev"], &["the trunk", "the feature line"]),
+        )],
+    );
+
+    for selector in ["phone-tray-choice-1", "phone-tray-choice-2"] {
+        assert!(drawn(&mut h, selector), "{selector} draws");
+    }
+    for (choice, description) in [
+        ("phone-tray-choice-1", "phone-tray-choice-desc-1"),
+        ("phone-tray-choice-2", "phone-tray-choice-desc-2"),
+    ] {
+        assert!(drawn(&mut h, description), "{description} draws");
+        let choice = h.bounds(choice);
+        let description = h.bounds(description);
+        assert!(
+            description.top() > choice.top() && description.bottom() <= choice.bottom(),
+            "{description} runs below its label, inside its choice"
+        );
+    }
+}
+
+#[gpui::test]
+fn every_tray_card_offers_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting("b", 3, question(&["main", "dev", "next"]))],
+    );
+    assert!(drawn(&mut h, "phone-tray-choice-1"), "the answers draw");
+    assert!(drawn(&mut h, "phone-tray-open"), "beside their Open");
+    assert!(
+        h.bounds("phone-tray-open").size.height >= touch_target(),
+        "Open is a 44 pt target"
+    );
+
+    send_waits(&mut h, vec![waiting("b", 3, permission())]);
+    assert!(drawn(&mut h, "phone-tray-choice-1"), "Allow draws");
+    assert!(drawn(&mut h, "phone-tray-open"), "a permission offers Open");
+
+    h.click_on("phone-tray-open");
+
+    assert_eq!(shown(&mut h).as_deref(), Some("b"));
+    assert!(drawn(&mut h, "phone-session"), "the session page shows");
+}
+
+#[gpui::test]
+fn a_card_with_several_questions_draws_every_question_read_only_with_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting_phone(cx, &dir, vec![waiting("b", 3, two_questions())]);
+
+    for selector in [
+        "phone-tray-question-1",
+        "phone-tray-question-2",
+        "phone-tray-option-2-1",
+        "phone-tray-option-2-2",
+    ] {
+        assert!(drawn(&mut h, selector), "{selector} draws");
+    }
+    assert!(
+        !drawn(&mut h, "phone-tray-choice-1"),
+        "no answers a card cannot send"
+    );
+    assert!(drawn(&mut h, "phone-tray-open"), "with Open");
+}
+
+#[gpui::test]
+fn a_long_tray_card_keeps_its_height_and_its_open_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting("b", 5, question(&["main", "dev", "next"]))],
+    );
+    let short = h.bounds("phone-tray-card").size.height;
+
+    send_waits(&mut h, vec![waiting("b", 5, long_question())]);
+
+    let card = h.bounds("phone-tray-card");
+    assert_eq!(card.size.height, short, "the card keeps its height");
+    let open = h.bounds("phone-tray-open");
+    assert!(
+        open.top() >= card.top() && open.bottom() <= card.bottom(),
+        "Open stays inside the card"
+    );
+}
+
+/// A phone whose host lists the long waiting card `b` and 30 idle sessions,
+/// so Home's list overflows; the last of those rows' selector comes back
+/// too.
+fn long_card_over_a_long_list<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+) -> (Harness<'a>, String) {
+    let mut h = open_phone(cx, dir);
+    let fillers: Vec<String> = (0..30).map(|n| format!("f{n:02}")).collect();
+    let mut sessions = vec![waiting("b", 3, three_questions())];
+    sessions.extend(
+        fillers
+            .iter()
+            .map(|id| session(id).in_repo("r1").status("idle").build()),
+    );
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+    let last = row(&saved_remote(), &fillers[29]);
+    (h, last)
+}
+
+#[gpui::test]
+fn a_sideways_swipe_over_a_long_card_leaves_its_body_where_it_was(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting_phone(cx, &dir, vec![waiting("b", 3, three_questions())]);
+    let line = h.bounds("phone-tray-option-1-1").top();
+    let width = h.bounds("phone-tray-card").size.width;
+    assert!(
+        h.bounds("phone-tray-option-3-2").bottom() > h.bounds("phone-tray-body").bottom(),
+        "the card's body overflows"
+    );
+
+    swipe(&mut h, -(width * 0.1), 1);
+
+    assert_eq!(
+        h.bounds("phone-tray-option-1-1").top(),
+        line,
+        "a sideways move left the body where it was"
+    );
+    assert_eq!(header(&mut h).as_deref(), Some("Needs you · 1 of 1"));
+}
+
+#[gpui::test]
+fn the_next_card_opens_at_the_top_of_its_body(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let tall = three_questions();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting("b", 5, tall.clone()), waiting("c", 2, tall)],
+    );
+    let top = body_line_offset(&mut h);
+
+    pan(&mut h, "phone-tray-body", px(40.0), 2);
+    assert!(
+        body_line_offset(&mut h) < top,
+        "the first card's body scrolled"
+    );
+
+    let width = h.bounds("phone-tray-card").size.width;
+    swipe(&mut h, -(width * 0.25), 2);
+
+    assert_eq!(header(&mut h).as_deref(), Some("Needs you · 2 of 2"));
+    assert_eq!(
+        body_line_offset(&mut h),
+        top,
+        "the second card opens at the top of its own body"
+    );
+}
+
+#[gpui::test]
+fn a_vertical_pan_over_a_long_card_scrolls_only_its_body(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, last) = long_card_over_a_long_list(cx, &dir);
+    let line = body_line_offset(&mut h);
+    let list = h.bounds(&last).top();
+    assert!(drawn(&mut h, "phone-tray-body"), "the card's body draws");
+    assert!(
+        h.bounds("phone-tray-option-3-2").bottom() > h.bounds("phone-tray-body").bottom(),
+        "the card's body overflows"
+    );
+    assert!(
+        h.bounds(&last).bottom() > h.bounds("phone-home").bottom(),
+        "the list is taller than its room"
+    );
+
+    pan(&mut h, "phone-tray-body", px(40.0), 3);
+
+    assert!(
+        body_line_offset(&mut h) < line,
+        "the body scrolled under the finger"
+    );
+    assert_eq!(h.bounds(&last).top(), list, "the list held still");
+}
+
+#[gpui::test]
+fn a_pan_that_turns_sideways_still_swipes_to_the_next_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let tall = three_questions();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting("b", 5, tall.clone()), waiting("c", 2, tall)],
+    );
+    let at = h.center("phone-tray-body");
+    let width = h.bounds("phone-tray-card").size.width;
+    // The event stream a pan leaves: gpui's recogniser locks a real touch to
+    // its first axis, so the turn to sideways travel is fed as its events.
+    let event = |dx: f32, dy: f32, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: ScrollSource::Touch,
+    };
+
+    h.cx.simulate_event(event(0.0, -40.0, TouchPhase::Started));
+    h.cx.simulate_event(event(0.0, -40.0, TouchPhase::Moved));
+    h.cx.simulate_event(event(-f32::from(width) * 0.5, 0.0, TouchPhase::Moved));
+    h.cx.simulate_event(event(0.0, 0.0, TouchPhase::Ended));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        header(&mut h).as_deref(),
+        Some("Needs you · 2 of 2"),
+        "the swipe still moves the tray on"
+    );
+}
+
+#[gpui::test]
+fn a_pan_past_the_bodys_end_scrolls_the_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, last) = long_card_over_a_long_list(cx, &dir);
+    let list = h.bounds(&last).top();
+
+    pan(&mut h, "phone-tray-body", px(40.0), 12);
+
+    assert!(
+        h.bounds(&last).top() < list,
+        "the list took the move the body could not"
     );
 }
 

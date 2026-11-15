@@ -153,7 +153,7 @@ const PHONE_WINDOW_SIZE: (u16, u16) = (390, 844);
 const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
 /// How many session rows the `phone-home` shot's Home lists.
-const PHONE_HOME_ROWS: usize = 3;
+const PHONE_HOME_ROWS: usize = 4;
 /// The working session whose sheet the `phone-sheet` shot opens, and
 /// whose page the `phone-session` shot shows.
 const PHONE_SHEET_SESSION: &str = "b-pwa";
@@ -1336,6 +1336,7 @@ fn permission_ask() -> AskBlock {
             choice("Allow", protocol::PromptChoice::Allow),
             choice("Deny", protocol::PromptChoice::Deny),
         ],
+        questions: Vec::new(),
         typed: None,
     }
 }
@@ -1372,6 +1373,7 @@ fn question_ask() -> AskBlock {
                 "Nothing is tagged; the preview channel gets the build.",
             ),
         ],
+        questions: Vec::new(),
         typed: Some(AskBox::type_something()),
     }
 }
@@ -1547,8 +1549,8 @@ async fn capture_phone_home(
         bail!("the phone-home view lists {rows} rows, not {PHONE_HOME_ROWS}");
     }
     let header = handle.update(cx, |phone, _, cx| phone.tray_header(cx))?;
-    if header.as_deref() != Some("Needs you · 1 of 1") {
-        bail!("the phone-home view's tray reads {header:?}, not one card");
+    if header.as_deref() != Some("Needs you · 1 of 2") {
+        bail!("the phone-home view's tray reads {header:?}, not the first of two cards");
     }
     if shot.view == View::PhoneSheet {
         let opened = handle.update(cx, |phone, _, cx| {
@@ -2748,9 +2750,10 @@ impl RemoteFixture {
     }
 
     /// What the `phone-home` shot's "box" lists: two repos, the first with
-    /// a session waiting on a question, the second with a working session
-    /// and an idle one, which the `phone-terminal` view lists as a shell
-    /// with no agent.
+    /// two sessions waiting, the longest waiting on a question whose three
+    /// answers each carry a description and the other on a two-question
+    /// prompt, the second with a working session and an idle one, which the
+    /// `phone-terminal` view lists as a shell with no agent.
     fn phone_home(view: View, now: DateTime<Utc>) -> Result<Self> {
         let repos = parse_message(json!({
             "type": "repos",
@@ -2768,8 +2771,32 @@ impl RemoteFixture {
                     "question": "Keep the newest copy or merge both?",
                     "header": "Migration",
                     "options": ["Keep newest", "Merge both", "Stop"],
+                    "option_descriptions": [
+                        "Drop every older copy and keep the newest migration.",
+                        "Keep both copies and merge their steps into one file.",
+                        "Stop the migration and leave the schema as it stands.",
+                    ],
                     "multi_select": false,
                 }],
+            },
+        });
+        let plan = json!({
+            "pending_input": {
+                "kind": "question",
+                "questions": [
+                    {
+                        "question": "Which release does the phone app ride?",
+                        "header": "Release",
+                        "options": ["vNext", "Hold"],
+                        "multi_select": false,
+                    },
+                    {
+                        "question": "Which checks gate it?",
+                        "header": "Checks",
+                        "options": ["fmt and clippy", "the full suite"],
+                        "multi_select": true,
+                    },
+                ],
             },
         });
         let rows = [
@@ -2780,6 +2807,14 @@ impl RemoteFixture {
                 in_repo(BOX_REPO, BOX_REPO_PATH),
                 2,
                 question,
+            ),
+            (
+                "b-plans",
+                "Release plan check",
+                "awaiting_input",
+                in_repo(BOX_REPO, BOX_REPO_PATH),
+                1,
+                plan,
             ),
             (
                 "b-pwa",

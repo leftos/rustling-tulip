@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.
+- The iPhone's Needs you card on Home shows each answer with its description, every question of a longer prompt, and Open on every card.
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
 - Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 - Settings › Remote access tells you when Tailscale is slow to answer, while remote access keeps serving.

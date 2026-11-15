@@ -1150,6 +1150,7 @@ mod tests {
                 command: command.then(|| "gh pr merge".to_owned()),
                 since: Some(chrono::Utc::now()),
                 choices,
+                questions: Vec::new(),
                 typed: None,
             }),
             None,
