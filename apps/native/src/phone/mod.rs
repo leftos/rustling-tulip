@@ -19,6 +19,7 @@ mod session;
 mod session_view;
 pub(crate) mod sheet;
 mod sweep;
+mod terminal_view;
 mod tray;
 
 use std::rc::Rc;

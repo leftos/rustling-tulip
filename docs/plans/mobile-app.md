@@ -209,7 +209,7 @@ These wait on MA.12, so no screen is built before the device and the connection 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma14-session.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_session`
 
   Waits on: MA.13. Owner's iPhone: not needed (MA.16 checks it on the device).
-- [ ] **MA.15 Build the phone's terminal.** The Terminal toggle replaces the chat, composer and sheet with the session's terminal, a fresh attach each time it opens, claiming the PTY size for the phone (RT-184). `TerminalPane`'s input handler reports its UTF-16 length, asks for the keyboard on a tap and sends an inserted lone `"\n"` as Return (`\r`). A key bar under it carries Esc, Tab, a sticky Ctrl, the arrows, Paste and Quick, whose reply is typed into the terminal.
+- [x] **MA.15 Build the phone's terminal.** The Terminal toggle replaces the chat and composer with the session's terminal (the prompt sheet still rises over it), measuring about 54 columns at 390 pt, a fresh attach each time it opens, claiming the PTY size for the phone (RT-184). `TerminalPane`'s input handler reports its UTF-16 length, asks for the keyboard on a tap and sends an inserted lone `"\n"` as Return (`\r`). A key bar under it carries Esc, Tab, a sticky Ctrl, the arrows, Paste and Quick, whose reply is typed into the terminal.
 
   Files: `apps/native/src/term_view.rs`, `apps/native/src/phone/terminal_view.rs`, `apps/native/src/phone/key_bar.rs`, `apps/native/src/phone/session_view.rs`, `apps/native/examples/shot.rs` (view `phone-terminal`), `apps/native/tests/ui/ui_phone_terminal.rs`.
 

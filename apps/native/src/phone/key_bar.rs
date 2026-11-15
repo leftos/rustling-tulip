@@ -1,11 +1,6 @@
 //! The phone terminal's key bar as plain Rust: the keys in the order it
 //! draws them, what a tap yields, and the sticky Ctrl that arms one
-//! keystroke. The view that draws the bar is not written yet.
-
-#![allow(
-    dead_code,
-    reason = "the phone's session view does not draw the bar yet"
-)]
+//! keystroke. `terminal_view` draws the bar.
 
 use gpui::{Keystroke, Modifiers};
 

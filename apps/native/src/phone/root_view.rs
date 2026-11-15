@@ -1,6 +1,8 @@
 //! [`PhoneRoot`], the phone's root view, and its push effect plumbing.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use futures::StreamExt as _;
@@ -13,6 +15,7 @@ use protocol::ClientMessage;
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
@@ -49,6 +52,15 @@ pub struct PhoneRoot {
     pub(super) composer_dock: super::composer::Dock,
     /// The shown session's prompt sheet: the prompt put away and the drag.
     pub(super) prompt_sheet: SheetState,
+    /// The session whose terminal the Terminal page opened, while open.
+    pub(super) terminal_open: Option<(HostKey, String)>,
+    /// The bottom inset the open terminal last drew with.
+    pub(super) terminal_inset: Option<Pixels>,
+    /// The Terminal page's key bar, shared with the terminal's typed text
+    /// so a sticky Ctrl reaches the soft keyboard's next character.
+    pub(super) key_bar: Rc<RefCell<KeyBar>>,
+    /// Whether the Terminal page's Quick replies are open.
+    pub(super) terminal_quick: bool,
     /// Home's Needs you tray: the card it shows and the swipe in progress.
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
@@ -136,6 +148,10 @@ impl PhoneRoot {
             page: None,
             composer_dock: super::composer::Dock::None,
             prompt_sheet: SheetState::default(),
+            terminal_open: None,
+            terminal_inset: None,
+            key_bar: Rc::new(RefCell::new(KeyBar::new())),
+            terminal_quick: false,
             tray: super::tray::Tray::default(),
             sheet: None,
             resumes: Vec::new(),
@@ -1043,6 +1059,7 @@ impl Render for PhoneRoot {
             .clone()
             .unwrap_or_else(|| window.insets());
         let padding = content_padding(&insets);
+        self.sync_terminal(padding.bottom, window, cx);
         let body = if let Some(page) = self.session_page(cx) {
             page
         } else if hosts_view::any_host_open(self.root.read(cx)) {

@@ -70,6 +70,10 @@
 //! `phone-session-sheet` shows that page, no dock open, with the `chat`
 //! view's question pending: its prompt sheet raised over a scrim, the
 //! desktop's question card in it over the Esc, up and down keys.
+//! `phone-terminal` shows the same Home's idle session as a shell with no
+//! agent, opened on its Terminal page: the shell's screen in the live
+//! terminal at the phone's width, the key bar under it. The width the
+//! terminal sizes its PTY to is logged.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -159,6 +163,9 @@ const PHONE_SESSION_ROWS: usize = 6;
 /// The prompt the `phone-session-sheet` shot's sheet raises: the `chat`
 /// view's question.
 const PHONE_SHEET_PROMPT: &str = "ask-1";
+/// The session the `phone-terminal` shot opens on its Terminal page: Home's
+/// idle session, listed as a shell with no agent in that view.
+const PHONE_TERMINAL_SESSION: &str = "b-trim";
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -303,10 +310,11 @@ enum View {
     PhoneSheet,
     PhoneSession,
     PhoneSessionSheet,
+    PhoneTerminal,
 }
 
 impl View {
-    const ALL: [Self; 53] = [
+    const ALL: [Self; 54] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -360,13 +368,18 @@ impl View {
         Self::PhoneSheet,
         Self::PhoneSession,
         Self::PhoneSessionSheet,
+        Self::PhoneTerminal,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
     fn is_phone(self) -> bool {
         matches!(
             self,
-            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession | Self::PhoneSessionSheet
+            Self::PhoneHome
+                | Self::PhoneSheet
+                | Self::PhoneSession
+                | Self::PhoneSessionSheet
+                | Self::PhoneTerminal
         )
     }
 
@@ -425,6 +438,7 @@ impl View {
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
+            Self::PhoneTerminal => "phone-terminal",
         }
     }
 
@@ -470,9 +484,11 @@ impl View {
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
-            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession | Self::PhoneSessionSheet => {
-                PHONE_WINDOW_SIZE
-            }
+            Self::PhoneHome
+            | Self::PhoneSheet
+            | Self::PhoneSession
+            | Self::PhoneSessionSheet
+            | Self::PhoneTerminal => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -515,7 +531,8 @@ impl View {
             | Self::PhoneHome
             | Self::PhoneSheet
             | Self::PhoneSession
-            | Self::PhoneSessionSheet => true,
+            | Self::PhoneSessionSheet
+            | Self::PhoneTerminal => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -788,6 +805,7 @@ impl Shot {
             | View::PhoneSheet
             | View::PhoneSession
             | View::PhoneSessionSheet
+            | View::PhoneTerminal
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -816,9 +834,11 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
-            View::PhoneHome | View::PhoneSheet | View::PhoneSession | View::PhoneSessionSheet => {
-                phone_home_ui_state()
-            }
+            View::PhoneHome
+            | View::PhoneSheet
+            | View::PhoneSession
+            | View::PhoneSessionSheet
+            | View::PhoneTerminal => phone_home_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -1571,6 +1591,9 @@ async fn capture_phone_home(
             cx.background_executor().timer(DRIVE_WAIT).await;
         }
     }
+    if shot.view == View::PhoneTerminal {
+        open_phone_terminal(handle, cx).await?;
+    }
     if shot.view == View::PhoneSessionSheet {
         let card = handle.update(cx, |phone, _, cx| {
             phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
@@ -1581,6 +1604,37 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// Opens the `phone-terminal` view's shell session, checks it shows on its
+/// Terminal page with no toggle, and that its terminal draws the shell's
+/// screen.
+async fn open_phone_terminal(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let opened = handle.update(cx, |phone, _, cx| {
+        phone.open_session_on(PHONE_TERMINAL_SESSION, cx)
+    })?;
+    if !opened {
+        bail!("the phone-terminal view's Home does not list {PHONE_TERMINAL_SESSION}");
+    }
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
+    if toggle.is_some() {
+        bail!("the phone-terminal view's shell shows the toggle {toggle:?}");
+    }
+    let screen = handle.update(cx, |phone, _, cx| {
+        phone
+            .root()
+            .read(cx)
+            .phone_terminal_view()
+            .map(|pane| pane.read(cx).grid_text())
+    })?;
+    let Some(screen) = screen else {
+        bail!("the phone-terminal view's page holds no terminal");
+    };
+    if !screen.iter().any(|row| row.contains("git log")) {
+        bail!("the phone-terminal view's terminal does not draw the shell: {screen:?}");
+    }
+    Ok(())
 }
 
 /// Opens the root view in a cloaked window that is never activated.
@@ -1704,7 +1758,8 @@ fn drive(
         | View::PhoneHome
         | View::PhoneSheet
         | View::PhoneSession
-        | View::PhoneSessionSheet => Ok(()),
+        | View::PhoneSessionSheet
+        | View::PhoneTerminal => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -2641,7 +2696,7 @@ struct RemoteFixture {
 impl RemoteFixture {
     fn build(view: View, now: DateTime<Utc>) -> Result<Self> {
         if view.is_phone() {
-            return Self::phone_home(now);
+            return Self::phone_home(view, now);
         }
         let repos = parse_message(json!({
             "type": "repos",
@@ -2694,8 +2749,9 @@ impl RemoteFixture {
 
     /// What the `phone-home` shot's "box" lists: two repos, the first with
     /// a session waiting on a question, the second with a working session
-    /// and an idle one.
-    fn phone_home(now: DateTime<Utc>) -> Result<Self> {
+    /// and an idle one, which the `phone-terminal` view lists as a shell
+    /// with no agent.
+    fn phone_home(view: View, now: DateTime<Utc>) -> Result<Self> {
         let repos = parse_message(json!({
             "type": "repos",
             "repos": [
@@ -2734,12 +2790,16 @@ impl RemoteFixture {
                 json!({}),
             ),
             (
-                "b-trim",
+                PHONE_TERMINAL_SESSION,
                 "Scrollback trim",
                 "idle",
                 in_repo(PHONE_REPO, PHONE_REPO_PATH),
                 40,
-                json!({}),
+                if view == View::PhoneTerminal {
+                    json!({ "agent": null })
+                } else {
+                    json!({})
+                },
             ),
         ];
         let sessions = rows
@@ -3011,6 +3071,16 @@ impl FakeDaemon {
             let NetCommand::Send(msg) = command else {
                 continue;
             };
+            if self.view == View::PhoneTerminal
+                && let ClientMessage::Resize { cols, rows, .. } = &*msg
+            {
+                // The shot's subscriber shows warnings only.
+                tracing::warn!(
+                    cols,
+                    rows,
+                    "phone-terminal shot: the terminal sized its PTY"
+                );
+            }
             let sent = self
                 .answer(&msg)
                 .and_then(|replies| replies.into_iter().try_for_each(|reply| self.send(reply)));
@@ -4673,7 +4743,7 @@ fn compact_facts(now: DateTime<Utc>) -> [Value; 3] {
 /// The screen a session's scrollback replays.
 fn screen_for(session_id: &str) -> String {
     let lines = match session_id {
-        "s-shell" => SHELL_SCREEN,
+        "s-shell" | PHONE_TERMINAL_SESSION => SHELL_SCREEN,
         "s-review" => CLAUDE_REVIEW_SCREEN,
         "s-petal" => CLAUDE_WORKING_SCREEN,
         _ => CLAUDE_IDLE_SCREEN,

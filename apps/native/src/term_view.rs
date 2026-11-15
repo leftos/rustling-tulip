@@ -57,6 +57,10 @@ const DOT_LEFT: f32 = GUTTER - 10.0;
 /// How far right of a dot's right edge its menu opens.
 const MENU_GAP: f32 = 4.0;
 
+/// Decides committed text before the pane types it: a keystroke to press
+/// in its place, or `None` to type the text as it is.
+pub type TypedFilter = Box<dyn FnMut(&str, &mut App) -> Option<Keystroke>>;
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent switches — host locality, query answering, a pending dead key, focus at the press — not one state"
@@ -115,6 +119,9 @@ pub struct TerminalPane {
     /// The character of the last key-down left to the text input, which a
     /// dead key's mark repeats.
     last_key_char: Option<String>,
+    /// Turns committed text into a keystroke first, while set: the phone's
+    /// sticky Ctrl.
+    typed_filter: Option<TypedFilter>,
     /// Drops the composition when the pane loses focus in the window it
     /// draws in, named by its id: a pane moved to another window (a
     /// pop-out, or back) subscribes again there.
@@ -641,6 +648,7 @@ impl TerminalPane {
             marked: None,
             dead_key: false,
             last_key_char: None,
+            typed_filter: None,
             blur: None,
             font: font.normalized(),
             family: None,
@@ -955,6 +963,16 @@ impl TerminalPane {
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+
+    /// Sets the filter committed text passes through before it is typed,
+    /// or clears it.
+    ///
+    /// Args:
+    ///     filter: Returns the keystroke to press in place of the text, or
+    ///         `None` to type the text; `None` types all text as it is.
+    pub fn set_typed_filter(&mut self, filter: Option<TypedFilter>) {
+        self.typed_filter = filter;
     }
 
     /// Whether this pane drives its session's PTY size: the focused pane
@@ -2401,6 +2419,12 @@ impl EntityInputHandler for TerminalPane {
                 _ => {}
             }
             cx.notify();
+            return;
+        }
+        if let Some(filter) = self.typed_filter.as_mut()
+            && let Some(keystroke) = filter(text, cx)
+        {
+            self.press(&keystroke, cx);
             return;
         }
         // iOS delivers Return as an inserted line break, never as a key.

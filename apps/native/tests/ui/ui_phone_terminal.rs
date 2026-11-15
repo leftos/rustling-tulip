@@ -6,9 +6,13 @@
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{TestAppContext, WindowOptions};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
+use gpui::{Edges, Pixels, TestAppContext, WindowInsets, WindowOptions, px};
+use protocol::{
+    ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
+    DaemonMessage, SessionSnapshot,
+};
 use rustling_tulip_native::chat::PaneView;
+use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
@@ -353,4 +357,379 @@ fn the_phone_terminal_uses_the_phone_font(cx: &mut TestAppContext) {
         Some(11.0),
         "a sessions list keeps the phone's size"
     );
+}
+
+// ── The Terminal page ──────────────────────────────────────────────────────
+
+/// The least height of a touch target.
+fn touch_target() -> Pixels {
+    px(44.0)
+}
+
+/// The key bar's keys' driver ids, in the order it draws them.
+const BAR_KEYS: [&str; 9] = [
+    "phone-bar-esc",
+    "phone-bar-tab",
+    "phone-bar-ctrl",
+    "phone-bar-up",
+    "phone-bar-down",
+    "phone-bar-left",
+    "phone-bar-right",
+    "phone-bar-paste",
+    "phone-bar-quick",
+];
+
+/// The selector of the saved host's Home row for session `id`.
+fn row(id: &str) -> String {
+    let wire = host()
+        .wire()
+        .expect("a tailnet host has a wire key")
+        .to_owned();
+    format!("phone-home-row-{wire}::{id}")
+}
+
+/// Whether the last frame drew what `selector` tags.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.width > px(0.0)
+}
+
+/// Runs `drive` on the phone's root and lets the window settle.
+fn phone_update(
+    h: &mut Harness<'_>,
+    drive: impl FnOnce(&mut PhoneRoot, &mut gpui::Context<PhoneRoot>),
+) {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, drive);
+    });
+    h.cx.run_until_parked();
+}
+
+/// A phone showing session `id`'s page, tapped open from Home, everything
+/// sent so far drained.
+fn page_of<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Harness<'a> {
+    let mut h = open_phone(cx, dir);
+    h.click_on(&row(id));
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// Shell session `n` on its Terminal page, its scrollback answered and
+/// everything sent so far drained.
+fn on_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = open_phone(cx, dir);
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).pty("n", b"");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The insets a phone draws with a `keyboard`-tall on-screen keyboard up.
+fn keyboard_insets(keyboard: Pixels) -> WindowInsets {
+    WindowInsets {
+        safe_area: Edges {
+            top: px(62.0),
+            bottom: px(34.0),
+            ..Edges::default()
+        },
+        ime: Edges {
+            bottom: keyboard,
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    }
+}
+
+#[gpui::test]
+fn the_terminal_page_draws_the_terminal_and_the_key_bar(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert!(drawn(&mut h, "phone-key-bar"));
+    let terminal = h.bounds("phone-session-terminal");
+    let bar = h.bounds("phone-key-bar");
+    assert!(
+        bar.origin.y + px(1.0) >= terminal.bottom(),
+        "the bar sits under the terminal: {bar:?}, terminal {terminal:?}"
+    );
+    let mut left = px(-1.0);
+    for key in BAR_KEYS {
+        assert!(drawn(&mut h, key), "{key} is drawn");
+        let bounds = h.bounds(key);
+        assert!(bounds.size.height >= touch_target(), "{key} is {bounds:?}");
+        assert!(bounds.origin.x > left, "{key} follows the key before it");
+        left = bounds.origin.x;
+    }
+    assert!(
+        h.root(|root, _| root.phone_terminal_view()).is_some(),
+        "the page holds the session's terminal"
+    );
+}
+
+#[gpui::test]
+fn the_toggle_attaches_and_detaches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = page_of(cx, &dir, "a");
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_none());
+
+    h.click_on("phone-session-toggle");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        scrollback_loads(&sent, "a"),
+        1,
+        "the Terminal page attaches: {sent:?}"
+    );
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
+
+    h.click_on("phone-session-toggle");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(detaches(&sent, "a"), 1, "the Chat page detaches: {sent:?}");
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_none());
+}
+
+#[gpui::test]
+fn back_from_the_terminal_detaches_and_returns_to_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = page_of(cx, &dir, "a");
+    h.click_on("phone-session-toggle");
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-session-back");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(detaches(&sent, "a"), 1, "Back detaches: {sent:?}");
+    assert!(
+        drawn(&mut h, "phone-session-chat"),
+        "Back steps to the chat"
+    );
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_none());
+}
+
+#[gpui::test]
+fn a_shell_session_opens_on_its_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+
+    h.click_on(&row("n"));
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        scrollback_loads(&sent, "n"),
+        1,
+        "it loads scrollback: {sent:?}"
+    );
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert!(drawn(&mut h, "phone-key-bar"));
+}
+
+#[gpui::test]
+fn another_session_shown_detaches_the_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    phone_update(&mut h, |phone, cx| {
+        assert!(phone.open_session_on("a", cx), "Home lists a");
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(detaches(&sent, "n"), 1, "n is detached: {sent:?}");
+    assert_eq!(
+        scrollback_loads(&sent, "a"),
+        0,
+        "a opens on its chat: {sent:?}"
+    );
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_none());
+}
+
+#[gpui::test]
+fn the_key_bar_arrows_send_cursor_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    h.click_on("phone-bar-up");
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), b"\x1b[A");
+
+    h.host(&saved_remote()).pty("n", b"\x1b[?1h");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-bar-up");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\x1bOA",
+        "application-cursor mode"
+    );
+}
+
+#[gpui::test]
+fn ctrl_then_a_typed_c_sends_etx(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    h.click_on("phone-bar-ctrl");
+    h.commit(&slot_id("n"), "c");
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), [0x03]);
+
+    h.commit(&slot_id("n"), "c");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"c",
+        "Ctrl is no longer armed"
+    );
+}
+
+#[gpui::test]
+fn a_second_ctrl_tap_disarms(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    h.click_on("phone-bar-ctrl");
+    h.click_on("phone-bar-ctrl");
+    h.commit(&slot_id("n"), "c");
+
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), b"c");
+}
+
+#[gpui::test]
+fn paste_sends_the_clipboard_text_bracketed_when_asked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    h.host(&saved_remote()).pty("n", b"\x1b[?2004h");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h.set_clipboard("ls -la");
+
+    h.click_on("phone-bar-paste");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\x1b[200~ls -la\x1b[201~"
+    );
+}
+
+#[gpui::test]
+fn paste_with_an_empty_clipboard_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    h.set_clipboard("");
+
+    h.click_on("phone-bar-paste");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SendInput { .. })),
+        "no input: {sent:?}"
+    );
+    assert!(drawn(&mut h, "phone-bar-paste"), "the bar is drawn");
+}
+
+#[gpui::test]
+fn quick_types_into_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+
+    h.click_on("phone-bar-quick");
+    assert!(drawn(&mut h, "phone-terminal-quick"), "the dock opens");
+    h.click_on("phone-terminal-quick-confirm-0");
+
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), b"y\r");
+    assert!(!drawn(&mut h, "phone-terminal-quick"), "the dock closes");
+}
+
+#[gpui::test]
+fn a_rising_keyboard_claims_the_size_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(px(0.0))), cx);
+    });
+    h.host(&saved_remote()).sent();
+
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(px(336.0))), cx);
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_claim(&sent, "n"),
+        Some(true),
+        "the shorter terminal claims the size: {sent:?}"
+    );
+}
+
+/// A pending single-select question `id` with two options.
+fn question_prompt(id: &str) -> ChatPrompt {
+    ChatPrompt {
+        id: id.to_owned(),
+        kind: ChatPromptKind::Question,
+        subject: "calc.py".to_owned(),
+        body: "Which one?".to_owned(),
+        options: [(1, "sub"), (2, "div")]
+            .iter()
+            .map(|(number, label)| ChatOption {
+                number: *number,
+                label: (*label).to_owned(),
+                description: None,
+                selected: false,
+            })
+            .collect(),
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+    }
+}
+
+#[gpui::test]
+fn the_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = sent.iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "a" => Some(request_id.clone()),
+        _ => None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "message u1".to_owned(),
+            pending: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request.flatten(),
+    });
+    h.click_on("phone-session-toggle");
+    assert!(drawn(&mut h, "phone-session-terminal"));
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: Some(question_prompt("q1")),
+            },
+        });
+    h.cx.run_until_parked();
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
 }

@@ -22,8 +22,6 @@ use crate::ui_theme::{UiTheme, theme};
 
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
-/// What the Terminal page says until it holds the terminal.
-const TERMINAL_PENDING_TEXT: &str = "The terminal opens here in a later build.";
 
 /// The composer's Send button's label.
 const SEND_LABEL: &str = "Send";
@@ -46,7 +44,7 @@ impl PhoneRoot {
     }
 
     /// The shown session's header, while a session is shown.
-    fn session_header(&self, cx: &App) -> Option<Header> {
+    pub(super) fn session_header(&self, cx: &App) -> Option<Header> {
         let (host, session_id) = self.shown.as_ref()?;
         let ended = self
             .root
@@ -66,7 +64,7 @@ impl PhoneRoot {
 
     /// The page the shown session draws while its chat is mirrored or not
     /// ([`SessionPage::shown`]).
-    fn shown_page(&self, chat_mirrored: bool) -> Page {
+    pub(super) fn shown_page(&self, chat_mirrored: bool) -> Page {
         self.page
             .unwrap_or_else(|| SessionPage::opened(chat_mirrored))
             .shown(chat_mirrored)
@@ -190,7 +188,10 @@ impl PhoneRoot {
                     .children(show_prompt.take())
                     .children(composer)
             }
-            Page::Terminal => terminal_body(&t, cx),
+            Page::Terminal => {
+                let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
+                self.terminal_page(&id, cx)
+            }
         };
         Some(
             div()
@@ -352,17 +353,23 @@ impl PhoneRoot {
         let t = theme(cx);
         match self.composer_dock {
             Dock::None => None,
-            Dock::Quick => Some(self.quick_dock(session_id, &t, cx)),
+            Dock::Quick => Some(self.quick_dock(session_id, QuickTarget::Composer, &t, cx)),
             Dock::Keys => Some(Self::keys_dock(session_id, cx)),
         }
     }
 
-    /// The Quick dock: each of the shown session's reply groups under its
-    /// title, every reply a tap that types it and Return.
-    fn quick_dock(&self, session_id: &str, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+    /// The Quick dock for `target`: each of the shown session's reply
+    /// groups under its title, every reply a tap that types it and Return.
+    pub(super) fn quick_dock(
+        &self,
+        session_id: &str,
+        target: QuickTarget,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let id = session_id.to_owned();
         let mut dock = div()
-            .driver_id(|| "phone-dock-quick".to_owned())
+            .driver_id(move || target.dock_id().to_owned())
             .flex()
             .flex_col()
             .gap(px(COMPOSER_GAP));
@@ -372,7 +379,7 @@ impl PhoneRoot {
                 let bytes = composer::quick_bytes(text);
                 row = row.child(
                     phone_button(
-                        &format!("phone-quick-{}-{index}", group.title),
+                        &format!("{}-{}-{index}", target.reply_prefix(), group.title),
                         ButtonKind::Outlined,
                         cx,
                     )
@@ -381,8 +388,7 @@ impl PhoneRoot {
                     .on_click(cx.listener({
                         let id = id.clone();
                         move |this, _: &ClickEvent, _, cx| {
-                            this.root
-                                .update(cx, |root, _| root.send_phone_input(&id, &bytes));
+                            this.quick_reply(target, &id, &bytes, cx);
                         }
                     })),
                 );
@@ -402,6 +408,23 @@ impl PhoneRoot {
             );
         }
         dock
+    }
+
+    /// A Quick reply's tap: `bytes` typed into session `session_id` from the
+    /// composer, or through the terminal on the Terminal page.
+    fn quick_reply(
+        &mut self,
+        target: QuickTarget,
+        session_id: &str,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            QuickTarget::Composer => self
+                .root
+                .update(cx, |root, _| root.send_phone_input(session_id, bytes)),
+            QuickTarget::Terminal => self.quick_into_terminal(bytes, cx),
+        }
     }
 
     /// The Keys tray: every key of the strip, each a tap that types its
@@ -479,6 +502,33 @@ impl PhoneRoot {
     }
 }
 
+/// Where a Quick dock's replies are typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuickTarget {
+    /// Into the session from the composer, around the terminal.
+    Composer,
+    /// Through the Terminal page's terminal.
+    Terminal,
+}
+
+impl QuickTarget {
+    /// The dock's driver id.
+    fn dock_id(self) -> &'static str {
+        match self {
+            Self::Composer => "phone-dock-quick",
+            Self::Terminal => "phone-terminal-quick",
+        }
+    }
+
+    /// The start of each reply's driver id, before its group and index.
+    fn reply_prefix(self) -> &'static str {
+        match self {
+            Self::Composer => "phone-quick",
+            Self::Terminal => "phone-terminal-quick",
+        }
+    }
+}
+
 /// The status word in its tone's colour, as Home's row draws it.
 fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App) -> Div {
     div()
@@ -486,17 +536,4 @@ fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App) -> Div {
         .text_size(ui_px(cx, STATUS_TEXT_SIZE))
         .text_color(gpui::rgb(tone_color(tone, t)))
         .child(word)
-}
-
-/// The Terminal page's body: one muted line until it holds the terminal.
-fn terminal_body(t: &UiTheme, cx: &App) -> Div {
-    div()
-        .driver_id(|| "phone-session-terminal".to_owned())
-        .flex_1()
-        .min_h_0()
-        .px(px(SIDE_PADDING))
-        .py(px(12.0))
-        .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
-        .text_color(gpui::rgb(t.muted))
-        .child(TERMINAL_PENDING_TEXT)
 }
