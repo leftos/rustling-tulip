@@ -176,7 +176,7 @@ impl NetDeps {
             let host = host.clone();
             let tokens = Arc::clone(&tokens);
             Box::pin(async move {
-                crate::ssh_inproc::open(&host, None, tokens.as_ref())
+                crate::ssh_inproc::open(&host, host.host_fingerprint(), tokens.as_ref())
                     .await
                     .map_err(anyhow::Error::from)
             })

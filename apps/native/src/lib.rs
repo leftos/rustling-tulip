@@ -4923,7 +4923,14 @@ impl RootView {
         let pairing_input = device_pairing_view::PairingInput::of(&event);
         let moves_badge = taskbar_badge::moves_badge(&event);
         match event {
-            NetEvent::State(conn) => self.on_conn_state(host, conn, window, cx),
+            NetEvent::State(conn) => {
+                let auth_failed =
+                    matches!(conn.state(), crate::connection::State::AuthFailed { .. });
+                self.on_conn_state(host, conn, window, cx);
+                if !auth_failed {
+                    self.set_unverified_fingerprint(host, None);
+                }
+            }
             NetEvent::Handshake(info) => self.set_handshake(host, info),
             NetEvent::DaemonId(id) => {
                 self.drop_if_duplicate(host, Some(&id), window, cx);
@@ -4945,8 +4952,11 @@ impl RootView {
                 Some(reason),
                 cx,
             ),
-            NetEvent::HostKeyUnverified { .. }
-            | NetEvent::Paired
+            NetEvent::HostKeyUnverified { fingerprint } => {
+                self.set_unverified_fingerprint(host, Some(fingerprint));
+                cx.notify();
+            }
+            NetEvent::Paired
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
             | NetEvent::PairRequestSent => {}

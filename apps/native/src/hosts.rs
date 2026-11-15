@@ -71,6 +71,10 @@ pub(crate) struct HostConn {
     /// window opens gets a new one, so an event its network thread sends
     /// after a newer connection replaced it is told apart.
     generation: u64,
+    /// The host key the host offered and the user has not answered for yet,
+    /// as its `SHA256` fingerprint: the connection is refused until a
+    /// Restart, and trusting it keeps it for the host.
+    unverified_fingerprint: Option<String>,
     pub(crate) mirrors: HostMirrors,
 }
 
@@ -83,6 +87,7 @@ impl HostConn {
             handshake: None,
             daemon_id: None,
             generation: 0,
+            unverified_fingerprint: None,
             mirrors: HostMirrors::default(),
         }
     }
@@ -769,14 +774,11 @@ impl RootView {
     }
 
     /// Saves `target`'s host switched on and connects it: the desktop
-    /// picker's Add and the phone's add form. A host the window holds on
-    /// another port or remote command is dialled again on the new one.
-    pub(crate) fn add_saved_host(
-        &mut self,
-        target: Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// picker's Add and the phone's add form. The target dialled is the one
+    /// rebuilt from the saved record, so a host saved with a trusted host
+    /// key is dialled with it. A host the window holds on another port,
+    /// remote command or host key is dialled again on the new one.
+    pub fn add_saved_host(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let Some(host) = SavedHost::from_target(&target) else {
             return;
         };
@@ -785,14 +787,73 @@ impl RootView {
         saved.set_enabled(&target, true);
         self.sidebar.set_saved_hosts(saved.saved().to_vec());
         self.save_ui();
-        let key = HostKey::of(&target);
+        let dialled = match saved
+            .saved()
+            .iter()
+            .find(|record| record.is_for(&target))
+            .map(SavedHost::target)
+        {
+            Some(Ok(rebuilt)) => rebuilt,
+            Some(Err(err)) => {
+                tracing::warn!(
+                    ?target,
+                    "the saved host could not be rebuilt ({err}); connecting it as typed"
+                );
+                target
+            }
+            None => target,
+        };
+        let key = HostKey::of(&dialled);
         if self
             .conn_of(&key)
-            .is_some_and(|conn| *conn.target() != target)
+            .is_some_and(|conn| *conn.target() != dialled)
         {
             self.disconnect_host(&key, window, cx);
         }
-        self.connect_host(target, window, cx);
+        self.connect_host(dialled, window, cx);
+        cx.notify();
+    }
+
+    /// The host key `key`'s held connection offered and the user has not
+    /// trusted yet, as its `SHA256` fingerprint.
+    #[must_use]
+    pub fn unverified_fingerprint(&self, key: &HostKey) -> Option<&str> {
+        self.hosts
+            .get(key)
+            .and_then(|conn| conn.unverified_fingerprint.as_deref())
+    }
+
+    /// Records the host key `key`'s held connection offered, for the user
+    /// to answer for; `None` clears it.
+    pub(crate) fn set_unverified_fingerprint(
+        &mut self,
+        key: &HostKey,
+        fingerprint: Option<String>,
+    ) {
+        if let Some(conn) = self.hosts.get_mut(key) {
+            conn.unverified_fingerprint = fingerprint;
+        }
+    }
+
+    /// Trusts the host key `key`'s held connection offered: the host is
+    /// saved with it and dialled again with it, which refuses any other key.
+    /// Nothing happens when no key is pending.
+    pub fn trust_host_key(&mut self, key: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(fingerprint) = self.unverified_fingerprint(key).map(str::to_owned) else {
+            tracing::debug!(?key, "trust_host_key: no unverified host key is pending");
+            return;
+        };
+        let Some(target) = self.conn_of(key).map(|conn| conn.target().clone()) else {
+            tracing::debug!(?key, "trust_host_key: the window holds no connection to it");
+            return;
+        };
+        self.add_saved_host(target.with_host_fingerprint(Some(fingerprint)), window, cx);
+    }
+
+    /// The user declined the host key `key`'s held connection offered:
+    /// nothing is saved, and the host is left as it was.
+    pub fn cancel_host_key(&mut self, key: &HostKey, cx: &mut Context<Self>) {
+        self.set_unverified_fingerprint(key, None);
         cx.notify();
     }
 

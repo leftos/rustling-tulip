@@ -27,6 +27,10 @@ pub struct SshHost {
     /// An `~/.ssh/config` alias or `user@host[:port]`, never lower-cased.
     name: String,
     remote_command: Option<String>,
+    /// The host key this device trusts for the host, as the `SHA256`
+    /// fingerprint the in-process SSH reports; `None` until the user trusts
+    /// one, and a dial offering any other key is refused.
+    host_fingerprint: Option<String>,
 }
 
 impl SshHost {
@@ -40,6 +44,21 @@ impl SshHost {
     #[must_use]
     pub fn remote_command(&self) -> Option<&str> {
         self.remote_command.as_deref()
+    }
+
+    /// The host key this device trusts for the host, as its `SHA256`
+    /// fingerprint; `None` until the user trusts one.
+    #[must_use]
+    pub fn host_fingerprint(&self) -> Option<&str> {
+        self.host_fingerprint.as_deref()
+    }
+
+    /// This host dialling only `fingerprint` as its host key; `None` trusts
+    /// whatever key the host offers.
+    #[must_use]
+    pub fn with_host_fingerprint(mut self, fingerprint: Option<String>) -> Self {
+        self.host_fingerprint = fingerprint;
+        self
     }
 
     /// The host part: without a `user@` and without a `:port`.
@@ -228,6 +247,7 @@ impl Target {
         Ok(Self::Ssh(SshHost {
             name: name.to_owned(),
             remote_command,
+            host_fingerprint: None,
         }))
     }
 
@@ -252,6 +272,17 @@ impl Target {
         match self {
             Self::Ssh(host) => Some(host),
             Self::Local | Self::Tailnet(_) => None,
+        }
+    }
+
+    /// This target with `fingerprint` as the SSH host key it trusts; any
+    /// other target is returned unchanged, since only an in-process SSH
+    /// checks a saved key.
+    #[must_use]
+    pub fn with_host_fingerprint(self, fingerprint: Option<String>) -> Target {
+        match self {
+            Self::Ssh(host) => Self::Ssh(host.with_host_fingerprint(fingerprint)),
+            Self::Local | Self::Tailnet(_) => self,
         }
     }
 
@@ -654,6 +685,42 @@ mod tests {
             Target::parse_ssh("devbox", None).ok(),
             Target::parse_ssh("devbox", Some("other")).ok(),
             "another remote command is another target"
+        );
+    }
+
+    #[test]
+    fn an_ssh_target_with_a_host_fingerprint_differs_from_one_without() {
+        let Ok(plain) = Target::parse_ssh("me@box", None) else {
+            panic!("an SSH host string was refused");
+        };
+        let pinned = plain
+            .clone()
+            .with_host_fingerprint(Some("SHA256:abc".to_owned()));
+        assert_ne!(plain, pinned, "the trusted key is part of the target");
+        assert_eq!(
+            pinned.ssh_host().and_then(SshHost::host_fingerprint),
+            Some("SHA256:abc")
+        );
+        assert_eq!(
+            pinned.host_key(),
+            plain.host_key(),
+            "the host's key names the host, not the key"
+        );
+    }
+
+    #[test]
+    fn with_host_fingerprint_leaves_a_tailnet_target_unchanged() {
+        let tailnet = parsed("box.tail1234.ts.net", Some(DEFAULT_TAILNET_PORT));
+        assert_eq!(
+            tailnet
+                .clone()
+                .with_host_fingerprint(Some("SHA256:abc".to_owned())),
+            tailnet,
+            "a tailnet host keeps no host key"
+        );
+        assert_eq!(
+            Target::Local.with_host_fingerprint(Some("SHA256:abc".to_owned())),
+            Target::Local
         );
     }
 }

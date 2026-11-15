@@ -115,7 +115,11 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Its `saved_hosts` list (the hosts the host manager offers) is what the client connects at launch: This PC, then each enabled saved host in saved order. The host manager writes it (adding or picking a host saves it on, a row's switch sets its `enabled`, and Forget rewrites the list).
 
-  Each entry has a `kind`, `"tailnet"` when missing: a tailnet entry is `{name, port}` (written without `kind`; one that fails the DNS-name check is dropped on load), an SSH entry is `{"kind": "ssh", "name": "<host string>", "remote_command": "<optional>"}` with no port. An entry may carry `"enabled": false` for a host switched off; only a disabled host writes the key, and a missing key means enabled. An unknown kind, or an SSH host string that fails its check, is dropped on load. The SSH add form (`Add and connect`) writes an SSH entry (with no port), re-adding a name replaces the whole record, and Forget removes it.
+  Each entry has a `kind`, `"tailnet"` when missing: a tailnet entry is `{name, port}` (written without `kind`; one that fails the DNS-name check is dropped on load), an SSH entry is `{"kind": "ssh", "name": "<host string>", "remote_command": "<optional>"}` with no port.
+
+  An entry may carry `"enabled": false` for a host switched off; only a disabled host writes the key, and a missing key means enabled. An unknown kind, or an SSH host string that fails its check, is dropped on load.
+
+  The SSH add form (`Add and connect`) writes an SSH entry (with no port), re-adding a name replaces the whole record but keeps its `host_fingerprint` unless the add names another, and Forget removes it. An SSH entry may also carry `host_fingerprint`, the SHA256 fingerprint of the host key the user trusted on the phone: the phone's in-process SSH refuses any other key for that host, and the desktop ignores it.
 
   Its `session_views` map holds each session's remembered pane view per host: `{"<host key>": {"<session id>": "chat" | "summary"}}`, the host key `"local"` for this PC, else the key `host_session_counts` uses; only chat and summary entries are written (a terminal is the default), a host with none is left out, and a save prunes only the connected host's ended sessions, once its session list has arrived (a missing or malformed value loads as empty, with a warning for a wrong type).
 

@@ -59,6 +59,11 @@ pub struct SavedHost {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_command: Option<String>,
+    /// The host key this device trusts for an SSH host, as its `SHA256`
+    /// fingerprint; a record without one loads with none and is written
+    /// without the key. A tailnet record never has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_fingerprint: Option<String>,
     /// Whether the window connects to this host at launch; a record
     /// without the key is enabled, and an enabled host is written without
     /// it.
@@ -90,6 +95,7 @@ impl SavedHost {
                 name: host.name().to_owned(),
                 port: host.port(),
                 remote_command: None,
+                host_fingerprint: None,
                 enabled: true,
             }),
             Target::Ssh(host) => Some(Self {
@@ -97,6 +103,7 @@ impl SavedHost {
                 name: host.name().to_owned(),
                 port: 0,
                 remote_command: host.remote_command().map(str::to_owned),
+                host_fingerprint: host.host_fingerprint().map(str::to_owned),
                 enabled: true,
             }),
         }
@@ -118,6 +125,7 @@ impl SavedHost {
                 Target::parse_tailnet(&self.name, Some(self.port)).map_err(TypedHostError::Name)
             }
             HostKind::Ssh => Target::parse_ssh(&self.name, self.remote_command.as_deref())
+                .map(|target| target.with_host_fingerprint(self.host_fingerprint.clone()))
                 .map_err(TypedHostError::SshName),
         }
     }
@@ -132,7 +140,8 @@ impl SavedHost {
     /// This host in its normal form: a tailnet name as
     /// [`Target::parse_tailnet`] keeps it (lower-cased, without a trailing
     /// dot); an SSH host as typed, without a port and without a blank
-    /// remote command. Its `enabled` flag is kept.
+    /// remote command. Its `enabled` flag is kept, and so is an SSH host's
+    /// trusted host key; a tailnet record keeps none.
     ///
     /// # Errors
     ///
@@ -988,8 +997,9 @@ impl ConnectionPicker {
 
     /// Saves `host` after the others; a saved host of its kind and name is
     /// replaced by it, in its place, so a new port or remote command is
-    /// kept, and so is the saved record's `enabled` flag. A host of the
-    /// other kind and the same name is left alone.
+    /// kept, and so is the saved record's `enabled` flag. Its trusted host
+    /// key is kept unless `host` names one. A host of the other kind and the
+    /// same name is left alone.
     pub fn remember(&mut self, host: SavedHost) {
         match self
             .saved
@@ -997,8 +1007,13 @@ impl ConnectionPicker {
             .find(|saved| saved.kind == host.kind && saved.name == host.name)
         {
             Some(saved) => {
+                let host_fingerprint = host
+                    .host_fingerprint
+                    .clone()
+                    .or_else(|| saved.host_fingerprint.clone());
                 *saved = SavedHost {
                     enabled: saved.enabled,
+                    host_fingerprint,
                     ..host
                 };
             }
@@ -1079,7 +1094,7 @@ mod tests {
         offers_pair, offers_reconnect, offers_update, row_detail, typed_ssh_target, typed_target,
         version_against,
     };
-    use crate::target::{DEFAULT_TAILNET_PORT, Target};
+    use crate::target::{DEFAULT_TAILNET_PORT, SshHost, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
 
     const OWNER: i64 = 42;
@@ -1126,6 +1141,7 @@ mod tests {
             name: name.to_owned(),
             port,
             remote_command: None,
+            host_fingerprint: None,
             enabled: true,
         }
     }
@@ -1403,6 +1419,7 @@ mod tests {
             name: name.to_owned(),
             port: 0,
             remote_command: remote_command.map(str::to_owned),
+            host_fingerprint: None,
             enabled: true,
         }
     }
@@ -1505,6 +1522,68 @@ mod tests {
             picker.saved(),
             [saved(BOX, 9443), ssh_saved(BOX, None)],
             "the tailnet record takes the port; the SSH one is untouched"
+        );
+    }
+
+    /// `record` carrying `fingerprint` as the host key the user trusted.
+    fn pinned(record: SavedHost, fingerprint: &str) -> SavedHost {
+        SavedHost {
+            host_fingerprint: Some(fingerprint.to_owned()),
+            ..record
+        }
+    }
+
+    #[test]
+    fn a_saved_ssh_host_carries_its_host_fingerprint_both_ways() {
+        let target = ssh("me@box").with_host_fingerprint(Some("SHA256:abc".to_owned()));
+        let record = SavedHost::from_target(&target).expect("an SSH host record");
+        assert_eq!(record.host_fingerprint.as_deref(), Some("SHA256:abc"));
+        let rebuilt = record.target().expect("a saved host");
+        assert_eq!(
+            rebuilt.ssh_host().and_then(SshHost::host_fingerprint),
+            Some("SHA256:abc"),
+            "the record dials with the key it saved"
+        );
+        assert_eq!(rebuilt, target);
+    }
+
+    #[test]
+    fn normalising_a_saved_host_keeps_its_host_fingerprint() {
+        let host = pinned(ssh_saved("Me@Box:2222", None), "SHA256:abc");
+        let normal = host.normalised().expect("a saved SSH host");
+        assert_eq!(normal, host, "nothing about it changes");
+        assert_eq!(normal.host_fingerprint.as_deref(), Some("SHA256:abc"));
+    }
+
+    #[test]
+    fn normalising_a_tailnet_record_drops_a_host_fingerprint() {
+        let host = pinned(saved(BOX, 8787), "SHA256:x");
+        let normal = host.normalised().expect("a saved tailnet host");
+        assert_eq!(normal, saved(BOX, 8787), "a tailnet record has no host key");
+        assert_eq!(normal.host_fingerprint, None);
+    }
+
+    #[test]
+    fn re_adding_a_host_without_a_fingerprint_keeps_the_trusted_one() {
+        let mut picker =
+            ConnectionPicker::new(vec![pinned(ssh_saved("me@box", None), "SHA256:abc")]);
+        picker.remember(ssh_saved("me@box", None));
+        assert_eq!(
+            picker.saved()[0].host_fingerprint.as_deref(),
+            Some("SHA256:abc"),
+            "a record that names no key keeps the trusted one"
+        );
+    }
+
+    #[test]
+    fn re_adding_a_host_with_a_fingerprint_replaces_the_trusted_one() {
+        let mut picker =
+            ConnectionPicker::new(vec![pinned(ssh_saved("me@box", None), "SHA256:abc")]);
+        picker.remember(pinned(ssh_saved("me@box", None), "SHA256:def"));
+        assert_eq!(
+            picker.saved()[0].host_fingerprint.as_deref(),
+            Some("SHA256:def"),
+            "a record that names a key takes it"
         );
     }
 

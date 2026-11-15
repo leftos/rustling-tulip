@@ -7634,6 +7634,7 @@ pub(crate) mod tests {
             name: name.to_owned(),
             port,
             remote_command: None,
+            host_fingerprint: None,
             enabled: true,
         }
     }
@@ -7644,6 +7645,7 @@ pub(crate) mod tests {
             name: name.to_owned(),
             port: 0,
             remote_command: remote_command.map(str::to_owned),
+            host_fingerprint: None,
             enabled: true,
         }
     }
@@ -7739,6 +7741,47 @@ pub(crate) mod tests {
             saved["saved_hosts"][0], host,
             "a tailnet record is written without a kind"
         );
+    }
+
+    #[test]
+    fn a_saved_ssh_host_without_a_host_fingerprint_loads_and_resaves_unchanged() {
+        let dir = TestDir::new("ssh-host-without-fingerprint");
+        let file = json!({ "saved_hosts": [{ "kind": "ssh", "name": "me@box" }] });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(
+            loaded.saved_hosts,
+            [ssh_host("me@box", None)],
+            "a record without a host key loads with none"
+        );
+        save_ui_state(&dir.0, &loaded).expect("save");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert!(
+            saved["saved_hosts"][0].get("host_fingerprint").is_none(),
+            "a record without one writes no key: {saved}"
+        );
+    }
+
+    #[test]
+    fn a_saved_ssh_host_fingerprint_round_trips() {
+        let dir = TestDir::new("ssh-host-fingerprint");
+        let file = json!({
+            "saved_hosts": [{ "kind": "ssh", "name": "me@box", "host_fingerprint": "SHA256:abc" }],
+        });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        let record = SavedHost {
+            host_fingerprint: Some("SHA256:abc".to_owned()),
+            ..ssh_host("me@box", None)
+        };
+        assert_eq!(loaded.saved_hosts, [record]);
+        save_ui_state(&dir.0, &loaded).expect("save");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(saved["saved_hosts"][0], file["saved_hosts"][0]);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use protocol::{
 };
 use rustling_tulip_native::connection_picker::TypedHostError;
 use rustling_tulip_native::phone::PhoneRoot;
-use rustling_tulip_native::target::{HostKey, Target};
+use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::json;
 use support::{Harness, REMOTE, TestDir, saved_remote, saved_ui, seed_ui, session};
@@ -435,5 +435,140 @@ fn a_phone_keeps_a_menu_open_while_a_host_sends_events(cx: &mut TestAppContext) 
         h.root(|root, _| root.session_menu().map(str::to_owned)),
         Some("s1".to_owned()),
         "a host's event leaves the menu open"
+    );
+}
+
+/// The SSH host the host-key specs dial.
+const SSH: &str = "me@box";
+
+/// The target [`SSH`] is.
+fn ssh_target() -> Target {
+    Target::parse_ssh(SSH, None).expect("an SSH host string")
+}
+
+/// A connection to `target` its daemon refused, as an SSH host refuses an
+/// unknown host key.
+fn refused(target: &Target) -> Connection {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_auth_failed("the host's key is not trusted".to_owned());
+    conn
+}
+
+/// The pending host key the window holds for `key`.
+fn pending(h: &mut Harness<'_>, key: &HostKey) -> Option<String> {
+    h.root(|root, _| root.unverified_fingerprint(key).map(str::to_owned))
+}
+
+/// A phone over `dir` with [`SSH`] saved, its connection reporting
+/// `SHA256:abc` as the host key the user has not trusted.
+fn phone_with_an_unverified_key<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+) -> (Harness<'a>, HostKey) {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "kind": "ssh", "name": SSH }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    let target = ssh_target();
+    let key = HostKey::of(&target);
+    h.host(&target).event(NetEvent::HostKeyUnverified {
+        fingerprint: "SHA256:abc".to_owned(),
+    });
+    h.host(&target).event(NetEvent::State(refused(&target)));
+    (h, key)
+}
+
+#[gpui::test]
+fn an_unverified_host_key_is_held_until_the_connection_leaves_auth_failed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, key) = phone_with_an_unverified_key(cx, &dir);
+    assert_eq!(
+        pending(&mut h, &key),
+        Some("SHA256:abc".to_owned()),
+        "a refused host key stays pending until the user answers"
+    );
+
+    let mut connecting = Connection::for_target(ssh_target());
+    connecting.on_connecting();
+    h.host(&ssh_target()).event(NetEvent::State(connecting));
+
+    assert_eq!(
+        pending(&mut h, &key),
+        None,
+        "a connection that left auth failed holds no pending key"
+    );
+}
+
+#[gpui::test]
+fn trusting_an_unverified_host_key_saves_it_and_redials_with_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, key) = phone_with_an_unverified_key(cx, &dir);
+
+    h.root_update(|root, window, cx| root.trust_host_key(&key, window, cx));
+
+    let dialled = h
+        .opened_targets()
+        .pop()
+        .expect("Trust dials the host again");
+    assert_eq!(
+        dialled.ssh_host().and_then(SshHost::host_fingerprint),
+        Some("SHA256:abc"),
+        "the redial carries the trusted key"
+    );
+    assert_eq!(
+        saved_ui(&dir)["saved_hosts"][0]["host_fingerprint"],
+        "SHA256:abc",
+        "the saved record keeps the trusted key"
+    );
+    assert_eq!(pending(&mut h, &key), None, "nothing is pending any more");
+}
+
+#[gpui::test]
+fn cancelling_an_unverified_host_key_saves_nothing_and_does_not_redial(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, key) = phone_with_an_unverified_key(cx, &dir);
+    let opened = h.opened_targets();
+
+    h.root_update(|root, _, cx| root.cancel_host_key(&key, cx));
+
+    assert_eq!(h.opened_targets(), opened, "Cancel dials nothing");
+    assert!(
+        saved_ui(&dir)["saved_hosts"][0]
+            .get("host_fingerprint")
+            .is_none(),
+        "Cancel saves no key"
+    );
+    assert_eq!(pending(&mut h, &key), None, "nothing is pending any more");
+}
+
+#[gpui::test]
+fn re_adding_a_trusted_ssh_host_dials_with_its_pin(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{
+                "kind": "ssh",
+                "name": SSH,
+                "enabled": false,
+                "host_fingerprint": "SHA256:abc",
+            }],
+        }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    assert!(
+        h.opened_targets().is_empty(),
+        "a switched-off host dials nothing at launch"
+    );
+
+    h.root_update(|root, window, cx| root.add_saved_host(ssh_target(), window, cx));
+
+    let dialled = h.opened_targets().pop().expect("Add connects it");
+    assert_eq!(
+        dialled.ssh_host().and_then(SshHost::host_fingerprint),
+        Some("SHA256:abc"),
+        "the saved key is dialled with, not the typed target's"
     );
 }
