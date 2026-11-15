@@ -28,6 +28,17 @@ The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https
 
 `claude--suggestion.txt` and `claude--suggestion-typed.txt` are SGR-coloured captures taken in this repo from Claude Code 2.1.325 under ConPTY at 120x40, with prompt suggestions on and `FORCE_COLOR=3`, on a session's second turn: the idle box showing Claude's suggested next prompt drawn dim (`❯ write todo.py`, SGR 2 alone, as the empty box's `Try "…"` placeholder is drawn), and the same session with `hello` typed, which replaced the suggestion with text not drawn dim. The working folder in their banner is a neutral path of the same length in place of the scratch folder they were taken in.
 
+The `claude--draft-*.txt` fixtures and `claude--suggestion-cut.txt` are SGR-coloured captures from Claude Code 2.1.325 under ConPTY at 120x40, scrubbed the same way, of the prompt box holding a draft: a one-line draft (`draft-one-line`), one long line Ink wrapped onto a second row (`draft-wrapped`), two lines joined by a real newline typed with ctrl+j (`draft-two-lines`), ten such lines (`draft-ten-rows`), a draft taller than the box, which scrolls (`draft-scrolled`), a bracketed paste drawn as its `[Pasted text #1 +N lines]` placeholder with default attributes (`draft-pasted`), and a suggestion cut with `…` (U+2026) in its last cell at a 30-column width (`suggestion-cut`).
+
+What the captures measured about the box, which the draft reader and the clear recipe rely on:
+
+- A row's line-wrap flag does not tell a wrapped row from a real newline: ConPTY repaints some newline rows by autowrap too, so both can carry it. Ink wraps at a word boundary, so a wrapped row can stop short of the box's inner width.
+- ctrl+u (0x15) deletes from the cursor to the start of its line; at the start of a line it deletes the newline before it, so a draft of N lines takes 2N-1 presses. At the start of the first line, and on an empty box, it does nothing, and an empty-box press leaves the kill buffer alone. After a press Claude shows `Ctrl+Y to paste deleted text` above the box.
+- Down past the last line is harmless and leaves the cursor at the draft's end; ctrl+e moves to the end of a line, ctrl+k deletes to its end.
+- A pasted-text placeholder counts as one line: one ctrl+u clears it.
+- ctrl+u bytes written together act one per byte up to a 40-byte write; an 88-byte write was dropped whole, so a recipe writes them in small groups.
+- Tab accepts a suggestion as plain text, the whole of it, even when the box shows it cut.
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.

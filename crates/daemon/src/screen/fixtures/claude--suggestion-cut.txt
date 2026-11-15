@@ -1,0 +1,40 @@
+
+[0m           [0m[1mClaude Code[0m
+[0m           [0m[38;2;153;153;153mv2.1.325[0m
+[0m[38;2;215;119;87m ▐[0m[38;2;215;119;87m[48;2;0;0;0m▛███▛█[0m   [0m[38;2;153;153;153mHaiku 5.5[0m
+[0m[38;2;215;119;87m▝▜[0m[38;2;215;119;87m[48;2;0;0;0m█████[0m[38;2;215;119;87m█▀  [0m[38;2;153;153;153mClaude Ultra       [0m
+[0m[38;2;215;119;87m ▝▝   ▝▝   [0m[38;2;153;153;153mX:\dev\scratch\prom[0m
+[0m           [0m[38;2;153;153;153m…[0m
+
+[0m[38;2;255;193;7m⚠ Safe mode: all[0m
+[0m  [0m[38;2;255;193;7mcustomizations are disabled [0m
+[0m  [0m[38;2;255;193;7m(CLAUDE.md, skills, plugins,[0m
+[0m  [0m[38;2;255;193;7mhooks, MCP, agents, and     [0m
+[0m  [0m[38;2;255;193;7mmore)[0m
+[0m  [0m[38;2;153;153;153mRestart without --safe-mode [0m
+[0m  [0m[38;2;153;153;153mto re-enable[0m
+[0m[38;2;255;193;7m⚠ Code Mode (experimental) is [0m
+[0m  [0m[38;2;255;193;7mon · this session can be    [0m
+[0m  [0m[38;2;255;193;7mresumed only with Code Mode [0m
+[0m  [0m[38;2;255;193;7mon[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mRead README.md and reply in [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55mone sentence with what      [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55mthis project still needs.   [0m
+
+[0m  [0m[38;2;153;153;153mRead [0m[1m[38;2;153;153;153m1[0m[38;2;153;153;153m file, ran [0m[1m[38;2;153;153;153m1[0m[38;2;153;153;153m shell    [0m
+[0m  [0m[38;2;153;153;153mcommand[0m
+
+[0m[38;2;255;255;255m● [0mThe README says the project
+[0m  still needs [0m[38;2;177;185;249mtodo.py [0mwritten,
+[0m  with [0m[38;2;177;185;249madd[0m, [0m[38;2;177;185;249mlist [0mand [0m[38;2;177;185;249mdone     [0m
+[0m  commands that store items in
+[0m  [0m[38;2;177;185;249mtodo.json[0m.
+
+[0m[38;2;153;153;153m✻ Baked for 9s · done 1:47 AM [0m
+
+
+[0m[38;2;136;136;136m──────────────────────────────[0m
+[0m❯ [0m[2mWrite todo.py with add, lis…[0m
+[0m[38;2;136;136;136m──────────────────────────────[0m
+[0m  [0m[38;2;255;193;7m⏵⏵ auto mode on [0m[38;2;153;153;153m(shift+tab  [0m
