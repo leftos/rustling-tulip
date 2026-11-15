@@ -10,7 +10,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    BackGesturePhase, Edges, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource,
+    BackGesturePhase, Edges, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
     TestAppContext, TouchPhase, WindowInsets, point, px,
 };
 use protocol::error_codes::CHAT_REFUSED;
@@ -24,7 +24,7 @@ use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
-use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
 
 /// The least height of a row or a target.
 fn touch_target() -> Pixels {
@@ -1803,4 +1803,272 @@ fn a_tap_on_a_tail_button_with_the_keyboard_up_opens_its_box_and_lowers_the_keyb
         Some(KeyboardCall::Lower),
         "and the keyboard goes away whatever the card's button stopped"
     );
+}
+
+/// Where the phone's chat maps window point `at` to, as (entry, unit,
+/// byte), once the frames in flight have drawn.
+fn hit(h: &mut Harness<'_>, at: Point<Pixels>) -> Option<(String, u32, usize)> {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.phone_chat_hit(at))
+}
+
+#[gpui::test]
+fn a_hit_test_across_two_rows_returns_the_expected_positions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    let anywhere = point(px(100.0), px(200.0));
+    assert_eq!(hit(&mut h, anywhere), None, "no chat text is drawn yet");
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, vec![user("u1"), answer("a1")]));
+    let bubble = h.bounds("chat-row-phone-u1");
+    let reply = h.bounds("chat-row-phone-a1");
+    let at = |entry: &str, byte: usize| Some((entry.to_owned(), 0, byte));
+    // The bubble's text ends at its 10 px padding, at the row's right edge.
+    let bubble_line = bubble.top() + px(12.0);
+    assert_eq!(
+        hit(&mut h, point(bubble.right() - px(12.0), bubble_line)),
+        at("u1", 9),
+        "on the bubble's last letter"
+    );
+    assert_eq!(
+        hit(&mut h, point(bubble.right() - px(3.0), bubble_line)),
+        at("u1", 10),
+        "in the bubble right of its text"
+    );
+    let left = reply.left() + px(1.0);
+    assert_eq!(
+        hit(&mut h, point(left, reply.top() + px(4.0))),
+        at("a1", 0),
+        "on the answer's first letter"
+    );
+    assert_eq!(
+        hit(
+            &mut h,
+            point(reply.left() + px(40.0), reply.top() - px(2.0))
+        ),
+        at("a1", 0),
+        "the gap between the rows, nearer the answer's top"
+    );
+    assert_eq!(
+        hit(&mut h, point(left, bubble.top() - px(4.0))),
+        at("u1", 0),
+        "above the first text"
+    );
+    assert_eq!(
+        hit(&mut h, point(left, reply.bottom() + px(4.0))),
+        at("a1", "answer a1".len()),
+        "below the last text"
+    );
+}
+
+/// Where the body cell "42" of a two-column, two-row table drawn as answer
+/// `a1` sits: its text line's y, and the left and right edges of the
+/// second column's text room (inside the row's 1 px border and the cell's
+/// 8 px padding).
+fn second_cell(h: &mut Harness<'_>) -> (Pixels, Pixels, Pixels) {
+    let reply = h.bounds("chat-row-phone-a1");
+    // The body row is the lower of two equal rows, whatever gap follows.
+    let line = reply.top() + reply.size.height * 0.75;
+    let inner_left = reply.left() + px(1.0);
+    let inner_width = reply.size.width - px(2.0);
+    let pad_x = px(8.0);
+    let left = inner_left + inner_width / 2.0 + pad_x;
+    let right = inner_left + inner_width - pad_x;
+    (line, left, right)
+}
+
+#[gpui::test]
+fn a_tap_on_a_right_aligned_cell_hits_its_own_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let table = "| k | n |\n| --- | ---: |\n| a | 42 |\n";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", table)]);
+    let (line, left, right) = second_cell(&mut h);
+
+    assert_eq!(
+        hit(&mut h, point(right - px(2.0), line)),
+        Some(pos("a1", 3, 1)),
+        "over the 2, drawn at the cell's right edge"
+    );
+    let mut x = right - px(2.0);
+    while x > left && hit(&mut h, point(x, line)) != Some(pos("a1", 3, 0)) {
+        x -= px(1.0);
+    }
+    assert!(
+        right - x < px(24.0),
+        "the 4 is one glyph left of the 2, not at the cell's left edge"
+    );
+    assert_eq!(
+        hit(&mut h, point(left + px(2.0), line)),
+        Some(pos("a1", 3, 0)),
+        "the cell's empty left part is before its first byte"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_centred_cell_hits_its_own_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let table = "| k | n |\n| --- | :---: |\n| a | 42 |\n";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", table)]);
+    let (line, left, right) = second_cell(&mut h);
+    let middle = (left + right) / 2.0;
+
+    assert_eq!(
+        hit(&mut h, point(middle - px(2.0), line)),
+        Some(pos("a1", 3, 0)),
+        "over the 4, left of the cell's middle"
+    );
+    assert_eq!(
+        hit(&mut h, point(middle + px(2.0), line)),
+        Some(pos("a1", 3, 1)),
+        "over the 2, right of the cell's middle"
+    );
+    assert_eq!(
+        hit(&mut h, point(left + px(2.0), line)),
+        Some(pos("a1", 3, 0)),
+        "the cell's empty left part is before its first byte"
+    );
+}
+
+/// An answer `id` whose text is `text`.
+fn answer_with(id: &str, text: &str) -> ChatEntry {
+    ChatEntry::Answer {
+        id: id.to_owned(),
+        text: text.to_owned(),
+        live: false,
+    }
+}
+
+/// A position as the selection hooks take it.
+type Pos = (String, u32, usize);
+
+fn pos(entry: &str, unit: u32, byte: usize) -> Pos {
+    (entry.to_owned(), unit, byte)
+}
+
+/// Seeds session `session_id`'s chat selection from `anchor` to `focus`.
+fn select(h: &mut Harness<'_>, session_id: &str, anchor: Pos, focus: Pos) {
+    let id = session_id.to_owned();
+    h.root_update(move |root, _, cx| root.set_phone_chat_selection(&id, anchor, focus, cx));
+}
+
+/// The (entry, unit, bytes) the phone chat's latest frame drew selected.
+fn painted_selection(h: &mut Harness<'_>) -> Vec<(String, u32, std::ops::Range<usize>)> {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.phone_chat_painted_selection())
+}
+
+#[gpui::test]
+fn a_seeded_selection_draws_its_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1"), answer("a1")]);
+    let rows = ["chat-row-phone-u1", "chat-row-phone-a1"];
+    let before: Vec<_> = rows.iter().map(|row| h.bounds(row)).collect();
+    assert!(
+        painted_selection(&mut h).is_empty(),
+        "no selection, no highlight"
+    );
+
+    select(&mut h, "a", pos("u1", 0, 3), pos("a1", 0, 4));
+
+    assert_eq!(
+        painted_selection(&mut h),
+        vec![("u1".to_owned(), 0, 3..10), ("a1".to_owned(), 0, 0..4)],
+        "the user text to its end, the answer up to the byte"
+    );
+    let after: Vec<_> = rows.iter().map(|row| h.bounds(row)).collect();
+    assert_eq!(after, before, "the highlight moves and resizes no row");
+}
+
+#[gpui::test]
+fn a_selection_inside_a_table_cell_highlights_only_that_cell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let table = "| c1 | c2 |\n| --- | --- |\n| v1 | v2 |\n";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", table)]);
+
+    select(&mut h, "a", pos("a1", 1, 0), pos("a1", 1, 2));
+
+    assert_eq!(painted_selection(&mut h), vec![("a1".to_owned(), 1, 0..2)]);
+}
+
+#[gpui::test]
+fn a_selection_in_a_code_line_highlights_only_that_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let code = "```\nfn a() {}\nlet b = 1;\n```";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", code)]);
+
+    select(&mut h, "a", pos("a1", 1, 4), pos("a1", 1, 5));
+
+    assert_eq!(painted_selection(&mut h), vec![("a1".to_owned(), 1, 4..5)]);
+}
+
+#[gpui::test]
+fn desktop_chat_draws_no_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on("pane-view-chat-p1");
+    let request = loads_of(&h.sent(), "s1")
+        .pop()
+        .expect("the toggle asks for the chat");
+    h.send(chat_reply("s1", request, vec![user("u1"), answer("a1")]));
+    assert!(
+        drawn(&mut h, "chat-row-p1-u1"),
+        "the desktop draws the chat"
+    );
+
+    select(&mut h, "s1", pos("u1", 0, 0), pos("a1", 0, 4));
+
+    assert!(
+        painted_selection(&mut h).is_empty(),
+        "nothing drawn selected"
+    );
+    let on_row = h.center("chat-row-p1-a1");
+    assert_eq!(hit(&mut h, on_row), None, "and no text registered");
+}
+
+#[gpui::test]
+fn a_seed_past_a_shortened_text_is_clamped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1"), answer("a1")]);
+    select(&mut h, "a", pos("u1", 0, 2), pos("a1", 7, 0));
+    assert_eq!(
+        painted_selection(&mut h),
+        vec![("u1".to_owned(), 0, 2..10), ("a1".to_owned(), 0, 0..9)],
+        "a unit past the answer's last is its last unit's end"
+    );
+    let short = ChatEntry::User {
+        id: "u1".to_owned(),
+        text: "msg".to_owned(),
+        pending: false,
+    };
+
+    h.host(&saved_remote())
+        .send(chat_reply("a", None, vec![short, answer("a1")]));
+
+    assert_eq!(
+        painted_selection(&mut h),
+        vec![("u1".to_owned(), 0, 2..3), ("a1".to_owned(), 0, 0..9)],
+        "an end past the shortened text is its end"
+    );
+}
+
+#[gpui::test]
+fn the_selected_text_hook_copies_the_seeded_range(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1"), answer("a1")]);
+
+    select(&mut h, "a", pos("u1", 0, 8), pos("a1", 0, 6));
+
+    assert_eq!(
+        h.root(|root, _| root.phone_chat_selected_text("a")),
+        "u1\n\nanswer"
+    );
+    h.root_update(|root, _, cx| root.clear_phone_chat_selection("a", cx));
+    assert!(painted_selection(&mut h).is_empty(), "a cleared selection");
+    assert_eq!(h.root(|root, _| root.phone_chat_selected_text("a")), "");
 }

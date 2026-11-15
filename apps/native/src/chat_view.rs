@@ -7,7 +7,9 @@
 //! show a chat and which chats are loaded live in [`crate::chat`]; the Tail
 //! boxes' state in [`crate::chat_tail`].
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -18,9 +20,11 @@ use chrono::{DateTime, TimeDelta, Utc};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Autocapitalize, ClickEvent, Context, Div, ElementId, Entity, Focusable,
-    KeyDownEvent, Keystroke, MouseUpEvent, ScrollEvent, ScrollHandle, SharedString, Subscription,
-    Task, TextInputAction, TextInputConfiguration, Window, WindowId, div, prelude::*, px, relative,
+    AnyElement, App, Autocapitalize, Bounds, ClickEvent, Context, Div, ElementId, Entity,
+    Focusable, HighlightStyle, Hsla, KeyDownEvent, Keystroke, MouseUpEvent, Pixels, Point,
+    ScrollEvent, ScrollHandle, SharedString, StyledText, Subscription, Task, TextAlign,
+    TextInputAction, TextInputConfiguration, TextLayout, Window, WindowId, canvas, div, point,
+    prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -40,6 +44,7 @@ use crate::chat_cards::{
     OnPress, box_placeholder, card_answer_message, key_action, prompt_card, restored_box_text,
     typed_option,
 };
+use crate::chat_select::{self, SelectedSpan, Selection, TextPos, UnitSource, Units};
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
@@ -52,7 +57,9 @@ use crate::summary::{SummaryLog, wanted_loads};
 use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
-use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare_answer, render_row};
+use crate::viewer_md_view::{
+    LinkRoute, MdDoc, Painter, prepare_answer, render_row, select_highlights,
+};
 use crate::work_strip::strip_row;
 use crate::{RootView, UI_TEXT_SIZE, new_request_id};
 
@@ -168,6 +175,8 @@ pub(crate) struct SessionChat {
     composer: Option<Composer>,
     /// The daemon's reason for refusing the last send.
     send_error: Option<String>,
+    /// The phone's selection of the chat's text; it goes with the chat.
+    selection: Option<Selection>,
 }
 
 /// An answer's parsed document, with the text length, live flag and open
@@ -395,6 +404,242 @@ pub(crate) struct ChatPanes {
     /// daemon refused to load it; it is not asked again until the phone
     /// shows a session again or its host reconnects.
     phone_refused: Option<String>,
+    /// The phone chat's selectable texts as its last frame drew them.
+    phone_text: Rc<RefCell<TextRegistry>>,
+}
+
+/// The selectable texts the phone's chat drew in its latest frame, each
+/// with its layout, for the hit test, and the selected bytes it drew.
+#[derive(Default)]
+pub(crate) struct TextRegistry {
+    /// Each drawn unit, in drawing order.
+    texts: Vec<DrawnText>,
+    /// Whether the frame that registered `texts` has painted, so that each
+    /// layout has been measured and placed; until then none is read.
+    painted: bool,
+    /// Each unit's entry id, unit index and the bytes drawn selected.
+    painted_ranges: Vec<(String, u32, Range<usize>)>,
+}
+
+impl TextRegistry {
+    /// Forgets the last frame's texts, before a new frame registers its own.
+    fn clear(&mut self) {
+        self.texts.clear();
+        self.painted = false;
+        self.painted_ranges.clear();
+    }
+
+    /// The (entry id, unit index, byte) window point `at` falls on: the
+    /// first text whose bounds hold it, while it is inside `viewport` (the
+    /// chat's scroll area), else the text nearest it vertically (the earlier
+    /// on a tie), at byte 0 above that text, at its end below it; the byte
+    /// at a character's start. `None` before the frame has painted or with
+    /// no text drawn.
+    fn hit(
+        &self,
+        at: Point<Pixels>,
+        viewport: Option<Bounds<Pixels>>,
+    ) -> Option<(String, u32, usize)> {
+        if !self.painted {
+            return None;
+        }
+        let in_view = viewport.is_none_or(|view| view.contains(&at));
+        let inside = self
+            .texts
+            .iter()
+            .find(|text| in_view && text.layout.bounds().contains(&at));
+        let text = match inside {
+            Some(text) => text,
+            None => self.nearest(at)?,
+        };
+        Some((text.entry.clone(), text.unit, byte_at(text, at)))
+    }
+
+    /// The text nearest window point `at` vertically, the earlier on a tie.
+    fn nearest(&self, at: Point<Pixels>) -> Option<&DrawnText> {
+        let mut best: Option<(Pixels, &DrawnText)> = None;
+        for text in &self.texts {
+            let distance = y_distance(text.layout.bounds(), at.y);
+            if best.is_none_or(|(least, _)| distance < least) {
+                best = Some((distance, text));
+            }
+        }
+        best.map(|(_, text)| text)
+    }
+}
+
+/// How far `y` is above or below `bounds`; zero inside its rows.
+fn y_distance(bounds: Bounds<Pixels>, y: Pixels) -> Pixels {
+    if y < bounds.top() {
+        bounds.top() - y
+    } else if y > bounds.bottom() {
+        y - bounds.bottom()
+    } else {
+        px(0.0)
+    }
+}
+
+/// One selectable text a frame drew: its entry id, unit index, layout, and
+/// how its element aligns it.
+struct DrawnText {
+    entry: String,
+    unit: u32,
+    layout: TextLayout,
+    align: TextAlign,
+}
+
+/// The byte of `text` at window point `at`: 0 above it, its end below it,
+/// else the character under or nearest the point, measured from where the
+/// text's line is drawn; moved back to a character's start.
+fn byte_at(text: &DrawnText, at: Point<Pixels>) -> usize {
+    let layout = &text.layout;
+    let bounds = layout.bounds();
+    let drawn = layout.text();
+    let byte = if at.y < bounds.top() {
+        0
+    } else if at.y > bounds.bottom() {
+        drawn.len()
+    } else {
+        let shifted = point(at.x - align_shift(layout, text.align), at.y);
+        match layout.index_for_position(shifted) {
+            Ok(index) | Err(index) => index,
+        }
+    };
+    chat_select::char_floor(&drawn, byte)
+}
+
+/// How far right of its bounds' left edge a centred or right-aligned text
+/// draws its line, which the layout's own position lookup does not apply;
+/// zero for a left-aligned text and for one that takes more than one line,
+/// which keeps the left-edge measure.
+fn align_shift(layout: &TextLayout, align: TextAlign) -> Pixels {
+    if matches!(align, TextAlign::Left) {
+        return px(0.0);
+    }
+    let lines = layout.line_layouts();
+    let [line] = lines.as_slice() else {
+        return px(0.0);
+    };
+    if !line.wrap_boundaries.is_empty() {
+        return px(0.0);
+    }
+    let room = (layout.bounds().size.width - line.unwrapped_layout.width).max(px(0.0));
+    match align {
+        TextAlign::Right => room,
+        TextAlign::Center => room / 2.0,
+        TextAlign::Left => px(0.0),
+    }
+}
+
+/// What a phone chat's selectable texts are drawn with: its units, the
+/// selection's ends as positions in the units, the highlight colour, and
+/// the registry each drawn text's layout goes into.
+#[derive(Clone)]
+pub(crate) struct SelectDraw {
+    units: Rc<Units>,
+    selected: Option<SelectedSpan>,
+    background: Hsla,
+    registry: Rc<RefCell<TextRegistry>>,
+}
+
+impl SelectDraw {
+    /// `text`, entry `entry`'s text drawn from `source` and aligned by
+    /// `align`, styled with `highlights` and the selected bytes on the
+    /// highlight colour; when it is a unit, its layout is registered and its
+    /// selected bytes recorded.
+    pub(crate) fn text(
+        &self,
+        (entry, source): (&str, UnitSource),
+        align: TextAlign,
+        text: SharedString,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+    ) -> StyledText {
+        let Some((at, unit)) = self.units.locate(entry, source) else {
+            return styled_text(text, highlights);
+        };
+        let selected = self
+            .selected
+            .as_ref()
+            .and_then(|span| self.units.range_at(span, at));
+        let mut registry = self.registry.borrow_mut();
+        if let Some(range) = &selected {
+            registry
+                .painted_ranges
+                .push((entry.to_owned(), unit, range.clone()));
+        }
+        let styled = styled_text(
+            text,
+            select_highlights(highlights, selected, self.background),
+        );
+        registry.texts.push(DrawnText {
+            entry: entry.to_owned(),
+            unit,
+            layout: styled.layout().clone(),
+            align,
+        });
+        styled
+    }
+}
+
+/// `text` styled with `highlights`, none set when there are none.
+fn styled_text(text: SharedString, highlights: Vec<(Range<usize>, HighlightStyle)>) -> StyledText {
+    if highlights.is_empty() {
+        StyledText::new(text)
+    } else {
+        StyledText::new(text).with_highlights(highlights)
+    }
+}
+
+/// A chat text: through `select` when the pane draws selectable text
+/// ([`SelectDraw::text`]), else `text` styled with `highlights`.
+pub(crate) fn select_text(
+    select: Option<&SelectDraw>,
+    entry: &str,
+    source: UnitSource,
+    text: impl Into<SharedString>,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> StyledText {
+    match select {
+        Some(select) => select.text((entry, source), TextAlign::Left, text.into(), highlights),
+        None => styled_text(text.into(), highlights),
+    }
+}
+
+/// The phone chat's selectable texts, in the order it draws them: Compact,
+/// folding only runs of four or more calls.
+fn phone_units(chat: &SessionChat) -> Units {
+    let rows = chat::display_rows_folding(chat.log.entries(), ChatMode::Compact, PHONE_MIN_RUN);
+    Units::build(
+        &rows,
+        |id| chat.docs.get(id).map(|answer| answer.doc.as_ref()),
+        |id| chat.log.is_expanded(id),
+        |id| chat.log.is_run_open(id),
+    )
+}
+
+/// `selection` with both ends moved into `units` ([`Units::clamp`]); `None`
+/// when either end's entry has no units any more.
+fn clamped(units: &Units, selection: &Selection) -> Option<Selection> {
+    Some(Selection {
+        anchor: units.clamp(&selection.anchor)?,
+        focus: units.clamp(&selection.focus)?,
+    })
+}
+
+/// A position from a spec hook's plain data: (entry id, unit index, byte).
+fn text_pos((entry, unit, byte): (String, u32, usize)) -> TextPos {
+    TextPos { entry, unit, byte }
+}
+
+/// A mark painted after the phone chat's rows, telling `registry` that
+/// every text it holds has been laid out.
+fn painted_mark(registry: Rc<RefCell<TextRegistry>>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, (), _, _| registry.borrow_mut().painted = true,
+    )
+    .absolute()
+    .size_0()
 }
 
 /// The pane id the phone's shown session's chat loads and scrolls under.
@@ -453,6 +698,7 @@ impl ChatPanes {
             work_strip_repaints: 0,
             phone: None,
             phone_refused: None,
+            phone_text: Rc::default(),
         }
     }
 
@@ -634,6 +880,9 @@ pub(crate) struct RowLook<'a> {
     /// The fewest calls in a row Compact folds into one row; a shorter run
     /// draws each of its rows.
     pub(crate) min_run: usize,
+    /// How the rows' selectable texts are drawn and registered; only the
+    /// phone's chat has it.
+    pub(crate) select: Option<&'a SelectDraw>,
 }
 
 /// The parts of a tool call a card draws.
@@ -1142,6 +1391,69 @@ impl RootView {
                     .map(DisplayRow::shape)
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    /// Spec hook: the position in the phone chat's selectable text that
+    /// window point `point` falls on, as plain data (entry id, unit index,
+    /// byte): the text it is on, else the one nearest it above or below;
+    /// none before the chat's texts have been painted.
+    #[must_use]
+    pub fn phone_chat_hit(&self, point: Point<Pixels>) -> Option<(String, u32, usize)> {
+        let viewport = self
+            .chat
+            .scrolls
+            .get(PHONE_PANE)
+            .map(|scroll| scroll.handle().bounds());
+        self.chat.phone_text.borrow().hit(point, viewport)
+    }
+
+    /// Spec hook: selects session `session_id`'s chat text from `anchor` to
+    /// `focus`, each as plain data (entry id, unit index, byte); the
+    /// phone's chat draws it while that chat stays loaded.
+    pub fn set_phone_chat_selection(
+        &mut self,
+        session_id: &str,
+        anchor: (String, u32, usize),
+        focus: (String, u32, usize),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.selection = Some(Selection {
+                anchor: text_pos(anchor),
+                focus: text_pos(focus),
+            });
+            cx.notify();
+        }
+    }
+
+    /// Spec hook: drops session `session_id`'s chat selection.
+    pub fn clear_phone_chat_selection(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.selection = None;
+            cx.notify();
+        }
+    }
+
+    /// Spec hook: each (entry id, unit index, bytes) the phone chat's
+    /// latest frame drew on the selection's colour, in drawing order.
+    #[must_use]
+    pub fn phone_chat_painted_selection(&self) -> Vec<(String, u32, Range<usize>)> {
+        self.chat.phone_text.borrow().painted_ranges.clone()
+    }
+
+    /// Spec hook: the text session `session_id`'s chat selection copies, as
+    /// the phone draws the chat; empty without a selection.
+    #[must_use]
+    pub fn phone_chat_selected_text(&self, session_id: &str) -> String {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return String::new();
+        };
+        let units = phone_units(chat);
+        chat.selection
+            .as_ref()
+            .and_then(|selection| clamped(&units, selection))
+            .map(|selection| chat_select::selected_text(&units, &selection))
             .unwrap_or_default()
     }
 
@@ -2231,11 +2543,13 @@ impl RootView {
         on_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let select = self.phone_select_draw(session_id, cx);
         let look = RowLook {
             mode: ChatMode::Compact,
             max_width: None,
             finals: BTreeSet::new(),
             min_run: PHONE_MIN_RUN,
+            select: select.as_ref(),
             ..self.row_look(PHONE_PANE, session_id, cx)
         };
         let (main, strip) = match &self.chat.phone_refused {
@@ -2258,7 +2572,30 @@ impl RootView {
             .capture_any_mouse_up(on_up)
             .child(main)
             .children(strip)
+            .child(painted_mark(self.chat.phone_text.clone()))
             .into_any_element()
+    }
+
+    /// What the phone draws session `session_id`'s selectable texts with,
+    /// while its chat is loaded: its selection moved into the texts it now
+    /// holds, in order; the registry is emptied first, for this frame's
+    /// texts.
+    fn phone_select_draw(&self, session_id: &str, cx: &App) -> Option<SelectDraw> {
+        self.chat.phone_text.borrow_mut().clear();
+        let chat = self.chat.sessions.get(session_id)?;
+        let units = phone_units(chat);
+        let selected = chat
+            .selection
+            .as_ref()
+            .and_then(|selection| clamped(&units, selection))
+            .and_then(|selection| selection.ordered(&units))
+            .and_then(|ordered| units.resolve(&ordered));
+        Some(SelectDraw {
+            units: Rc::new(units),
+            selected,
+            background: gpui::rgba(theme(cx).input_selection).into(),
+            registry: self.chat.phone_text.clone(),
+        })
     }
 
     /// Session `session_id`'s prompt card area as the desktop draws it
@@ -2318,6 +2655,7 @@ impl RootView {
             max_width: None,
             finals: BTreeSet::new(),
             min_run: 1,
+            select: None,
         }
     }
 
@@ -2699,7 +3037,7 @@ pub(crate) fn chat_row(
     };
     let muted = |text: String| muted_line(look.text_offset, text, &look.theme);
     let row = match entry {
-        ChatEntry::User { text, pending, .. } => user_row(look, text, *pending),
+        ChatEntry::User { text, pending, .. } => user_row(look, id, text, *pending),
         ChatEntry::Answer { text, live, .. } => {
             let answer = answer_row(look, id, text, *live, chat.docs.get(id));
             if look.finals.contains(id) {
@@ -2759,7 +3097,7 @@ fn hidden_row(look: &RowLook<'_>, hidden: u32) -> AnyElement {
 
 /// A message the user sent: a bubble on the right, dimmed until the
 /// transcript has it.
-fn user_row(look: &RowLook<'_>, text: &str, pending: bool) -> Div {
+fn user_row(look: &RowLook<'_>, id: &str, text: &str, pending: bool) -> Div {
     div().flex().justify_end().child(
         div()
             .max_w(relative(BUBBLE_MAX_SHARE))
@@ -2768,7 +3106,13 @@ fn user_row(look: &RowLook<'_>, text: &str, pending: bool) -> Div {
             .rounded(px(BUBBLE_RADIUS))
             .bg(gpui::rgb(look.theme.chip))
             .when(pending, |bubble| bubble.opacity(PENDING_OPACITY))
-            .child(text.to_owned()),
+            .child(select_text(
+                look.select,
+                id,
+                UnitSource::User,
+                text.to_owned(),
+                Vec::new(),
+            )),
     )
 }
 
@@ -2790,13 +3134,20 @@ fn answer_row(
                 (look.mono_family, look.mono_size),
                 &look.theme,
             )
-            .for_answer(look.session_id, id);
+            .for_answer(look.session_id, id)
+            .selectable(id, look.select);
             div()
                 .flex()
                 .flex_col()
                 .children((0..doc.row_count()).map(|ix| render_row(doc, &painter, ix, 0.0, 0.0)))
         }
-        None => div().child(text.to_owned()),
+        None => div().child(select_text(
+            look.select,
+            id,
+            UnitSource::AnswerPlain,
+            text.to_owned(),
+            Vec::new(),
+        )),
     };
     if !live {
         return body;
@@ -2858,35 +3209,7 @@ fn tool_card(
     cx: &mut Context<RootView>,
 ) -> Div {
     let t = &look.theme;
-    let (state, mark, color) = match tool.result {
-        None => ("running", "running", t.working),
-        Some(outcome) if outcome.is_error => ("error", "failed", t.danger),
-        Some(_) => ("done", "done", t.waiting),
-    };
-    let mark_name = format!("chat-tool-{state}-{}-{}", look.pane_id, tool.id);
-    let one_liner = chat::tool_one_liner(tool.summary, tool.name);
-    let summary_slot = div()
-        .flex_1()
-        .min_w(px(0.0))
-        .when(!one_liner.is_empty(), |slot| slot.child(one_liner));
-    let header = div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex_none()
-                .text_color(gpui::rgb(t.text))
-                .child(tool.name.to_owned()),
-        )
-        .child(summary_slot)
-        .child(
-            div()
-                .driver_id(|| mark_name)
-                .flex_none()
-                .text_color(gpui::rgb(color))
-                .child(mark),
-        );
+    let header = tool_header(look, tool);
     let (session_id, id) = (look.session_id.to_owned(), tool.id.to_owned());
     let card_id = format!("chat-card-{}-{}", look.pane_id, tool.id);
     let card = div()
@@ -2916,10 +3239,20 @@ fn tool_card(
             card.when(!statements.is_empty(), |card| {
                 card.child(command_lines(look, tool.id, statements))
             })
-            .child(tool_detail("Input", tool.input, t))
+            .child(tool_detail(
+                look,
+                "Input",
+                tool.input,
+                (tool.id, UnitSource::ToolInput),
+            ))
             .children(tool.result.map(|outcome| {
                 let label = if outcome.is_error { "Error" } else { "Result" };
-                tool_detail(label, &outcome.text, t)
+                tool_detail(
+                    look,
+                    label,
+                    &outcome.text,
+                    (tool.id, UnitSource::ToolResult),
+                )
             }))
         });
     let boxes: Vec<AnyElement> = tool
@@ -2949,6 +3282,49 @@ fn tool_card(
         .gap(px(4.0))
         .child(card)
         .children(boxes)
+}
+
+/// A tool card's header line: the tool's name, its one-liner and its status
+/// mark (tagged `chat-tool-<running|done|error>-<pane>-<id>`).
+fn tool_header(look: &RowLook<'_>, tool: &ToolRow<'_>) -> Div {
+    let t = &look.theme;
+    let (state, mark, color) = match tool.result {
+        None => ("running", "running", t.working),
+        Some(outcome) if outcome.is_error => ("error", "failed", t.danger),
+        Some(_) => ("done", "done", t.waiting),
+    };
+    let mark_name = format!("chat-tool-{state}-{}-{}", look.pane_id, tool.id);
+    let one_liner = chat::tool_one_liner(tool.summary, tool.name);
+    let summary_slot = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .when(!one_liner.is_empty(), |slot| {
+            slot.child(select_text(
+                look.select,
+                tool.id,
+                UnitSource::ToolSummary,
+                one_liner,
+                Vec::new(),
+            ))
+        });
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .text_color(gpui::rgb(t.text))
+                .child(tool.name.to_owned()),
+        )
+        .child(summary_slot)
+        .child(
+            div()
+                .driver_id(|| mark_name)
+                .flex_none()
+                .text_color(gpui::rgb(color))
+                .child(mark),
+        )
 }
 
 /// The last component of `path`, which a Tail button names.
@@ -3101,18 +3477,38 @@ fn command_lines(look: &RowLook<'_>, id: &str, statements: Vec<String>) -> Div {
         .text_color(gpui::rgb(t.text))
         .children(statements.into_iter().enumerate().map(|(n, statement)| {
             let name = format!("chat-tool-line-{}-{id}-{n}", look.pane_id);
-            div().driver_id(|| name).child(statement)
+            let source = UnitSource::ToolStatement { line: n };
+            div().driver_id(|| name).child(select_text(
+                look.select,
+                id,
+                source,
+                statement,
+                Vec::new(),
+            ))
         }))
 }
 
-/// One labelled block of an open tool card.
-fn tool_detail(label: &'static str, text: &str, t: &UiTheme) -> Div {
+/// One labelled block of an open tool card, its text the `source` text of
+/// entry `entry`.
+fn tool_detail(
+    look: &RowLook<'_>,
+    label: &'static str,
+    text: &str,
+    (entry, source): (&str, UnitSource),
+) -> Div {
+    let t = &look.theme;
     div()
         .flex()
         .flex_col()
         .gap(px(2.0))
         .child(div().text_color(gpui::rgb(t.faint)).child(label))
-        .child(div().child(text.to_owned()))
+        .child(div().child(select_text(
+            look.select,
+            entry,
+            source,
+            text.to_owned(),
+            Vec::new(),
+        )))
 }
 
 /// A row the daemon wrote: a muted pill centred in the column.

@@ -3,14 +3,7 @@
 //! byte, range ordering, clamping to a shorter text, and the one function
 //! that builds the copied text.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the phone Chat's hit test, highlight and Copy read this model"
-    )
-)]
-
+use std::collections::HashMap;
 use std::ops::Range;
 
 use protocol::ChatEntry;
@@ -30,7 +23,7 @@ pub(crate) struct TextPos {
 
 /// Where a unit's text comes from, so a hit test and the painter can map it
 /// back to what the chat draws.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum UnitSource {
     /// A user message's text.
     User,
@@ -63,6 +56,20 @@ pub(crate) struct Unit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Units {
     units: Vec<Unit>,
+    /// By entry id, then by where the text comes from, the unit's position
+    /// in `units`: the first unit with that source.
+    by_source: HashMap<String, HashMap<UnitSource, usize>>,
+}
+
+/// A selection's ends as positions in the units' order, with their bytes
+/// moved back to a character's start: what each drawn unit's selected
+/// bytes are read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectedSpan {
+    first: usize,
+    start_byte: usize,
+    last: usize,
+    end_byte: usize,
 }
 
 impl Units {
@@ -70,38 +77,112 @@ impl Units {
     /// text; an answer's Markdown rows (its raw text without a parsed
     /// document); a tool card's one-liner, plus its statements, input and
     /// result while the card is open; nothing for a folded run or a muted
-    /// row; empty texts left out except an answer's empty code line, which
-    /// a copy keeps. `doc_of` and `is_open` take an entry id.
+    /// row, though an open run lists each of its cards' texts as a single
+    /// row's; empty texts left out except an answer's empty code line, which
+    /// a copy keeps. `doc_of` and `is_open` take an entry id, `is_run_open`
+    /// a run's first entry id.
     pub(crate) fn build<'a>(
         rows: &[DisplayRow<'a>],
         doc_of: impl Fn(&str) -> Option<&'a MdDoc>,
         is_open: impl Fn(&str) -> bool,
+        is_run_open: impl Fn(&str) -> bool,
     ) -> Units {
         let mut units = Vec::new();
         for row in rows {
-            let DisplayRow::Single(entry) = row else {
-                continue;
-            };
-            let Some(id) = chat::entry_id(entry) else {
-                continue;
-            };
-            let parts = entry_parts(entry, id, &doc_of, &is_open);
-            for (index, (source, text)) in parts
-                .into_iter()
-                .filter(|(source, text)| {
-                    !text.is_empty() || matches!(source, UnitSource::AnswerRow { .. })
-                })
-                .enumerate()
-            {
-                units.push(Unit {
-                    entry: id.to_owned(),
-                    index: u32::try_from(index).unwrap_or(u32::MAX),
-                    source,
-                    text,
-                });
+            match row {
+                DisplayRow::Single(entry) => push_entry(&mut units, entry, &doc_of, &is_open),
+                DisplayRow::Run { entries, .. } => {
+                    let open = entries
+                        .first()
+                        .and_then(|first| chat::entry_id(first))
+                        .is_some_and(&is_run_open);
+                    if open {
+                        for entry in entries {
+                            push_entry(&mut units, entry, &doc_of, &is_open);
+                        }
+                    }
+                }
             }
         }
-        Units { units }
+        let mut by_source: HashMap<String, HashMap<UnitSource, usize>> = HashMap::new();
+        for (at, unit) in units.iter().enumerate() {
+            by_source
+                .entry(unit.entry.clone())
+                .or_default()
+                .entry(unit.source)
+                .or_insert(at);
+        }
+        Units { units, by_source }
+    }
+
+    /// The position in the units' order and the index within entry `entry`
+    /// of the unit drawn from `source`, when that text is a unit (an empty
+    /// one is not).
+    pub(crate) fn locate(&self, entry: &str, source: UnitSource) -> Option<(usize, u32)> {
+        let at = *self.by_source.get(entry)?.get(&source)?;
+        Some((at, self.units.get(at)?.index))
+    }
+
+    /// The index within entry `entry` of the unit drawn from `source`, when
+    /// that text is a unit (an empty one is not). The drawing reads
+    /// [`Self::locate`], which gives the position too.
+    #[cfg(test)]
+    fn index_of_source(&self, entry: &str, source: UnitSource) -> Option<u32> {
+        self.locate(entry, source).map(|(_, index)| index)
+    }
+
+    /// `ordered`, a selection's (start, end) in the units' order, as
+    /// positions in the units with each byte moved back to a character's
+    /// start; `None` when either end names no unit.
+    pub(crate) fn resolve(&self, ordered: &(TextPos, TextPos)) -> Option<SelectedSpan> {
+        let (start, end) = ordered;
+        let (first, last) = (self.index_of(start)?, self.index_of(end)?);
+        Some(SelectedSpan {
+            first,
+            start_byte: char_floor(&self.units.get(first)?.text, start.byte),
+            last,
+            end_byte: char_floor(&self.units.get(last)?.text, end.byte),
+        })
+    }
+
+    /// The bytes of the unit at position `at` that `span` covers: from the
+    /// start byte in the first unit, to the end byte in the last, the whole
+    /// text in between; `None` when the unit is outside the span or nothing
+    /// of it is covered.
+    pub(crate) fn range_at(&self, span: &SelectedSpan, at: usize) -> Option<Range<usize>> {
+        if at < span.first || at > span.last {
+            return None;
+        }
+        let text = &self.units.get(at)?.text;
+        let from = if at == span.first { span.start_byte } else { 0 };
+        let to = if at == span.last {
+            span.end_byte
+        } else {
+            text.len()
+        };
+        (from < to).then_some(from..to)
+    }
+
+    /// The bytes of unit `unit` of entry `entry` that `ordered`, a
+    /// selection's (start, end) in the units' order, covers: from the start
+    /// byte in the start unit, to the end byte in the end unit, the whole
+    /// text in between, both ends moved back to a character's start; `None`
+    /// when the unit is outside the selection, unknown, or nothing of it is
+    /// covered. The drawing reads [`Self::range_at`] with the selection
+    /// resolved once per frame.
+    #[cfg(test)]
+    fn selected_range(
+        &self,
+        ordered: &(TextPos, TextPos),
+        entry: &str,
+        unit: u32,
+    ) -> Option<Range<usize>> {
+        let span = self.resolve(ordered)?;
+        let at = self
+            .units
+            .iter()
+            .position(|drawn| drawn.entry == entry && drawn.index == unit)?;
+        self.range_at(&span, at)
     }
 
     /// The index of `pos` in the units' order, when a unit has it.
@@ -137,6 +218,32 @@ impl Units {
             unit: last.index,
             byte: last.text.len(),
         })
+    }
+}
+
+/// Pushes onto `units` the selectable texts of `entry`, numbered within it,
+/// empty ones left out except an answer's rows.
+fn push_entry<'a>(
+    units: &mut Vec<Unit>,
+    entry: &ChatEntry,
+    doc_of: &impl Fn(&str) -> Option<&'a MdDoc>,
+    is_open: &impl Fn(&str) -> bool,
+) {
+    let Some(id) = chat::entry_id(entry) else {
+        return;
+    };
+    let parts = entry_parts(entry, id, doc_of, is_open);
+    for (index, (source, text)) in parts
+        .into_iter()
+        .filter(|(source, text)| !text.is_empty() || matches!(source, UnitSource::AnswerRow { .. }))
+        .enumerate()
+    {
+        units.push(Unit {
+            entry: id.to_owned(),
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            source,
+            text,
+        });
     }
 }
 
@@ -225,6 +332,13 @@ impl Selection {
 /// punctuation, or a hyphen or apostrophe with no word on one side) is that
 /// character alone. A byte at or past the text's end gives an empty range
 /// at the end. Both ends are character boundaries.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the phone Chat's long press reads the word under a byte"
+    )
+)]
 pub(crate) fn word_at(text: &str, byte: usize) -> Range<usize> {
     let len = text.len();
     if byte >= len {
@@ -302,7 +416,7 @@ fn word_end(text: &str, end: usize) -> usize {
 
 /// `byte` moved back to the start of the character it falls in, or to the
 /// text's end when it is at or past it.
-fn char_floor(text: &str, byte: usize) -> usize {
+pub(crate) fn char_floor(text: &str, byte: usize) -> usize {
     let mut at = byte.min(text.len());
     while at > 0 && !text.is_char_boundary(at) {
         at -= 1;
@@ -480,7 +594,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
         let expected = vec![
             (
                 "u1".to_owned(),
@@ -539,7 +653,7 @@ mod tests {
         let input = r#"{"command":"echo hi\nls -la"}"#;
         let entries = [tool("t1", "Bash", "run two commands", input, Some("done"))];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| true);
+        let units = Units::build(&rows, |_| None, |_| true, |_| false);
         let expected = vec![
             (
                 "t1".to_owned(),
@@ -605,7 +719,7 @@ mod tests {
             DisplayRow::Single(&entries[5]),
             DisplayRow::Single(&entries[6]),
         ];
-        let units = Units::build(&rows, |_| None, |_| true);
+        let units = Units::build(&rows, |_| None, |_| true, |_| false);
         assert!(units.units.is_empty(), "{:?}", units.units);
     }
 
@@ -613,7 +727,7 @@ mod tests {
     fn ordered_swaps_a_focus_before_its_anchor() {
         let entries = [user("u1", "one"), user("u2", "two")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
         let selection = Selection {
             anchor: pos("u2", 0, 2),
             focus: pos("u1", 0, 1),
@@ -631,7 +745,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
         let selection = Selection {
             anchor: pos("u1", 0, 6),
             focus: pos("a1", 4, 1),
@@ -649,7 +763,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
         let selection = Selection {
             anchor: pos("a1", 0, 0),
             focus: pos("a1", 1, 3),
@@ -664,7 +778,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
         let blank = pos("a1", 1, 0);
         assert!(units.units[1].text.is_empty(), "the blank line is a unit");
         assert_eq!(units.clamp(&blank), Some(blank));
@@ -687,7 +801,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
         assert_eq!(units.clamp(&pos("u1", 0, 40)), Some(pos("u1", 0, 10)));
         assert_eq!(units.clamp(&pos("a1", 9, 0)), Some(pos("a1", 1, 3)));
         assert_eq!(units.clamp(&pos("zz", 0, 0)), None);
@@ -698,7 +812,7 @@ mod tests {
     fn an_empty_or_dangling_selection_copies_nothing() {
         let entries = [user("u1", "hello")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
         let empty = Selection {
             anchor: pos("u1", 0, 2),
             focus: pos("u1", 0, 2),
@@ -709,5 +823,120 @@ mod tests {
             focus: pos("u1", 0, 2),
         };
         assert_eq!(selected_text(&units, &dangling), "");
+    }
+
+    #[test]
+    fn selected_range_in_a_unit_covers_start_middle_end_and_one_unit() {
+        let entries = [
+            user("u1", "hello"),
+            user("u2", "middle"),
+            user("u3", "café x"),
+        ];
+        let rows = single_rows(&entries);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let across = (pos("u1", 0, 2), pos("u3", 0, 4));
+        assert_eq!(units.selected_range(&across, "u1", 0), Some(2..5));
+        assert_eq!(units.selected_range(&across, "u2", 0), Some(0..6));
+        assert_eq!(
+            units.selected_range(&across, "u3", 0),
+            Some(0..3),
+            "an end inside a character moves to its start"
+        );
+        let inside = (pos("u2", 0, 1), pos("u2", 0, 4));
+        assert_eq!(units.selected_range(&inside, "u1", 0), None);
+        assert_eq!(units.selected_range(&inside, "u2", 0), Some(1..4));
+        assert_eq!(units.selected_range(&inside, "u3", 0), None);
+        let empty = (pos("u2", 0, 3), pos("u2", 0, 3));
+        assert_eq!(units.selected_range(&empty, "u2", 0), None);
+        assert_eq!(units.selected_range(&across, "zz", 0), None);
+        assert_eq!(units.selected_range(&across, "u1", 1), None);
+    }
+
+    #[test]
+    fn index_of_source_finds_each_drawn_unit() {
+        let answer_text = "# Head\n\n| c1 | c2 |\n| --- | --- |\n";
+        let entries = [
+            user("u1", "hi"),
+            answer("a1", answer_text),
+            tool("t1", "Bash", "list", r#"{"command":"ls"}"#, Some("done")),
+            tool("t2", "Read", "read", "", None),
+        ];
+        let rows = single_rows(&entries);
+        let mut docs = HashMap::new();
+        docs.insert("a1".to_owned(), doc(answer_text));
+        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false);
+        assert_eq!(units.index_of_source("u1", UnitSource::User), Some(0));
+        let cell = UnitSource::AnswerRow { row: 1, part: 1 };
+        assert_eq!(units.index_of_source("a1", cell), Some(2));
+        let statement = UnitSource::ToolStatement { line: 0 };
+        assert_eq!(units.index_of_source("t1", statement), Some(1));
+        assert_eq!(units.index_of_source("t1", UnitSource::ToolResult), Some(3));
+        assert_eq!(
+            units.index_of_source("t2", UnitSource::ToolInput),
+            None,
+            "an empty input is no unit"
+        );
+        assert_eq!(units.index_of_source("u1", UnitSource::AnswerPlain), None);
+        assert_eq!(units.index_of_source("zz", UnitSource::User), None);
+    }
+
+    #[test]
+    fn an_open_run_lists_its_cards_units() {
+        let entries = [
+            tool("t1", "Read", "read a", "", None),
+            tool("t2", "Search", "search b", "", None),
+        ];
+        let rows = vec![DisplayRow::Run {
+            entries: vec![&entries[0], &entries[1]],
+            summary: RunSummary::default(),
+        }];
+        let units = Units::build(&rows, |_| None, |_| false, |id| id == "t1");
+        let expected = vec![
+            (
+                "t1".to_owned(),
+                0,
+                UnitSource::ToolSummary,
+                "read a".to_owned(),
+            ),
+            (
+                "t2".to_owned(),
+                0,
+                UnitSource::ToolSummary,
+                "search b".to_owned(),
+            ),
+        ];
+        assert_eq!(shape(&units), expected);
+        let folded = Units::build(&rows, |_| None, |_| false, |_| false);
+        assert!(folded.units.is_empty(), "{:?}", folded.units);
+    }
+
+    #[test]
+    fn units_index_lookup_matches_a_linear_scan() {
+        let answer_text = "intro\n\n| c1 | c2 |\n| --- | --- |\n| v1 | v2 |\n\n```\nfn a() {}\n\nlet b = 1;\n```\n";
+        let input = r#"{"command":"echo hi\nls -la"}"#;
+        let entries = [
+            user("u1", "hello"),
+            answer("a1", answer_text),
+            tool("t1", "Bash", "run two commands", input, Some("done")),
+        ];
+        let rows = single_rows(&entries);
+        let mut docs = HashMap::new();
+        docs.insert("a1".to_owned(), doc(answer_text));
+        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false);
+        assert!(units.units.len() > 10, "{:?}", units.units);
+        for unit in &units.units {
+            let linear = units
+                .units
+                .iter()
+                .position(|other| other.entry == unit.entry && other.source == unit.source)
+                .map(|at| (at, units.units[at].index));
+            assert_eq!(units.locate(&unit.entry, unit.source), linear, "{unit:?}");
+            assert_eq!(
+                units.index_of_source(&unit.entry, unit.source),
+                linear.map(|(_, index)| index)
+            );
+        }
+        assert_eq!(units.locate("u1", UnitSource::ToolInput), None);
+        assert_eq!(units.locate("zz", UnitSource::User), None);
     }
 }

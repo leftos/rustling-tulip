@@ -15,10 +15,12 @@ use std::time::Instant;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FontStyle, FontWeight,
     HighlightStyle, Hsla, InteractiveText, ListOffset, ListState, Modifiers, SharedString,
-    StrikethroughStyle, StyledText, UnderlineStyle, Window, div, list, prelude::*, px,
+    StrikethroughStyle, StyledText, TextAlign, UnderlineStyle, Window, div, list, prelude::*, px,
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::chat_select::UnitSource;
+use crate::chat_view::SelectDraw;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, ui_px_at};
 use crate::links::TerminalLinkCandidate;
@@ -610,6 +612,49 @@ fn line_highlights(
         .collect()
 }
 
+/// `highlights`, ordered and not overlapping, with `selected` drawn on
+/// `background`: each range cut where the selection starts and ends, the
+/// pieces inside it given the background, and the selected bytes no range
+/// covers given a range of their own. They stay ordered and not
+/// overlapping, as [`StyledText::with_highlights`] needs; no selection, or
+/// an empty one, leaves them as they are.
+pub(crate) fn select_highlights(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selected: Option<Range<usize>>,
+    background: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(selected) = selected.filter(|range| !range.is_empty()) else {
+        return highlights;
+    };
+    let lit = |style: HighlightStyle| HighlightStyle {
+        background_color: Some(background),
+        ..style
+    };
+    let mut out = Vec::with_capacity(highlights.len() + 3);
+    let mut push = |range: Range<usize>, style: HighlightStyle| {
+        if !range.is_empty() {
+            out.push((range, style));
+        }
+    };
+    // The first selected byte not yet given its background.
+    let mut uncovered = selected.start;
+    for (range, style) in highlights {
+        push(
+            uncovered..range.start.min(selected.end),
+            lit(HighlightStyle::default()),
+        );
+        push(range.start..range.end.min(selected.start), style);
+        push(
+            range.start.max(selected.start)..range.end.min(selected.end),
+            lit(style),
+        );
+        push(range.start.max(selected.end)..range.end, style);
+        uncovered = uncovered.max(range.end);
+    }
+    push(uncovered..selected.end, lit(HighlightStyle::default()));
+    out
+}
+
 /// A task item's box at UI text `offset`, filled when it is checked.
 fn task_box(offset: i8, checked: bool, t: &UiTheme) -> Div {
     let color = if checked { t.accent } else { t.line_strong };
@@ -636,6 +681,9 @@ pub(crate) struct Painter {
     theme: UiTheme,
     /// The session and answer a chat answer's stretchtext links toggle.
     stretchtext: Option<(String, String)>,
+    /// The chat entry the document is and how its selectable texts are
+    /// drawn, in the phone's chat only.
+    select: Option<(String, SelectDraw)>,
 }
 
 impl Painter {
@@ -659,6 +707,32 @@ impl Painter {
             colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
             theme: *t,
             stretchtext: None,
+            select: None,
+        }
+    }
+
+    /// This painter drawing chat entry `entry_id`'s texts through `select`
+    /// (registered, and highlighted where selected); no change without it.
+    pub(crate) fn selectable(mut self, entry_id: &str, select: Option<&SelectDraw>) -> Self {
+        self.select = select.map(|select| (entry_id.to_owned(), select.clone()));
+        self
+    }
+
+    /// Part `part` of row `ix`, `text`, aligned by `align` and styled with
+    /// `highlights`, through the painter's selection drawing when it has
+    /// one.
+    fn styled(
+        &self,
+        (ix, part, align): (usize, usize, TextAlign),
+        text: String,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+    ) -> StyledText {
+        match &self.select {
+            Some((entry, select)) => {
+                let source = UnitSource::AnswerRow { row: ix, part };
+                select.text((entry, source), align, text.into(), highlights)
+            }
+            None => StyledText::new(text).with_highlights(highlights),
         }
     }
 
@@ -676,15 +750,15 @@ impl Painter {
             RowKind::Heading { level, spans } => div()
                 .text_size(ui_px_at(self.offset, heading_size(*level)))
                 .font_weight(FontWeight::BOLD)
-                .child(self.inline(spans, ix, 0)),
-            RowKind::Text(spans) => div().child(self.inline(spans, ix, 0)),
+                .child(self.inline(spans, ix, 0, TextAlign::Left)),
+            RowKind::Text(spans) => div().child(self.inline(spans, ix, 0, TextAlign::Left)),
             RowKind::Item { marker, spans } => self.item(marker, spans, ix),
             RowKind::CodeLine {
                 text,
                 spans,
                 first,
                 last,
-            } => self.code_line(text, spans.as_ref(), *first, *last),
+            } => self.code_line(text, spans.as_ref(), (*first, *last), ix),
             RowKind::TableRow {
                 aligns,
                 cells,
@@ -697,13 +771,19 @@ impl Painter {
                 .font_weight(crate::fonts::mono_weight())
                 .text_size(px(self.mono_size))
                 .text_color(gpui::rgb(t.subtle))
-                .child(text.clone()),
+                .child(match &self.select {
+                    Some(_) => self
+                        .styled((ix, 0, TextAlign::Left), text.clone(), Vec::new())
+                        .into_any_element(),
+                    None => text.clone().into_any_element(),
+                }),
         }
     }
 
     /// Inline spans as one text with a highlight per span; `part` tells the
-    /// cells of one table row apart.
-    fn inline(&self, spans: &[Span], ix: usize, part: usize) -> AnyElement {
+    /// cells of one table row apart, and `align` is how its element aligns
+    /// it.
+    fn inline(&self, spans: &[Span], ix: usize, part: usize, align: TextAlign) -> AnyElement {
         let t = &self.theme;
         let (text, ranges) = inline_text(spans);
         let links = link_ranges(spans, self.route);
@@ -717,7 +797,7 @@ impl Painter {
             "md-text-{}-{ix}-{part}",
             self.tab_id
         )));
-        let text = InteractiveText::new(id, StyledText::new(text).with_highlights(highlights));
+        let text = InteractiveText::new(id, self.styled((ix, part, align), text, highlights));
         if links.is_empty() {
             return text.into_any_element();
         }
@@ -785,14 +865,20 @@ impl Painter {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(self.inline(spans, ix, 0)),
+                    .child(self.inline(spans, ix, 0, TextAlign::Left)),
             )
     }
 
     /// A code line in the terminal font, coloured as the source view
     /// colours a file; the block's first and last lines carry its padding
-    /// and corners.
-    fn code_line(&self, text: &str, spans: Option<&LineSpans>, first: bool, last: bool) -> Div {
+    /// and corners; `ix` is its row.
+    fn code_line(
+        &self,
+        text: &str,
+        spans: Option<&LineSpans>,
+        (first, last): (bool, bool),
+        ix: usize,
+    ) -> Div {
         let t = &self.theme;
         let line_height = (self.mono_size * LINE_HEIGHT_RATIO).round();
         let highlights = spans
@@ -813,7 +899,7 @@ impl Painter {
                 div()
                     .h(px(line_height))
                     .whitespace_nowrap()
-                    .child(StyledText::new(text.to_owned()).with_highlights(highlights)),
+                    .child(self.styled((ix, 0, TextAlign::Left), text.to_owned(), highlights)),
             )
     }
 
@@ -832,16 +918,21 @@ impl Painter {
             .iter()
             .enumerate()
             .map(|(index, cell)| {
+                let align = match aligns.get(index).copied().unwrap_or(Align::None) {
+                    Align::Center => TextAlign::Center,
+                    Align::Right => TextAlign::Right,
+                    Align::None | Align::Left => TextAlign::Left,
+                };
                 let cell_box = div()
                     .flex_1()
                     .min_w(px(0.0))
                     .px(px(CELL_PAD_X))
                     .py(px(CELL_PAD_Y))
-                    .child(self.inline(cell, ix, index));
-                match aligns.get(index).copied().unwrap_or(Align::None) {
-                    Align::Center => cell_box.text_center(),
-                    Align::Right => cell_box.text_right(),
-                    Align::None | Align::Left => cell_box,
+                    .child(self.inline(cell, ix, index, align));
+                match align {
+                    TextAlign::Center => cell_box.text_center(),
+                    TextAlign::Right => cell_box.text_right(),
+                    TextAlign::Left => cell_box,
                 }
             })
             .collect();
@@ -1181,6 +1272,51 @@ mod tests {
             Some(Block::Paragraph(spans)) => spans.clone(),
             other => panic!("one paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn highlight_split_cuts_span_ranges_around_the_selection() {
+        let bg = gpui::red();
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..HighlightStyle::default()
+        };
+        let italic = HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..HighlightStyle::default()
+        };
+        let lit = |style: HighlightStyle| HighlightStyle {
+            background_color: Some(bg),
+            ..style
+        };
+        let spans = vec![(0..4, bold), (4..8, italic), (10..12, bold)];
+        assert_eq!(select_highlights(spans.clone(), None, bg), spans);
+        assert_eq!(select_highlights(spans.clone(), Some(3..3), bg), spans);
+        assert_eq!(
+            select_highlights(spans.clone(), Some(2..11), bg),
+            vec![
+                (0..2, bold),
+                (2..4, lit(bold)),
+                (4..8, lit(italic)),
+                (8..10, lit(HighlightStyle::default())),
+                (10..11, lit(bold)),
+                (11..12, bold),
+            ]
+        );
+        assert_eq!(
+            select_highlights(spans.clone(), Some(5..6), bg),
+            vec![
+                (0..4, bold),
+                (4..5, italic),
+                (5..6, lit(italic)),
+                (6..8, italic),
+                (10..12, bold),
+            ]
+        );
+        assert_eq!(
+            select_highlights(Vec::new(), Some(1..3), bg),
+            vec![(1..3, lit(HighlightStyle::default()))]
+        );
     }
 
     #[test]
