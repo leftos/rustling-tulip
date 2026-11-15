@@ -489,11 +489,11 @@
 - [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
 - [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone · release vNext
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
-- [ ] RT-1533 MA.14: Build the phone's session screen with its chat · release vNext
 - [ ] RT-1534 MA.15: Build the phone's terminal · release vNext
+  - [ ] RT-1742 MA.15c: Add the phone's terminal slot to the root view · release vNext
+  - [ ] RT-1743 MA.15d: Show the session's terminal on the phone's Terminal page · release vNext
 - [ ] RT-1535 MA.16: Check the phone screens on the owner's iPhone · release vNext
-- [ ] RT-1538 MA.19: Open the session a notification names · release vNext
-- [ ] RT-1540 MA.21: Add SSH hosts on the phone · release vNext
+- [/] RT-1538 MA.19: Open the session a notification names · release vNext
 - [ ] RT-1647 Drop the relay's cached APNs provider token when APNs refuses it
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
@@ -502,10 +502,12 @@
 - [ ] RT-1704 Clear the signing values from testflight.ps1's environment once each is used
 - [ ] RT-1708 Fix the iOS-only clippy warnings so the phone app's iOS clippy passes
 - [ ] RT-1709 Find why the notification extension does not launch for a simulator push
-- [ ] RT-1716 Clear a phone's Needs you notification once the wait is handled in any client · release vNext
-  - [ ] RT-1728 Add the phone's background wake method before a cold background launch can deliver a clear
 - [ ] RT-1724 Keep the phone Home's scroll position across a session visit, and make Add a host 44 px
 - [ ] RT-1726 Answer the right host from the phone tray, let a tap through after a swipe, and clear an ended card after Open
+- [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
+- [ ] RT-1737 Polish how the phone's content follows the keyboard
+  - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
+  - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 
 ## Dashboard, Gates and Linear
 
@@ -726,6 +728,8 @@
 - [ ] RT-1710 Harden the phone's iOS push platform: token deadline, keys errors, args
 - [ ] RT-1721 Report a key refusal followed by NoAuthMethod as KeyRefused, not a dropped sign-in
 - [ ] RT-1723 Report a slow relay and a push store failure correctly in rustling-tulipd push-fallback
+- [ ] RT-1734 Settle a finished short run's running mark in the phone's chat
+- [ ] RT-1736 Measure the iOS keyboard's on-screen overlap, not its frame height, in the gpui fork
 
 ## Design files
 
@@ -744,12 +748,12 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1533, RT-1534, RT-1535, RT-1538, RT-1540, RT-1695, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1534, RT-1535, RT-1538, RT-1695, RT-1735, RT-1742, RT-1743, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
-- [push-relay.md](push-relay.md) — RT-1518, RT-1519, RT-1716
+- [push-relay.md](push-relay.md) — RT-1518, RT-1519
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
