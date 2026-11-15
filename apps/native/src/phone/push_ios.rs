@@ -14,6 +14,11 @@
 //! app has registered the platform's delegate classes, with the launch
 //! callback's call as a second try: a clear notice removes its session's Needs
 //! you notification and sets the badge.
+//!
+//! A tap on a notification reaches the phone through a notification center
+//! delegate of the app's own, [`add_tap_delegate`], also set before the app
+//! starts so a tap that cold-launches it is delivered: the tap's `host` and
+//! `session_id` go into a channel the phone's root drains.
 
 use std::ffi::CStr;
 use std::ptr::NonNull;
@@ -22,18 +27,18 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use block2::{DynBlock, RcBlock};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use futures::FutureExt as _;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use gpui::App;
-use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
-use objc2::{available, sel};
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSString};
+use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, NSObjectProtocol, ProtocolObject, Sel};
+use objc2::{ClassType, MainThreadMarker, available, define_class, msg_send, sel};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSObject, NSString};
 use objc2_ui_kit::{UIApplication, UIApplicationState, UIBackgroundFetchResult};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNAuthorizationStatus, UNNotification, UNNotificationSettings,
-    UNUserNotificationCenter,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNNotification, UNNotificationResponse,
+    UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use protocol::{ApnsEnvironment, PushNotice, PushNoticeKind};
 use push_crypto::{InstallKeys, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
@@ -44,7 +49,7 @@ use security_framework::passwords::{
     set_generic_password_options,
 };
 
-use super::push::{Authorization, Delivered, PushPlatform, build_environment};
+use super::push::{Authorization, Delivered, PushPlatform, Tap, build_environment, no_taps};
 use super::sweep::{self, Sweep};
 
 /// The launch argument that asks for provisional notification permission at
@@ -67,6 +72,47 @@ static WAITING: Mutex<Vec<oneshot::Sender<TokenAnswer>>> = Mutex::new(Vec::new()
 
 /// Whether the delegate methods were added, made once on first use.
 static HOOK: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// The delegate's end of the taps, made before the app starts so a tap that
+/// cold-launches it has somewhere to wait.
+static TAP_SENDER: OnceLock<UnboundedSender<Tap>> = OnceLock::new();
+
+/// The phone's end of the taps, taken once by the phone's root.
+static TAPS: Mutex<Option<UnboundedReceiver<Tap>>> = Mutex::new(None);
+
+/// Whether the tap delegate was set, tried once.
+static TAP_HOOK: OnceLock<()> = OnceLock::new();
+
+/// The block
+/// `userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:`
+/// is handed, which must be called once.
+type ResponseHandler = DynBlock<dyn Fn()>;
+
+// SAFETY:
+// - `UNUserNotificationCenterDelegate` asks this class only for the methods it
+//   overrides, with their declared signatures, and it calls the response's
+//   completion handler once.
+// - `NotificationTap` does not implement `Drop`.
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "RTNotificationTap"]
+    struct NotificationTap;
+
+    impl NotificationTap {
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn did_receive_response(
+            &self,
+            _center: &UNUserNotificationCenter,
+            response: &UNNotificationResponse,
+            handler: &ResponseHandler,
+        ) {
+            tap_of(response, handler);
+        }
+    }
+
+    unsafe impl NSObjectProtocol for NotificationTap {}
+    unsafe impl UNUserNotificationCenterDelegate for NotificationTap {}
+);
 
 /// The iOS push platform.
 pub struct IosPushPlatform;
@@ -192,6 +238,14 @@ impl PushPlatform for IosPushPlatform {
         };
         #[expect(deprecated, reason = "iOS 15 has no setBadgeCount")]
         UIApplication::sharedApplication(mtm).setApplicationIconBadgeNumber(count);
+    }
+
+    fn taps(&self) -> UnboundedReceiver<Tap> {
+        add_tap_delegate();
+        TAPS.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(no_taps)
     }
 }
 
@@ -350,6 +404,68 @@ extern "C-unwind" fn did_fail(
         |error| error.localizedDescription().to_string(),
     );
     answer_all(&Err(text));
+}
+
+/// The tap a tapped notification names, into the phone's channel, then the
+/// completion handler once: a notification with no `host` or `session_id` (a
+/// fallback alert) names nothing and is logged.
+fn tap_of(response: &UNNotificationResponse, handler: &ResponseHandler) {
+    let info = response.notification().request().content().userInfo();
+    match (info_string(&info, "host"), info_string(&info, "session_id")) {
+        (Some(host), Some(session_id)) => {
+            tracing::info!("phone: a notification was tapped");
+            match TAP_SENDER.get() {
+                // A receiver gone means the phone's root was dropped.
+                Some(sender) => {
+                    let _unheard = sender.unbounded_send(Tap { host, session_id });
+                }
+                None => tracing::warn!("phone: a tap came before its channel"),
+            }
+        }
+        _ => tracing::debug!("phone: a tapped notification names no session"),
+    }
+    handler.call(());
+}
+
+/// Makes the notification center's delegate, which hands the phone every
+/// notification the owner taps, with the channel it sends them on, and sets
+/// it. [`crate::phone::run`] calls it before the app starts, so a tap that
+/// cold-launches the app finds it. A failure is logged and leaves tapped
+/// notifications opening nothing.
+pub fn add_tap_delegate() {
+    TAP_HOOK.get_or_init(|| match set_tap_delegate() {
+        Ok(()) => tracing::info!("phone: notification tap delegate set"),
+        Err(err) => {
+            tracing::warn!(error = %err, "phone: a tapped notification will open no session");
+        }
+    });
+}
+
+/// [`add_tap_delegate`]'s one try.
+///
+/// # Errors
+///
+/// The delegate could not be allocated.
+fn set_tap_delegate() -> Result<(), String> {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    // A channel from an earlier call keeps its sender, which is the one the
+    // delegate sends on.
+    if TAP_SENDER.set(sender).is_ok() {
+        *TAPS.lock().unwrap_or_else(PoisonError::into_inner) = Some(receiver);
+    }
+    // SAFETY: `+new` allocates an instance of the class just defined and runs
+    // its inherited `init`, which takes no arguments.
+    let delegate: Option<Retained<NotificationTap>> =
+        unsafe { msg_send![NotificationTap::class(), new] };
+    let delegate = delegate.ok_or_else(|| "the tap delegate could not be made".to_owned())?;
+    // The center holds its delegate unretained, so the one instance is leaked
+    // to live as long as the process.
+    // SAFETY: the leaked object is never freed, so the reference is valid for
+    // the process.
+    let delegate: &'static NotificationTap = unsafe { &*Retained::into_raw(delegate) };
+    UNUserNotificationCenter::currentNotificationCenter()
+        .setDelegate(Some(ProtocolObject::from_ref(delegate)));
+    Ok(())
 }
 
 /// Adds the two remote-notification callbacks to `gpui_ios`'s delegate class;

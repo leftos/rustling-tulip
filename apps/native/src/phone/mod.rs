@@ -9,6 +9,7 @@ mod hosts_view;
 mod key_bar;
 pub(crate) mod lifecycle;
 mod long_press;
+mod open_tap;
 mod prompt_sheet;
 pub mod push;
 #[cfg(target_os = "ios")]
@@ -46,6 +47,8 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
     register_delegates();
     #[cfg(target_os = "ios")]
     push_ios::add_wake_method();
+    #[cfg(target_os = "ios")]
+    push_ios::add_tap_delegate();
     gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .run(move |cx: &mut App| {

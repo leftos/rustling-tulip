@@ -18,6 +18,7 @@ use protocol::{
     ApnsEnvironment, AttentionReason, ClientMessage, DaemonMessage, FEATURE_RELAY_PUSH,
     PushRegistration, Secret,
 };
+use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::{
     Authorization, Delivered, FakePushPlatform, NEEDS_YOU_KIND, PlatformCall, PushPlatform,
     UnsupportedPlatform,
@@ -35,6 +36,39 @@ fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
 /// The saved host's switch.
 fn switch() -> String {
     format!("phone-host-push-{REMOTE}")
+}
+
+/// Reads the phone's root.
+fn read_phone<R>(h: &mut Harness<'_>, read: impl FnOnce(&PhoneRoot, &gpui::App) -> R) -> R {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        read(phone.read(cx), cx)
+    })
+}
+
+/// The host and id of the session the phone shows in place of Home.
+fn shown_session(h: &mut Harness<'_>) -> Option<(String, String)> {
+    read_phone(h, |phone, _| {
+        phone
+            .shown_session()
+            .map(|(host, id)| (host.wire().unwrap_or_default().to_owned(), id.to_owned()))
+    })
+}
+
+/// Why the phone could not open the session a notification named, while it
+/// says so.
+fn open_note(h: &mut Harness<'_>) -> Option<String> {
+    read_phone(h, |phone, _| phone.open_note().map(str::to_owned))
+}
+
+/// Taps the phone's notification for `session_id` on `host`, then lets its
+/// root take the tap.
+fn tap(platform: &FakePushPlatform, host: &str, session_id: &str, h: &mut Harness<'_>) {
+    platform.tap(host, session_id);
+    h.cx.run_until_parked();
 }
 
 /// A phone with [`REMOTE`] saved and paired, its push through `platform`.
@@ -723,5 +757,251 @@ fn two_hosts_at_push_1_stay_apart(cx: &mut TestAppContext) {
     assert!(
         drawn(&mut h, &format!("phone-host-push-{OTHER_HOST}-empty")),
         "the other host's switch waits for its own reply"
+    );
+}
+
+#[gpui::test]
+fn a_tap_before_the_host_connects_opens_the_session_once_it_is_listed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    tap(&platform, REMOTE, "s1", &mut h);
+    assert_eq!(
+        shown_session(&mut h),
+        None,
+        "the host has listed nothing yet"
+    );
+
+    h.host(&saved_remote()).connect();
+    assert!(
+        drawn(&mut h, "phone-open-pending"),
+        "the wait shows on Home"
+    );
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s1".to_owned()))
+    );
+    assert!(
+        !drawn(&mut h, "phone-open-pending"),
+        "the wait is over once the session shows"
+    );
+}
+
+#[gpui::test]
+fn a_tap_for_a_session_no_longer_listed_notes_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    tap(&platform, REMOTE, "gone", &mut h);
+
+    assert_eq!(shown_session(&mut h), None, "no session page opens");
+    assert_eq!(
+        open_note(&mut h),
+        Some(format!("That session is no longer on {REMOTE}."))
+    );
+    assert!(drawn(&mut h, "phone-open-note"), "the line shows on Home");
+}
+
+#[gpui::test]
+fn a_tap_for_an_unsaved_host_notes_it(cx: &mut TestAppContext) {
+    const OTHER_HOST: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+
+    tap(&platform, OTHER_HOST, "s1", &mut h);
+
+    assert_eq!(shown_session(&mut h), None);
+    assert_eq!(
+        open_note(&mut h),
+        Some(format!("{OTHER_HOST} is not saved on this phone."))
+    );
+    assert!(
+        drawn(&mut h, "phone-open-note"),
+        "the line shows on the hosts screen"
+    );
+}
+
+#[gpui::test]
+fn the_wait_line_shows_while_no_host_is_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+
+    tap(&platform, REMOTE, "s1", &mut h);
+
+    assert!(
+        drawn(&mut h, "phone-open-pending"),
+        "the wait shows on the hosts screen"
+    );
+}
+
+#[gpui::test]
+fn a_tap_for_a_host_not_paired_notes_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = Harness::phone_with(cx, &dir, platform.clone());
+
+    tap(&platform, REMOTE, "s1", &mut h);
+
+    assert_eq!(
+        open_note(&mut h),
+        Some(format!("{REMOTE} is not paired with this phone."))
+    );
+    assert!(
+        drawn(&mut h, "phone-open-note"),
+        "the line shows on the hosts screen"
+    );
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    assert_eq!(shown_session(&mut h), None, "the pending open is cleared");
+}
+
+#[gpui::test]
+fn a_tap_after_returning_to_the_foreground_waits_for_the_fresh_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    tap(&platform, REMOTE, "s1", &mut h);
+    assert_eq!(
+        shown_session(&mut h),
+        None,
+        "the list from before the suspension decides nothing"
+    );
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s1".to_owned()))
+    );
+}
+
+#[gpui::test]
+fn a_second_tap_replaces_the_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    tap(&platform, REMOTE, "s1", &mut h);
+    tap(&platform, REMOTE, "s2", &mut h);
+
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s3"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s2".to_owned()))
+    );
+}
+
+#[gpui::test]
+fn a_tap_matches_the_host_name_however_it_is_spelt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    let spelt = format!(" {}.. ", REMOTE.to_uppercase());
+    tap(&platform, &spelt, "s1", &mut h);
+
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s1".to_owned()))
+    );
+}
+
+#[gpui::test]
+fn navigating_clears_a_pending_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    tap(&platform, REMOTE, "s1", &mut h);
+    assert!(drawn(&mut h, "phone-open-pending"), "the wait shows");
+
+    h.click_on("phone-host-add-another");
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        None,
+        "the hosts form took the tap's place"
+    );
+    assert!(!drawn(&mut h, "phone-open-pending"), "the wait is gone");
+}
+
+#[gpui::test]
+fn a_tap_that_notes_while_a_session_shows_returns_home_with_the_note(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    tap(&platform, REMOTE, "s1", &mut h);
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s1".to_owned())),
+        "the first tap opens its session"
+    );
+
+    tap(&platform, REMOTE, "gone", &mut h);
+
+    assert_eq!(shown_session(&mut h), None, "the page closes for the note");
+    assert_eq!(
+        open_note(&mut h),
+        Some(format!("That session is no longer on {REMOTE}."))
+    );
+    assert!(drawn(&mut h, "phone-open-note"), "Home shows the note");
+}
+
+#[gpui::test]
+fn opening_a_sheet_clears_a_pending_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    tap(&platform, REMOTE, "s1", &mut h);
+    assert_eq!(
+        shown_session(&mut h),
+        None,
+        "no list has come since the foreground"
+    );
+
+    let opened = h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.open_sheet_on("s1", cx))
+    });
+    assert!(opened, "the listed session's sheet opens");
+
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        None,
+        "the sheet took the tap's place"
     );
 }

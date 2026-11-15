@@ -1,7 +1,9 @@
 //! [`PhoneRoot`], the phone's root view, and its push effect plumbing.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use futures::StreamExt as _;
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FontWeight, IntoElement, Pixels, Render, Stateful,
     Subscription, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
@@ -11,6 +13,7 @@ use protocol::ClientMessage;
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::open_tap::{self, PendingOpen};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::session::SessionPage;
@@ -21,6 +24,7 @@ use super::sweep::{self, HostNow};
 use super::{content_padding, home, hosts_view};
 use crate::RootView;
 use crate::buttons::ButtonKind;
+use crate::connection::State;
 use crate::driver_id::DriverId as _;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
@@ -65,6 +69,12 @@ pub struct PhoneRoot {
     /// How many sweeps have started; a sweep whose delivered list returns
     /// after a newer one started does nothing.
     sweeps: u64,
+    /// A tap on a notification waiting for its host to list the session it
+    /// names, replacing any tap before it.
+    pub(super) pending_open: Option<PendingOpen>,
+    /// Why the last tap could not open its session, until the next
+    /// navigation or tap.
+    pub(super) open_note: Option<String>,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
     /// Redials the dropped saved hosts when the window comes back to the
@@ -84,6 +94,7 @@ impl PhoneRoot {
     ) -> Self {
         let root_changed = cx.observe(&root, |this, root, cx| {
             this.hosts.root_changed(root.read(cx));
+            this.try_open_pending(cx);
             this.forget_gone_session(cx);
             this.take_replies(cx);
             this.sync_sheet(cx);
@@ -94,6 +105,15 @@ impl PhoneRoot {
         if platform.supported() {
             Self::learn_token(&platform, cx);
         }
+        let mut taps = platform.taps();
+        cx.spawn(async move |this, cx| {
+            while let Some(tap) = taps.next().await {
+                if this.update(cx, |this, cx| this.tap(tap, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let visibility = cx.observe_window_visibility(window, |this, visibility, window, cx| {
             this.in_front = visibility == WindowVisibility::Visible;
             if this.in_front {
@@ -124,6 +144,8 @@ impl PhoneRoot {
             in_front: window.visibility() == WindowVisibility::Visible,
             swept: None,
             sweeps: 0,
+            pending_open: None,
+            open_note: None,
             _root_changed: root_changed,
             _visibility: visibility,
         }
@@ -154,6 +176,73 @@ impl PhoneRoot {
     #[must_use]
     pub fn host_error(&self) -> Option<&str> {
         self.hosts.error()
+    }
+
+    /// Why the phone could not open the session a notification named, while
+    /// it says so.
+    #[must_use]
+    pub fn open_note(&self) -> Option<&str> {
+        self.open_note.as_deref()
+    }
+
+    /// A tap on a notification for its user info's session: remembered until
+    /// that host lists it, replacing any tap before it.
+    fn tap(&mut self, tap: push::Tap, cx: &mut Context<Self>) {
+        // One token store read per tap, so deciding on the root changes that
+        // follow reads the set this keeps and never the store.
+        self.hosts.read_tokens(self.root.read(cx));
+        let host = open_tap::target_key(&tap.host);
+        tracing::debug!(
+            ?host,
+            session_id = tap.session_id.as_str(),
+            "phone: a notification was tapped"
+        );
+        self.pending_open = Some(PendingOpen {
+            host,
+            session_id: tap.session_id,
+        });
+        self.open_note = None;
+        self.try_open_pending(cx);
+        cx.notify();
+    }
+
+    /// Decides the tap waiting for its host's session list: opens the
+    /// session, gives up with a line, or leaves it waiting for the next
+    /// root change.
+    fn try_open_pending(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_open.clone() else {
+            return;
+        };
+        let next = {
+            let root = self.root.read(cx);
+            open_tap::decide(
+                pending.host_name(),
+                open_facts(root, self.hosts.not_paired(), &pending),
+            )
+        };
+        match next {
+            open_tap::Next::Wait => {}
+            open_tap::Next::Open => self.open_session(pending.host, &pending.session_id, cx),
+            open_tap::Next::Note(note) => {
+                tracing::debug!(
+                    note = note.as_str(),
+                    "phone: a tap's session could not be opened"
+                );
+                self.pending_open = None;
+                // A session page hides the line, so the note returns Home.
+                if self.shown.is_some() {
+                    self.close_session(cx);
+                }
+                self.open_note = Some(note);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Any navigation the user makes clears the tap's wait and its line.
+    pub(super) fn forget_pending_open(&mut self) {
+        self.pending_open = None;
+        self.open_note = None;
     }
 
     /// The session shown in place of Home, as its host and id.
@@ -214,6 +303,7 @@ impl PhoneRoot {
     /// while it can show. It opens no tab and lays out no pane.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
+        self.forget_pending_open();
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
@@ -236,6 +326,7 @@ impl PhoneRoot {
         let Some(offer) = self.offer_of(&host, session_id, cx) else {
             return;
         };
+        self.forget_pending_open();
         tracing::debug!(?host, session_id, "phone: opening a session's sheet");
         let mut sheet = Sheet::new(host, session_id, offer);
         // A resume already out for the session keeps its row inert.
@@ -466,6 +557,7 @@ impl PhoneRoot {
 
     /// Back from the shown session to Home; its chat unloads.
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
+        self.forget_pending_open();
         self.shown = None;
         self.page = None;
         self.composer_dock = super::composer::Dock::None;
@@ -778,6 +870,37 @@ fn sweep_hosts(root: &RootView) -> Vec<HostNow> {
             })
         })
         .collect()
+}
+
+/// What the phone knows about `pending`'s host: whether a saved host has
+/// its key, whether that host is paired with this phone (from the not-paired
+/// set `PhoneHosts` keeps, so no token store is read here), whether it is
+/// loaded, and whether the loaded list holds the session.
+fn open_facts(
+    root: &RootView,
+    not_paired: &HashSet<String>,
+    pending: &PendingOpen,
+) -> open_tap::Facts {
+    let saved_hosts = &root.sidebar.ui_state().saved_hosts;
+    let saved = saved_hosts.iter().find(|saved| {
+        saved
+            .target()
+            .is_ok_and(|target| HostKey::of(&target) == pending.host)
+    });
+    let refused = root
+        .conn_of(&pending.host)
+        .is_some_and(|conn| matches!(conn.state(), State::NotApproved { .. }));
+    open_tap::Facts {
+        saved: saved.is_some(),
+        paired: saved.is_some_and(|saved| !refused && !not_paired.contains(&saved.name)),
+        loaded: hosts_view::host_open(root, &pending.host)
+            && root.listed_since_welcome(&pending.host)
+            && root.listed_since_foreground(&pending.host),
+        listed: root
+            .sidebar
+            .session_on(&pending.host, &pending.session_id)
+            .is_some(),
+    }
 }
 
 /// One line of the sheet's `text`, tagged `id`, in `color`.

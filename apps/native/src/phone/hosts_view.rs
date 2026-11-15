@@ -24,6 +24,10 @@ use crate::text_input::TextInput;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{NetCommand, RootView};
 
+/// Home's line while a tap waits for its host's session list.
+const PENDING_OPEN_ID: &str = "phone-open-pending";
+/// Home's line when a tap's session could not be opened.
+const OPEN_NOTE_ID: &str = "phone-open-note";
 /// The form's title, and the label of the button that shows it again.
 const ADD_TITLE: &str = "Add a host";
 /// The name field's placeholder.
@@ -111,6 +115,12 @@ impl PhoneHosts {
         hosts
     }
 
+    /// The saved tailnet hosts this phone holds no device token for, as the
+    /// token store gave them when a host's connection last changed state.
+    pub(super) fn not_paired(&self) -> &HashSet<String> {
+        &self.not_paired
+    }
+
     /// The mode the form takes.
     fn mode(&self) -> HostMode {
         self.mode
@@ -145,7 +155,7 @@ impl PhoneHosts {
     }
 
     /// Reads the not-paired hosts afresh from `root`'s token store.
-    fn read_tokens(&mut self, root: &RootView) {
+    pub(super) fn read_tokens(&mut self, root: &RootView) {
         self.seen = seen_states(root);
         self.not_paired = root.hosts_not_paired(&root.sidebar.ui_state().saved_hosts);
     }
@@ -444,12 +454,14 @@ impl PhoneRoot {
         let t = theme(cx);
         let row_elements: Vec<Div> = rows.iter().map(|row| Self::row(row, &t, cx)).collect();
         let tail = self.hosts_tail(form_shows, &t, cx);
+        let tap_lines = self.tap_lines(&t);
         div()
             .size_full()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .p(px(16.0))
+            .children(tap_lines)
             .children(row_elements)
             .child(tail)
     }
@@ -461,16 +473,49 @@ impl PhoneRoot {
         let t = theme(cx);
         let lines = self.push_lines(&t, cx);
         let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
-        div().size_full().flex().flex_col().child(panel).child(
+        let tap_lines = self.tap_lines(&t);
+        let over = (!tap_lines.is_empty()).then(|| {
             div()
-                .flex_none()
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
-                .p(px(16.0))
-                .children(lines)
-                .child(tail),
-        )
+                .px(px(16.0))
+                .pt(px(12.0))
+                .children(tap_lines)
+        });
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(over)
+            .child(panel)
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .p(px(16.0))
+                    .children(lines)
+                    .child(tail),
+            )
+    }
+
+    /// The tap's line: what the phone is opening, or why it could not open
+    /// the session.
+    fn tap_lines(&self, t: &UiTheme) -> Vec<Div> {
+        let pending = self.pending_open.as_ref().map(|pending| {
+            div()
+                .driver_id(|| PENDING_OPEN_ID.to_owned())
+                .text_color(gpui::rgb(t.muted))
+                .child(format!("Opening a session on {}…", pending.host_name()))
+        });
+        let note = self.open_note.as_ref().map(|note| {
+            div()
+                .driver_id(|| OPEN_NOTE_ID.to_owned())
+                .text_color(gpui::rgb(t.muted))
+                .child(note.clone())
+        });
+        pending.into_iter().chain(note).collect()
     }
 
     /// One line per saved host with a Notifications switch: its name and
@@ -864,6 +909,7 @@ impl PhoneRoot {
     /// "Add a host" under the rows: the form shows, empty, with the
     /// keyboard in its name field.
     fn show_add_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.forget_pending_open();
         self.hosts.reset(cx);
         self.hosts.form_open = true;
         self.hosts.name.read(cx).focus_handle(cx).focus(window, cx);

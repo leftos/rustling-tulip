@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use futures::FutureExt as _;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use protocol::{ApnsEnvironment, DaemonMessage, PushRegistration, Secret};
@@ -63,6 +64,17 @@ pub struct Delivered {
 /// The wire kind of a Needs you push notice, the only kind a sweep removes.
 pub const NEEDS_YOU_KIND: &str = "needs_you";
 
+/// A tap on a notification the drawer showed: the `host` and `session_id`
+/// the notification extension put in its user info, as text the app reads
+/// but never connects to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tap {
+    /// The daemon's host name the notification came from.
+    pub host: String,
+    /// The session the notification was about.
+    pub session_id: String,
+}
+
 /// What the phone's platform offers for push: whether it has push at all,
 /// the APNs environment its tokens come from, its notification permission,
 /// its device token and the install's push keys.
@@ -90,6 +102,15 @@ pub trait PushPlatform: Send + Sync {
     fn remove_delivered(&self, ids: Vec<String>);
     /// Sets the app's badge to `count`.
     fn set_badge(&self, count: u32);
+    /// The taps on this phone's notifications, oldest first; a tap that
+    /// arrived before the phone's root existed waits in it.
+    fn taps(&self) -> UnboundedReceiver<Tap>;
+}
+
+/// A tap channel nothing sends on, so its drain ends at once.
+pub(super) fn no_taps() -> UnboundedReceiver<Tap> {
+    let (_sender, receiver) = futures::channel::mpsc::unbounded();
+    receiver
 }
 
 /// The APNs environment a build reports: `sandbox` for debug and simulator
@@ -142,6 +163,10 @@ impl PushPlatform for UnsupportedPlatform {
     fn remove_delivered(&self, _ids: Vec<String>) {}
 
     fn set_badge(&self, _count: u32) {}
+
+    fn taps(&self) -> UnboundedReceiver<Tap> {
+        no_taps()
+    }
 }
 
 /// One question a [`FakePushPlatform`] was asked.
@@ -173,6 +198,10 @@ struct FakeScript {
     /// [`FakePushPlatform::release_delivered`].
     hold_delivered: bool,
     held: Vec<oneshot::Sender<Vec<Delivered>>>,
+    /// The phone's end of the taps, until it takes it.
+    taps: Option<UnboundedReceiver<Tap>>,
+    /// The fake's end of the taps, which [`FakePushPlatform::tap`] sends on.
+    tapper: UnboundedSender<Tap>,
 }
 
 /// A scripted platform for specs: supported, permission granted, a fixed
@@ -186,6 +215,7 @@ pub struct FakePushPlatform {
 
 impl Default for FakePushPlatform {
     fn default() -> Self {
+        let (tapper, taps) = futures::channel::mpsc::unbounded();
         Self {
             script: Mutex::new(FakeScript {
                 supported: true,
@@ -198,6 +228,8 @@ impl Default for FakePushPlatform {
                 badges: Vec::new(),
                 hold_delivered: false,
                 held: Vec::new(),
+                taps: Some(taps),
+                tapper,
             }),
         }
     }
@@ -278,6 +310,17 @@ impl FakePushPlatform {
         }
     }
 
+    /// Hands the phone a tap on a notification for `session_id` on `host`,
+    /// as a tap on the drawer delivers one.
+    pub fn tap(&self, host: &str, session_id: &str) {
+        let tap = Tap {
+            host: host.to_owned(),
+            session_id: session_id.to_owned(),
+        };
+        // A receiver gone means the phone's root was dropped.
+        let _unheard = self.script().tapper.unbounded_send(tap);
+    }
+
     /// The keys [`PushPlatform::install_keys`] gives: a fixed scalar and
     /// secret.
     #[must_use]
@@ -343,6 +386,10 @@ impl PushPlatform for FakePushPlatform {
 
     fn set_badge(&self, count: u32) {
         self.script().badges.push(count);
+    }
+
+    fn taps(&self) -> UnboundedReceiver<Tap> {
+        self.script().taps.take().unwrap_or_else(no_taps)
     }
 }
 
