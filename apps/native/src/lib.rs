@@ -3085,6 +3085,13 @@ impl RootView {
         Some(self.panes.get(pane_id)?.view().entity_id())
     }
 
+    /// Pane `pane_id`'s terminal, for driving its input directly (the phone's
+    /// key bar).
+    #[must_use]
+    pub fn pane_terminal(&self, pane_id: &str) -> Option<gpui::Entity<term_view::TerminalPane>> {
+        Some(self.panes.get(pane_id)?.view().clone())
+    }
+
     /// Pane `pane_id`'s text input, which the platform drives with typed
     /// characters and the IME's composition.
     #[must_use]

@@ -1222,6 +1222,12 @@ impl TerminalPane {
         self.session.is_some_and(SessionContext::accepts_input)
     }
 
+    /// The document the platform sees, in UTF-16 units: the composition the
+    /// pane holds, or the phantom document's one unit.
+    fn document_len(&self) -> usize {
+        self.marked.as_deref().map_or(phantom_len(), utf16_len)
+    }
+
     fn drop_marked_unless_accepting(&mut self) {
         if !self.accepts_input() {
             self.marked = None;
@@ -1539,8 +1545,32 @@ impl TerminalPane {
         let Some(session) = self.session else {
             return;
         };
+        // A key the pane leaves alone goes on to the input handler, which
+        // types it.
+        if !self.run_key(&event.keystroke, session, cx) {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Presses `keystroke` on the pane as its own keyboard would: the bytes
+    /// [`term_input::key_action`] decides for the session's modes (an
+    /// application-cursor arrow included), a copy, a paste, or nothing.
+    pub fn press(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(session) = self.session else {
+            return;
+        };
+        self.run_key(keystroke, session, cx);
+        cx.notify();
+    }
+
+    /// Runs `keystroke` through the pane's key handling: a pending dead key
+    /// ends first, then the action sends, copies, pastes or does nothing.
+    /// Returns whether the terminal handled it; a key it leaves alone is
+    /// typed text for the input handler.
+    fn run_key(&mut self, ks: &Keystroke, session: SessionContext, cx: &mut Context<Self>) -> bool {
         self.note_input();
-        let ks = &event.keystroke;
         let action = term_input::key_action(
             ks,
             self.term.app_cursor(),
@@ -1550,7 +1580,7 @@ impl TerminalPane {
         );
         let Some(action) = action else {
             self.last_key_char = ks.key_char.clone().filter(|text| text.chars().count() == 1);
-            return;
+            return false;
         };
         self.last_key_char = None;
         if self.end_dead_key(ks) {
@@ -1564,8 +1594,7 @@ impl TerminalPane {
                 KeyAction::Consume => {}
             }
         }
-        cx.stop_propagation();
-        cx.notify();
+        true
     }
 
     /// Ends a pending dead key when the terminal handles `ks` itself: the
@@ -1603,11 +1632,11 @@ impl TerminalPane {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        self.note_input();
         let item = cx.read_from_clipboard();
         let text = item.as_ref().and_then(ClipboardItem::text);
         let pasted = text.as_deref().filter(|text| !text.is_empty());
         if pasted.is_none() && self.remote && self.session.is_some_and(|s| s.agent_up) {
+            self.note_input();
             // The agent would read its own host's clipboard, not this one's,
             // so an image goes up to that host as a file. A remote shell
             // still gets `^V`.
@@ -1630,6 +1659,7 @@ impl TerminalPane {
         }
         // A clipboard with no text sends the agent's image-paste key and
         // logs nothing, since nothing was pasted.
+        self.note_input();
         let image_paste = self
             .session
             .map_or(ImagePaste::CtrlV, |session| session.image_paste);
@@ -1637,13 +1667,26 @@ impl TerminalPane {
         self.send_input(&bytes);
     }
 
+    /// Types `bytes` into the session as typed input, as a key's bytes go:
+    /// the size is claimed and the pane repaints at the live screen.
+    pub fn type_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.note_input();
+        self.term.clear_selection();
+        self.send_input(bytes);
+        cx.notify();
+    }
+
     /// Pastes `text` into the session, bracketed when the program asked,
     /// while the pane still shows `session_id`.
-    pub(crate) fn paste_text(&mut self, text: &str, session_id: &str, cx: &mut Context<Self>) {
+    pub fn paste_text(&mut self, text: &str, session_id: &str, cx: &mut Context<Self>) {
         if self.attachment.session_id.as_deref() != Some(session_id) {
             tracing::debug!(%session_id, "a paste for a session the pane no longer shows");
             return;
         }
+        self.note_input();
         let bracketed = self.term.bracketed_paste();
         let bytes = term_input::paste_bytes(text, bracketed);
         // A paste no session took is not logged: nothing saw it.
@@ -1774,6 +1817,13 @@ impl TerminalPane {
         if self.in_gutter(event.position) {
             cx.stop_propagation();
             return;
+        }
+        // A tap is the phone's editing gesture: the soft keyboard comes up for
+        // it, as it does on a text field. A first-mouse press only brings the
+        // window forward, and a session that takes no input has nothing to
+        // type into.
+        if event.button == MouseButton::Left && !event.first_mouse && self.accepts_input() {
+            window.request_virtual_keyboard();
         }
         // Ctrl+click on a URL or a path opens it, and Ctrl+Shift+click on a path
         // opens the link menu, ahead of a selection or a mouse
@@ -2217,6 +2267,19 @@ fn utf16_len(text: &str) -> usize {
     offset_to_utf16(text, text.len())
 }
 
+/// The document the platform sees while the pane holds no composition: one
+/// character, so a soft keyboard's Backspace has a unit it can replace with
+/// nothing, which the terminal deletes.
+const PHANTOM_DOCUMENT: &str = " ";
+
+/// What the soft keyboard's Backspace sends, as a keyboard's own key does.
+const BACKSPACE: u8 = 0x7f;
+
+/// The phantom document's length in UTF-16 units.
+fn phantom_len() -> usize {
+    PHANTOM_DOCUMENT.encode_utf16().count()
+}
+
 /// The cell the IME anchors to and the composition is drawn from: the
 /// cursor's, shown or hidden, or the grid's top-left cell without one.
 fn anchor_cell(snap: &Snapshot) -> (usize, usize) {
@@ -2254,6 +2317,14 @@ fn flush_dead_key() {}
 /// Text from the platform: typed characters and the IME. Only committed
 /// text is sent; the composition before it is held and drawn at the cursor.
 impl EntityInputHandler for TerminalPane {
+    // The iOS text-input bridge treats a handler with no document length as
+    // ineligible for the keyboard, and its Backspace reads the unit before
+    // the caret: the pane reports the composition it holds, or a phantom
+    // document of one unit that a Backspace replaces with nothing.
+    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        Some(self.document_len())
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -2261,7 +2332,15 @@ impl EntityInputHandler for TerminalPane {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let marked = self.marked.as_deref()?;
+        let Some(marked) = self.marked.as_deref() else {
+            let phantom = 0..phantom_len();
+            if range_utf16 == phantom {
+                adjusted_range.replace(phantom);
+                return Some(PHANTOM_DOCUMENT.to_owned());
+            }
+            adjusted_range.replace(range_utf16.clone());
+            return Some(String::new());
+        };
         let range = utf8_range(marked, &range_utf16);
         adjusted_range
             .replace(offset_to_utf16(marked, range.start)..offset_to_utf16(marked, range.end));
@@ -2274,7 +2353,7 @@ impl EntityInputHandler for TerminalPane {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let end = self.marked.as_deref().map_or(0, utf16_len);
+        let end = self.document_len();
         Some(UTF16Selection {
             range: end..end,
             reversed: false,
@@ -2294,18 +2373,41 @@ impl EntityInputHandler for TerminalPane {
 
     fn replace_text_in_range(
         &mut self,
-        _: Option<Range<usize>>,
+        range_utf16: Option<Range<usize>>,
         text: &str,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked = None;
         self.last_key_char = None;
-        if !text.is_empty() {
-            self.note_input();
-            self.term.clear_selection();
-            self.send_input(text.as_bytes());
+        let marked = self.marked.take();
+        if text.is_empty() {
+            match (marked, range_utf16) {
+                // The platform replaced the phantom document's unit with
+                // nothing: a Backspace, which the terminal deletes. The
+                // phantom stays, so the next one deletes again.
+                (None, Some(range)) if range == (0..phantom_len()) => {
+                    self.note_input();
+                    self.term.clear_selection();
+                    self.send_input(&[BACKSPACE]);
+                }
+                // A range of the composition: the marked text loses it and no
+                // program sees the edit.
+                (Some(marked), Some(range)) => {
+                    let removed = utf8_range(&marked, &range);
+                    let mut rest = marked;
+                    rest.replace_range(removed, "");
+                    self.marked = (!rest.is_empty() && self.accepts_input()).then_some(rest);
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
         }
+        // iOS delivers Return as an inserted line break, never as a key.
+        let bytes: &[u8] = if text == "\n" { b"\r" } else { text.as_bytes() };
+        self.note_input();
+        self.term.clear_selection();
+        self.send_input(bytes);
         cx.notify();
     }
 

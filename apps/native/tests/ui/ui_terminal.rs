@@ -9,11 +9,15 @@
 
 use crate::support;
 
+use std::cell::Cell;
+use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use gpui::{
-    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point, TestAppContext, point, px, size,
+    App, InputHandler, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point, ScrollDelta,
+    ScrollEvent, TestAppContext, TouchPhase, Window, point, px, size,
 };
 use protocol::{
     ChatScreen, ClientMessage, ComposerState, DaemonMessage, ImagePaste, SessionSnapshot,
@@ -125,6 +129,253 @@ fn composition_sends_only_committed_text(cx: &mut TestAppContext) {
     h.commit("p1", "日本");
     assert_eq!(h.sent_input("s1"), "日本".as_bytes());
     assert_eq!(h.marked_text("p1"), None, "the commit ends the composition");
+}
+
+/// The newest iOS delivers Return as an inserted line break, never as a key:
+/// the pane sends it as a carriage return.
+#[gpui::test]
+fn an_inserted_lone_newline_sends_return(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.commit("p1", "\n");
+    assert_eq!(h.sent_input("s1"), b"\r");
+}
+
+/// Only a lone line break is Return: text holding one is typed as it came.
+#[gpui::test]
+fn inserted_text_with_a_newline_inside_is_sent_as_typed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.commit("p1", "a\nb");
+    assert_eq!(h.sent_input("s1"), b"a\nb");
+}
+
+/// The platform raises the soft keyboard for a handler that reports a
+/// document length; the pane keeps no document, so it reports what it holds.
+#[gpui::test]
+fn the_pane_reports_its_text_length_for_the_platform(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    assert_eq!(text_length(&mut h), Some(1), "the phantom document's unit");
+    h.compose("p1", "にほ");
+    assert_eq!(text_length(&mut h), Some(2), "the composition's length");
+}
+
+/// Presses keystroke `name` on pane `pane`'s terminal, the way the phone's
+/// key bar will.
+fn press_pane(h: &mut Harness<'_>, pane: &str, name: &'static str) {
+    let keystroke = gpui::Keystroke::parse(name).expect("a keystroke");
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal(pane).expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.press(&keystroke, cx));
+    });
+}
+
+/// An arrow from the key bar follows the program's application-cursor mode.
+#[gpui::test]
+fn press_sends_an_arrow_in_application_cursor_mode(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    press_pane(&mut h, "p1", "up");
+    assert_eq!(h.sent_input("s1"), b"\x1b[A");
+
+    h.pty("s1", b"\x1b[?1h");
+    press_pane(&mut h, "p1", "up");
+    assert_eq!(h.sent_input("s1"), b"\x1bOA");
+}
+
+#[gpui::test]
+fn press_sends_ctrl_c_as_0x03(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    press_pane(&mut h, "p1", "ctrl-c");
+    assert_eq!(h.sent_input("s1"), b"\x03");
+}
+
+#[gpui::test]
+fn type_bytes_sends_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.type_bytes(b"\x1b[C", cx));
+    });
+    assert_eq!(h.sent_input("s1"), b"\x1b[C");
+}
+
+#[gpui::test]
+fn paste_text_brackets_when_the_program_asked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?2004h");
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.paste_text("a\nb", "s1", cx));
+    });
+    assert_eq!(h.sent_input("s1"), b"\x1b[200~a\rb\x1b[201~");
+}
+
+/// Drives pane `p1`'s input handler as the platform does, then lets the view
+/// settle.
+fn input<R>(
+    h: &mut Harness<'_>,
+    drive: impl FnOnce(&mut dyn InputHandler, &mut Window, &mut App) -> R,
+) -> R {
+    h.root_update(|root, window, cx| {
+        let mut handler = root
+            .pane_input_handler("p1")
+            .expect("the pane has a terminal");
+        drive(&mut handler, window, cx)
+    })
+}
+
+/// A key-bar press while scrolled back snaps to the live screen and asks for
+/// the frame that shows it.
+#[gpui::test]
+fn type_bytes_while_scrolled_back_snaps_to_the_bottom_and_repaints(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    let mut history = String::new();
+    for line in 0..80 {
+        write!(history, "line {line}\r\n").expect("a string write");
+    }
+    h.pty("s1", history.as_bytes());
+    let at = h.cell_center("p1", 0, 0);
+    h.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(400.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    h.cx.run_until_parked();
+    assert!(
+        !visible_text(&mut h).contains("line 79"),
+        "the pane is scrolled back: {:?}",
+        visible_text(&mut h)
+    );
+
+    // What the frame the press must produce is made of: the pane telling its
+    // window it changed.
+    let notified = Rc::new(Cell::new(0));
+    let count = notified.clone();
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        cx.observe(&terminal, move |_, _, _| count.set(count.get() + 1))
+            .detach();
+    });
+    notified.set(0);
+
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.type_bytes(b"x", cx));
+    });
+    assert!(
+        notified.get() > 0,
+        "typed bytes ask for a repaint of the pane"
+    );
+    assert!(
+        visible_text(&mut h).contains("line 79"),
+        "the pane is back on the live screen"
+    );
+}
+
+/// The text pane `p1` shows.
+fn visible_text(h: &mut Harness<'_>) -> String {
+    h.root(|root, cx| root.pane_visible_text("p1", cx))
+        .expect("the pane shows a session")
+}
+
+/// A direct paste claims the size before it sends, as typed input does.
+#[gpui::test]
+fn paste_text_notes_input_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?2004h");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.paste_text("a\nb", "s1", cx));
+    });
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true],
+        "the first paste after idle claims the size"
+    );
+    let resize_at = sent
+        .iter()
+        .position(|m| matches!(m, ClientMessage::Resize { .. }));
+    let input_at = sent
+        .iter()
+        .position(|m| matches!(m, ClientMessage::SendInput { .. }));
+    assert!(input_at.is_some(), "the paste is sent: {sent:?}");
+    assert!(
+        resize_at < input_at,
+        "the claim goes ahead of the paste: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn backspace_from_the_soft_keyboard_sends_del(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    // What the bridge reads before it replaces the unit it deletes.
+    let (text, adjusted) = input(&mut h, |handler, window, cx| {
+        let mut adjusted = None;
+        let text = handler.text_for_range(0..1, &mut adjusted, window, cx);
+        (text, adjusted)
+    });
+    assert_eq!(text.as_deref(), Some(" "), "the phantom document's unit");
+    assert_eq!(adjusted, Some(0..1), "and its range");
+
+    input(&mut h, |handler, window, cx| {
+        handler.replace_text_in_range(Some(0..1), "", window, cx);
+    });
+    assert_eq!(h.sent_input("s1"), b"\x7f");
+}
+
+#[gpui::test]
+fn two_backspaces_send_two_dels(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    for _ in 0..2 {
+        input(&mut h, |handler, window, cx| {
+            handler.replace_text_in_range(Some(0..1), "", window, cx);
+        });
+    }
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x7f\x7f",
+        "the phantom stays, so every Backspace deletes again",
+    );
+}
+
+#[gpui::test]
+fn backspace_inside_a_composition_deletes_one_character(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.compose("p1", "にほ");
+    input(&mut h, |handler, window, cx| {
+        handler.replace_text_in_range(Some(1..2), "", window, cx);
+    });
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "an edit of the composition reaches no program"
+    );
+    assert_eq!(h.marked_text("p1").as_deref(), Some("に"));
+}
+
+/// The length pane `p1`'s input handler reports to the platform.
+fn text_length(h: &mut Harness<'_>) -> Option<usize> {
+    h.root_update(|root, window, cx| {
+        let mut handler = root
+            .pane_input_handler("p1")
+            .expect("the pane has a terminal");
+        handler.text_length_utf16(window, cx)
+    })
 }
 
 /// A key press with no modifiers, as the platform delivers it.
