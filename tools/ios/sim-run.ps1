@@ -7,8 +7,9 @@
 # a pass and .tmp/ios/* on a failure. On the Mac (-OnMac) it builds the
 # simulator bundle (tools/ios/build.ps1), boots the iPhone 17 on iOS 27.0 unless
 # it is already booted, installs and launches the app, waits for its
-# "phone app started" log line, takes .tmp/ios/sim-first.png, then stops the app
-# and shuts the simulator down again if this run booted it.
+# "phone app started" log line with the background-wake method's line before it,
+# takes .tmp/ios/sim-first.png, then stops the app and shuts the simulator down
+# again if this run booted it.
 #
 #   pwsh -NoProfile -File tools/ios/sim-run.ps1
 #
@@ -28,6 +29,10 @@ $BundleId = 'dev.leftos.rustling-tulip.phone'
 $DeviceName = 'iPhone 17'
 $RuntimeMark = 'iOS-27-0'
 $ReadyLine = 'phone app started'
+# The two lines together prove the pre-launch call added the background-push
+# method: the wake line, and no warning that the class was not registered yet.
+$WakeLine = 'phone: background wake method added'
+$WakeLateLine = 'phone: the app delegate class is not registered yet'
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
 $Shot = Join-Path $OutDir 'sim-first.png'
 
@@ -100,6 +105,22 @@ function Wait-ForReadyLine([string[]] $Logs, [Diagnostics.Process] $Launch) {
     throw "no '$ReadyLine' line from the app within 60 s; log tail:`n$($tail -join "`n")"
 }
 
+function Assert-WakeLineBeforeReady([string[]] $Logs) {
+    foreach ($log in $Logs) {
+        if (-not (Test-Path $log)) { continue }
+        if (Select-String -LiteralPath $log -SimpleMatch $WakeLateLine -Quiet) {
+            throw "the app delegate class was not registered before launch ('$WakeLateLine' in the app log); the background-push method was added late"
+        }
+    }
+    foreach ($log in $Logs) {
+        if (-not (Test-Path $log)) { continue }
+        $wake = Select-String -LiteralPath $log -SimpleMatch $WakeLine | Select-Object -First 1
+        $ready = Select-String -LiteralPath $log -SimpleMatch $ReadyLine | Select-Object -First 1
+        if ($wake -and $ready -and $wake.LineNumber -lt $ready.LineNumber) { return }
+    }
+    throw "no '$WakeLine' line before '$ReadyLine'; the background-push method was not added before launch"
+}
+
 function Stop-Run([string] $Udid, [Diagnostics.Process] $Launch, [bool] $Booted) {
     & xcrun simctl terminate $Udid $BundleId
     if ($LASTEXITCODE -ne 0) { Write-Warning "xcrun simctl terminate failed (exit $LASTEXITCODE)" }
@@ -135,6 +156,7 @@ function Invoke-OnMac {
         $launch = Start-Process -FilePath 'xcrun' -PassThru -RedirectStandardOutput $logs[0] -RedirectStandardError $logs[1] `
             -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId)
         Wait-ForReadyLine $logs $launch
+        Assert-WakeLineBeforeReady $logs
         & xcrun simctl io $udid screenshot $Shot
         Assert-LastExit "xcrun simctl io $udid screenshot"
     }

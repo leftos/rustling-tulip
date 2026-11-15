@@ -9,9 +9,11 @@
 //! oneshot channel.
 //!
 //! A background push wakes the app through
-//! `didReceiveRemoteNotification:fetchCompletionHandler:`, added at launch
-//! ([`add_wake_method`]): a clear notice removes its session's Needs you
-//! notification and sets the badge.
+//! `didReceiveRemoteNotification:fetchCompletionHandler:`, added by
+//! [`add_wake_method`] in [`crate::phone::run`] before the app starts, once the
+//! app has registered the platform's delegate classes, with the launch
+//! callback's call as a second try: a clear notice removes its session's Needs
+//! you notification and sets the badge.
 
 use std::ffi::CStr;
 use std::ptr::NonNull;
@@ -425,12 +427,21 @@ type Woken = extern "C-unwind" fn(
 static WAKE_HOOK: OnceLock<()> = OnceLock::new();
 
 /// Adds `application:didReceiveRemoteNotification:fetchCompletionHandler:`
-/// to `gpui_ios`'s delegate class, once; called at launch, so a background
-/// push that wakes the app finds it. A failure is logged, and the
-/// foreground sweep still clears.
+/// to `gpui_ios`'s delegate class, once. [`crate::phone::run`] calls it before
+/// the app starts, after the app has registered the delegate classes, so a
+/// background push that cold-launches the app finds it; `push_platform`'s call
+/// inside the launch callback is a second try for a run where the class was
+/// still missing. A failure is logged, and the foreground sweep still clears.
 pub fn add_wake_method() {
-    WAKE_HOOK.get_or_init(|| {
-        if let Err(err) = add_wake() {
+    let Some(class) = AnyClass::get(DELEGATE_CLASS) else {
+        tracing::warn!(
+            "phone: the app delegate class is not registered yet; the background-push method waits"
+        );
+        return;
+    };
+    WAKE_HOOK.get_or_init(|| match add_wake(class) {
+        Ok(()) => tracing::info!("phone: background wake method added"),
+        Err(err) => {
             tracing::warn!(error = %err, "phone: a background push will not clear notifications");
         }
     });
@@ -440,9 +451,8 @@ pub fn add_wake_method() {
 ///
 /// # Errors
 ///
-/// The class is not registered, or already answers the selector.
-fn add_wake() -> Result<(), String> {
-    let class = AnyClass::get(DELEGATE_CLASS).ok_or("the app delegate class is not registered")?;
+/// The class already answers the selector.
+fn add_wake(class: &AnyClass) -> Result<(), String> {
     // SAFETY: a C-ABI function; the runtime calls it with the `v@:@@@?` signature it is added
     // under, which is the one it declares.
     let woken = unsafe { std::mem::transmute::<Woken, Imp>(did_wake as Woken) };

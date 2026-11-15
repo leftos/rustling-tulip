@@ -54,9 +54,9 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-gpui = { git = "https://github.com/leftos/zed", rev = "2640ed91240892bc212b050bb6eb194b42bc4d02" }
+gpui = { git = "https://github.com/leftos/zed", rev = "80c66b83ccb33ada5dbe611f7e8612dd3f3995b6" }
 # gpui 0.2.2 turned these on by default; without `font-kit` macOS draws no text.
-gpui_platform = { git = "https://github.com/leftos/zed", rev = "2640ed91240892bc212b050bb6eb194b42bc4d02", features = [
+gpui_platform = { git = "https://github.com/leftos/zed", rev = "80c66b83ccb33ada5dbe611f7e8612dd3f3995b6", features = [
     "font-kit",
     "wayland",
     "x11",
@@ -242,7 +242,7 @@ agent-api = { workspace = true, features = ["test-support"] }
 agent-registry = { workspace = true, features = ["test-support"] }
 # The live tier's isolated daemon, which `tests/support/live.rs` wraps.
 dev-daemon = { workspace = true }
-gpui = { git = "https://github.com/leftos/zed", rev = "2640ed91240892bc212b050bb6eb194b42bc4d02", features = ["test-support"] }
+gpui = { git = "https://github.com/leftos/zed", rev = "80c66b83ccb33ada5dbe611f7e8612dd3f3995b6", features = ["test-support"] }
 png = "0.18"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.
 tokio = { workspace = true, features = ["test-util"] }

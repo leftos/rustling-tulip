@@ -28,14 +28,19 @@ use crate::{
 use push::PushPlatform;
 pub use root_view::PhoneRoot;
 
-/// Starts the phone app: logging to stderr, then one full-screen window.
-/// `on_start` runs first inside the app, before the window opens.
-pub fn run(on_start: impl FnOnce(&mut App) + 'static) {
+/// Starts the phone app: logging to stderr, then `register_delegates` (which
+/// registers the platform's app delegate classes before the app starts, so the
+/// background-push method can be added to them first), then one full-screen
+/// window. `on_start` runs first inside the app, before the window opens.
+pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 'static) {
     // Another subscriber already set is the only error, and it still logs.
     let _already_set = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();
+    register_delegates();
+    #[cfg(target_os = "ios")]
+    push_ios::add_wake_method();
     gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .run(move |cx: &mut App| {
