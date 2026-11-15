@@ -91,6 +91,7 @@ mod host_update;
 mod host_update_dialog;
 mod hosts;
 mod html_media;
+pub mod keyboard;
 mod keys;
 pub mod launch_last;
 mod layout_chooser;

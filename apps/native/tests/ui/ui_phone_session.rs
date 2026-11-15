@@ -16,9 +16,10 @@ use gpui::{
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, SessionSnapshot, ToolKind, ToolOutcome,
+    ComposerState, DaemonMessage, FEATURE_FILE_TAIL, SessionSnapshot, ToolKind, ToolOutcome,
 };
 use rustling_tulip_native::chat::RowShape;
+use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -1614,5 +1615,190 @@ fn a_tap_on_a_stretch_opens_its_long_form(cx: &mut TestAppContext) {
         stretch_links(&mut h),
         [("\u{2039}".to_owned(), key)],
         "one tap opens the stretch, leaving its closer as the answer's only link"
+    );
+}
+
+// ── Putting the keyboard away ──────────────────────────────────────────────
+
+/// The last call the app made on the on-screen keyboard, if any.
+fn last_keyboard_call() -> Option<KeyboardCall> {
+    keyboard_calls().last().copied()
+}
+
+#[gpui::test]
+fn a_tap_on_the_chat_lowers_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    clear_keyboard_calls();
+
+    h.tap_on("chat-row-phone-u1");
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "a tap anywhere on the chat puts the keyboard away"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_stretch_with_the_keyboard_up_opens_it_and_lowers_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![stretched("a1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    let [(_, key)]: [(String, String); 1] = stretch_links(&mut h)
+        .try_into()
+        .expect("the answer draws one closed stretch");
+    let answer = h.bounds("chat-row-phone-a1");
+    let at = point(
+        answer.origin.x + px(30.0),
+        answer.origin.y + answer.size.height / 2.0,
+    );
+    clear_keyboard_calls();
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        stretch_links(&mut h),
+        [("\u{2039}".to_owned(), key)],
+        "the stretch still opens on the one tap"
+    );
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "and the keyboard goes away under it"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_chat_with_the_keyboard_down_calls_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(0.0))));
+    clear_keyboard_calls();
+
+    h.tap_on("chat-row-phone-u1");
+
+    assert_eq!(
+        keyboard_calls(),
+        [],
+        "a tap on the chat with no keyboard up calls nothing"
+    );
+}
+
+#[gpui::test]
+fn the_composer_shows_hide_keyboard_only_while_the_keyboard_is_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    assert!(
+        !drawn(&mut h, "phone-composer-hide"),
+        "no Hide keyboard button with the keyboard down"
+    );
+
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+
+    assert!(
+        drawn(&mut h, "phone-composer-hide"),
+        "Hide keyboard shows with the keyboard up"
+    );
+    let hide = h.bounds("phone-composer-hide");
+    let keys = h.bounds("phone-composer-keys");
+    assert!(
+        hide.origin.x > keys.origin.x,
+        "Hide follows Keys: {hide:?} after {keys:?}"
+    );
+    assert!(
+        hide.size.height >= touch_target(),
+        "Hide is a touch target: {hide:?}"
+    );
+}
+
+#[gpui::test]
+fn hide_keyboard_lowers_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    clear_keyboard_calls();
+
+    h.tap_on("phone-composer-hide");
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "the composer's Hide keyboard button puts the keyboard away"
+    );
+}
+
+// ── The chat's own buttons ─────────────────────────────────────────────────
+
+/// The file `tailing_tool`'s call writes.
+const LOG: &str = "C:/work/build.log";
+
+/// A shell call `id` that writes [`LOG`], offering its Tail button.
+fn tailing_tool(id: &str) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "Bash".to_owned(),
+        summary: "cargo build > build.log".to_owned(),
+        input: "{\"command\": \"cargo build > build.log\"}".to_owned(),
+        result: None,
+        parent_id: None,
+        tail_paths: vec![LOG.to_owned()],
+        kind: ToolKind::Other,
+    }
+}
+
+/// Session `a`'s page over a daemon that follows files, its chat's load
+/// answered with `entries`.
+fn chat_loaded_tailing<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(&[FEATURE_FILE_TAIL]);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, entries));
+    h
+}
+
+#[gpui::test]
+fn a_tap_on_a_tail_button_with_the_keyboard_up_opens_its_box_and_lowers_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_tailing(cx, &dir, vec![tailing_tool("t1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    assert!(drawn(&mut h, "chat-tail-t1-0"), "the card offers its file");
+    clear_keyboard_calls();
+
+    h.tap_on("chat-tail-t1-0");
+
+    assert!(
+        drawn(&mut h, "chat-tail-box-t1-0"),
+        "the box opens under the card, whose handler stops the click"
+    );
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "and the keyboard goes away whatever the card's button stopped"
     );
 }

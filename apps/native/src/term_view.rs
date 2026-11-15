@@ -105,6 +105,9 @@ pub struct TerminalPane {
     /// tab's focused one, which the grid records before the press reaches
     /// this pane. Read in `on_mouse_down`.
     inactive_pane_at_press: bool,
+    /// Whether the phone's on-screen keyboard is up over this terminal: a
+    /// tap on it then puts the keyboard away and goes no further.
+    phone_keyboard_up: bool,
     /// Whether this pane may size the session's PTY yet.
     size_gate: SizeGate,
     /// Whether this pane answers its session's terminal queries: one pane
@@ -643,6 +646,7 @@ impl TerminalPane {
             last_motion: None,
             focused_at_press: false,
             inactive_pane_at_press: false,
+            phone_keyboard_up: false,
             size_gate: SizeGate::default(),
             answers_queries: false,
             marked: None,
@@ -1821,6 +1825,12 @@ impl TerminalPane {
         self.inactive_pane_at_press = inactive;
     }
 
+    /// Records whether the phone's on-screen keyboard is up over this
+    /// terminal; a desktop pane's stays false.
+    pub(crate) fn set_phone_keyboard_up(&mut self, up: bool) {
+        self.phone_keyboard_up = up;
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1836,12 +1846,18 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // A tap is the phone's editing gesture: the soft keyboard comes up for
-        // it, as it does on a text field. A first-mouse press only brings the
-        // window forward, and a session that takes no input has nothing to
-        // type into.
+        // On the phone a tap toggles the soft keyboard: while it is up, the
+        // tap puts it away and goes no further, so nothing reaches the
+        // program and no selection starts; while it is down, the tap raises
+        // it as a text field does. A first-mouse press only brings the window
+        // forward, and a session that takes no input has nothing to type
+        // into.
+        if event.button == MouseButton::Left && !event.first_mouse && self.phone_keyboard_up {
+            crate::keyboard::lower(window);
+            return;
+        }
         if event.button == MouseButton::Left && !event.first_mouse && self.accepts_input() {
-            window.request_virtual_keyboard();
+            crate::keyboard::raise(window);
         }
         // Ctrl+click on a URL or a path opens it, and Ctrl+Shift+click on a path
         // opens the link menu, ahead of a selection or a mouse

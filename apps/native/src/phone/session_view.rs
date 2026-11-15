@@ -4,7 +4,8 @@
 //! takes the back gesture. It only renders and forwards taps.
 
 use gpui::{
-    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, Window, div, prelude::*, px,
+    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Window, div,
+    prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -17,6 +18,7 @@ use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_f
 use crate::chat_view::chat_available;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
+use crate::keyboard;
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 
@@ -31,8 +33,59 @@ const PASTE_LABEL: &str = "Paste";
 const QUICK_LABEL: &str = "Quick";
 /// The Keys tray's button's label.
 const KEYS_LABEL: &str = "Keys";
+/// The Hide keyboard button's label.
+const HIDE_LABEL: &str = "Hide keyboard";
 /// The room between the composer's rows, and between its buttons.
 const COMPOSER_GAP: f32 = 8.0;
+
+/// One of the composer row's buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerButton {
+    /// Paste the clipboard's text into the field.
+    Paste,
+    /// Open the Quick replies' dock.
+    Quick,
+    /// Open the Keys tray's dock.
+    Keys,
+    /// Put the on-screen keyboard away.
+    Hide,
+}
+
+impl ComposerButton {
+    /// The button's driver id.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Paste => "phone-composer-paste",
+            Self::Quick => "phone-composer-quick",
+            Self::Keys => "phone-composer-keys",
+            Self::Hide => "phone-composer-hide",
+        }
+    }
+
+    /// The label drawn on the button.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Paste => PASTE_LABEL,
+            Self::Quick => QUICK_LABEL,
+            Self::Keys => KEYS_LABEL,
+            Self::Hide => HIDE_LABEL,
+        }
+    }
+}
+
+/// The composer row's buttons in the order it draws them: Paste, Quick and
+/// Keys, and Hide keyboard while the on-screen keyboard is up.
+fn buttons_shown(keyboard_up: bool) -> Vec<ComposerButton> {
+    let mut buttons = vec![
+        ComposerButton::Paste,
+        ComposerButton::Quick,
+        ComposerButton::Keys,
+    ];
+    if keyboard_up {
+        buttons.push(ComposerButton::Hide);
+    }
+    buttons
+}
 
 impl PhoneRoot {
     /// Whether `host`'s session `session_id` mirrors its chat now.
@@ -163,9 +216,21 @@ impl PhoneRoot {
         }
     }
 
+    /// A release anywhere in the shown session's chat body: while the
+    /// on-screen keyboard is up it goes away, whatever child handled the
+    /// release, since this runs in the capture phase before any of them. A
+    /// pan never reaches here: it is delivered as scroll events with no
+    /// mouse release, so a drag that scrolls the chat leaves the keyboard.
+    fn chat_tapped(keyboard_up: bool, window: &mut Window) {
+        if keyboard_up {
+            keyboard::lower(window);
+        }
+    }
+
     /// While a session is shown: its page, the header over the body of the
-    /// page it is on.
-    pub(super) fn session_page(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// page it is on, with whether the on-screen keyboard is up for the
+    /// composer's buttons and the chat's tap.
+    pub(super) fn session_page(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Option<Div> {
         let header = self.session_header(cx)?;
         let page = self.shown_page(header.chat_mirrored);
         let t = theme(cx);
@@ -174,10 +239,13 @@ impl PhoneRoot {
         let body = match page {
             Page::Chat => {
                 let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
+                let on_tap = cx.listener(move |_, _: &MouseUpEvent, window, _| {
+                    Self::chat_tapped(keyboard_up, window);
+                });
                 let chat = self
                     .root
-                    .update(cx, |root, cx| root.phone_chat_body(&id, cx));
-                let composer = self.composer(&id, cx);
+                    .update(cx, |root, cx| root.phone_chat_body(&id, on_tap, cx));
+                let composer = self.composer(&id, keyboard_up, cx);
                 div()
                     .driver_id(|| "phone-session-chat".to_owned())
                     .flex()
@@ -190,7 +258,7 @@ impl PhoneRoot {
             }
             Page::Terminal => {
                 let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
-                self.terminal_page(&id, cx)
+                self.terminal_page(&id, keyboard_up, cx)
             }
         };
         Some(
@@ -207,9 +275,8 @@ impl PhoneRoot {
 
     /// The shown session's composer under its chat: the Quick or Keys dock
     /// while one is open, the note saying why it cannot send, the field with
-    /// Send, and the Paste, Quick and Keys buttons under them. None before
-    /// the chat has loaded.
-    fn composer(&self, session_id: &str, cx: &mut Context<Self>) -> Option<Div> {
+    /// Send, and the buttons under them. None before the chat has loaded.
+    fn composer(&self, session_id: &str, keyboard_up: bool, cx: &mut Context<Self>) -> Option<Div> {
         let (input, note, enabled, error) = {
             let root = self.root.read(cx);
             (
@@ -289,7 +356,7 @@ impl PhoneRoot {
                         .text_color(gpui::rgb(t.danger))
                         .child(reason)
                 }))
-                .child(Self::composer_buttons(cx)),
+                .child(Self::composer_buttons(keyboard_up, cx)),
         )
     }
 
@@ -307,32 +374,38 @@ impl PhoneRoot {
                 .is_some()
     }
 
-    /// The three buttons under the composer's field: Paste, and the Quick
-    /// and Keys docks' buttons.
-    fn composer_buttons(cx: &mut Context<Self>) -> Div {
-        let paste = phone_button("phone-composer-paste", ButtonKind::Outlined, cx)
-            .min_h(px(TOUCH_TARGET))
-            .flex_1()
-            .child(PASTE_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.paste_into_composer(window, cx);
-            }));
-        let quick = phone_button("phone-composer-quick", ButtonKind::Outlined, cx)
-            .min_h(px(TOUCH_TARGET))
-            .flex_1()
-            .child(QUICK_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_quick(cx)));
-        let keys = phone_button("phone-composer-keys", ButtonKind::Outlined, cx)
-            .min_h(px(TOUCH_TARGET))
-            .flex_1()
-            .child(KEYS_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_keys(cx)));
-        div()
-            .flex()
-            .gap(px(COMPOSER_GAP))
-            .child(paste)
-            .child(quick)
-            .child(keys)
+    /// The buttons under the composer's field, in the order
+    /// [`buttons_shown`] gives them: Paste, Quick and Keys, and Hide
+    /// keyboard while the on-screen keyboard is up.
+    fn composer_buttons(keyboard_up: bool, cx: &mut Context<Self>) -> Div {
+        let mut row = div().flex().gap(px(COMPOSER_GAP));
+        for button in buttons_shown(keyboard_up) {
+            let drawn = phone_button(button.id(), ButtonKind::Outlined, cx)
+                .min_h(px(TOUCH_TARGET))
+                .flex_1()
+                .child(button.label());
+            let drawn = match button {
+                ComposerButton::Paste => {
+                    drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.paste_into_composer(window, cx);
+                    }))
+                }
+                ComposerButton::Quick => drawn.on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_quick(cx)),
+                ),
+                ComposerButton::Keys => drawn.on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_keys(cx)),
+                ),
+                ComposerButton::Hide => {
+                    drawn.on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
+                        keyboard::lower(window);
+                        cx.notify();
+                    }))
+                }
+            };
+            row = row.child(drawn);
+        }
+        row
     }
 
     /// Paste's tap: the clipboard's text goes into the composer's field at
@@ -536,4 +609,36 @@ fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App) -> Div {
         .text_size(ui_px(cx, STATUS_TEXT_SIZE))
         .text_color(gpui::rgb(tone_color(tone, t)))
         .child(word)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ComposerButton, buttons_shown};
+
+    #[test]
+    fn the_composer_shows_hide_keyboard_only_while_the_keyboard_is_up() {
+        let ids = |keyboard_up: bool| -> Vec<&'static str> {
+            buttons_shown(keyboard_up)
+                .into_iter()
+                .map(ComposerButton::id)
+                .collect()
+        };
+        assert_eq!(
+            ids(false),
+            [
+                "phone-composer-paste",
+                "phone-composer-quick",
+                "phone-composer-keys"
+            ]
+        );
+        assert_eq!(
+            ids(true),
+            [
+                "phone-composer-paste",
+                "phone-composer-quick",
+                "phone-composer-keys",
+                "phone-composer-hide"
+            ]
+        );
+    }
 }

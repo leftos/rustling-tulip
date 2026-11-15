@@ -12,6 +12,7 @@ use protocol::{
     DaemonMessage, SessionSnapshot,
 };
 use rustling_tulip_native::chat::PaneView;
+use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -732,4 +733,125 @@ fn the_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-prompt-sheet"));
     assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
     assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
+}
+
+// ── Putting the keyboard away ──────────────────────────────────────────────
+
+/// Draws the phone with the on-screen keyboard up or down.
+fn draw_keyboard(h: &mut Harness<'_>, up: bool) {
+    let keyboard = if up { px(336.0) } else { px(0.0) };
+    phone_update(h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(keyboard)), cx);
+    });
+}
+
+/// The last call the app made on the on-screen keyboard, if any.
+fn last_keyboard_call() -> Option<KeyboardCall> {
+    keyboard_calls().last().copied()
+}
+
+#[gpui::test]
+fn the_key_bar_shows_hide_only_while_the_keyboard_is_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    draw_keyboard(&mut h, false);
+    assert!(
+        !drawn(&mut h, "phone-bar-hide"),
+        "no Hide key with the keyboard down"
+    );
+
+    draw_keyboard(&mut h, true);
+
+    assert!(
+        drawn(&mut h, "phone-bar-hide"),
+        "Hide shows at the bar's end with the keyboard up"
+    );
+    let hide = h.bounds("phone-bar-hide");
+    let quick = h.bounds("phone-bar-quick");
+    assert!(
+        hide.origin.x > quick.origin.x,
+        "Hide is the bar's last key: {hide:?} after {quick:?}"
+    );
+    assert!(
+        hide.size.height >= touch_target(),
+        "Hide is a touch target: {hide:?}"
+    );
+}
+
+#[gpui::test]
+fn the_hide_key_lowers_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    draw_keyboard(&mut h, true);
+    clear_keyboard_calls();
+
+    h.tap_on("phone-bar-hide");
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "the bar's Hide key puts the keyboard away"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_terminal_with_the_keyboard_up_lowers_it_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    draw_keyboard(&mut h, true);
+    h.host(&saved_remote()).sent();
+    clear_keyboard_calls();
+
+    h.tap_on("phone-session-terminal");
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "the tap puts the keyboard away"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SendInput { .. })),
+        "the tap reaches no program: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_terminal_with_the_keyboard_down_raises_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    draw_keyboard(&mut h, false);
+    clear_keyboard_calls();
+
+    h.tap_on("phone-session-terminal");
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Raise),
+        "the tap brings the keyboard up"
+    );
+}
+
+#[gpui::test]
+fn the_key_bar_fits_a_375_point_phone_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(375.0), px(812.0)));
+    draw_keyboard(&mut h, true);
+
+    let width = h.window_width();
+    let hide = h.bounds("phone-bar-hide");
+    assert!(
+        f32::from(hide.right()) <= width - 16.0 + 1.0,
+        "the bar ends inside the phone: {hide:?} in {width} px"
+    );
+    for key in BAR_KEYS.into_iter().chain(["phone-bar-hide"]) {
+        let bounds = h.bounds(key);
+        assert!(
+            bounds.size.height >= touch_target(),
+            "{key} is {bounds:?}, under a touch target"
+        );
+    }
 }

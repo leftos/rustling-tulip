@@ -4,7 +4,8 @@
 
 use gpui::{Keystroke, Modifiers};
 
-/// The bar's keys in the order it draws them.
+/// The bar's keys in the order it draws them; [`shown`] adds the Hide key
+/// at their end while the on-screen keyboard is up.
 pub(crate) const KEYS: &[Key] = &[
     Key::Esc,
     Key::Tab,
@@ -16,6 +17,17 @@ pub(crate) const KEYS: &[Key] = &[
     Key::Paste,
     Key::Quick,
 ];
+
+/// The keys the bar draws: [`KEYS`], and Hide after them while the on-screen
+/// keyboard is up.
+#[must_use]
+pub(crate) fn shown(keyboard_up: bool) -> Vec<Key> {
+    let mut keys = KEYS.to_vec();
+    if keyboard_up {
+        keys.push(Key::Hide);
+    }
+    keys
+}
 
 /// One key of the phone terminal's bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +50,8 @@ pub(crate) enum Key {
     Paste,
     /// Open the Quick replies.
     Quick,
+    /// Put the on-screen keyboard away.
+    Hide,
 }
 
 impl Key {
@@ -53,6 +67,7 @@ impl Key {
             Self::Right => "right",
             Self::Paste => "paste",
             Self::Quick => "quick",
+            Self::Hide => "hide",
         }
     }
 
@@ -68,6 +83,7 @@ impl Key {
             Self::Right => "→",
             Self::Paste => "Paste",
             Self::Quick => "Quick",
+            Self::Hide => "Hide",
         }
     }
 }
@@ -81,6 +97,8 @@ pub(crate) enum Action {
     Paste,
     /// Open the Quick replies.
     Quick,
+    /// Put the on-screen keyboard away.
+    Hide,
     /// Nothing: the Ctrl key only arms.
     None,
 }
@@ -102,7 +120,7 @@ impl KeyBar {
         self.armed
     }
 
-    /// A tap on `key`: Ctrl toggles arming, Paste and Quick yield their
+    /// A tap on `key`: Ctrl toggles arming, Paste, Quick and Hide yield their
     /// action and leave arming as it is, and the rest send their keystroke
     /// and disarm Ctrl.
     pub(crate) fn press(&mut self, key: Key) -> Action {
@@ -113,6 +131,7 @@ impl KeyBar {
             }
             Key::Paste => Action::Paste,
             Key::Quick => Action::Quick,
+            Key::Hide => Action::Hide,
             Key::Esc => self.terminal_key("escape"),
             Key::Tab => self.terminal_key("tab"),
             Key::Up => self.terminal_key("up"),
@@ -179,7 +198,7 @@ mod tests {
 
     use crate::term_input::{CopyKeys, KeyAction, key_action};
 
-    use super::{Action, KEYS, Key, KeyBar};
+    use super::{Action, KEYS, Key, KeyBar, shown};
 
     fn stroke(name: &str, control: bool) -> Keystroke {
         Keystroke {
@@ -209,6 +228,22 @@ mod tests {
                 ("Quick", "quick"),
             ]
         );
+    }
+
+    #[test]
+    fn the_hide_key_shows_only_while_the_keyboard_is_up() {
+        assert_eq!(shown(false), KEYS);
+        let up = shown(true);
+        assert_eq!(up.len(), KEYS.len() + 1);
+        assert_eq!(up.last(), Some(&Key::Hide), "Hide draws at the bar's end");
+    }
+
+    #[test]
+    fn hide_yields_its_action_and_leaves_ctrl_armed() {
+        let mut bar = KeyBar::new();
+        bar.press(Key::Ctrl);
+        assert_eq!(bar.press(Key::Hide), Action::Hide);
+        assert!(bar.armed(), "Hide leaves Ctrl armed");
     }
 
     #[test]

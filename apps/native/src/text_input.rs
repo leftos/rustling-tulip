@@ -528,7 +528,7 @@ impl TextInput {
     ) {
         self.focus_handle.focus(window, cx);
         if !self.read_only {
-            window.request_virtual_keyboard();
+            crate::keyboard::raise(window);
         }
         self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);

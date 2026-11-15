@@ -26,14 +26,20 @@ use crate::ui_theme::theme;
 /// The room between the bar's keys, and around the bar.
 const BAR_GAP: f32 = 4.0;
 
+/// The horizontal padding of each of the bar's keys, narrow enough for ten
+/// of them to share a phone's width.
+const BAR_KEY_PAD: f32 = 6.0;
+
 impl PhoneRoot {
     /// Opens the shown session's terminal while its Terminal page shows and
     /// closes it otherwise; a terminal newly opened gets a fresh key bar,
     /// the keyboard's focus and the bar's sticky Ctrl for typed text. While
     /// it is open, a changed bottom inset (the keyboard rose or fell) has
-    /// its next size claim the PTY.
+    /// its next size claim the PTY, and the terminal records whether the
+    /// keyboard is up, which decides whether a tap puts it away.
     pub(super) fn sync_terminal(
         &mut self,
+        keyboard_up: bool,
         inset_bottom: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -49,6 +55,9 @@ impl PhoneRoot {
         self.root.update(cx, |root, cx| {
             root.open_phone_terminal(&host, &session_id, window, cx);
         });
+        if let Some(pane) = self.terminal_pane(cx) {
+            pane.update(cx, |pane, _| pane.set_phone_keyboard_up(keyboard_up));
+        }
         let wanted = (host, session_id);
         if self.terminal_open.as_ref() != Some(&wanted) {
             tracing::debug!(
@@ -107,7 +116,12 @@ impl PhoneRoot {
 
     /// The Terminal page's body: the terminal filling it, the Quick replies
     /// while they are open, and the key bar.
-    pub(super) fn terminal_page(&self, session_id: &str, cx: &mut Context<Self>) -> Div {
+    pub(super) fn terminal_page(
+        &self,
+        session_id: &str,
+        keyboard_up: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let screen = div()
             .driver_id(|| "phone-session-terminal".to_owned())
             .flex()
@@ -132,12 +146,12 @@ impl PhoneRoot {
             .min_h_0()
             .child(screen)
             .children(quick)
-            .child(self.key_bar_row(cx))
+            .child(self.key_bar_row(keyboard_up, cx))
     }
 
     /// The key bar: one row of the bar's keys in order, Ctrl lit while it
-    /// is armed.
-    fn key_bar_row(&self, cx: &mut Context<Self>) -> Div {
+    /// is armed, and Hide at its end while the on-screen keyboard is up.
+    fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.key_bar.borrow().armed();
         let mut bar = div()
             .driver_id(|| "phone-key-bar".to_owned())
@@ -146,7 +160,7 @@ impl PhoneRoot {
             .gap(px(BAR_GAP))
             .px(px(SIDE_PADDING))
             .py(px(BAR_GAP));
-        for &key in key_bar::KEYS {
+        for key in key_bar::shown(keyboard_up) {
             let kind = if key == Key::Ctrl && armed {
                 ButtonKind::Primary
             } else {
@@ -157,9 +171,10 @@ impl PhoneRoot {
                     .flex_1()
                     .min_w_0()
                     .min_h(px(TOUCH_TARGET))
+                    .px(px(BAR_KEY_PAD))
                     .child(key.label())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.tap_bar(key, cx);
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.tap_bar(key, window, cx);
                     })),
             );
         }
@@ -167,9 +182,9 @@ impl PhoneRoot {
     }
 
     /// A tap on the bar's `key`: its keystroke through the terminal, the
-    /// clipboard's text pasted, the Quick replies opened or closed, or
-    /// Ctrl armed or disarmed.
-    fn tap_bar(&mut self, key: Key, cx: &mut Context<Self>) {
+    /// clipboard's text pasted, the Quick replies opened or closed, Ctrl
+    /// armed or disarmed, or the on-screen keyboard put away.
+    fn tap_bar(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
         let action = self.key_bar.borrow_mut().press(key);
         let pane = self.terminal_pane(cx);
         match action {
@@ -180,6 +195,7 @@ impl PhoneRoot {
             }
             Action::Paste => Self::paste_into_terminal(pane, self.terminal_session(), cx),
             Action::Quick => self.terminal_quick = !self.terminal_quick,
+            Action::Hide => crate::keyboard::lower(window),
             Action::None => {}
         }
         cx.notify();

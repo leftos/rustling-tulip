@@ -1059,8 +1059,9 @@ impl Render for PhoneRoot {
             .clone()
             .unwrap_or_else(|| window.insets());
         let padding = content_padding(&insets);
-        self.sync_terminal(padding.bottom, window, cx);
-        let body = if let Some(page) = self.session_page(cx) {
+        let keyboard_up = crate::keyboard::is_up(&insets);
+        self.sync_terminal(keyboard_up, padding.bottom, window, cx);
+        let body = if let Some(page) = self.session_page(keyboard_up, cx) {
             page
         } else if hosts_view::any_host_open(self.root.read(cx)) {
             self.list_body(cx)

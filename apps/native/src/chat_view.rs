@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Autocapitalize, ClickEvent, Context, Div, ElementId, Entity, Focusable,
-    KeyDownEvent, Keystroke, ScrollEvent, ScrollHandle, SharedString, Subscription, Task,
-    TextInputAction, TextInputConfiguration, Window, WindowId, div, prelude::*, px, relative,
+    KeyDownEvent, Keystroke, MouseUpEvent, ScrollEvent, ScrollHandle, SharedString, Subscription,
+    Task, TextInputAction, TextInputConfiguration, Window, WindowId, div, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -2222,8 +2222,15 @@ impl RootView {
     /// tagged `phone-chat`: its rows (Compact, at the page's full width,
     /// with no final-reply box, folding only runs of four or more calls) or
     /// the loading or empty note, over the running-work strip while work
-    /// runs.
-    pub(crate) fn phone_chat_body(&self, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// runs. A release anywhere in it reaches `on_up` first, in the capture
+    /// phase, before the row, link or button the tap hit acts, which is how
+    /// the phone puts the keyboard away whatever a child does with the click.
+    pub(crate) fn phone_chat_body(
+        &self,
+        session_id: &str,
+        on_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let look = RowLook {
             mode: ChatMode::Compact,
             max_width: None,
@@ -2241,12 +2248,14 @@ impl RootView {
             None => self.rows_and_strip(&look, cx),
         };
         div()
+            .id(ElementId::Name(SharedString::from("phone-chat")))
             .driver_id(|| "phone-chat".to_owned())
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .size_full()
+            .capture_any_mouse_up(on_up)
             .child(main)
             .children(strip)
             .into_any_element()
