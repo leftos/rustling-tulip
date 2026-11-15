@@ -1749,6 +1749,7 @@ fn tailing_tool(id: &str) -> ChatEntry {
         parent_id: None,
         tail_paths: vec![LOG.to_owned()],
         kind: ToolKind::Other,
+        script: None,
     }
 }
 
