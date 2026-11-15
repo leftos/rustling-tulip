@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Answering a question from a toast, the Dashboard or the phone works again when Claude draws the question's box indented.
 - A session in a tab or split you haven't looked at yet now fills its pane to the bottom when first shown, instead of leaving blank rows.
 - Another computer on your tailnet stays connected while the host PC is busy, and gets straight back in when it reconnects then.
+- A selected choice in a question card with several answers keeps its description readable, instead of fading into the filled button.
 
 ### Changed
 

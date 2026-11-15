@@ -839,7 +839,7 @@ fn card_button(
             .when_some(option.description.as_deref(), |row, description| {
                 let number = option.number;
                 row.child(
-                    small(offset, description, t.text_2)
+                    small(offset, description, option_description_color(selected, t))
                         .driver_id(move || format!("chat-card-option-desc-{number}")),
                 )
             }),
@@ -863,6 +863,13 @@ fn card_button(
             .into_any_element(),
         None => base.into_any_element(),
     }
+}
+
+/// The colour of an option's description under its label: the filled
+/// button's text colour while a multi-select option is selected, else the
+/// secondary text colour.
+fn option_description_color(selected: bool, t: &UiTheme) -> u32 {
+    if selected { t.on_accent } else { t.text_2 }
 }
 
 /// The card's text box (`chat-card-box`), filling the rest of its row.
@@ -906,6 +913,7 @@ mod tests {
     use super::{
         AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, allow_once_option,
         always_allow_option, card_answer_message, card_buttons, deny_option, key_action,
+        option_description_color,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
 
@@ -1595,5 +1603,33 @@ mod tests {
             "the gone card's refusal is still ours"
         );
         assert!(cards.is_busy("p2"));
+    }
+
+    #[test]
+    fn a_selected_options_description_takes_the_filled_buttons_text_colour() {
+        for (id, _, theme) in crate::builtin_themes::BUILT_INS {
+            assert_eq!(
+                option_description_color(true, theme),
+                theme.on_accent,
+                "{id}: a selected option's description takes the filled button's text colour"
+            );
+            let ratio =
+                crate::contrast::ratio(option_description_color(true, theme), theme.primary);
+            assert!(
+                ratio >= 4.5,
+                "{id}: a selected option's description is {ratio:.2}:1 on the primary fill"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unselected_options_description_stays_secondary_text() {
+        for (id, _, theme) in crate::builtin_themes::BUILT_INS {
+            assert_eq!(
+                option_description_color(false, theme),
+                theme.text_2,
+                "{id}: an unselected option's description stays the secondary text colour"
+            );
+        }
     }
 }
