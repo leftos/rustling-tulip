@@ -24,6 +24,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Another computer on your tailnet stays connected while the host PC is busy, and gets straight back in when it reconnects then.
 - A selected choice in a question card with several answers keeps its description readable, instead of fading into the filled button.
 - On the iPhone, one tap on a short summary in Chat opens its full text, and a single tap follows a link in Chat.
+- Chat sends your message when Claude's prompt box shows only its suggested next prompt, instead of calling it a draft.
 
 ### Changed
 
