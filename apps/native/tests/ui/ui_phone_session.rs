@@ -1,0 +1,345 @@
+//! The phone's session page: a header with Back, the session's label and
+//! Home's status word, and at its right end a Terminal toggle shown only
+//! for a running session whose chat is mirrored; the toggle flips between
+//! the Chat and Terminal pages, and Back or a committed back gesture takes
+//! one step back, from the Terminal page to the Chat page, else to Home.
+
+use crate::support;
+
+use daemon_client::device_tokens::DeviceTokenStore as _;
+use gpui::{BackGesturePhase, Edges, Pixels, TestAppContext, WindowInsets, point, px};
+use protocol::{DaemonMessage, SessionSnapshot};
+use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::target::{HostKey, Target};
+use rustling_tulip_native::{Connection, NetEvent};
+use serde_json::json;
+use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+
+/// The least height of a row or a target.
+fn touch_target() -> Pixels {
+    px(44.0)
+}
+
+/// The selector of the saved host's row for session `id`.
+fn row(id: &str) -> String {
+    let wire = HostKey::of(&saved_remote())
+        .wire()
+        .expect("a tailnet host has a wire key")
+        .to_owned();
+    format!("phone-home-row-{wire}::{id}")
+}
+
+/// Whether the last frame drew what `selector` tags.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.width > px(0.0)
+}
+
+/// Reads the phone's root.
+fn phone<R>(h: &mut Harness<'_>, read: impl FnOnce(&PhoneRoot, &gpui::App) -> R) -> R {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        read(phone.read(cx), cx)
+    })
+}
+
+/// The id of the session the phone shows in place of Home.
+fn shown(h: &mut Harness<'_>) -> Option<String> {
+    phone(h, |phone, _| {
+        phone.shown_session().map(|(_, id)| id.to_owned())
+    })
+}
+
+/// `a` working with a mirrored chat, `e` stopped, `n` with no agent and
+/// so no chat, all in r1.
+fn listed() -> Vec<SessionSnapshot> {
+    vec![
+        session("a")
+            .label("Alpha")
+            .in_repo("r1")
+            .status("working")
+            .build(),
+        session("e")
+            .label("Echo")
+            .in_repo("r1")
+            .status("stopped")
+            .build(),
+        session("n")
+            .label("November")
+            .in_repo("r1")
+            .status("working")
+            .no_agent()
+            .build(),
+    ]
+}
+
+/// A phone with the saved [`REMOTE`] open, listing [`listed`].
+fn open_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+    h
+}
+
+/// A phone showing session `id`'s page.
+fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Harness<'a> {
+    let mut h = open_phone(cx, dir);
+    h.click_on(&row(id));
+    assert_eq!(shown(&mut h).as_deref(), Some(id));
+    h
+}
+
+/// A back gesture in `phase` from the page's leading edge.
+fn back_gesture(h: &mut Harness<'_>, phase: BackGesturePhase) {
+    let page = h.bounds("phone-session");
+    let at = point(page.origin.x + px(4.0), page.origin.y + px(200.0));
+    h.back_gesture(phase, at);
+}
+
+#[gpui::test]
+fn the_header_shows_back_label_and_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    assert!(drawn(&mut h, "phone-session-back"));
+    assert!(h.bounds("phone-session-back").size.height >= touch_target());
+    assert!(drawn(&mut h, "phone-session-label"));
+    assert!(drawn(&mut h, "phone-session-status"));
+    let (label, status) = phone(&mut h, |phone, cx| {
+        (phone.session_label(cx), phone.session_status(cx))
+    });
+    assert_eq!(label.as_deref(), Some("Alpha"));
+    assert_eq!(status, Some("Working"), "Home's word for the row");
+}
+
+#[gpui::test]
+fn the_terminal_toggle_shows_for_a_live_session_with_a_mirrored_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    assert!(drawn(&mut h, "phone-session-toggle"));
+    assert!(h.bounds("phone-session-toggle").size.height >= touch_target());
+    assert!(
+        h.bounds("phone-session-toggle").origin.x > h.bounds("phone-session-label").origin.x,
+        "the toggle sits right of the label"
+    );
+    let toggle = phone(&mut h, PhoneRoot::session_toggle);
+    assert_eq!(toggle, Some("Terminal"));
+    assert!(drawn(&mut h, "phone-session-chat"), "it opens on the chat");
+}
+
+#[gpui::test]
+fn the_terminal_toggle_is_hidden_for_an_ended_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "e");
+
+    assert!(!drawn(&mut h, "phone-session-toggle"));
+    assert_eq!(phone(&mut h, PhoneRoot::session_toggle), None);
+    assert_eq!(phone(&mut h, PhoneRoot::session_status), Some("Stopped"));
+}
+
+#[gpui::test]
+fn the_terminal_toggle_is_hidden_without_a_mirrored_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "n");
+
+    assert!(!drawn(&mut h, "phone-session-toggle"));
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the terminal is its main view"
+    );
+    assert!(!drawn(&mut h, "phone-session-chat"));
+}
+
+#[gpui::test]
+fn the_toggle_switches_to_the_terminal_page_and_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    h.click_on("phone-session-toggle");
+
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert!(!drawn(&mut h, "phone-session-chat"));
+    assert_eq!(phone(&mut h, PhoneRoot::session_toggle), Some("Chat"));
+
+    h.click_on("phone-session-toggle");
+
+    assert!(drawn(&mut h, "phone-session-chat"));
+    assert!(!drawn(&mut h, "phone-session-terminal"));
+    assert_eq!(phone(&mut h, PhoneRoot::session_toggle), Some("Terminal"));
+}
+
+#[gpui::test]
+fn the_back_button_returns_to_home(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-session-back");
+
+    assert_eq!(shown(&mut h), None);
+    assert!(drawn(&mut h, "phone-home"));
+    assert!(!drawn(&mut h, "phone-session"));
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "Back sends nothing"
+    );
+}
+
+#[gpui::test]
+fn back_from_the_terminal_page_returns_to_the_chat_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    h.click_on("phone-session-toggle");
+
+    h.click_on("phone-session-back");
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+    assert!(drawn(&mut h, "phone-session-chat"));
+
+    h.click_on("phone-session-back");
+
+    assert_eq!(shown(&mut h), None);
+    assert!(drawn(&mut h, "phone-home"));
+}
+
+#[gpui::test]
+fn a_committed_back_gesture_returns_to_home(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    back_gesture(&mut h, BackGesturePhase::Started);
+    back_gesture(&mut h, BackGesturePhase::Progressed);
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "not before it commits");
+    back_gesture(&mut h, BackGesturePhase::Committed);
+
+    assert_eq!(shown(&mut h), None);
+    assert!(drawn(&mut h, "phone-home"));
+}
+
+#[gpui::test]
+fn a_back_gesture_starting_in_the_top_inset_returns_to_home(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    // The harness's window reports no insets: draw a phone's 62 pt top one.
+    let insets = WindowInsets {
+        safe_area: Edges {
+            top: px(62.0),
+            bottom: px(34.0),
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    };
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.set_insets_override(Some(insets), cx));
+    });
+    h.cx.run_until_parked();
+    assert!(
+        h.bounds("phone-session").origin.y >= px(62.0),
+        "the page sits under the inset"
+    );
+    let at = point(px(4.0), px(20.0));
+
+    h.back_gesture(BackGesturePhase::Started, at);
+    h.back_gesture(BackGesturePhase::Committed, at);
+
+    assert_eq!(shown(&mut h), None);
+    assert!(drawn(&mut h, "phone-home"));
+}
+
+#[gpui::test]
+fn the_page_shows_the_terminal_when_the_chat_stops_being_mirrored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    assert!(drawn(&mut h, "phone-session-chat"));
+
+    // The agent exited to the shell it ran in: the session runs on, its
+    // chat is no longer mirrored.
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("working")
+        .program_name("pwsh")
+        .build();
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert!(!drawn(&mut h, "phone-session-chat"));
+    assert!(!drawn(&mut h, "phone-session-toggle"));
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions: listed() });
+    h.cx.run_until_parked();
+
+    assert!(
+        drawn(&mut h, "phone-session-chat"),
+        "the chosen chat returns"
+    );
+    assert!(drawn(&mut h, "phone-session-toggle"));
+}
+
+#[gpui::test]
+fn a_cancelled_back_gesture_stays(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    back_gesture(&mut h, BackGesturePhase::Started);
+    back_gesture(&mut h, BackGesturePhase::Progressed);
+    back_gesture(&mut h, BackGesturePhase::Cancelled);
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"));
+    assert!(drawn(&mut h, "phone-session"));
+    assert!(drawn(&mut h, "phone-session-chat"));
+}
+
+#[gpui::test]
+fn the_page_stays_while_its_host_is_disconnected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    let target: Target = saved_remote();
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("dropped".to_owned());
+
+    h.host(&target).event(NetEvent::State(conn));
+    h.cx.run_until_parked();
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+    assert!(drawn(&mut h, "phone-session-label"));
+    assert!(drawn(&mut h, "phone-session-status"));
+}
+
+#[gpui::test]
+fn the_page_closes_when_its_session_is_gone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    let rest: Vec<SessionSnapshot> = listed().into_iter().skip(1).collect();
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions: rest });
+    h.cx.run_until_parked();
+
+    assert_eq!(shown(&mut h), None);
+    assert!(drawn(&mut h, "phone-home"));
+    assert!(!drawn(&mut h, "phone-session"));
+}

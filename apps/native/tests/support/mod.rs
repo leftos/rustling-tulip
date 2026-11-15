@@ -4261,6 +4261,17 @@ impl<'a> Harness<'a> {
         self.touch(TouchPhase::Ended, at);
     }
 
+    /// A back gesture in `phase` started at `at`, as a phone's platform
+    /// reports the swipe from the leading screen edge.
+    pub fn back_gesture(&mut self, phase: gpui::BackGesturePhase, at: Point<Pixels>) {
+        self.cx.simulate_event(gpui::BackGestureEvent {
+            phase,
+            start_position: at,
+            progress: 0.0,
+        });
+        self.cx.run_until_parked();
+    }
+
     /// A finger held on what `selector` tags past the long-press time,
     /// then lifted, as gpui's own long-press spec drives it.
     pub fn long_press_on(&mut self, selector: &str) {

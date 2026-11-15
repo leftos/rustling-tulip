@@ -12,6 +12,7 @@ use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
+use super::session::SessionPage;
 use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
 };
@@ -37,6 +38,8 @@ pub struct PhoneRoot {
     pub(super) platform: Arc<dyn PushPlatform>,
     /// The session shown in place of Home: its host and id.
     pub(super) shown: Option<(HostKey, String)>,
+    /// The page the shown session is on, while a session is shown.
+    pub(super) page: Option<SessionPage>,
     /// Home's Needs you tray: the card it shows and the swipe in progress.
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
@@ -105,6 +108,7 @@ impl PhoneRoot {
             root,
             platform,
             shown: None,
+            page: None,
             tray: super::tray::Tray::default(),
             sheet: None,
             resumes: Vec::new(),
@@ -124,6 +128,13 @@ impl PhoneRoot {
     pub fn with_insets_override(mut self, insets: Option<WindowInsets>) -> Self {
         self.insets_override = insets;
         self
+    }
+
+    /// Draws `insets` around the content in place of the window's from now
+    /// on, while `insets` is set.
+    pub fn set_insets_override(&mut self, insets: Option<WindowInsets>, cx: &mut Context<Self>) {
+        self.insets_override = insets;
+        cx.notify();
     }
 
     /// The root view the phone reads and drives.
@@ -150,10 +161,14 @@ impl PhoneRoot {
         self.home(cx).rows().count()
     }
 
-    /// Shows `host`'s session `session_id` in place of Home. It sends
-    /// nothing: the phone opens no tab and lays out no pane.
+    /// Shows `host`'s session `session_id` in place of Home, on its chat
+    /// when the chat is mirrored, else on its terminal. It sends nothing:
+    /// the phone opens no tab and lays out no pane.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
+        self.page = Some(SessionPage::opened(
+            self.chat_mirrored(&host, session_id, cx),
+        ));
         self.shown = Some((host, session_id.to_owned()));
         self.sheet = None;
         cx.notify();
@@ -399,6 +414,7 @@ impl PhoneRoot {
     /// Back from the shown session to Home.
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
         self.shown = None;
+        self.page = None;
         cx.notify();
     }
 
@@ -417,6 +433,7 @@ impl PhoneRoot {
         if gone {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
+            self.page = None;
         }
     }
 
@@ -864,9 +881,15 @@ impl Render for PhoneRoot {
                 .pb(padding.bottom)
                 .pl(padding.left)
         };
+        // The whole window takes a session page's back gesture, so a swipe
+        // that starts in the safe area's bands goes back too.
+        let session_shown = self.shown.is_some();
         div()
             .relative()
             .size_full()
+            .when(session_shown, |root| {
+                root.on_back_gesture(cx.listener(Self::session_back_gesture))
+            })
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
             .child(padded().size_full().child(body))

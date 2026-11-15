@@ -1,6 +1,7 @@
-//! Draws the phone's Home ([`super::home`]) and the page a row's tap
-//! opens: rows and targets at least 44 pt tall, no shortcut hints and
-//! nothing that shows only on hover. It only renders and forwards taps.
+//! Draws the phone's Home ([`super::home`]): rows and targets at least
+//! 44 pt tall, no shortcut hints and nothing that shows only on hover. A
+//! row's tap opens the session page `session_view` draws. It only renders
+//! and forwards taps.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -31,9 +32,7 @@ pub(super) const STATUS_TEXT_SIZE: f32 = 11.0;
 /// The mark's dot.
 const DOT: f32 = 8.0;
 /// The space either side of a row's content.
-const SIDE_PADDING: f32 = 16.0;
-/// The session page's Back button.
-const BACK_LABEL: &str = "Back";
+pub(super) const SIDE_PADDING: f32 = 16.0;
 /// A not-paired host's header button.
 const PAIR_LABEL: &str = "Pair";
 /// What Home says with no session to list.
@@ -144,7 +143,7 @@ fn dot(color: u32) -> Div {
 }
 
 /// The colour a row's dot and status word take for `tone`.
-fn tone_color(tone: Tone, t: &UiTheme) -> u32 {
+pub(super) fn tone_color(tone: Tone, t: &UiTheme) -> u32 {
     match tone {
         Tone::NeedsYou => t.asking,
         Tone::Working => t.working,
@@ -494,49 +493,5 @@ impl PhoneRoot {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.open_session(host.clone(), &session_id, cx);
             }))
-    }
-
-    /// While a session is shown: its page, a header with Back and its
-    /// label over an empty body.
-    pub(super) fn session_page(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let (host, session_id) = self.shown.clone()?;
-        let label = self
-            .home(cx)
-            .label_of(&host, &session_id)
-            .map_or_else(|| session_id.clone(), str::to_owned);
-        let t = theme(cx);
-        let back = phone_button("phone-session-back", ButtonKind::Outlined, cx)
-            .min_h(px(TOUCH_TARGET))
-            .flex_none()
-            .child(BACK_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_session(cx)));
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .min_h(px(TOUCH_TARGET))
-            .px(px(SIDE_PADDING))
-            .py(px(6.0))
-            .border_b_1()
-            .border_color(gpui::rgb(t.line))
-            .child(back)
-            .child(
-                div()
-                    .driver_id(|| "phone-session-label".to_owned())
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                    .child(label),
-            );
-        Some(
-            div()
-                .driver_id(|| "phone-session".to_owned())
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(header)
-                .child(div().flex_1().min_h_0()),
-        )
     }
 }

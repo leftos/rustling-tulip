@@ -80,9 +80,13 @@ impl Home {
 
     /// The label of `host`'s session `session_id`, while Home lists it.
     pub(crate) fn label_of(&self, host: &HostKey, session_id: &str) -> Option<&str> {
+        self.row_of(host, session_id).map(|row| row.label.as_str())
+    }
+
+    /// The row of `host`'s session `session_id`, while Home lists it.
+    pub(crate) fn row_of(&self, host: &HostKey, session_id: &str) -> Option<&HomeRow> {
         self.rows()
             .find(|row| row.host == *host && row.session_id == session_id)
-            .map(|row| row.label.as_str())
     }
 }
 
@@ -216,6 +220,12 @@ pub(crate) fn offer(session: &SessionSnapshot) -> Offer {
         ActionState::Running => Offer::Stop,
         ActionState::Stopped | ActionState::Inactive | ActionState::Abandoned => Offer::Resume,
     }
+}
+
+/// Whether `session` has ended: stopped, parked or abandoned, the states
+/// whose sheet offers Resume rather than Stop.
+pub(crate) fn ended(session: &SessionSnapshot) -> bool {
+    session_actions::action_state(session) != ActionState::Running
 }
 
 /// The bare stop the sheet sends: no park and no discard, which the

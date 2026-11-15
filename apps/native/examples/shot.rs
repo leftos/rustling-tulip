@@ -62,6 +62,9 @@
 //! a working session and an idle one.
 //! `phone-sheet` shows the same Home with the working session's long-press
 //! sheet open over a scrim: its label, Stop and Cancel.
+//! `phone-session` shows the same Home's working session opened: its
+//! page's header with Back, the label, `Working` and the Terminal toggle
+//! over the empty chat body.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -142,7 +145,8 @@ const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
 /// How many session rows the `phone-home` shot's Home lists.
 const PHONE_HOME_ROWS: usize = 3;
-/// The working session whose sheet the `phone-sheet` shot opens.
+/// The working session whose sheet the `phone-sheet` shot opens, and
+/// whose page the `phone-session` shot shows.
 const PHONE_SHEET_SESSION: &str = "b-pwa";
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
@@ -286,10 +290,11 @@ enum View {
     FirstConnect,
     PhoneHome,
     PhoneSheet,
+    PhoneSession,
 }
 
 impl View {
-    const ALL: [Self; 51] = [
+    const ALL: [Self; 52] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -341,11 +346,15 @@ impl View {
         Self::FirstConnect,
         Self::PhoneHome,
         Self::PhoneSheet,
+        Self::PhoneSession,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
     fn is_phone(self) -> bool {
-        matches!(self, Self::PhoneHome | Self::PhoneSheet)
+        matches!(
+            self,
+            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession
+        )
     }
 
     fn name(self) -> &'static str {
@@ -401,6 +410,7 @@ impl View {
             Self::FirstConnect => "first-connect",
             Self::PhoneHome => "phone-home",
             Self::PhoneSheet => "phone-sheet",
+            Self::PhoneSession => "phone-session",
         }
     }
 
@@ -446,7 +456,7 @@ impl View {
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
-            Self::PhoneHome | Self::PhoneSheet => PHONE_WINDOW_SIZE,
+            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -485,7 +495,7 @@ impl View {
         match self {
             // Drawn by `start_toast_shot`, in a window with no root view,
             // and by `start_phone_home_shot`, which checks its own rows.
-            Self::Toast | Self::PhoneHome | Self::PhoneSheet => true,
+            Self::Toast | Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -756,6 +766,7 @@ impl Shot {
             | View::FirstConnect
             | View::PhoneHome
             | View::PhoneSheet
+            | View::PhoneSession
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -784,7 +795,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
-            View::PhoneHome | View::PhoneSheet => phone_home_ui_state(),
+            View::PhoneHome | View::PhoneSheet | View::PhoneSession => phone_home_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -1509,6 +1520,19 @@ async fn capture_phone_home(
             bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
         }
     }
+    if shot.view == View::PhoneSession {
+        let opened = handle.update(cx, |phone, _, cx| {
+            phone.open_session_on(PHONE_SHEET_SESSION, cx)
+        })?;
+        if !opened {
+            bail!("the phone-session view's Home does not list {PHONE_SHEET_SESSION}");
+        }
+        cx.background_executor().timer(DRIVE_WAIT).await;
+        let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
+        if toggle != Some("Terminal") {
+            bail!("the phone-session view's toggle reads {toggle:?}, not Terminal");
+        }
+    }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -1632,7 +1656,8 @@ fn drive(
         | View::FirstConnect
         | View::Toast
         | View::PhoneHome
-        | View::PhoneSheet => Ok(()),
+        | View::PhoneSheet
+        | View::PhoneSession => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
