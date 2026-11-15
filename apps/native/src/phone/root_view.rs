@@ -40,6 +40,8 @@ pub struct PhoneRoot {
     pub(super) shown: Option<(HostKey, String)>,
     /// The page the shown session is on, while a session is shown.
     pub(super) page: Option<SessionPage>,
+    /// The composer's open dock on the shown session's page, if any.
+    pub(super) composer_dock: super::composer::Dock,
     /// Home's Needs you tray: the card it shows and the swipe in progress.
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
@@ -109,6 +111,7 @@ impl PhoneRoot {
             platform,
             shown: None,
             page: None,
+            composer_dock: super::composer::Dock::None,
             tray: super::tray::Tray::default(),
             sheet: None,
             resumes: Vec::new(),
@@ -155,6 +158,47 @@ impl PhoneRoot {
         self.shown.as_ref().map(|(host, id)| (host, id.as_str()))
     }
 
+    /// A tap on the composer's Quick button: the Quick dock opens over it,
+    /// or the open one closes.
+    pub fn tap_composer_quick(&mut self, cx: &mut Context<Self>) {
+        self.toggle_dock(super::composer::DockButton::Quick, cx);
+    }
+
+    /// A tap on the composer's Keys button: the Keys tray opens over it, or
+    /// the open one closes.
+    pub fn tap_composer_keys(&mut self, cx: &mut Context<Self>) {
+        self.toggle_dock(super::composer::DockButton::Keys, cx);
+    }
+
+    /// The shown session's Quick dock replies, group by group: an agent's
+    /// groups for a session with an agent, the shell pair otherwise.
+    #[must_use]
+    pub fn quick_reply_items(&self, cx: &App) -> Vec<String> {
+        super::composer::quick_groups(self.shown_has_agent(cx))
+            .iter()
+            .flat_map(|group| group.items.iter().map(|item| (*item).to_owned()))
+            .collect()
+    }
+
+    /// Whether the shown session has an agent.
+    pub(super) fn shown_has_agent(&self, cx: &App) -> bool {
+        let Some((host, session_id)) = self.shown.as_ref() else {
+            return false;
+        };
+        self.root
+            .read(cx)
+            .sidebar
+            .session_on(host, session_id)
+            .is_some_and(|session| session.agent.is_some())
+    }
+
+    /// A tap on one of the composer's dock buttons: its dock opens, or the
+    /// open one closes.
+    fn toggle_dock(&mut self, button: super::composer::DockButton, cx: &mut Context<Self>) {
+        self.composer_dock = self.composer_dock.tap(button);
+        cx.notify();
+    }
+
     /// How many session rows Home lists now.
     #[must_use]
     pub fn home_row_count(&self, cx: &App) -> usize {
@@ -169,6 +213,7 @@ impl PhoneRoot {
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
+        self.composer_dock = super::composer::Dock::None;
         let shown = (host, session_id.to_owned());
         self.shown = Some(shown.clone());
         self.sheet = None;
@@ -418,6 +463,7 @@ impl PhoneRoot {
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
         self.shown = None;
         self.page = None;
+        self.composer_dock = super::composer::Dock::None;
         self.root
             .update(cx, |root, cx| root.show_phone_chat(None, cx));
         cx.notify();
@@ -439,6 +485,7 @@ impl PhoneRoot {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
             self.page = None;
+            self.composer_dock = super::composer::Dock::None;
             self.root
                 .update(cx, |root, cx| root.show_phone_chat(None, cx));
         }

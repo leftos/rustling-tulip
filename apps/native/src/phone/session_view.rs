@@ -8,11 +8,12 @@ use gpui::{
 };
 
 use super::PhoneRoot;
+use super::composer::{self, Dock};
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
 use super::session::{self, BackStep, Header, Page, SessionPage};
-use crate::buttons::ButtonKind;
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat_view::chat_available;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
@@ -23,6 +24,17 @@ use crate::ui_theme::{UiTheme, theme};
 const BACK_LABEL: &str = "Back";
 /// What the Terminal page says until it holds the terminal.
 const TERMINAL_PENDING_TEXT: &str = "The terminal opens here in a later build.";
+
+/// The composer's Send button's label.
+const SEND_LABEL: &str = "Send";
+/// The composer's Paste button's label.
+const PASTE_LABEL: &str = "Paste";
+/// The Quick dock's button's label.
+const QUICK_LABEL: &str = "Quick";
+/// The Keys tray's button's label.
+const KEYS_LABEL: &str = "Keys";
+/// The room between the composer's rows, and between its buttons.
+const COMPOSER_GAP: f32 = 8.0;
 
 impl PhoneRoot {
     /// Whether `host`'s session `session_id` mirrors its chat now.
@@ -96,17 +108,26 @@ impl PhoneRoot {
             .then(|| self.shown_page(header.chat_mirrored).toggle_label())
     }
 
-    /// One back step on the session page: to the Chat page from the
-    /// Terminal page while the toggle shows, else back to Home.
+    /// One back step on the session page: the composer's open dock closes
+    /// first, then the page steps back, from the Terminal page to the Chat
+    /// page while the toggle shows, else back to Home.
     pub(super) fn session_back(&mut self, cx: &mut Context<Self>) {
         let (mirrored, toggle) = self.session_header(cx).map_or((false, false), |header| {
             (header.chat_mirrored, header.toggle)
         });
-        let step = self
-            .page
-            .as_mut()
-            .map_or(BackStep::Close, |page| page.back(mirrored, toggle));
+        let drawn = self
+            .shown
+            .as_ref()
+            .is_some_and(|(_, id)| self.dock_drawn(id, self.shown_page(mirrored), cx));
+        let step = match self.page.as_mut() {
+            Some(page) => session::back_step(drawn, page, mirrored, toggle),
+            None => BackStep::Close,
+        };
         match step {
+            BackStep::CloseDock => {
+                self.composer_dock = Dock::None;
+                cx.notify();
+            }
             BackStep::ToChat => cx.notify(),
             BackStep::Close => self.close_session(cx),
         }
@@ -125,10 +146,12 @@ impl PhoneRoot {
         }
     }
 
-    /// The toggle's tap: the other page.
+    /// The toggle's tap: the other page, with the composer's dock closed
+    /// since the page it draws on leaves the screen.
     fn toggle_page(&mut self, cx: &mut Context<Self>) {
         if let Some(page) = self.page.as_mut() {
             page.toggle();
+            self.composer_dock = Dock::None;
             cx.notify();
         }
     }
@@ -145,6 +168,7 @@ impl PhoneRoot {
                 let chat = self
                     .root
                     .update(cx, |root, cx| root.phone_chat_body(&id, cx));
+                let composer = self.composer(&id, cx);
                 div()
                     .driver_id(|| "phone-session-chat".to_owned())
                     .flex()
@@ -152,6 +176,7 @@ impl PhoneRoot {
                     .flex_1()
                     .min_h_0()
                     .child(chat)
+                    .children(composer)
             }
             Page::Terminal => terminal_body(&t, cx),
         };
@@ -164,6 +189,233 @@ impl PhoneRoot {
                 .child(Self::session_header_row(&header, page, &t, cx))
                 .child(body),
         )
+    }
+
+    /// The shown session's composer under its chat: the Quick or Keys dock
+    /// while one is open, the note saying why it cannot send, the field with
+    /// Send, and the Paste, Quick and Keys buttons under them. None before
+    /// the chat has loaded.
+    fn composer(&self, session_id: &str, cx: &mut Context<Self>) -> Option<Div> {
+        let (input, note, enabled, error) = {
+            let root = self.root.read(cx);
+            (
+                root.phone_composer_input(session_id)?,
+                root.chat_composer_note(session_id),
+                root.phone_composer_send_enabled(session_id, cx),
+                root.chat_composer_error(session_id),
+            )
+        };
+        let dock = if self.dock_drawn(session_id, Page::Chat, cx) {
+            self.dock(session_id, cx)
+        } else {
+            None
+        };
+        let t = theme(cx);
+        let id = session_id.to_owned();
+        let field = field_frame(false, Layer::Base, &t)
+            .driver_id(|| "phone-composer-field".to_owned())
+            .flex_1()
+            .min_w(px(0.0))
+            .py(px(6.0))
+            .child(input);
+        let send = button(
+            "phone-composer-send",
+            button_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                ButtonKind::Primary,
+                ButtonSize::Large,
+                enabled,
+                Layer::Base,
+                &t,
+            ),
+        )
+        .min_h(px(TOUCH_TARGET))
+        .flex_none()
+        .child(SEND_LABEL)
+        .when(enabled, |send| {
+            send.on_click(cx.listener({
+                let id = id.clone();
+                move |this, _: &ClickEvent, _, cx| {
+                    this.root.update(cx, |root, cx| root.send_composer(&id, cx));
+                }
+            }))
+        });
+        Some(
+            div()
+                .driver_id(|| "phone-composer".to_owned())
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(COMPOSER_GAP))
+                .px(px(SIDE_PADDING))
+                .py(px(COMPOSER_GAP))
+                .border_t_1()
+                .border_color(gpui::rgb(t.line))
+                .children(dock)
+                .children(note.map(|note| {
+                    div()
+                        .driver_id(|| "phone-composer-note".to_owned())
+                        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                        .text_color(gpui::rgb(t.muted))
+                        .child(note)
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(COMPOSER_GAP))
+                        .child(field)
+                        .child(send),
+                )
+                .children(error.map(|reason| {
+                    div()
+                        .driver_id(|| "phone-composer-error".to_owned())
+                        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                        .text_color(gpui::rgb(t.danger))
+                        .child(reason)
+                }))
+                .child(Self::composer_buttons(cx)),
+        )
+    }
+
+    /// Whether the composer's dock draws now: one is open, the shown page is
+    /// the Chat page, and the session's chat has a composer to draw it over.
+    /// Both the draw and the back step ask this, so a dock that is set but
+    /// off screen never swallows a Back.
+    fn dock_drawn(&self, session_id: &str, page: Page, cx: &App) -> bool {
+        self.composer_dock != Dock::None
+            && page == Page::Chat
+            && self
+                .root
+                .read(cx)
+                .phone_composer_input(session_id)
+                .is_some()
+    }
+
+    /// The three buttons under the composer's field: Paste, and the Quick
+    /// and Keys docks' buttons.
+    fn composer_buttons(cx: &mut Context<Self>) -> Div {
+        let paste = phone_button("phone-composer-paste", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_1()
+            .child(PASTE_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.paste_into_composer(window, cx);
+            }));
+        let quick = phone_button("phone-composer-quick", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_1()
+            .child(QUICK_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_quick(cx)));
+        let keys = phone_button("phone-composer-keys", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_1()
+            .child(KEYS_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_keys(cx)));
+        div()
+            .flex()
+            .gap(px(COMPOSER_GAP))
+            .child(paste)
+            .child(quick)
+            .child(keys)
+    }
+
+    /// Paste's tap: the clipboard's text goes into the composer's field at
+    /// its caret. A clipboard with no text changes nothing.
+    fn paste_into_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, session_id)) = self.shown.as_ref() else {
+            return;
+        };
+        let session_id = session_id.clone();
+        let Some(input) = self.root.read(cx).phone_composer_input(&session_id) else {
+            return;
+        };
+        input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// The composer's open dock above its row, while one is.
+    fn dock(&self, session_id: &str, cx: &mut Context<Self>) -> Option<Div> {
+        let t = theme(cx);
+        match self.composer_dock {
+            Dock::None => None,
+            Dock::Quick => Some(self.quick_dock(session_id, &t, cx)),
+            Dock::Keys => Some(Self::keys_dock(session_id, cx)),
+        }
+    }
+
+    /// The Quick dock: each of the shown session's reply groups under its
+    /// title, every reply a tap that types it and Return.
+    fn quick_dock(&self, session_id: &str, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let id = session_id.to_owned();
+        let mut dock = div()
+            .driver_id(|| "phone-dock-quick".to_owned())
+            .flex()
+            .flex_col()
+            .gap(px(COMPOSER_GAP));
+        for group in composer::quick_groups(self.shown_has_agent(cx)) {
+            let mut row = div().flex().flex_wrap().gap(px(COMPOSER_GAP));
+            for (index, text) in group.items.iter().enumerate() {
+                let bytes = composer::quick_bytes(text);
+                row = row.child(
+                    phone_button(
+                        &format!("phone-quick-{}-{index}", group.title),
+                        ButtonKind::Outlined,
+                        cx,
+                    )
+                    .min_h(px(TOUCH_TARGET))
+                    .child(*text)
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.root
+                                .update(cx, |root, _| root.send_phone_input(&id, &bytes));
+                        }
+                    })),
+                );
+            }
+            dock = dock.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                            .text_color(gpui::rgb(t.muted))
+                            .child(group.title),
+                    )
+                    .child(row),
+            );
+        }
+        dock
+    }
+
+    /// The Keys tray: every key of the strip, each a tap that types its
+    /// bytes.
+    fn keys_dock(session_id: &str, cx: &mut Context<Self>) -> Div {
+        let id = session_id.to_owned();
+        let mut dock = div()
+            .driver_id(|| "phone-dock-keys".to_owned())
+            .flex()
+            .flex_wrap()
+            .gap(px(COMPOSER_GAP));
+        for (index, key) in composer::KEY_TRAY.iter().enumerate() {
+            let bytes = key.bytes;
+            dock = dock.child(
+                phone_button(&format!("phone-key-{index}"), ButtonKind::Outlined, cx)
+                    .min_h(px(TOUCH_TARGET))
+                    .child(key.label)
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.root
+                                .update(cx, |root, _| root.send_phone_input(&id, bytes));
+                        }
+                    })),
+            );
+        }
+        dock
     }
 
     /// The header: Back, the label over the status word, and the toggle

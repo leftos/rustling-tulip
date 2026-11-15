@@ -18,9 +18,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable, KeyDownEvent,
-    Keystroke, ScrollEvent, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, div,
-    prelude::*, px, relative,
+    AnyElement, App, Autocapitalize, ClickEvent, Context, Div, ElementId, Entity, Focusable,
+    KeyDownEvent, Keystroke, ScrollEvent, ScrollHandle, SharedString, Subscription, Task,
+    TextInputAction, TextInputConfiguration, Window, WindowId, div, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -71,6 +71,12 @@ const COMPOSER_PLACEHOLDER: &str = "Send a message (Ctrl+Enter)";
 /// How many rows the composer grows between.
 const COMPOSER_MIN_ROWS: usize = 2;
 const COMPOSER_MAX_ROWS: usize = 6;
+
+/// What the phone's empty composer says.
+const PHONE_COMPOSER_PLACEHOLDER: &str = "Message";
+/// How many rows the phone's composer grows between.
+const PHONE_COMPOSER_MIN_ROWS: usize = 1;
+const PHONE_COMPOSER_MAX_ROWS: usize = 5;
 
 /// How a label names an agent the client has no descriptor for.
 const GENERIC_AGENT: &str = "the agent";
@@ -1483,7 +1489,9 @@ impl RootView {
 
     /// Makes session `session_id`'s composer once its chat has loaded:
     /// Ctrl+Enter and Esc in it go through [`Self::chat_key`], and every edit
-    /// repaints the buttons beside it.
+    /// repaints the buttons beside it. The phone's sessions build it with the
+    /// phone's values: its own placeholder, one to five rows and the soft
+    /// keyboard's Send action key.
     fn ensure_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let wanted = self
             .chat
@@ -1494,9 +1502,21 @@ impl RootView {
             return;
         }
         let draft = self.chat.drafts.remove(session_id).unwrap_or_default();
+        let phone = self
+            .chat
+            .phone
+            .as_ref()
+            .is_some_and(|(_, id)| id == session_id);
         let input = cx.new(|cx| {
-            let mut input = TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
-                .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS);
+            let mut input = if phone {
+                let mut input = TextInput::multi_line("", PHONE_COMPOSER_PLACEHOLDER, cx)
+                    .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS);
+                input.set_text_input_configuration(phone_composer_configuration(), cx);
+                input
+            } else {
+                TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
+                    .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+            };
             input.set_text(draft, cx);
             input
         });
@@ -1776,7 +1796,7 @@ impl RootView {
 
     /// Sends session `session_id`'s composer text, clearing the composer;
     /// a refusal puts it back. Nothing happens while a send is in flight.
-    fn send_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn send_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let now = (self.now)();
         let request_id = new_request_id();
         let Some(chat) = self.chat.sessions.get_mut(session_id) else {
@@ -1795,6 +1815,33 @@ impl RootView {
         let host = self.chat.host_of(session_id);
         self.send_to(&host, msg);
         cx.notify();
+    }
+
+    /// Types `bytes` into session `session_id` through its host, as the
+    /// phone's Quick and Keys buttons do.
+    pub(crate) fn send_phone_input(&mut self, session_id: &str, bytes: &[u8]) {
+        let host = self.chat.host_of(session_id);
+        self.send_to(
+            &host,
+            ClientMessage::SendInput {
+                session_id: session_id.to_owned(),
+                data_b64: B64.encode(bytes),
+                automatic: false,
+            },
+        );
+    }
+
+    /// Whether `chat`'s composer may send `text` now: not blank, no note
+    /// that disables, no send in flight and no card up.
+    fn send_enabled(&self, session_id: &str, chat: &SessionChat, text: &str) -> bool {
+        let disabled = self
+            .composer_note_of(session_id, chat)
+            .as_ref()
+            .is_some_and(ComposerNote::disables);
+        !text.trim().is_empty()
+            && !disabled
+            && !chat.sends.in_flight((self.now)())
+            && chat.stack.current().is_none()
     }
 
     /// The note `chat`'s composer shows: why it cannot send.
@@ -1825,6 +1872,27 @@ impl RootView {
                 || GENERIC_AGENT.to_owned(),
                 |descriptor| descriptor.label.clone(),
             )
+    }
+
+    /// Session `session_id`'s composer input, while its chat has one.
+    #[must_use]
+    pub(crate) fn phone_composer_input(&self, session_id: &str) -> Option<Entity<TextInput>> {
+        let chat = self.chat.sessions.get(session_id)?;
+        Some(chat.composer.as_ref()?.input.clone())
+    }
+
+    /// Whether session `session_id`'s composer may send now: not blank, no
+    /// note that disables, no send in flight and no card up.
+    #[must_use]
+    pub fn phone_composer_send_enabled(&self, session_id: &str, cx: &App) -> bool {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return false;
+        };
+        let Some(composer) = chat.composer.as_ref() else {
+            return false;
+        };
+        let text = composer.input.read(cx).text().to_owned();
+        self.send_enabled(session_id, chat, &text)
     }
 
     /// The text of session `session_id`'s composer; none before its chat
@@ -2289,7 +2357,6 @@ impl RootView {
         let note = self.composer_note_of(session_id, chat);
         let disabled = note.as_ref().is_some_and(ComposerNote::disables);
         let text = composer.input.read(cx).text().to_owned();
-        let blank = text.trim().is_empty();
         let field = field_frame(false, Layer::Base, &t)
             .driver_id(|| "chat-composer".to_owned())
             .flex_1()
@@ -2297,9 +2364,7 @@ impl RootView {
             .py(px(6.0))
             .when(disabled, |field| field.opacity(DISABLED_OPACITY))
             .when(!disabled, |field| field.child(composer.input.clone()));
-        let card_up = chat.stack.current().is_some();
-        let sending = chat.sends.in_flight((self.now)());
-        let enabled = !blank && !disabled && !sending && !card_up;
+        let enabled = self.send_enabled(session_id, chat, &text);
         let id = session_id.to_owned();
         let send = primary_button(
             offset,
@@ -2352,6 +2417,17 @@ impl RootView {
 
 /// How a disabled composer is dimmed.
 const DISABLED_OPACITY: f32 = 0.5;
+
+/// The soft keyboard the phone's composer asks for: Send as its action key,
+/// with autocorrect and sentence autocapitalization on.
+fn phone_composer_configuration() -> TextInputConfiguration {
+    TextInputConfiguration {
+        autocorrect: true,
+        autocapitalize: Autocapitalize::Sentences,
+        input_action: TextInputAction::Send,
+        ..TextInputConfiguration::default()
+    }
+}
 
 /// The card key `keystroke` is, when the chat reads it before its
 /// composer: a bare digit, or Ctrl+Shift+Enter. Ctrl+Enter and Esc reach

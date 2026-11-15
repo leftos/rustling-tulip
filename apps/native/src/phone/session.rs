@@ -70,6 +70,8 @@ impl Page {
 /// Where one back step goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackStep {
+    /// The composer's open dock closes, and the page stays as it is.
+    CloseDock,
     /// From the Terminal page to the Chat page.
     ToChat,
     /// Off the page, back to Home.
@@ -128,6 +130,23 @@ impl SessionPage {
         } else {
             BackStep::Close
         }
+    }
+}
+
+/// One back step while the composer's dock is `drawn` or not: a drawn dock
+/// closes first and the page stays as it is, else the page's own step comes
+/// ([`SessionPage::back`]). A dock left set on a page that does not draw it
+/// takes no step of its own.
+pub(crate) fn back_step(
+    dock_drawn: bool,
+    page: &mut SessionPage,
+    chat_mirrored: bool,
+    toggle_shown: bool,
+) -> BackStep {
+    if dock_drawn {
+        BackStep::CloseDock
+    } else {
+        page.back(chat_mirrored, toggle_shown)
     }
 }
 
@@ -258,6 +277,35 @@ mod tests {
             Page::Terminal,
             "the chosen terminal stays"
         );
+    }
+
+    #[test]
+    fn back_with_a_dock_open_closes_it_first() {
+        let mut page = SessionPage::opened(true);
+        assert_eq!(back_step(true, &mut page, true, true), BackStep::CloseDock);
+        assert_eq!(page.page(), Page::Chat, "the page stays where it was");
+        assert_eq!(
+            back_step(false, &mut page, true, true),
+            BackStep::Close,
+            "with no dock open the page's own step comes"
+        );
+    }
+
+    #[test]
+    fn back_with_a_dock_set_but_not_drawn_takes_the_next_step() {
+        let mut page = SessionPage::opened(true);
+        page.toggle();
+        assert_eq!(
+            page.shown(true),
+            Page::Terminal,
+            "the dock draws only on the Chat page"
+        );
+        assert_eq!(
+            back_step(false, &mut page, true, true),
+            BackStep::ToChat,
+            "Back steps off the Terminal page, not onto a dock nobody sees"
+        );
+        assert_eq!(page.page(), Page::Chat);
     }
 
     #[test]

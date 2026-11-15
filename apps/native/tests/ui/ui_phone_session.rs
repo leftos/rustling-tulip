@@ -8,6 +8,7 @@ use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{BackGesturePhase, Edges, Pixels, TestAppContext, WindowInsets, point, px};
+use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot, ToolKind,
     ToolOutcome,
@@ -632,4 +633,280 @@ fn the_page_closes_when_its_session_is_gone(cx: &mut TestAppContext) {
     assert_eq!(shown(&mut h), None);
     assert!(drawn(&mut h, "phone-home"));
     assert!(!drawn(&mut h, "phone-session"));
+}
+
+// ── The composer: Send, Paste, Quick and Keys ──────────────────────────────
+
+/// Session `a`'s page with its chat loaded, `text` typed into its composer.
+fn typed_composer<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
+    let mut h = chat_loaded(cx, dir, vec![user("u1")]);
+    h.click_on("phone-composer-field");
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+    h
+}
+
+/// The text in session `a`'s composer.
+fn composer_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, cx| root.chat_composer_text("a", cx))
+}
+
+/// The note session `a`'s composer shows, while it shows one.
+fn composer_note(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_composer_note("a"))
+}
+
+/// Whether session `a`'s composer may send now.
+fn send_enabled(h: &mut Harness<'_>) -> bool {
+    h.root(|root, cx| root.phone_composer_send_enabled("a", cx))
+}
+
+/// The `ChatSend`s to session `a` since the last drain, as text and
+/// request id.
+fn chat_sends(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSend {
+                session_id,
+                text,
+                request_id,
+            } if session_id == "a" => Some((text, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn send_sends_the_text_and_clears_the_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_composer(cx, &dir, "hello there");
+    assert!(drawn(&mut h, "phone-composer"));
+    assert_eq!(composer_text(&mut h).as_deref(), Some("hello there"));
+    assert!(send_enabled(&mut h), "a full box can send");
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-composer-send");
+
+    let sends = chat_sends(&mut h);
+    assert_eq!(sends.len(), 1, "one send: {sends:?}");
+    assert_eq!(sends[0].0, "hello there");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "the send clears it"
+    );
+}
+
+#[gpui::test]
+fn return_makes_a_line_break_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_composer(cx, &dir, "hi");
+    h.host(&saved_remote()).sent();
+
+    h.keys("enter");
+
+    assert_eq!(composer_text(&mut h).as_deref(), Some("hi\n"));
+    let sends = chat_sends(&mut h);
+    assert!(sends.is_empty(), "Return sends nothing: {sends:?}");
+}
+
+#[gpui::test]
+fn send_is_off_for_a_blank_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+
+    assert!(!send_enabled(&mut h), "an empty box cannot send");
+    h.click_on("phone-composer-send");
+
+    assert!(
+        chat_sends(&mut h).is_empty(),
+        "and a tap on Send sends nothing"
+    );
+}
+
+#[gpui::test]
+fn send_is_off_while_the_host_is_disconnected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_composer(cx, &dir, "hello");
+    let target: Target = saved_remote();
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("dropped".to_owned());
+    h.host(&target).event(NetEvent::State(conn));
+    h.cx.run_until_parked();
+
+    assert!(!send_enabled(&mut h), "no connection, no send");
+    assert_eq!(composer_note(&mut h).as_deref(), Some("Not connected"));
+    assert!(drawn(&mut h, "phone-composer-note"), "the note says why");
+}
+
+#[gpui::test]
+fn paste_inserts_the_clipboard_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.set_clipboard("pasted text");
+
+    h.click_on("phone-composer-paste");
+
+    assert_eq!(composer_text(&mut h).as_deref(), Some("pasted text"));
+}
+
+#[gpui::test]
+fn quick_types_its_reply_with_return(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-composer-quick");
+    assert!(drawn(&mut h, "phone-dock-quick"), "the dock opens");
+    h.click_on("phone-quick-common-0");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"continue\r",
+        "a quick reply types its text and Return"
+    );
+    assert!(
+        drawn(&mut h, "phone-dock-quick"),
+        "the dock stays open after a tap"
+    );
+}
+
+#[gpui::test]
+fn a_shell_session_offers_only_y_and_n(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "n");
+
+    assert_eq!(phone(&mut h, PhoneRoot::quick_reply_items), ["y", "n"]);
+}
+
+#[gpui::test]
+fn keys_types_each_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-keys");
+    assert!(drawn(&mut h, "phone-dock-keys"), "the tray opens");
+
+    h.click_on("phone-key-0");
+    assert_eq!(h.host(&saved_remote()).sent_input("a"), b"\x1b", "Esc");
+
+    h.click_on("phone-key-6");
+    assert_eq!(h.host(&saved_remote()).sent_input("a"), b"\x03", "Ctrl+C");
+}
+
+#[gpui::test]
+fn only_one_dock_shows_at_a_time(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+
+    h.click_on("phone-composer-quick");
+    assert!(drawn(&mut h, "phone-dock-quick"));
+    assert!(!drawn(&mut h, "phone-dock-keys"));
+
+    h.click_on("phone-composer-keys");
+    assert!(!drawn(&mut h, "phone-dock-quick"));
+    assert!(drawn(&mut h, "phone-dock-keys"));
+}
+
+#[gpui::test]
+fn a_refused_send_gives_its_text_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_composer(cx, &dir, "hello there");
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-send");
+    let sent = chat_sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send to refuse: {sent:?}");
+
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "the prompt box holds a draft".to_owned(),
+        request_id: sent[0].1.clone(),
+        code: Some(CHAT_REFUSED.to_owned()),
+    });
+
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("hello there"),
+        "the refusal gives the text back"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_composer_error("a")).as_deref(),
+        Some("the prompt box holds a draft"),
+        "and the daemon's reason is kept"
+    );
+    assert!(
+        drawn(&mut h, "phone-composer-error"),
+        "the reason shows under the field"
+    );
+}
+
+#[gpui::test]
+fn back_closes_an_open_dock_and_stays(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-keys");
+    assert!(drawn(&mut h, "phone-dock-keys"));
+
+    h.click_on("phone-session-back");
+
+    assert!(!drawn(&mut h, "phone-dock-keys"), "the dock closes first");
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "and the page stays");
+    assert!(drawn(&mut h, "phone-session-chat"));
+}
+
+#[gpui::test]
+fn back_from_the_terminal_page_after_opening_keys_returns_to_the_chat_page(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-keys");
+    assert!(drawn(&mut h, "phone-dock-keys"));
+
+    h.click_on("phone-session-toggle");
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the toggle leaves the chat page"
+    );
+
+    h.click_on("phone-session-back");
+
+    assert!(
+        drawn(&mut h, "phone-session-chat"),
+        "one Back steps off the terminal page, not onto a dock nobody sees"
+    );
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+}
+
+#[gpui::test]
+fn the_composer_buttons_are_44_px_tall(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+
+    for selector in [
+        "phone-composer-send",
+        "phone-composer-paste",
+        "phone-composer-quick",
+        "phone-composer-keys",
+    ] {
+        let bounds = h.bounds(selector);
+        assert!(
+            bounds.size.height >= touch_target(),
+            "{selector} is {} tall",
+            bounds.size.height
+        );
+    }
 }

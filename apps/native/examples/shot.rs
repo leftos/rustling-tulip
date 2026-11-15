@@ -65,7 +65,8 @@
 //! `phone-session` shows the same Home's working session opened: its
 //! page's header with Back, the label, `Working` and the Terminal toggle
 //! over its loaded chat: a message, three read calls drawn one per row, an
-//! answer with a little Markdown and a Bash call.
+//! answer with a little Markdown and a Bash call, the composer under them
+//! with `Message` in its field and its Keys tray open.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -1546,6 +1547,8 @@ async fn capture_phone_home(
         if rows != PHONE_SESSION_ROWS {
             bail!("the phone-session view's chat draws {rows} rows, not {PHONE_SESSION_ROWS}");
         }
+        handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
+        cx.background_executor().timer(DRIVE_WAIT).await;
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await

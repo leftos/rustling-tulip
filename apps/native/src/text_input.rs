@@ -315,6 +315,24 @@ impl TextInput {
         }
     }
 
+    /// Pastes the clipboard's text at the caret, or over the selection, as
+    /// the [`Paste`] action does: newlines normalized in a multi-line input,
+    /// one line in a single-line one. A clipboard with no text changes
+    /// nothing, and a read-only input takes none.
+    pub fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let text = if self.mode.is_multi_line() {
+                normalize_newlines(&text)
+            } else {
+                single_line(&text)
+            };
+            self.replace_text_in_range(None, &text, window, cx);
+        }
+    }
+
     #[must_use]
     pub fn is_masked(&self) -> bool {
         self.draws == Draws::Dots
@@ -532,17 +550,7 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let text = if self.mode.is_multi_line() {
-                normalize_newlines(&text)
-            } else {
-                single_line(&text)
-            };
-            self.replace_text_in_range(None, &text, window, cx);
-        }
+        self.paste_clipboard(window, cx);
     }
 
     /// Copies the selection, unless the input is masked.
@@ -1775,6 +1783,21 @@ mod tests {
             input.update(cx, |input, cx| input.text_input_configuration(window, cx))
         });
         assert_eq!(set, wanted);
+    }
+
+    #[gpui::test]
+    fn paste_clipboard_inserts_the_clipboard_text(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "");
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("pasted text".to_owned()));
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+        });
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_owned()),
+            "pasted text"
+        );
     }
 
     #[gpui::test]

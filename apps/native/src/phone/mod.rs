@@ -2,6 +2,7 @@
 //! and the home indicator, drawn by [`PhoneRoot`] over a phone-shape
 //! [`RootView`].
 
+mod composer;
 mod home;
 mod home_view;
 mod hosts_view;
