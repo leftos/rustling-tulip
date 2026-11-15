@@ -22,6 +22,7 @@ mod buttons;
 mod changes_view;
 pub mod chat;
 mod chat_cards;
+mod chat_select;
 mod chat_tail;
 mod chat_view;
 mod cleanup_failed;

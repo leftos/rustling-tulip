@@ -79,6 +79,15 @@ pub(crate) struct MdDoc {
     anchor_rows: HashMap<String, usize>,
 }
 
+/// One selectable text of a document: its row, its part within that row (a
+/// table row's cell), and the text it draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MdUnit {
+    pub(crate) row: usize,
+    pub(crate) part: usize,
+    pub(crate) text: String,
+}
+
 impl MdDoc {
     /// How many rows the document draws: one list item each.
     pub(crate) fn row_count(&self) -> usize {
@@ -98,6 +107,42 @@ impl MdDoc {
             .map(Row::drawn_text)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Each selectable text the document draws, in order: a heading, a
+    /// paragraph and a list item's own text as part 0 (a list item's marker
+    /// is not part of its spans, so it is never copied), a table row one
+    /// part per cell, a code line and inline HTML as part 0, and nothing
+    /// for a rule. Every empty text is left out except an empty code line,
+    /// which a copy keeps so a code block's blank lines survive.
+    pub(crate) fn unit_texts(&self) -> Vec<MdUnit> {
+        let mut units = Vec::new();
+        for (row, drawn) in self.rows.iter().enumerate() {
+            match &drawn.kind {
+                RowKind::Heading { spans, .. }
+                | RowKind::Text(spans)
+                | RowKind::Item { spans, .. } => {
+                    push_unit(&mut units, row, 0, inline_text(spans).0);
+                }
+                RowKind::TableRow { cells, .. } => {
+                    for (part, cell) in cells.iter().enumerate() {
+                        push_unit(&mut units, row, part, inline_text(cell).0);
+                    }
+                }
+                RowKind::CodeLine { text, .. } => {
+                    units.push(MdUnit {
+                        row,
+                        part: 0,
+                        text: text.clone(),
+                    });
+                }
+                RowKind::Html(text) => {
+                    push_unit(&mut units, row, 0, text.clone());
+                }
+                RowKind::Rule => {}
+            }
+        }
+        units
     }
 
     /// Each stretchtext link the document draws, in order: its drawn text
@@ -462,6 +507,13 @@ pub(crate) fn inline_text(spans: &[Span]) -> (String, Vec<Range<usize>>) {
         })
         .collect();
     (text, ranges)
+}
+
+/// Pushes `text` as a unit of `row` when it has anything to select.
+fn push_unit(units: &mut Vec<MdUnit>, row: usize, part: usize, text: String) {
+    if !text.is_empty() {
+        units.push(MdUnit { row, part, text });
+    }
 }
 
 /// The marker of item `index` of a list: a bullet, or the number counted
@@ -1148,6 +1200,32 @@ mod tests {
         assert!(prefers_viewer(Modifiers::none()), "a plain click views");
         assert!(!prefers_viewer(ctrl), "Ctrl+click opens externally");
         assert!(prefers_viewer(ctrl_shift), "Ctrl+Shift+click views");
+    }
+
+    #[test]
+    fn unit_texts_lists_rows_and_cells_without_markers_or_rules() {
+        let doc = prepare_text(
+            "# Title\n\n- one\n\n| a | b |\n| --- | --- |\n| c | d |\n\n```\nfn f() {}\n\nlet x = 1;\n```\n\n---\n",
+        );
+        let listed = doc.unit_texts();
+        let units: Vec<(usize, usize, &str)> = listed
+            .iter()
+            .map(|unit| (unit.row, unit.part, unit.text.as_str()))
+            .collect();
+        assert_eq!(
+            units,
+            vec![
+                (0, 0, "Title"),
+                (1, 0, "one"),
+                (2, 0, "a"),
+                (2, 1, "b"),
+                (3, 0, "c"),
+                (3, 1, "d"),
+                (4, 0, "fn f() {}"),
+                (5, 0, ""),
+                (6, 0, "let x = 1;"),
+            ]
+        );
     }
 
     #[test]

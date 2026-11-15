@@ -307,7 +307,7 @@
       "paths": [
         "apps/native/src/chat.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^chat::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^chat::/) | test(/^chat_select::/))) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
     },
     {
       "paths": [
@@ -1262,7 +1262,7 @@
       "paths": [
         "apps/native/src/viewer_md_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_md_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_chat|ui_viewer|ui_viewer_md)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^viewer_md_view::/) | test(/^chat_select::/))) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_chat|ui_viewer|ui_viewer_md)::/))"
     },
     {
       "paths": [
@@ -1274,19 +1274,19 @@
       "paths": [
         "apps/native/src/md_blocks.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^md_blocks::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer_md|ui_chat|ui_summary)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^md_blocks::/) | test(/^chat_select::/))) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer_md|ui_chat|ui_summary)::/))"
     },
     {
       "paths": [
         "apps/native/src/stretchtext.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^stretchtext::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^stretchtext::/) | test(/^chat_select::/))) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
     },
     {
       "paths": [
         "apps/native/src/shell_lines.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^shell_lines::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^shell_lines::/) | test(/^chat_select::/))) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
     },
     {
       "paths": [
@@ -1908,6 +1908,12 @@
         "apps/native/src/keyboard.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^keyboard::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_session::/) | test(/^ui_phone_terminal::/)))"
+    },
+    {
+      "paths": [
+        "apps/native/src/chat_select.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^chat_select::/)"
     },
     {
       "paths": [
