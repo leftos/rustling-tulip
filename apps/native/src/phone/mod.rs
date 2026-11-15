@@ -6,6 +6,7 @@ mod composer;
 mod home;
 mod home_view;
 mod hosts_view;
+mod key_bar;
 pub(crate) mod lifecycle;
 mod long_press;
 mod prompt_sheet;
