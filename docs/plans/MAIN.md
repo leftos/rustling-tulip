@@ -489,11 +489,7 @@
 - [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first
 - [ ] RT-1518 PR.8: Prove a relay push end to end on a real iPhone · release vNext
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
-- [ ] RT-1534 MA.15: Build the phone's terminal · release vNext
-  - [ ] RT-1742 MA.15c: Add the phone's terminal slot to the root view · release vNext
-  - [ ] RT-1743 MA.15d: Show the session's terminal on the phone's Terminal page · release vNext
 - [ ] RT-1535 MA.16: Check the phone screens on the owner's iPhone · release vNext
-- [/] RT-1538 MA.19: Open the session a notification names · release vNext
 - [ ] RT-1647 Drop the relay's cached APNs provider token when APNs refuses it
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
@@ -730,6 +726,8 @@
 - [ ] RT-1723 Report a slow relay and a push store failure correctly in rustling-tulipd push-fallback
 - [ ] RT-1734 Settle a finished short run's running mark in the phone's chat
 - [ ] RT-1736 Measure the iOS keyboard's on-screen overlap, not its frame height, in the gpui fork
+- [ ] RT-1744 Move the phone's terminal with its session when a duplicate host is dropped
+- [ ] RT-1746 Fix the phone key bar's Ctrl after Backspace, Ctrl+C over a selection, and Back over its Quick dock
 
 ## Design files
 
@@ -748,7 +746,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1534, RT-1535, RT-1538, RT-1695, RT-1735, RT-1742, RT-1743, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1535, RT-1695, RT-1735, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
