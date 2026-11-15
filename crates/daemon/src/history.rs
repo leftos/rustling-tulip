@@ -3912,6 +3912,7 @@ mod recovery_tests {
 
     impl agent_api::Agent for ShellResumeAgent {
         type Options = TestOptions;
+        type ChatContext = ();
 
         fn descriptor(&self) -> &AgentDescriptor {
             LazyLock::force(self.descriptor)

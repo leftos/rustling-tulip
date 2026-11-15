@@ -48,6 +48,7 @@ use protocol::{ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen};
 use protocol::{PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::any::Any;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::error;
@@ -586,6 +587,12 @@ pub trait Agent: Send + Sync + 'static {
     /// `conformance` check under the `test-support` feature proves it).
     type Options: DeserializeOwned + Serialize + Default;
 
+    /// What the agent keeps between the lines of one chat's transcript,
+    /// handed to each [`Agent::chat_entries`] call; `()` for an agent that
+    /// reads each line alone. A chat makes a fresh one when it starts and
+    /// whenever its transcript starts over.
+    type ChatContext: Default + Send + 'static;
+
     /// The agent's id, names, look, capabilities and option schema.
     fn descriptor(&self) -> &AgentDescriptor;
 
@@ -699,11 +706,15 @@ pub trait Agent: Send + Sync + 'static {
     /// What one complete transcript line adds to the chat, in order. `known`
     /// returns the entry already held under an id, so a record that completes
     /// an earlier entry (a tool result) answers with the whole updated entry.
-    /// A line that adds nothing or does not parse yields none.
+    /// `context` is what the agent kept from the chat's earlier lines (such
+    /// as which script a later call belongs to); the chat starts it over
+    /// whenever its transcript does. A line that adds nothing or does not
+    /// parse yields none.
     fn chat_entries(
         &self,
         _line: &str,
         _known: &dyn Fn(&str) -> Option<ChatEntry>,
+        _context: &mut Self::ChatContext,
     ) -> Vec<ChatEntry> {
         Vec::new()
     }
@@ -1036,9 +1047,18 @@ pub trait AgentPlugin: Send + Sync {
         rows: &ResolvedRows,
     ) -> Option<PathBuf>;
 
-    /// See [`Agent::chat_entries`].
-    fn chat_entries(&self, line: &str, known: &dyn Fn(&str) -> Option<ChatEntry>)
-    -> Vec<ChatEntry>;
+    /// A fresh [`Agent::ChatContext`] for one chat, type-erased.
+    fn new_chat_context(&self) -> Box<dyn Any + Send>;
+
+    /// See [`Agent::chat_entries`]. `context` is one this plugin's
+    /// [`AgentPlugin::new_chat_context`] made; any other is read as a fresh
+    /// one for this line alone.
+    fn chat_entries(
+        &self,
+        line: &str,
+        known: &dyn Fn(&str) -> Option<ChatEntry>,
+        context: &mut dyn Any,
+    ) -> Vec<ChatEntry>;
 
     /// See [`Agent::chat_line_facts`].
     fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts;
@@ -1290,12 +1310,20 @@ impl<A: Agent> AgentPlugin for A {
         Agent::subagent_transcript_path(self, folder, conversation_id, agent_id, rows)
     }
 
+    fn new_chat_context(&self) -> Box<dyn Any + Send> {
+        Box::new(A::ChatContext::default())
+    }
+
     fn chat_entries(
         &self,
         line: &str,
         known: &dyn Fn(&str) -> Option<ChatEntry>,
+        context: &mut dyn Any,
     ) -> Vec<ChatEntry> {
-        Agent::chat_entries(self, line, known)
+        match context.downcast_mut::<A::ChatContext>() {
+            Some(context) => Agent::chat_entries(self, line, known, context),
+            None => Agent::chat_entries(self, line, known, &mut A::ChatContext::default()),
+        }
     }
 
     fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts {
@@ -1733,6 +1761,7 @@ mod tests {
 
     impl Agent for Bare {
         type Options = crate::test_agent::TestOptions;
+        type ChatContext = ();
 
         fn descriptor(&self) -> &AgentDescriptor {
             &DESCRIPTOR
@@ -1812,7 +1841,9 @@ mod tests {
             None
         );
         let line = r#"{"type":"user","uuid":"u1","message":{"content":"hi"}}"#;
-        assert_eq!(plugin.chat_entries(line, &|_| None), []);
+        let mut context = plugin.new_chat_context();
+        assert_eq!(plugin.chat_entries(line, &|_| None, context.as_mut()), []);
+        assert_eq!(plugin.chat_entries(line, &|_| None, &mut 7_u8), []);
         assert_eq!(plugin.chat_line_facts(line), TranscriptLineFacts::default());
     }
 

@@ -3,6 +3,8 @@
 //! Every method runs under its owner's lock, so a follow's backfill and the
 //! appends after it reach a follower in the log's own order.
 
+use std::any::Any;
+
 use crate::chat_mirror::{CHAT_REPLY_CAP, entry_id};
 use agent_api::AgentPlugin;
 use protocol::{ChatEntry, DaemonMessage, TranscriptSource};
@@ -22,6 +24,9 @@ pub(crate) struct TranscriptLog {
     hidden: u32,
     /// One per following connection.
     followers: Vec<(ConnectionId, Outbox)>,
+    /// What the plugin keeps between the transcript's lines; made on the
+    /// first line read and gone when the log is cleared.
+    context: Option<Box<dyn Any + Send>>,
 }
 
 impl TranscriptLog {
@@ -61,6 +66,7 @@ impl TranscriptLog {
     pub(crate) fn reset(&mut self) {
         self.entries.clear();
         self.hidden = 0;
+        self.context = None;
     }
 
     /// Parse `lines` with `plugin` and apply each line's entries in line
@@ -77,10 +83,15 @@ impl TranscriptLog {
             self.reset();
         }
         let mut applied = Vec::new();
+        let mut context = self
+            .context
+            .take()
+            .unwrap_or_else(|| plugin.new_chat_context());
         for line in lines {
-            let new = plugin.chat_entries(line, &|id| self.get(id));
+            let new = plugin.chat_entries(line, &|id| self.get(id), context.as_mut());
             applied.extend(self.apply(new));
         }
+        self.context = Some(context);
         if restart {
             let whole = self.backfill(source, None);
             self.publish(&whole);

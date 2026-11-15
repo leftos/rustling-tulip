@@ -4390,6 +4390,7 @@ mod tests {
 
     impl agent_api::Agent for ScriptedResume {
         type Options = serde_json::Value;
+        type ChatContext = ();
 
         fn descriptor(&self) -> &protocol::AgentDescriptor {
             &agent_api::test_agent::DESCRIPTOR
@@ -4505,6 +4506,7 @@ mod tests {
 
     impl agent_api::Agent for FixedResume {
         type Options = serde_json::Value;
+        type ChatContext = ();
 
         fn descriptor(&self) -> &protocol::AgentDescriptor {
             &agent_api::test_agent::DESCRIPTOR
@@ -4793,6 +4795,7 @@ mod tests {
 
     impl agent_api::Agent for EchoOptions {
         type Options = serde_json::Value;
+        type ChatContext = ();
 
         fn descriptor(&self) -> &protocol::AgentDescriptor {
             &agent_api::test_agent::DESCRIPTOR

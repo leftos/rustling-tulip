@@ -214,6 +214,7 @@ fn tool(id: &str, summary: &str, result: Option<&str>) -> ChatEntry {
         parent_id: None,
         tail_paths: Vec::new(),
         kind: ToolKind::Run,
+        script: None,
     }
 }
 

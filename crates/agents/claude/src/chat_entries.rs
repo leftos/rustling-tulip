@@ -7,10 +7,11 @@
 
 use agent_api::TranscriptLineFacts;
 use chrono::{DateTime, Utc};
-use protocol::{ChatEntry, ToolKind, ToolOutcome};
+use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
 use serde_json::{Map, Value};
 
 use crate::records;
+use crate::scripts::{self, Origin, ReplEvent, ScriptBook, Tie};
 use crate::tail_paths::{Shell, tail_paths};
 use crate::transcripts::{is_command_noise, is_meta};
 
@@ -20,7 +21,7 @@ const TOOL_INPUT_CAP: usize = 4096;
 /// row keeps.
 const TOOL_RESULT_CAP: usize = 8192;
 /// The longest tool card summary, in characters, including the ellipsis.
-const SUMMARY_MAX_CHARS: usize = 120;
+pub(crate) const SUMMARY_MAX_CHARS: usize = 120;
 /// What a cut text ends with.
 const CUT_MARKER: char = '…';
 /// The prefixes of a notification summary that already reads as a sentence.
@@ -32,26 +33,60 @@ const PLAN_ANSWER: &str = "Approved the plan";
 /// rather than a prompt the user typed.
 pub(crate) const TASK_NOTIFICATION_KIND: &str = "task-notification";
 
+/// Code Mode's tool: one call whose JavaScript runs other tools.
+const SCRIPT_TOOL: &str = "REPL";
+/// Code Mode's tool that waits for background scripts; it draws nothing.
+const POLL_TOOL: &str = "Poll";
+/// The model a virtual record, one Claude Code wrote for a script, names.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// The wrappers around a `REPL` result's text.
+const SCRIPT_RESULT_TAGS: [&str; 4] = ["<repl-output>", "</repl-output>", "<error>", "</error>"];
+
 type Known<'a> = &'a dyn Fn(&str) -> Option<ChatEntry>;
 
 /// What one complete transcript line adds to the chat, in record order.
 /// `known` answers the entry already held under an id: a tool result comes
 /// back as its whole card with the result set, and a `!` command's output as
-/// its row with the output appended. A line that does not parse, has no
-/// `uuid`, or is not a message yields nothing.
-pub(crate) fn chat_entries(line: &str, known: Known<'_>) -> Vec<ChatEntry> {
+/// its row with the output appended. `book` holds the chat's scripts across
+/// lines: a delivery that settles a background script answers with that
+/// script's card. A line that does not parse, has no `uuid`, or is not a
+/// message yields nothing.
+pub(crate) fn chat_entries(line: &str, known: Known<'_>, book: &mut ScriptBook) -> Vec<ChatEntry> {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
     let Some(uuid) = str_at(&record, "uuid").filter(|uuid| !uuid.is_empty()) else {
         return Vec::new();
     };
-    match str_at(&record, "type") {
-        Some("user") => user_entries(&record, uuid, known),
-        Some("assistant") => assistant_entries(&record, uuid),
-        Some("attachment") => queued_entry(&record, uuid).into_iter().collect(),
+    let kind = str_at(&record, "type");
+    let origin = origin_of(&record);
+    book.begin_row(
+        origin,
+        kind == Some("user") && record_facts(&record).is_user_prompt,
+    );
+    let entries = match kind {
+        Some("user") => user_entries(&record, uuid, known, book),
+        Some("assistant") => assistant_entries(&record, uuid, known, book, origin),
+        Some("attachment") => attachment_entries(&record, uuid, known, book),
         Some("system") => system_entry(&record, uuid).into_iter().collect(),
         _ => Vec::new(),
+    };
+    book.end_row();
+    entries
+}
+
+/// Who wrote `record`: an assistant record is the model's unless it is
+/// virtual, which Claude Code wrote for a script.
+fn origin_of(record: &Value) -> Origin {
+    if str_at(record, "type") != Some("assistant") {
+        return Origin::Other;
+    }
+    let synthetic = flag(record, "isVirtual")
+        || record.pointer("/message/model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
+    if synthetic {
+        Origin::Synthetic
+    } else {
+        Origin::Model
     }
 }
 
@@ -144,7 +179,12 @@ fn system_row(id: &str, text: String) -> ChatEntry {
     }
 }
 
-fn user_entries(record: &Value, uuid: &str, known: Known<'_>) -> Vec<ChatEntry> {
+fn user_entries(
+    record: &Value,
+    uuid: &str,
+    known: Known<'_>,
+    book: &mut ScriptBook,
+) -> Vec<ChatEntry> {
     if is_meta(record) || flag(record, "isCompactSummary") {
         return Vec::new();
     }
@@ -162,7 +202,7 @@ fn user_entries(record: &Value, uuid: &str, known: Known<'_>) -> Vec<ChatEntry> 
         Value::String(text) => user_string_entry(record, uuid, text, known)
             .into_iter()
             .collect(),
-        Value::Array(blocks) => user_block_entries(record, uuid, blocks, known),
+        Value::Array(blocks) => user_block_entries(record, uuid, blocks, known, book),
         _ => Vec::new(),
     }
 }
@@ -251,12 +291,13 @@ fn user_block_entries(
     uuid: &str,
     blocks: &[Value],
     known: Known<'_>,
+    book: &mut ScriptBook,
 ) -> Vec<ChatEntry> {
     let mut entries = Vec::new();
     let mut texts = Vec::new();
     for block in blocks {
         match str_at(block, "type") {
-            Some("tool_result") => entries.extend(tool_result_entries(record, block, known)),
+            Some("tool_result") => entries.extend(tool_result_entries(record, block, known, book)),
             Some("text") => texts.extend(str_at(block, "text")),
             _ => {}
         }
@@ -267,10 +308,110 @@ fn user_block_entries(
     entries
 }
 
-fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<ChatEntry> {
+/// A tool result's entries: a background script's receipt numbers its card
+/// and leaves it running; a script's error call fails its script; any other
+/// result settles the scripts its delivery names, then answers its own card.
+fn tool_result_entries(
+    record: &Value,
+    block: &Value,
+    known: Known<'_>,
+    book: &mut ScriptBook,
+) -> Vec<ChatEntry> {
     let Some(tool_use_id) = str_at(block, "tool_use_id") else {
         return Vec::new();
     };
+    let text = block
+        .get("content")
+        .and_then(content_text)
+        .unwrap_or_default();
+    let mut entries = Vec::new();
+    if book.is_script(tool_use_id) {
+        if let Some(eval) = scripts::dispatched_eval(&text) {
+            book.dispatched(tool_use_id, eval);
+            return script_update(known, tool_use_id, |_, facts| facts.eval = Some(eval))
+                .into_iter()
+                .collect();
+        }
+        book.at_once(tool_use_id);
+    } else if let Some(owner) = book.error_call_owner(tool_use_id) {
+        return script_update(known, &owner, |result, facts| {
+            fail(result);
+            facts.error = first_error_line(&text).or(facts.error.take());
+        })
+        .into_iter()
+        .collect();
+    } else {
+        entries = settled_entries(book, scripts::poll_events(&text), known);
+    }
+    entries.extend(answered_card(record, block, tool_use_id, &text, known));
+    entries
+}
+
+/// The cards of the scripts `events` settle: each done or failed, with the
+/// event's run time and, for a failure without one, its first error line.
+fn settled_entries(
+    book: &mut ScriptBook,
+    events: Vec<ReplEvent>,
+    known: Known<'_>,
+) -> Vec<ChatEntry> {
+    book.settle(events)
+        .into_iter()
+        .filter_map(|(id, event)| {
+            script_update(known, &id, |result, facts| {
+                *result = Some(ToolOutcome {
+                    text: cap_output(&event.text, TOOL_RESULT_CAP),
+                    is_error: !event.ok,
+                });
+                facts.ms = event.ms.or(facts.ms);
+                if facts.error.is_none() {
+                    facts.error = event.error.map(|line| cap_chars(&line, SUMMARY_MAX_CHARS));
+                }
+            })
+        })
+        .collect()
+}
+
+/// Marks a script's outcome failed, keeping any text it has.
+fn fail(result: &mut Option<ToolOutcome>) {
+    let text = result
+        .take()
+        .map(|outcome| outcome.text)
+        .unwrap_or_default();
+    *result = Some(ToolOutcome {
+        text,
+        is_error: true,
+    });
+}
+
+/// Script `id`'s held card with `change` made to its outcome and facts;
+/// none when the chat holds no script card under `id`.
+fn script_update(
+    known: Known<'_>,
+    id: &str,
+    change: impl FnOnce(&mut Option<ToolOutcome>, &mut ScriptFacts),
+) -> Option<ChatEntry> {
+    let mut entry = known(id)?;
+    let ChatEntry::Tool {
+        result,
+        script: Some(facts),
+        ..
+    } = &mut entry
+    else {
+        return None;
+    };
+    change(result, facts);
+    Some(entry)
+}
+
+/// A held card answered by its tool result `block`, whose text is `text`,
+/// and the receipts the result carries.
+fn answered_card(
+    record: &Value,
+    block: &Value,
+    tool_use_id: &str,
+    text: &str,
+    known: Known<'_>,
+) -> Vec<ChatEntry> {
     let Some(ChatEntry::Tool {
         id,
         name,
@@ -279,16 +420,21 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         parent_id,
         tail_paths,
         kind,
+        script,
         ..
     }) = known(tool_use_id)
     else {
         return Vec::new();
     };
     let is_error = flag(block, "is_error");
-    let text = block
-        .get("content")
-        .and_then(content_text)
-        .unwrap_or_default();
+    let script = script.map(|facts| ScriptFacts {
+        error: if is_error {
+            first_error_line(text)
+        } else {
+            None
+        },
+        ..facts
+    });
     let receipts = if is_error {
         Vec::new()
     } else {
@@ -300,14 +446,29 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         summary,
         input,
         result: Some(ToolOutcome {
-            text: cap_output(&text, TOOL_RESULT_CAP),
+            text: cap_output(text, TOOL_RESULT_CAP),
             is_error,
         }),
         parent_id,
         tail_paths,
         kind,
+        script,
     };
     std::iter::once(card).chain(receipts).collect()
+}
+
+/// A failed script's first error line: the first line of its result with
+/// text once the `<repl-output>` and `<error>` wrappers are taken off.
+fn first_error_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(|line| {
+            SCRIPT_RESULT_TAGS
+                .iter()
+                .fold(line.to_owned(), |line, tag| line.replace(tag, ""))
+        })
+        .map(|line| line.trim().to_owned())
+        .find(|line| !line.is_empty())
+        .map(|line| cap_chars(&line, SUMMARY_MAX_CHARS))
 }
 
 /// The receipts a prompt tool's answered result keeps: one per
@@ -404,7 +565,14 @@ fn content_text(content: &Value) -> Option<String> {
 /// text blocks as one answer, a signed thinking block as a thinking row,
 /// each tool call as a card. The record's first entry takes its `uuid` and
 /// each later one `<uuid>:<block index>`; a card keeps its call's id.
-fn assistant_entries(record: &Value, uuid: &str) -> Vec<ChatEntry> {
+/// `origin` says whether the model or a script made the record's calls.
+fn assistant_entries(
+    record: &Value,
+    uuid: &str,
+    known: Known<'_>,
+    book: &mut ScriptBook,
+    origin: Origin,
+) -> Vec<ChatEntry> {
     let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -423,7 +591,15 @@ fn assistant_entries(record: &Value, uuid: &str) -> Vec<ChatEntry> {
                 push_answer(&mut entries, id, text, in_text_run);
             }
             Some("thinking") => entries.extend(thinking_row(record, block, id)),
-            Some("tool_use") => entries.extend(tool_card(block, str_at(record, "cwd"))),
+            Some("tool_use") => {
+                entries.extend(call_entries(
+                    block,
+                    str_at(record, "cwd"),
+                    known,
+                    book,
+                    origin,
+                ));
+            }
             _ => {}
         }
         in_text_run = kind == Some("text");
@@ -461,33 +637,81 @@ fn thinking_row(record: &Value, block: &Value, id: String) -> Option<ChatEntry> 
     Some(ChatEntry::Thinking { id, secs })
 }
 
+/// What a tool call adds: none for a `Poll`; for a script's virtual call,
+/// its card naming the script as its parent, or, for a script's error call,
+/// no card but the script's card marked failed (nothing when no single
+/// script owns the call); for the model's `REPL` call, a script's card.
+fn call_entries(
+    block: &Value,
+    cwd: Option<&str>,
+    known: Known<'_>,
+    book: &mut ScriptBook,
+    origin: Origin,
+) -> Vec<ChatEntry> {
+    let (Some(id), Some(name)) = (str_at(block, "id"), str_at(block, "name")) else {
+        return Vec::new();
+    };
+    if name == POLL_TOOL {
+        return Vec::new();
+    }
+    let mut parent = None;
+    match origin {
+        Origin::Synthetic => match book.tie(id) {
+            Some(Tie::Error(script)) => {
+                return script_update(known, &script, |result, _| fail(result))
+                    .into_iter()
+                    .collect();
+            }
+            Some(Tie::Inner(script)) => parent = Some(script),
+            None if id.starts_with(scripts::ERROR_PREFIX) => return Vec::new(),
+            None => {}
+        },
+        Origin::Model if name == SCRIPT_TOOL => book.open(id),
+        Origin::Model | Origin::Other => {}
+    }
+    vec![tool_card(block, id, name, cwd, parent)]
+}
+
 /// A tool call's card. A shell call names the files its command writes or
-/// logs to, resolved against `cwd`, the record's working folder.
-fn tool_card(block: &Value, cwd: Option<&str>) -> Option<ChatEntry> {
-    let id = str_at(block, "id")?;
-    let name = str_at(block, "name")?;
+/// logs to, resolved against `cwd`, the record's working folder. A `REPL`
+/// call carries its script facts, its description's first line read before
+/// the input is capped; a call a script ran takes `parent`, that script.
+fn tool_card(
+    block: &Value,
+    id: &str,
+    name: &str,
+    cwd: Option<&str>,
+    parent: Option<String>,
+) -> ChatEntry {
     let input = block.get("input").unwrap_or(&Value::Null);
     let tail_paths = match (Shell::of_tool(name), str_at(input, "command")) {
         (Some(shell), Some(command)) => tail_paths(shell, command, cwd),
         _ => Vec::new(),
     };
-    Some(ChatEntry::Tool {
+    let kind = tool_kind(name);
+    let facts = (kind == ToolKind::Script).then(|| ScriptFacts {
+        description: scripts::description_line(input),
+        ..ScriptFacts::default()
+    });
+    ChatEntry::Tool {
         id: id.to_owned(),
         name: name.to_owned(),
         summary: tool_summary(name, input),
         input: cap(&format!("{input:#}"), TOOL_INPUT_CAP),
         result: None,
-        parent_id: None,
+        parent_id: parent,
         tail_paths,
-        kind: tool_kind(name),
-    })
+        kind,
+        script: facts,
+    }
 }
 
 /// What sort of work Claude's tool `name` does: reading, searching, running
-/// a command, or anything else (an edit, a write, a subagent task, an MCP
-/// tool).
+/// a command, running a script of other calls (Code Mode's `REPL`), or
+/// anything else (an edit, a write, a subagent task, an MCP tool).
 pub(crate) fn tool_kind(name: &str) -> ToolKind {
     match name {
+        SCRIPT_TOOL => ToolKind::Script,
         "Read" | "NotebookRead" | "WebFetch" => ToolKind::Read,
         "Grep" | "Glob" | "LS" | "WebSearch" | "ToolSearch" => ToolKind::Search,
         _ if Shell::of_tool(name).is_some() || name == "BashOutput" => ToolKind::Run,
@@ -503,13 +727,39 @@ fn tool_summary(name: &str, input: &Value) -> String {
         "Bash" | "PowerShell" => "command",
         "Read" | "Edit" | "Write" => "file_path",
         "Grep" | "Glob" => "pattern",
-        "Agent" | "Task" => "description",
+        "Agent" | "Task" | SCRIPT_TOOL => "description",
         _ => "",
     };
     let line = str_at(input, key)
         .and_then(|value| value.lines().map(str::trim).find(|line| !line.is_empty()))
         .unwrap_or("");
     cap_chars(line, SUMMARY_MAX_CHARS)
+}
+
+/// An attachment record's entries: a delivery of background scripts' events
+/// (`poll_events` with envelopes) settles those scripts' cards; a queued
+/// message is its own entry.
+fn attachment_entries(
+    record: &Value,
+    uuid: &str,
+    known: Known<'_>,
+    book: &mut ScriptBook,
+) -> Vec<ChatEntry> {
+    let envelopes = record
+        .pointer("/attachment/envelopes")
+        .and_then(Value::as_array)
+        .filter(|_| {
+            record.pointer("/attachment/type").and_then(Value::as_str) == Some("poll_events")
+        });
+    let events: Vec<ReplEvent> = envelopes
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .flat_map(scripts::queued_events)
+        .collect();
+    let mut entries = settled_entries(book, events, known);
+    entries.extend(queued_entry(record, uuid));
+    entries
 }
 
 /// A mid-turn message the user typed (`queued_command`); a queued
@@ -748,7 +998,7 @@ fn cap_output(text: &str, limit: usize) -> String {
 
 /// `text` cut to at most `max` characters, the last being [`CUT_MARKER`]
 /// when anything was cut.
-fn cap_chars(text: &str, max: usize) -> String {
+pub(crate) fn cap_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
@@ -760,12 +1010,13 @@ fn cap_chars(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CUT_MARKER, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output, chat_entries, line_facts,
+        CUT_MARKER, Known, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output, line_facts,
         split_at_limit, tool_kind,
     };
+    use crate::scripts::ScriptBook;
     use agent_api::TranscriptLineFacts;
     use chrono::{TimeDelta, TimeZone as _, Utc};
-    use protocol::{ChatEntry, ToolKind, ToolOutcome};
+    use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
     use serde_json::{Value, json};
 
     #[test]
@@ -922,16 +1173,23 @@ mod tests {
         }
     }
 
-    /// Every line of `body` through [`chat_entries`], each output upserted by
-    /// id into the chat the next line's `known` reads: the per-line outputs
-    /// and the chat at the end.
+    /// One line read alone, with a fresh book.
+    fn chat_entries(line: &str, known: Known<'_>) -> Vec<ChatEntry> {
+        super::chat_entries(line, known, &mut ScriptBook::default())
+    }
+
+    /// Every line of `body` through [`super::chat_entries`] with one book,
+    /// each output upserted by id into the chat the next line's `known`
+    /// reads: the per-line outputs and the chat at the end.
     fn replay(body: &str) -> (Vec<Vec<ChatEntry>>, Vec<ChatEntry>) {
         let mut chat: Vec<ChatEntry> = Vec::new();
         let mut outputs = Vec::new();
+        let mut book = ScriptBook::default();
         for line in body.lines() {
             let out = {
                 let held = &chat;
-                chat_entries(line, &|id| held.iter().find(|e| id_of(e) == id).cloned())
+                let known = |id: &str| held.iter().find(|e| id_of(e) == id).cloned();
+                super::chat_entries(line, &known, &mut book)
             };
             for entry in &out {
                 match chat.iter_mut().find(|held| id_of(held) == id_of(entry)) {
@@ -994,6 +1252,7 @@ mod tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind: tool_kind(name),
+            script: None,
         }
     }
 
@@ -1039,6 +1298,7 @@ mod tests {
                 include_str!("../tests/fixtures/transcripts/stream-json-run.jsonl")
             }
             "subagent-run" => include_str!("../tests/fixtures/transcripts/subagent-run.jsonl"),
+            "repl" => include_str!("../tests/fixtures/transcripts/repl.jsonl"),
             other => unreachable!("no fixture {other}"),
         }
     }
@@ -1053,6 +1313,488 @@ mod tests {
 
     fn alone(name: &str, n: &str) -> Vec<ChatEntry> {
         chat_entries(line(name, n), &|_| None)
+    }
+
+    const SCRIPT: &str = "toolu_r1";
+    const FAILING_SCRIPT: &str = "toolu_r2";
+    const INNER: [&str; 2] = [
+        "repl_00000000-0000-4000-8000-0000000000a1",
+        "repl_00000000-0000-4000-8000-0000000000a2",
+    ];
+
+    fn tool_in<'a>(chat: &'a [ChatEntry], wanted: &str) -> &'a ChatEntry {
+        chat.iter()
+            .find(|entry| id_of(entry) == wanted)
+            .unwrap_or_else(|| unreachable!("no entry {wanted} in {chat:?}"))
+    }
+
+    fn parent_of<'a>(chat: &'a [ChatEntry], wanted: &str) -> Option<&'a str> {
+        match tool_in(chat, wanted) {
+            ChatEntry::Tool { parent_id, .. } => parent_id.as_deref(),
+            other => unreachable!("{wanted} is not a tool: {other:?}"),
+        }
+    }
+
+    /// Script `wanted`'s outcome and facts in `chat`.
+    fn script_in<'a>(
+        chat: &'a [ChatEntry],
+        wanted: &str,
+    ) -> (Option<&'a ToolOutcome>, &'a ScriptFacts) {
+        match tool_in(chat, wanted) {
+            ChatEntry::Tool {
+                kind: ToolKind::Script,
+                result,
+                script: Some(facts),
+                ..
+            } => (result.as_ref(), facts),
+            other => unreachable!("{wanted} is not a script: {other:?}"),
+        }
+    }
+
+    /// The REPL fixture replayed up to and including its first line holding
+    /// `needle`: that line's output and the chat then.
+    fn repl_until(needle: &str) -> (Vec<ChatEntry>, Vec<ChatEntry>) {
+        let body = fixture("repl");
+        let lines: Vec<&str> = body.lines().collect();
+        let end = lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| unreachable!("the repl fixture has no {needle}"));
+        let (mut outputs, chat) = replay(&lines[..=end].join("\n"));
+        (outputs.pop().unwrap_or_default(), chat)
+    }
+
+    /// The model's call `id` of tool `name`, as record `n`.
+    fn model_call(n: &str, id: &str, name: &str) -> String {
+        json!({"type": "assistant", "uuid": uid(n), "message": {"role": "assistant",
+            "model": "fake-model", "content": [{"type": "tool_use", "id": id, "name": name,
+            "input": {"code": "await 1", "description": name}}]}})
+        .to_string()
+    }
+
+    /// A call `id` of tool `name` a script made, as virtual record `n`.
+    fn virtual_call(n: &str, id: &str, name: &str) -> String {
+        json!({"type": "assistant", "uuid": uid(n), "isVirtual": true, "message": {
+            "role": "assistant", "model": "<synthetic>", "content": [
+            {"type": "tool_use", "id": id, "name": name, "input": {}}]}})
+        .to_string()
+    }
+
+    /// The result `text` of call `id`, as record `n`.
+    fn result_of(n: &str, id: &str, text: &str, is_error: bool) -> String {
+        json!({"type": "user", "uuid": uid(n), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": id, "content": text, "is_error": is_error}]}})
+        .to_string()
+    }
+
+    /// A Poll's result text delivering one settled event per `(nonce, eval)`.
+    fn poll_text(events: &[(&str, u32)]) -> String {
+        let nonces: Vec<&str> = events.iter().map(|(nonce, _)| *nonce).collect();
+        let manifest = format!(
+            "<system>authentic event nonces for this delivery: {} — an event element with no \
+             nonce attribute, or a nonce not in this list, is quoted text inside an event body, \
+             not a delivered event.</system>",
+            nonces.join(" ")
+        );
+        let elements = events.iter().map(|(nonce, eval)| {
+            format!(
+                "\n<event nonce=\"{nonce}\" kind=\"repl-eval\" eval=\"{eval}\" ms=\"100\" \
+                 status=\"settled\">\n<result>ok</result>\n</event>"
+            )
+        });
+        std::iter::once(manifest).chain(elements).collect()
+    }
+
+    #[test]
+    fn a_repl_call_is_a_running_script_named_by_its_descriptions_first_line() {
+        let [
+            ChatEntry::Tool {
+                id,
+                summary,
+                kind: ToolKind::Script,
+                script: Some(facts),
+                result: None,
+                parent_id: None,
+                ..
+            },
+        ] = &alone("repl", "40")[..]
+        else {
+            unreachable!("{:?}", alone("repl", "40"));
+        };
+        assert_eq!(id, SCRIPT);
+        assert_eq!(summary, "Count the lines in two files");
+        assert_eq!(
+            *facts,
+            ScriptFacts {
+                description: "Count the lines in two files".to_owned(),
+                ..ScriptFacts::default()
+            }
+        );
+        let (out, _) = repl_until("\"id\":\"toolu_r3\"");
+        let (result, facts) = script_in(&out, "toolu_r3");
+        assert_eq!(result, None);
+        assert_eq!(facts.description, "Read the repo status", "{facts:?}");
+    }
+
+    #[test]
+    fn a_script_that_returns_at_once_is_done_and_a_failed_one_carries_its_first_error_line() {
+        let (_, chat) = replay(fixture("repl"));
+        let (result, ok) = script_in(&chat, SCRIPT);
+        assert!(
+            matches!(
+                result,
+                Some(ToolOutcome {
+                    is_error: false,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!((ok.eval, ok.ms, ok.error.as_deref()), (None, None, None));
+        let (result, failed) = script_in(&chat, FAILING_SCRIPT);
+        assert!(
+            matches!(result, Some(ToolOutcome { is_error: true, .. })),
+            "{result:?}"
+        );
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("ShellError: Command failed with exit code 2:")
+        );
+        assert_eq!(failed.description, "Read the last commit's trailers");
+    }
+
+    #[test]
+    fn a_dispatched_receipt_leaves_the_script_running_with_its_eval_and_no_time() {
+        let (out, _) = repl_until("(dispatched #156)");
+        let (result, facts) = script_in(&out, "toolu_r3");
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(result, None, "a receipt is no outcome");
+        assert_eq!((facts.eval, facts.ms), (Some(156), None));
+    }
+
+    #[test]
+    fn a_poll_settling_an_eval_finishes_its_script_with_the_events_time() {
+        let (out, chat) = repl_until("\"tool_use_id\":\"toolu_p1\"");
+        assert_eq!(out.len(), 1, "only the settled script: {out:?}");
+        let (result, facts) = script_in(&out, "toolu_r3");
+        assert_eq!(
+            result,
+            Some(&ToolOutcome {
+                text: "status:\n## main\n\nplan:\nfive lines".to_owned(),
+                is_error: false,
+            })
+        );
+        assert_eq!(
+            (facts.eval, facts.ms, facts.error.as_deref()),
+            (Some(156), Some(4194), None)
+        );
+        let (other, facts) = script_in(&chat, "toolu_r4");
+        assert_eq!(
+            (other, facts.eval),
+            (None, Some(157)),
+            "eval 157 still runs"
+        );
+
+        let (out, _) = repl_until("\"tool_use_id\":\"toolu_p2\"");
+        let (result, facts) = script_in(&out, "toolu_r4");
+        assert!(
+            matches!(
+                result,
+                Some(ToolOutcome {
+                    is_error: false,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(facts.ms, Some(842));
+    }
+
+    #[test]
+    fn a_poll_whose_event_opens_with_console_output_still_settles_its_script() {
+        let (out, _) = repl_until("\"tool_use_id\":\"toolu_p4\"");
+        let (result, facts) = script_in(&out, "toolu_r7");
+        assert_eq!(
+            result,
+            Some(&ToolOutcome {
+                text: "{\"taskId\":\"t1\",\"timeoutMs\":1800000,\"persistent\":false}".to_owned(),
+                is_error: false,
+            })
+        );
+        assert_eq!((facts.eval, facts.ms), (Some(200), Some(3715)));
+    }
+
+    #[test]
+    fn a_long_description_is_cut_to_the_summarys_length() {
+        let call = model_call("h1", "toolu_long", "REPL").replace(
+            "\"description\":\"REPL\"",
+            &format!("\"description\":\"{}\"", "w".repeat(300)),
+        );
+        let [
+            ChatEntry::Tool {
+                summary,
+                script: Some(facts),
+                ..
+            },
+        ] = &chat_entries(&call, &|_| None)[..]
+        else {
+            unreachable!("{call}");
+        };
+        assert_eq!(facts.description.chars().count(), 120, "{facts:?}");
+        assert_eq!(&facts.description, summary);
+    }
+
+    #[test]
+    fn a_poll_settling_an_eval_with_an_error_fails_its_script_with_its_line_and_time() {
+        let (out, _) = repl_until("\"tool_use_id\":\"toolu_p3\"");
+        let (result, facts) = script_in(&out, "toolu_r5");
+        assert!(
+            matches!(result, Some(ToolOutcome { is_error: true, .. })),
+            "{result:?}"
+        );
+        assert_eq!(facts.ms, Some(34020));
+        let error = facts.error.as_deref().unwrap_or_default();
+        assert!(
+            error.starts_with("Error: REPL execution timed out after 30000ms of script time"),
+            "{error}"
+        );
+        assert_eq!(
+            error.chars().count(),
+            120,
+            "capped as a summary is: {error}"
+        );
+    }
+
+    #[test]
+    fn a_repl_error_call_draws_nothing_and_fails_the_one_script_in_flight() {
+        let (out, _) = repl_until("\"id\":\"repl-error-");
+        assert!(
+            matches!(&out[..], [ChatEntry::Tool { id, .. }] if id == "toolu_r5"),
+            "{out:?}"
+        );
+        let (outputs, chat) = replay(fixture("repl"));
+        assert!(
+            !chat
+                .iter()
+                .any(|entry| id_of(entry).starts_with("repl-error-")),
+            "{chat:?}"
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .flatten()
+                .filter(|e| id_of(e).starts_with("repl-error-"))
+                .count(),
+            0
+        );
+        let (result, facts) = script_in(&chat, "toolu_r5");
+        assert!(
+            matches!(result, Some(ToolOutcome { is_error: true, .. })),
+            "{result:?}"
+        );
+        assert_eq!(
+            facts.error.as_deref(),
+            Some("Timed out after 30s, not counting time spent in tool calls"),
+            "the error call's line wins over the event's"
+        );
+        assert_eq!(facts.ms, Some(34020));
+    }
+
+    #[test]
+    fn a_repl_error_call_no_single_script_owns_draws_nothing() {
+        let error_call = virtual_call("e1", "repl-error-x", "REPL");
+        let error_result = result_of("e2", "repl-error-x", "Error: boom", true);
+        let (outputs, chat) = replay(&[error_call.clone(), error_result.clone()].join("\n"));
+        assert_eq!(
+            outputs,
+            [Vec::<ChatEntry>::new(), Vec::new()],
+            "none in flight"
+        );
+        assert_eq!(chat, []);
+
+        let two = [
+            model_call("e3", "toolu_q1", "REPL"),
+            model_call("e4", "toolu_q2", "REPL"),
+            result_of(
+                "e5",
+                "toolu_q1",
+                "<repl-output>\n<result>a</result>\n</repl-output>",
+                false,
+            ),
+            result_of(
+                "e6",
+                "toolu_q2",
+                "<repl-output>\n<result>b</result>\n</repl-output>",
+                false,
+            ),
+            error_call,
+            error_result,
+        ];
+        let (outputs, chat) = replay(&two.join("\n"));
+        assert_eq!(
+            outputs[4..],
+            [Vec::<ChatEntry>::new(), Vec::new()],
+            "two in flight"
+        );
+        for id in ["toolu_q1", "toolu_q2"] {
+            let (result, facts) = script_in(&chat, id);
+            assert!(
+                matches!(
+                    result,
+                    Some(ToolOutcome {
+                        is_error: false,
+                        ..
+                    })
+                ),
+                "{id}"
+            );
+            assert_eq!(facts.error, None, "{id}");
+        }
+    }
+
+    #[test]
+    fn calls_after_a_single_at_once_result_are_that_scripts() {
+        let (_, chat) = replay(fixture("repl"));
+        for inner in INNER {
+            assert_eq!(parent_of(&chat, inner), Some(SCRIPT), "{inner}");
+        }
+        assert_eq!(
+            parent_of(&chat, "repl_00000000-0000-4000-8000-0000000000b1"),
+            Some(FAILING_SCRIPT)
+        );
+        assert_eq!(
+            parent_of(&chat, SCRIPT),
+            None,
+            "a model call is no script's"
+        );
+        assert!(
+            matches!(
+                tool_in(&chat, INNER[0]),
+                ChatEntry::Tool {
+                    kind: ToolKind::Run,
+                    result: Some(_),
+                    ..
+                }
+            ),
+            "{chat:?}"
+        );
+    }
+
+    #[test]
+    fn calls_after_a_delivery_of_one_script_are_that_scripts() {
+        let (_, chat) = replay(fixture("repl"));
+        for (inner, script) in [
+            ("c1", "toolu_r3"),
+            ("c2", "toolu_r3"),
+            ("c3", "toolu_r4"),
+            ("d1", "toolu_r5"),
+            ("e1", "toolu_r6"),
+        ] {
+            let id = format!("repl_{}", uid(inner));
+            assert_eq!(parent_of(&chat, &id), Some(script), "{id}");
+        }
+        let (result, facts) = script_in(&chat, "toolu_r6");
+        assert!(
+            matches!(
+                result,
+                Some(ToolOutcome {
+                    is_error: false,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            (facts.eval, facts.ms),
+            (Some(159), Some(2149)),
+            "a poll_events delivery"
+        );
+    }
+
+    #[test]
+    fn calls_after_a_delivery_of_two_scripts_or_two_at_once_results_stay_untied() {
+        let delivered = [
+            model_call("f1", "toolu_d1", "REPL"),
+            result_of("f2", "toolu_d1", "(dispatched #4)", false),
+            model_call("f3", "toolu_d2", "REPL"),
+            result_of("f4", "toolu_d2", "(dispatched #5)", false),
+            model_call("f5", "toolu_p", "Poll"),
+            result_of(
+                "f6",
+                "toolu_p",
+                &poll_text(&[("uxbJyUIU", 4), ("xPSh_Y56", 5)]),
+                false,
+            ),
+            virtual_call("f7", "repl_r4", "Read"),
+        ];
+        let (_, chat) = replay(&delivered.join("\n"));
+        assert_eq!(parent_of(&chat, "repl_r4"), None);
+        for id in ["toolu_d1", "toolu_d2"] {
+            let (result, facts) = script_in(&chat, id);
+            assert!(
+                matches!(
+                    result,
+                    Some(ToolOutcome {
+                        is_error: false,
+                        ..
+                    })
+                ),
+                "{id}"
+            );
+            assert_eq!(facts.ms, Some(100), "{id}");
+        }
+
+        let at_once = [
+            model_call("f8", "toolu_q1", "REPL"),
+            model_call("f9", "toolu_q2", "REPL"),
+            result_of("fa", "toolu_q1", "a", false),
+            result_of("fb", "toolu_q2", "b", false),
+            virtual_call("fc", "repl_q", "Bash"),
+        ];
+        let (_, chat) = replay(&at_once.join("\n"));
+        assert_eq!(parent_of(&chat, "repl_q"), None);
+    }
+
+    #[test]
+    fn a_call_after_a_model_record_or_a_prompt_stays_untied() {
+        let after_model = [
+            model_call("g1", "toolu_a", "REPL"),
+            result_of("g2", "toolu_a", "(dispatched #1)", false),
+            result_of("g3", "toolu_p", &poll_text(&[("AAAA", 1)]), false),
+            model_call("g4", "toolu_z", "Bash"),
+            virtual_call("g5", "repl_r9", "Read"),
+        ];
+        let (_, chat) = replay(&after_model.join("\n"));
+        assert_eq!(parent_of(&chat, "repl_r9"), None);
+
+        let prompt = json!({"type": "user", "uuid": uid("g8"), "promptId": "p-2",
+            "message": {"role": "user", "content": "and now this"}});
+        let after_prompt = [
+            model_call("g6", "toolu_q", "REPL"),
+            result_of("g7", "toolu_q", "done", false),
+            prompt.to_string(),
+            virtual_call("g9", "repl_q9", "Read"),
+        ];
+        let (_, chat) = replay(&after_prompt.join("\n"));
+        assert_eq!(parent_of(&chat, "repl_q9"), None);
+    }
+
+    #[test]
+    fn a_poll_call_and_its_result_draw_nothing() {
+        let (outputs, chat) = replay(fixture("repl"));
+        for poll in ["toolu_p1", "toolu_p2", "toolu_p3"] {
+            assert!(
+                !chat.iter().any(|entry| id_of(entry) == poll),
+                "{poll} in {chat:?}"
+            );
+        }
+        let lines: Vec<&str> = fixture("repl").lines().collect();
+        for (line, out) in lines.iter().zip(&outputs) {
+            if line.contains("\"name\":\"Poll\"") || line.contains("\"deliveredVia\":\"poll_tool\"")
+            {
+                assert_eq!(out, &Vec::<ChatEntry>::new(), "{line}");
+            }
+        }
     }
 
     #[test]
@@ -1290,6 +2032,7 @@ mod tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind: ToolKind::Search,
+            script: None,
         };
         let result = json!({"type": "user", "uuid": "v", "message": {"content": [
             {"type": "tool_result", "tool_use_id": "toolu_k", "content": "ok"}

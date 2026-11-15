@@ -18,6 +18,7 @@
 //! new to the loader. The lock is taken inside a screen's grid lock, never
 //! the reverse, and is never held across an await.
 
+use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use agent_api::{AgentPlugin, LiveLine, ScreenWork, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, DaemonMessage,
-    PendingInput, SessionStatus, StretchLine, SummarySource,
+    PendingInput, SessionStatus, StretchLine, SummarySource, ToolKind,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -1841,6 +1842,11 @@ struct ChatState {
     ended_prompts: HashSet<String>,
     /// The keys of live messages changed since they were last sent.
     changed: HashSet<String>,
+    /// What the plugin keeps between the transcript's lines (such as which
+    /// script a later call belongs to); made by the plugin on the first line
+    /// read, and gone with the rest of the chat when the transcript restarts
+    /// or the session switches conversation.
+    context: Option<Box<dyn Any + Send>>,
 }
 
 /// One answer still arriving: its pieces by their place in the message.
@@ -1944,11 +1950,17 @@ impl ChatState {
             change.removed = self.end_live_before(facts.prompt_id.as_deref());
         }
         let mut starts_turn = facts.is_user_prompt;
-        let produced = plugin.chat_entries(line, &|id| self.get(id));
-        for entry in produced {
+        let mut context = self
+            .context
+            .take()
+            .unwrap_or_else(|| plugin.new_chat_context());
+        let produced = plugin.chat_entries(line, &|id| self.get(id), context.as_mut());
+        self.context = Some(context);
+        for mut entry in produced {
             let Some(id) = entry_id(&entry).map(str::to_owned) else {
                 continue;
             };
+            self.time_script(&id, &mut entry, facts.timestamp);
             if starts_turn {
                 starts_turn = false;
                 self.turn_starts.insert(id.clone());
@@ -1964,6 +1976,29 @@ impl ChatState {
             change.replaces.push(replaces);
         }
         change
+    }
+
+    /// A script that ran at once, its result written at `at`: one with an
+    /// outcome but no eval number and no time yet takes the milliseconds
+    /// from its call's time to `at` when both are known. A background
+    /// script's time comes from the event that settles it.
+    fn time_script(&self, id: &str, entry: &mut ChatEntry, at: Option<DateTime<Utc>>) {
+        let ChatEntry::Tool {
+            kind: ToolKind::Script,
+            result: Some(_),
+            script: Some(facts),
+            ..
+        } = entry
+        else {
+            return;
+        };
+        if facts.eval.is_some() || facts.ms.is_some() {
+            return;
+        }
+        let called = self.times.get(id).copied().flatten();
+        facts.ms = called
+            .zip(at)
+            .and_then(|(called, at)| u64::try_from((at - called).num_milliseconds()).ok());
     }
 
     /// Put `entry` in place of the entry with `id`, returning that one's
@@ -2365,6 +2400,107 @@ mod tests {
             mirror.pending.len(),
             1,
             "an old line with the send's text is not its record"
+        );
+    }
+
+    const REPL: &str = include_str!("../../agents/claude/tests/fixtures/transcripts/repl.jsonl");
+
+    #[test]
+    fn a_scripts_calls_name_it_and_its_result_carries_its_run_time() {
+        let mut chat = ChatState::default();
+        for line in REPL.lines() {
+            apply(&mut chat, line);
+        }
+        let parent = |id: &str| match chat.get(id) {
+            Some(ChatEntry::Tool { parent_id, .. }) => parent_id,
+            other => unreachable!("{id} is not a tool: {other:?}"),
+        };
+        for (inner, script) in [
+            ("repl_00000000-0000-4000-8000-0000000000a1", "toolu_r1"),
+            ("repl_00000000-0000-4000-8000-0000000000a2", "toolu_r1"),
+            ("repl_00000000-0000-4000-8000-0000000000b1", "toolu_r2"),
+            ("repl_00000000-0000-4000-8000-0000000000c1", "toolu_r3"),
+            ("repl_00000000-0000-4000-8000-0000000000c3", "toolu_r4"),
+        ] {
+            assert_eq!(parent(inner).as_deref(), Some(script), "{inner}");
+        }
+        assert_eq!(
+            parent("toolu_r2"),
+            None,
+            "a later script is no script's call"
+        );
+        let script_ms = |id: &str| match chat.get(id) {
+            Some(ChatEntry::Tool {
+                script: Some(facts),
+                result: Some(_),
+                ..
+            }) => facts.ms,
+            other => unreachable!("{id} is not an answered script: {other:?}"),
+        };
+        assert_eq!(
+            script_ms("toolu_r1"),
+            Some(7250),
+            "10:00:17.250 less 10:00:10.000"
+        );
+        assert_eq!(script_ms("toolu_r2"), Some(400));
+        for (script, ms) in [
+            ("toolu_r3", 4194),
+            ("toolu_r4", 842),
+            ("toolu_r5", 34020),
+            ("toolu_r6", 2149),
+        ] {
+            assert_eq!(script_ms(script), Some(ms), "{script}: the event's time");
+        }
+    }
+
+    #[test]
+    fn a_dispatched_script_runs_untimed_until_its_event_settles_it() {
+        let mut chat = ChatState::default();
+        let receipt = REPL
+            .lines()
+            .position(|line| line.contains("(dispatched #156)"))
+            .unwrap_or_else(|| unreachable!("no receipt in the fixture"));
+        for line in REPL.lines().take(receipt + 1) {
+            apply(&mut chat, line);
+        }
+        assert!(
+            matches!(
+                chat.get("toolu_r3"),
+                Some(ChatEntry::Tool {
+                    result: None,
+                    script: Some(protocol::ScriptFacts {
+                        eval: Some(156),
+                        ms: None,
+                        ..
+                    }),
+                    ..
+                })
+            ),
+            "{:?}",
+            chat.get("toolu_r3")
+        );
+    }
+
+    #[test]
+    fn a_restarted_transcript_forgets_its_scripts() {
+        let mut chat = ChatState::default();
+        let lines: Vec<&str> = REPL.lines().collect();
+        // The first script's call and its at-once result: its window is open.
+        for line in &lines[..3] {
+            apply(&mut chat, line);
+        }
+        chat.restart();
+        apply(&mut chat, lines[3]);
+        assert!(
+            matches!(
+                chat.get("repl_00000000-0000-4000-8000-0000000000a1"),
+                Some(ChatEntry::Tool {
+                    parent_id: None,
+                    ..
+                })
+            ),
+            "{:?}",
+            chat.entries
         );
     }
 

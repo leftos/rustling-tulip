@@ -4023,6 +4023,7 @@ fn chat_tool(
         parent_id: None,
         tail_paths: Vec::new(),
         kind,
+        script: None,
     }
 }
 
@@ -4187,6 +4188,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             parent_id: None,
             tail_paths: vec![FOOTER_LOG.to_owned()],
             kind: ToolKind::Run,
+            script: None,
         },
     ];
     entries.extend(footer_run());

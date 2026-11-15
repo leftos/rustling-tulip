@@ -168,6 +168,7 @@ fn call(id: &str, name: &str, kind: ToolKind) -> ChatEntry {
         parent_id: None,
         tail_paths: Vec::new(),
         kind,
+        script: None,
     }
 }
 

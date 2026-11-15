@@ -3536,6 +3536,11 @@ pub enum ChatEntry {
         /// On the wire as `tool_kind`, since `kind` is the entry's own tag.
         #[serde(default, rename = "tool_kind")]
         kind: ToolKind,
+        /// What a [`ToolKind::Script`] call adds: its description, its
+        /// number, its run time and its first error line. `None` for any
+        /// other call, and from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script: Option<ScriptFacts>,
     },
     /// A row the daemon itself wrote, such as a cleared conversation.
     System { id: String, text: String },
@@ -3566,14 +3571,35 @@ pub struct ToolOutcome {
     pub is_error: bool,
 }
 
+/// What a script call (one whose code runs other tools) carries beside its
+/// card. The calls the script ran are the tool entries whose `parent_id` is
+/// the script's id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScriptFacts {
+    /// The script's description, as the agent gave it.
+    pub description: String,
+    /// The agent's number for the script, when the transcript gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval: Option<u32>,
+    /// Milliseconds from the call to its result, when both are timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+    /// A failed script's first error line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// What sort of work a tool call does: it reads, searches, runs a command,
-/// or something else (an edit, a write, a subagent task).
+/// runs a script of other calls, or something else (an edit, a write, a
+/// subagent task).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
     Read,
     Search,
     Run,
+    /// A script: one call whose code runs other tool calls.
+    Script,
     #[default]
     Other,
     /// Forward-compat fallback: a kind the current build doesn't know.
@@ -17049,6 +17075,7 @@ mod tests {
                 parent_id: Some("a1".to_string()),
                 tail_paths: Vec::new(),
                 kind: ToolKind::Run,
+                script: None,
             },
             ChatEntry::System {
                 id: "sys1".to_string(),
@@ -17364,6 +17391,7 @@ mod tests {
             parent_id: None,
             tail_paths: vec!["C:/repo/build.log".to_string()],
             kind: ToolKind::Run,
+            script: None,
         };
         let json = serde_json::to_string(&with).expect("encode");
         assert!(
@@ -17382,6 +17410,7 @@ mod tests {
             (ToolKind::Read, "read"),
             (ToolKind::Search, "search"),
             (ToolKind::Run, "run"),
+            (ToolKind::Script, "script"),
             (ToolKind::Other, "other"),
         ] {
             let entry = ChatEntry::Tool {
@@ -17393,6 +17422,7 @@ mod tests {
                 parent_id: None,
                 tail_paths: Vec::new(),
                 kind,
+                script: None,
             };
             let json = serde_json::to_value(&entry).expect("serialize");
             assert_eq!(json["kind"], "tool", "{json}");
@@ -17401,6 +17431,62 @@ mod tests {
             assert_eq!(back, entry);
         }
         assert_eq!(ToolKind::default(), ToolKind::Other);
+    }
+
+    #[test]
+    fn a_script_entry_round_trips_its_facts() {
+        let entry = ChatEntry::Tool {
+            id: "t".to_string(),
+            name: "x".to_string(),
+            summary: "Count the lines".to_string(),
+            input: String::new(),
+            result: None,
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind: ToolKind::Script,
+            script: Some(ScriptFacts {
+                description: "Count the lines\nin two files".to_string(),
+                eval: Some(12),
+                ms: Some(3200),
+                error: Some("TypeError: x is not a function".to_string()),
+            }),
+        };
+        let json = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(json["tool_kind"], "script", "{json}");
+        assert_eq!(
+            json["script"]["description"],
+            "Count the lines\nin two files"
+        );
+        assert_eq!(json["script"]["eval"], 12, "{json}");
+        assert_eq!(json["script"]["ms"], 3200, "{json}");
+        let back: ChatEntry = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, entry);
+
+        let bare = ScriptFacts {
+            description: "d".to_string(),
+            ..ScriptFacts::default()
+        };
+        let json = serde_json::to_value(&bare).expect("serialize");
+        assert_eq!(json, serde_json::json!({"description": "d"}));
+    }
+
+    #[test]
+    fn a_tool_entry_without_script_facts_decodes_with_none() {
+        let old = r#"{"kind":"tool","id":"t","name":"Bash","summary":"ls","input":"{}","tool_kind":"run"}"#;
+        let decoded: ChatEntry = serde_json::from_str(old).expect("an older entry decodes");
+        assert!(
+            matches!(
+                decoded,
+                ChatEntry::Tool {
+                    kind: ToolKind::Run,
+                    script: None,
+                    ..
+                }
+            ),
+            "{decoded:?}"
+        );
+        let encoded = serde_json::to_value(&decoded).expect("encode");
+        assert!(encoded.get("script").is_none(), "{encoded}");
     }
 
     #[test]
@@ -17994,6 +18080,7 @@ mod tests {
                 parent_id: None,
                 tail_paths: Vec::new(),
                 kind: ToolKind::Read,
+                script: None,
             },
             ChatEntry::TurnEnd {
                 id: "end2".to_string(),

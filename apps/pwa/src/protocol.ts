@@ -2683,8 +2683,12 @@ export type ChatEntry =
    * `tool_kind`: What sort of work the call does, as the agent's plugin classes
    * it; an entry without one (an older daemon) is [`ToolKind::Other`].
    * On the wire as `tool_kind`, since `kind` is the entry's own tag.
+   *
+   * `script`: What a [`ToolKind::Script`] call adds: its description, its
+   * number, its run time and its first error line. `None` for any
+   * other call, and from an older daemon.
    */
-  | { kind: "tool"; id: string; name: string; summary: string; input: string; result?: ToolOutcome | null; parent_id?: string | null; tail_paths?: string[]; tool_kind?: ToolKind }
+  | { kind: "tool"; id: string; name: string; summary: string; input: string; result?: ToolOutcome | null; parent_id?: string | null; tail_paths?: string[]; tool_kind?: ToolKind; script?: ScriptFacts | null }
   /** A row the daemon itself wrote, such as a cleared conversation. */
   | { kind: "system"; id: string; text: string }
   /** The card a prompt was answered with, kept as the chat's receipt. */
@@ -2699,13 +2703,32 @@ export interface ToolOutcome {
 }
 
 /**
+ * What a script call (one whose code runs other tools) carries beside its
+ * card. The calls the script ran are the tool entries whose `parent_id` is
+ * the script's id.
+ */
+export interface ScriptFacts {
+  /** The script's description, as the agent gave it. */
+  description: string;
+  /** The agent's number for the script, when the transcript gives one. */
+  eval?: number | null;
+  /** Milliseconds from the call to its result, when both are timed. */
+  ms?: number | null;
+  /** A failed script's first error line. */
+  error?: string | null;
+}
+
+/**
  * What sort of work a tool call does: it reads, searches, runs a command,
- * or something else (an edit, a write, a subagent task).
+ * runs a script of other calls, or something else (an edit, a write, a
+ * subagent task).
  */
 export type ToolKind =
   | "read"
   | "search"
   | "run"
+  /** A script: one call whose code runs other tool calls. */
+  | "script"
   | "other";
 
 /**

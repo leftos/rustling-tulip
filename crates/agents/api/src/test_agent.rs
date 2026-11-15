@@ -145,6 +145,7 @@ impl TestAgent {
 
 impl Agent for TestAgent {
     type Options = TestOptions;
+    type ChatContext = ();
 
     fn descriptor(&self) -> &AgentDescriptor {
         &DESCRIPTOR

@@ -88,7 +88,7 @@ The optional `accounts(&AccountsConfig) -> Option<Arc<dyn AccountsService>>` (de
 
 The `accounts` module of `agent-api` holds the config, the `Send + Sync` service the hub shares with no lock, and its row types. The service has `snapshot`, `poll(PollScope::OnDemand)` (a `PollReport` of the new snapshot and `next_poll_in`) and `begin_shutdown(bound)` (stops new credential refreshes and waits for in-flight ones; true once idle).
 
-The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
+The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and the associated `ChatContext` and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
 
 | Capability | Method | What the app does with it |
 |---|---|---|
@@ -108,7 +108,7 @@ The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) an
 | Resume options | `recovery_options` | The options a recovered run spawns with |
 | Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the program and its arguments, which the daemon quotes for the shell's family and types, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one |
 | Import | `import_rev`, `import_tracer_run` | The importer offers each tracer log to every plugin and stamps the plugin's revision; the first `Some` becomes the entry, else the app's shell rule applies |
-| Chat | `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries`, and reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) |
+| Chat | `ChatContext`, `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries(line, known, context)`, where `context` is the agent's `ChatContext`: per-chat state the plugin owns (`()` when it reads each line alone), which `AgentPlugin` type-erases (`new_chat_context`) and the daemon's `ChatState` and `TranscriptLog` hold one of per chat, reset when the transcript restarts or switches (the Claude plugin's is `ScriptBook`, which ties a script's inner calls to it); it reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) |
 | Liveness | `liveness_tokens` | The orphan check's fallback for a sidecar with no `program_name` |
 | Fake CLI | `fake_cli` | The live harness points each plugin's override at its fake |
 

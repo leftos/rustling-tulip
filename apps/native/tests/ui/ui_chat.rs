@@ -125,6 +125,7 @@ fn tool(id: &str, result: Option<&str>) -> ChatEntry {
         parent_id: None,
         tail_paths: Vec::new(),
         kind: ToolKind::Other,
+        script: None,
     }
 }
 
@@ -252,6 +253,7 @@ fn kinded(id: &str, name: &str, kind: ToolKind, done: bool) -> ChatEntry {
         parent_id: None,
         tail_paths: Vec::new(),
         kind,
+        script: None,
     }
 }
 
@@ -2804,6 +2806,7 @@ fn bash(id: &str, command: &str) -> ChatEntry {
         parent_id: None,
         tail_paths: Vec::new(),
         kind: ToolKind::Other,
+        script: None,
     }
 }
 
@@ -3183,6 +3186,7 @@ fn tailing_tool(id: &str) -> ChatEntry {
         parent_id: None,
         tail_paths: vec![LOG.to_owned()],
         kind: ToolKind::Other,
+        script: None,
     }
 }
 

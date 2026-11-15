@@ -322,6 +322,7 @@ mod tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind: protocol::ToolKind::Run,
+            script: None,
         };
         (entry, at, false)
     }

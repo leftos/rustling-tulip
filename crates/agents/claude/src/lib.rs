@@ -18,12 +18,14 @@ mod pricing;
 mod providers;
 mod records;
 mod rules;
+mod scripts;
 mod subagents;
 mod summarize;
 mod tail_paths;
 mod transcripts;
 
 pub use providers::{display_name, provider_for_model};
+pub use scripts::ScriptBook;
 pub use transcripts::encode_project_dir;
 
 use agent_api::{
@@ -299,6 +301,7 @@ fn live_runs_dir_from(log_dir: Option<OsString>, home: Option<PathBuf>) -> Optio
 
 impl Agent for ClaudePlugin {
     type Options = ClaudeOptions;
+    type ChatContext = ScriptBook;
 
     fn descriptor(&self) -> &AgentDescriptor {
         &DESCRIPTOR
@@ -459,8 +462,9 @@ impl Agent for ClaudePlugin {
         &self,
         line: &str,
         known: &dyn Fn(&str) -> Option<ChatEntry>,
+        context: &mut ScriptBook,
     ) -> Vec<ChatEntry> {
-        chat_entries::chat_entries(line, known)
+        chat_entries::chat_entries(line, known, context)
     }
 
     fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts {

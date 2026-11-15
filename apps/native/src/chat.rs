@@ -416,7 +416,7 @@ impl RunSummary {
             ToolKind::Read => self.read += 1,
             ToolKind::Search => self.searched += 1,
             ToolKind::Run => self.ran += 1,
-            ToolKind::Other | ToolKind::Unknown => {}
+            ToolKind::Script | ToolKind::Other | ToolKind::Unknown => {}
         }
         self.failed += usize::from(failed);
         self.running |= running;
@@ -1527,6 +1527,7 @@ mod tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind: protocol::ToolKind::Other,
+            script: None,
         }
     }
 
@@ -3068,6 +3069,7 @@ mod run_tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind,
+            script: None,
         }
     }
 
@@ -3467,6 +3469,7 @@ mod final_reply_tests {
             parent_id: None,
             tail_paths: Vec::new(),
             kind: ToolKind::Read,
+            script: None,
         }
     }
 
