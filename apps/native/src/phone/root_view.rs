@@ -11,6 +11,7 @@ use protocol::ClientMessage;
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::session::SessionPage;
 use super::sheet::{
@@ -42,6 +43,8 @@ pub struct PhoneRoot {
     pub(super) page: Option<SessionPage>,
     /// The composer's open dock on the shown session's page, if any.
     pub(super) composer_dock: super::composer::Dock,
+    /// The shown session's prompt sheet: the prompt put away and the drag.
+    pub(super) prompt_sheet: SheetState,
     /// Home's Needs you tray: the card it shows and the swipe in progress.
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
@@ -112,6 +115,7 @@ impl PhoneRoot {
             shown: None,
             page: None,
             composer_dock: super::composer::Dock::None,
+            prompt_sheet: SheetState::default(),
             tray: super::tray::Tray::default(),
             sheet: None,
             resumes: Vec::new(),
@@ -216,6 +220,7 @@ impl PhoneRoot {
         self.composer_dock = super::composer::Dock::None;
         let shown = (host, session_id.to_owned());
         self.shown = Some(shown.clone());
+        self.prompt_sheet = SheetState::default();
         self.sheet = None;
         self.root
             .update(cx, |root, cx| root.show_phone_chat(Some(shown), cx));
@@ -464,6 +469,7 @@ impl PhoneRoot {
         self.shown = None;
         self.page = None;
         self.composer_dock = super::composer::Dock::None;
+        self.prompt_sheet = SheetState::default();
         self.root
             .update(cx, |root, cx| root.show_phone_chat(None, cx));
         cx.notify();
@@ -486,6 +492,7 @@ impl PhoneRoot {
             self.shown = None;
             self.page = None;
             self.composer_dock = super::composer::Dock::None;
+            self.prompt_sheet = SheetState::default();
             self.root
                 .update(cx, |root, cx| root.show_phone_chat(None, cx));
         }
@@ -928,6 +935,12 @@ impl Render for PhoneRoot {
         let sheet = over_home
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten();
+        self.sync_prompt_sheet(cx);
+        let prompt_sheet = self
+            .shown
+            .is_some()
+            .then(|| self.prompt_sheet_layer(padding.bottom, cx))
+            .flatten();
         let padded = || {
             div()
                 .pt(padding.top)
@@ -947,7 +960,9 @@ impl Render for PhoneRoot {
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
             .child(padded().size_full().child(body))
+            .child(Self::pan_guard(cx))
             .children(sheet)
+            .children(prompt_sheet)
             .children(pairing.map(|layer| {
                 padded()
                     .absolute()

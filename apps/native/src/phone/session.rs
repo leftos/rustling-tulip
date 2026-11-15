@@ -70,6 +70,8 @@ impl Page {
 /// Where one back step goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackStep {
+    /// The prompt sheet goes down; the page stays as it is.
+    DismissSheet,
     /// The composer's open dock closes, and the page stays as it is.
     CloseDock,
     /// From the Terminal page to the Chat page.
@@ -130,6 +132,31 @@ impl SessionPage {
         } else {
             BackStep::Close
         }
+    }
+}
+
+/// What lies over the session page when a back step comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Over {
+    /// The prompt sheet is up.
+    pub(crate) sheet_up: bool,
+    /// The composer's dock is drawn.
+    pub(crate) dock_drawn: bool,
+}
+
+/// One back step with `over` lying over the page: the prompt sheet goes
+/// down first, the page unchanged; with it down, [`back_step`] (the dock,
+/// then the page's own step).
+pub(crate) fn back_over_sheet(
+    over: Over,
+    page: &mut SessionPage,
+    chat_mirrored: bool,
+    toggle_shown: bool,
+) -> BackStep {
+    if over.sheet_up {
+        BackStep::DismissSheet
+    } else {
+        back_step(over.dock_drawn, page, chat_mirrored, toggle_shown)
     }
 }
 
@@ -306,6 +333,52 @@ mod tests {
             "Back steps off the Terminal page, not onto a dock nobody sees"
         );
         assert_eq!(page.page(), Page::Chat);
+    }
+
+    /// The sheet up or not and the dock drawn or not.
+    fn over(sheet_up: bool, dock_drawn: bool) -> Over {
+        Over {
+            sheet_up,
+            dock_drawn,
+        }
+    }
+
+    #[test]
+    fn back_with_the_sheet_up_dismisses_it_first() {
+        let mut page = SessionPage::opened(true);
+        page.toggle();
+        assert_eq!(
+            back_over_sheet(over(true, false), &mut page, true, true),
+            BackStep::DismissSheet
+        );
+        assert_eq!(page.page(), Page::Terminal, "the page stays");
+        assert_eq!(
+            back_over_sheet(over(false, false), &mut page, true, true),
+            BackStep::ToChat
+        );
+        assert_eq!(
+            back_over_sheet(over(false, false), &mut page, true, true),
+            BackStep::Close
+        );
+    }
+
+    #[test]
+    fn back_with_the_sheet_up_and_a_dock_open_dismisses_the_sheet_first() {
+        let mut page = SessionPage::opened(true);
+        assert_eq!(
+            back_over_sheet(over(true, true), &mut page, true, true),
+            BackStep::DismissSheet
+        );
+        assert_eq!(page.page(), Page::Chat, "the page stays");
+        assert_eq!(
+            back_over_sheet(over(false, true), &mut page, true, true),
+            BackStep::CloseDock,
+            "then the dock closes"
+        );
+        assert_eq!(
+            back_over_sheet(over(false, false), &mut page, true, true),
+            BackStep::Close
+        );
     }
 
     #[test]

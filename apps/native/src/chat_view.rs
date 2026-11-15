@@ -2248,6 +2248,34 @@ impl RootView {
             .into_any_element()
     }
 
+    /// Session `session_id`'s prompt card area as the desktop draws it
+    /// ([`Self::card_area`]), while its chat is loaded; the phone's prompt
+    /// sheet holds it.
+    pub(crate) fn phone_card_area(
+        &self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chat = self
+            .chat
+            .sessions
+            .get(session_id)
+            .filter(|chat| chat.request.is_none())?;
+        self.card_area(session_id, chat, cx)
+    }
+
+    /// The id of session `session_id`'s current prompt card, only while its
+    /// chat is loaded: the card [`Self::phone_card_area`] draws.
+    pub(crate) fn phone_current_prompt(&self, session_id: &str) -> Option<&str> {
+        self.chat
+            .sessions
+            .get(session_id)
+            .filter(|chat| chat.request.is_none())?
+            .stack
+            .current()
+            .map(|prompt| prompt.id.as_str())
+    }
+
     /// What every row pane `pane_id` draws for session `session_id` is
     /// drawn with: the terminal's font for code, the UI text size and the
     /// theme, with no width cap and no final replies (the chat pane adds

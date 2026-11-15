@@ -108,22 +108,31 @@ impl PhoneRoot {
             .then(|| self.shown_page(header.chat_mirrored).toggle_label())
     }
 
-    /// One back step on the session page: the composer's open dock closes
-    /// first, then the page steps back, from the Terminal page to the Chat
-    /// page while the toggle shows, else back to Home.
+    /// One back step on the session page: the prompt sheet goes down while
+    /// it is up, else the composer's open dock closes, else the page steps
+    /// back, from the Terminal page to the Chat page while the toggle shows,
+    /// else back to Home.
     pub(super) fn session_back(&mut self, cx: &mut Context<Self>) {
         let (mirrored, toggle) = self.session_header(cx).map_or((false, false), |header| {
             (header.chat_mirrored, header.toggle)
         });
+        let sheet_up = self.prompt_sheet_up(cx);
         let drawn = self
             .shown
             .as_ref()
             .is_some_and(|(_, id)| self.dock_drawn(id, self.shown_page(mirrored), cx));
         let step = match self.page.as_mut() {
-            Some(page) => session::back_step(drawn, page, mirrored, toggle),
+            Some(page) => {
+                let over = session::Over {
+                    sheet_up,
+                    dock_drawn: drawn,
+                };
+                session::back_over_sheet(over, page, mirrored, toggle)
+            }
             None => BackStep::Close,
         };
         match step {
+            BackStep::DismissSheet => self.put_prompt_sheet_away(cx),
             BackStep::CloseDock => {
                 self.composer_dock = Dock::None;
                 cx.notify();
@@ -162,6 +171,8 @@ impl PhoneRoot {
         let header = self.session_header(cx)?;
         let page = self.shown_page(header.chat_mirrored);
         let t = theme(cx);
+        // `Show prompt` sits between the page's body and the composer.
+        let mut show_prompt = self.show_prompt_button(cx);
         let body = match page {
             Page::Chat => {
                 let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
@@ -176,6 +187,7 @@ impl PhoneRoot {
                     .flex_1()
                     .min_h_0()
                     .child(chat)
+                    .children(show_prompt.take())
                     .children(composer)
             }
             Page::Terminal => terminal_body(&t, cx),
@@ -187,7 +199,8 @@ impl PhoneRoot {
                 .flex()
                 .flex_col()
                 .child(Self::session_header_row(&header, page, &t, cx))
-                .child(body),
+                .child(body)
+                .children(show_prompt),
         )
     }
 

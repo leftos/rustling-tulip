@@ -8,6 +8,7 @@ mod home_view;
 mod hosts_view;
 pub(crate) mod lifecycle;
 mod long_press;
+mod prompt_sheet;
 pub mod push;
 #[cfg(target_os = "ios")]
 mod push_ios;

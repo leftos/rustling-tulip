@@ -6,12 +6,17 @@
 
 use crate::support;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{BackGesturePhase, Edges, Pixels, TestAppContext, WindowInsets, point, px};
+use gpui::{
+    BackGesturePhase, Edges, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource,
+    TestAppContext, TouchPhase, WindowInsets, point, px,
+};
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
-    ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot, ToolKind,
-    ToolOutcome,
+    ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
+    ComposerState, DaemonMessage, SessionSnapshot, ToolKind, ToolOutcome,
 };
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::phone::PhoneRoot;
@@ -618,6 +623,498 @@ fn the_page_stays_while_its_host_is_disconnected(cx: &mut TestAppContext) {
     assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
     assert!(drawn(&mut h, "phone-session-label"));
     assert!(drawn(&mut h, "phone-session-status"));
+}
+
+// The prompt sheet: the chat's pending prompt card rises as a bottom sheet
+// over the page, with Esc, up and down keys; a swipe down or a back step
+// puts it away, `Show prompt` raises it again, and a different prompt rises
+// on its own.
+
+/// The selectors of the sheet's three keys.
+const SHEET_KEYS: [&str; 3] = ["phone-prompt-esc", "phone-prompt-up", "phone-prompt-down"];
+
+/// Prompt `id` of `kind` offering `list`.
+fn sheet_prompt(id: &str, kind: ChatPromptKind, list: &[(u32, &str)]) -> ChatPrompt {
+    ChatPrompt {
+        id: id.to_owned(),
+        kind,
+        subject: "calc.py".to_owned(),
+        body: "Do you want to make this edit?".to_owned(),
+        options: list
+            .iter()
+            .map(|(number, label)| ChatOption {
+                number: *number,
+                label: (*label).to_owned(),
+                description: None,
+                selected: false,
+            })
+            .collect(),
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+    }
+}
+
+/// A single-select question `id` with two numbered options.
+fn question_prompt(id: &str) -> ChatPrompt {
+    sheet_prompt(id, ChatPromptKind::Question, &[(1, "sub"), (2, "div")])
+}
+
+/// A permission prompt `id`: allow once, always allow and deny.
+fn permission_prompt(id: &str) -> ChatPrompt {
+    sheet_prompt(
+        id,
+        ChatPromptKind::Permission,
+        &[
+            (1, "Yes"),
+            (2, "Yes, and don't ask again for: python *"),
+            (3, "No"),
+        ],
+    )
+}
+
+/// Session `a`'s screen now shows `prompt`, or none.
+fn screen_shows(h: &mut Harness<'_>, prompt: Option<ChatPrompt>) {
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt,
+            },
+        });
+    h.cx.run_until_parked();
+}
+
+/// Session `a`'s page with its chat loaded and `prompt` pending, everything
+/// sent so far drained.
+fn prompted<'a>(cx: &'a mut TestAppContext, dir: &TestDir, prompt: ChatPrompt) -> Harness<'a> {
+    prompted_over(cx, dir, vec![user("u1")], prompt)
+}
+
+/// Session `a`'s page with its chat loaded with `entries` and `prompt`
+/// pending, everything sent so far drained.
+fn prompted_over<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+    prompt: ChatPrompt,
+) -> Harness<'a> {
+    let mut h = chat_loaded(cx, dir, entries);
+    screen_shows(&mut h, Some(prompt));
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The `ChatAnswer`s sent for session `a` since the last drain: prompt id,
+/// answer and request id.
+fn sheet_answers(h: &mut Harness<'_>) -> Vec<(String, ChatAnswerKind, Option<String>)> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatAnswer {
+                session_id,
+                prompt_id,
+                answer,
+                request_id,
+            } if session_id == "a" => Some((prompt_id, answer, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A downward pan over the sheet: `steps` movements of `dy`, then the lift.
+fn drag_sheet(h: &mut Harness<'_>, dy: Pixels, steps: usize) {
+    let at = h.bounds("phone-prompt-handle").center();
+    let pan = |delta: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), delta)),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: ScrollSource::Touch,
+    };
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    for _ in 0..steps {
+        h.cx.simulate_event(pan(dy, TouchPhase::Moved));
+    }
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+}
+
+/// Whether `selector` is drawn inside the sheet.
+fn in_sheet(h: &mut Harness<'_>, selector: &str) -> bool {
+    let sheet = h.bounds("phone-prompt-sheet");
+    drawn(h, selector) && sheet.contains(&h.bounds(selector).center())
+}
+
+#[gpui::test]
+fn a_pending_prompt_raises_the_sheet_over_the_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    screen_shows(&mut h, Some(question_prompt("q1")));
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "no sheet before the chat loads"
+    );
+    let request = loads_of(&h.host(&saved_remote()).sent(), "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, vec![user("u1")]));
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "no sheet without a card"
+    );
+
+    screen_shows(&mut h, Some(question_prompt("q1")));
+
+    assert!(drawn(&mut h, "phone-prompt-scrim"));
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(drawn(&mut h, "phone-session-chat"), "over the chat");
+    assert!(in_sheet(&mut h, "phone-prompt-handle"));
+    assert!(in_sheet(&mut h, "chat-card-1"), "the card's options");
+    assert!(in_sheet(&mut h, "chat-card-2"));
+    let (sheet, scrim) = (
+        h.bounds("phone-prompt-sheet"),
+        h.bounds("phone-prompt-scrim"),
+    );
+    assert!(
+        sheet.bottom() + px(1.0) >= scrim.bottom(),
+        "anchored to the bottom: {sheet:?} in {scrim:?}"
+    );
+    assert!(
+        h.bounds("phone-prompt-handle").origin.y < h.bounds("chat-card-1").origin.y,
+        "the handle tops the sheet"
+    );
+    assert!(!drawn(&mut h, "phone-prompt-show"));
+
+    screen_shows(&mut h, None);
+
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "an answered prompt takes the sheet down"
+    );
+}
+
+#[gpui::test]
+fn an_option_button_sends_a_chat_answer_with_its_number(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+
+    h.click_on("chat-card-2");
+
+    let answers = sheet_answers(&mut h);
+    assert_eq!(answers.len(), 1, "one answer: {answers:?}");
+    assert_eq!(answers[0].0, "q1");
+    assert_eq!(answers[0].1, ChatAnswerKind::Option { number: 2 });
+    assert!(answers[0].2.is_some(), "under a request id");
+}
+
+#[gpui::test]
+fn a_permission_prompt_offers_its_card_buttons(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, permission_prompt("p1"));
+
+    for selector in [
+        "chat-card-1",
+        "chat-card-2",
+        "chat-card-3",
+        "chat-card-box",
+        "chat-card-allow-text",
+        "chat-card-deny-text",
+    ] {
+        assert!(in_sheet(&mut h, selector), "{selector} is in the sheet");
+    }
+
+    h.click_on("chat-card-3");
+
+    let answers = sheet_answers(&mut h);
+    assert_eq!(
+        answers
+            .into_iter()
+            .map(|(_, answer, _)| answer)
+            .collect::<Vec<_>>(),
+        [ChatAnswerKind::Option { number: 3 }],
+        "Deny types its number"
+    );
+}
+
+#[gpui::test]
+fn esc_up_and_down_type_their_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+
+    for key in SHEET_KEYS {
+        assert!(in_sheet(&mut h, key), "{key} is in the sheet");
+        h.click_on(key);
+    }
+
+    let sent = h.host(&saved_remote()).sent();
+    let typed: Vec<Vec<u8>> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SendInput {
+                session_id,
+                data_b64,
+                automatic: false,
+            } if session_id == "a" => Some(B64.decode(data_b64).expect("base64 input")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        typed,
+        [b"\x1b".to_vec(), b"\x1b[A".to_vec(), b"\x1b[B".to_vec()],
+        "{sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ChatAnswer { .. })),
+        "the keys answer nothing"
+    );
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet stays up");
+}
+
+#[gpui::test]
+fn a_swipe_puts_the_sheet_away_and_show_prompt_raises_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+
+    drag_sheet(&mut h, px(4.0), 2);
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "a short slow drag snaps back"
+    );
+
+    drag_sheet(&mut h, px(60.0), 5);
+
+    assert!(!drawn(&mut h, "phone-prompt-sheet"));
+    assert!(!drawn(&mut h, "phone-prompt-scrim"));
+    assert!(drawn(&mut h, "phone-prompt-show"));
+    let (show, chat, composer) = (
+        h.bounds("phone-prompt-show"),
+        h.bounds("phone-chat"),
+        h.bounds("phone-composer"),
+    );
+    assert!(drawn(&mut h, "phone-composer"));
+    assert!(
+        show.origin.y + px(1.0) >= chat.bottom() && show.bottom() <= composer.origin.y + px(1.0),
+        "Show prompt sits between the chat and the composer: {show:?}, chat {chat:?}, composer {composer:?}"
+    );
+    assert!(show.size.height >= touch_target());
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "a swipe sends nothing"
+    );
+
+    h.click_on("phone-prompt-show");
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(!drawn(&mut h, "phone-prompt-show"));
+}
+
+#[gpui::test]
+fn a_different_prompt_raises_it_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+    drag_sheet(&mut h, px(60.0), 5);
+    assert!(!drawn(&mut h, "phone-prompt-sheet"));
+
+    screen_shows(&mut h, Some(question_prompt("q1")));
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "the same prompt stays down"
+    );
+
+    screen_shows(&mut h, Some(permission_prompt("p2")));
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(
+        in_sheet(&mut h, "chat-card-deny-text"),
+        "the new prompt's card"
+    );
+    assert!(!drawn(&mut h, "phone-prompt-show"));
+}
+
+#[gpui::test]
+fn back_with_the_sheet_up_dismisses_it_and_stays_on_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+
+    back_gesture(&mut h, BackGesturePhase::Started);
+    back_gesture(&mut h, BackGesturePhase::Committed);
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+    assert!(!drawn(&mut h, "phone-prompt-sheet"));
+    assert!(drawn(&mut h, "phone-prompt-show"));
+    assert!(drawn(&mut h, "phone-session-chat"));
+    assert!(
+        h.host(&saved_remote()).sent().is_empty(),
+        "the chat stays loaded"
+    );
+
+    back_gesture(&mut h, BackGesturePhase::Started);
+    back_gesture(&mut h, BackGesturePhase::Committed);
+
+    assert_eq!(shown(&mut h), None, "the next back closes the page");
+    assert!(drawn(&mut h, "phone-home"));
+}
+
+#[gpui::test]
+fn the_sheet_shows_on_the_terminal_page_too(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-session-toggle");
+    assert!(drawn(&mut h, "phone-session-terminal"));
+
+    screen_shows(&mut h, Some(question_prompt("q1")));
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(in_sheet(&mut h, "chat-card-1"));
+    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+}
+
+#[gpui::test]
+fn a_refused_answer_shows_its_reason(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, permission_prompt("p1"));
+    h.click_on("chat-card-1");
+    let request_id = sheet_answers(&mut h).pop().expect("the press answers").2;
+
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "the terminal did not respond".to_owned(),
+        request_id,
+        code: Some(CHAT_REFUSED.to_owned()),
+    });
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.root(|root, _| root.chat_card_refusal("a")).as_deref(),
+        Some("the terminal did not respond")
+    );
+    assert!(in_sheet(&mut h, "chat-card-refusal"));
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet stays up");
+}
+
+#[gpui::test]
+fn the_sheet_keys_are_44_px_tall(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+
+    for key in SHEET_KEYS {
+        assert!(
+            h.bounds(key).size.height >= touch_target(),
+            "{key} is a touch target tall"
+        );
+    }
+}
+
+/// One touch pan event at `at`, `dy` down, in `phase`; gpui sends every
+/// event of a pan, its momentum included, at the point the pan began.
+fn pan_at(h: &mut Harness<'_>, at: gpui::Point<Pixels>, dy: Pixels, phase: TouchPhase) {
+    h.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), dy)),
+        modifiers: Modifiers::none(),
+        touch_phase: phase,
+        source: ScrollSource::Touch,
+    });
+    h.cx.run_until_parked();
+}
+
+/// How far the phone's chat is scrolled from its top.
+fn chat_offset(h: &mut Harness<'_>) -> Option<f32> {
+    h.root(|root, _| root.chat_scroll_offset("phone"))
+}
+
+#[gpui::test]
+fn a_flick_that_dismisses_the_sheet_does_not_scroll_the_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    let mut h = prompted_over(cx, &dir, entries, question_prompt("q1"));
+    let start = chat_offset(&mut h);
+    assert!(
+        start.is_some_and(|offset| offset > 0.0),
+        "the long chat sits at its bottom: {start:?}"
+    );
+    let at = h.bounds("phone-prompt-handle").center();
+
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    for _ in 0..5 {
+        pan_at(&mut h, at, px(60.0), TouchPhase::Moved);
+    }
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+    assert!(!drawn(&mut h, "phone-prompt-sheet"), "the flick commits");
+    // `Show prompt` now sits under the chat, which keeps its bottom in view.
+    let before = chat_offset(&mut h);
+    // The flick's momentum, at the point the pan began.
+    for _ in 0..4 {
+        pan_at(&mut h, at, px(40.0), TouchPhase::Moved);
+    }
+    pan_at(&mut h, at, px(10.0), TouchPhase::Ended);
+
+    assert_eq!(chat_offset(&mut h), before, "the chat did not scroll");
+    let (last, chat) = (h.bounds("chat-row-phone-u39"), h.bounds("phone-chat"));
+    assert!(
+        last.bottom() <= chat.bottom() + px(1.0),
+        "the newest row stays in view: {last:?} in {chat:?}"
+    );
+
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    pan_at(&mut h, at, px(100.0), TouchPhase::Moved);
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+
+    assert_ne!(
+        chat_offset(&mut h),
+        before,
+        "the next pan is never swallowed"
+    );
+}
+
+#[gpui::test]
+fn back_while_the_chat_loads_does_not_dismiss_a_prompt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    h.click_on("phone-session-toggle");
+    let request = loads_of(&h.host(&saved_remote()).sent(), "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    screen_shows(&mut h, Some(question_prompt("q1")));
+    assert!(
+        h.root(|root, _| root.chat_card("a")).is_some(),
+        "the prompt is on the stack while the load is out"
+    );
+    assert!(!drawn(&mut h, "phone-prompt-sheet"));
+
+    back_gesture(&mut h, BackGesturePhase::Started);
+    back_gesture(&mut h, BackGesturePhase::Committed);
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"));
+    assert!(
+        drawn(&mut h, "phone-session-chat"),
+        "back steps to the Chat page as with no sheet up"
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![user("u1")],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Dialog,
+            prompt: Some(question_prompt("q1")),
+        },
+        request_id: request,
+    });
+    h.cx.run_until_parked();
+
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "the prompt rises once the load lands"
+    );
+    assert!(!drawn(&mut h, "phone-prompt-show"));
 }
 
 #[gpui::test]

@@ -67,6 +67,9 @@
 //! over its loaded chat: a message, three read calls drawn one per row, an
 //! answer with a little Markdown and a Bash call, the composer under them
 //! with `Message` in its field and its Keys tray open.
+//! `phone-session-sheet` shows that page, no dock open, with the `chat`
+//! view's question pending: its prompt sheet raised over a scrim, the
+//! desktop's question card in it over the Esc, up and down keys.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -153,6 +156,9 @@ const PHONE_SHEET_SESSION: &str = "b-pwa";
 /// How many rows the `phone-session` shot's chat draws: each of its six
 /// entries, its three reads being too few to fold.
 const PHONE_SESSION_ROWS: usize = 6;
+/// The prompt the `phone-session-sheet` shot's sheet raises: the `chat`
+/// view's question.
+const PHONE_SHEET_PROMPT: &str = "ask-1";
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -296,10 +302,11 @@ enum View {
     PhoneHome,
     PhoneSheet,
     PhoneSession,
+    PhoneSessionSheet,
 }
 
 impl View {
-    const ALL: [Self; 52] = [
+    const ALL: [Self; 53] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -352,13 +359,14 @@ impl View {
         Self::PhoneHome,
         Self::PhoneSheet,
         Self::PhoneSession,
+        Self::PhoneSessionSheet,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
     fn is_phone(self) -> bool {
         matches!(
             self,
-            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession
+            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession | Self::PhoneSessionSheet
         )
     }
 
@@ -416,6 +424,7 @@ impl View {
             Self::PhoneHome => "phone-home",
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
+            Self::PhoneSessionSheet => "phone-session-sheet",
         }
     }
 
@@ -461,7 +470,9 @@ impl View {
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
-            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession => PHONE_WINDOW_SIZE,
+            Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession | Self::PhoneSessionSheet => {
+                PHONE_WINDOW_SIZE
+            }
             _ => WINDOW_SIZE,
         }
     }
@@ -500,7 +511,11 @@ impl View {
         match self {
             // Drawn by `start_toast_shot`, in a window with no root view,
             // and by `start_phone_home_shot`, which checks its own rows.
-            Self::Toast | Self::PhoneHome | Self::PhoneSheet | Self::PhoneSession => true,
+            Self::Toast
+            | Self::PhoneHome
+            | Self::PhoneSheet
+            | Self::PhoneSession
+            | Self::PhoneSessionSheet => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -772,6 +787,7 @@ impl Shot {
             | View::PhoneHome
             | View::PhoneSheet
             | View::PhoneSession
+            | View::PhoneSessionSheet
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -800,7 +816,9 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
-            View::PhoneHome | View::PhoneSheet | View::PhoneSession => phone_home_ui_state(),
+            View::PhoneHome | View::PhoneSheet | View::PhoneSession | View::PhoneSessionSheet => {
+                phone_home_ui_state()
+            }
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -1525,7 +1543,7 @@ async fn capture_phone_home(
             bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
         }
     }
-    if shot.view == View::PhoneSession {
+    if matches!(shot.view, View::PhoneSession | View::PhoneSessionSheet) {
         let opened = handle.update(cx, |phone, _, cx| {
             phone.open_session_on(PHONE_SHEET_SESSION, cx)
         })?;
@@ -1547,8 +1565,19 @@ async fn capture_phone_home(
         if rows != PHONE_SESSION_ROWS {
             bail!("the phone-session view's chat draws {rows} rows, not {PHONE_SESSION_ROWS}");
         }
-        handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
-        cx.background_executor().timer(DRIVE_WAIT).await;
+        // The sheet's view opens no dock: the sheet covers the composer.
+        if shot.view == View::PhoneSession {
+            handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+        }
+    }
+    if shot.view == View::PhoneSessionSheet {
+        let card = handle.update(cx, |phone, _, cx| {
+            phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
+        })?;
+        if card.as_ref().map(|(id, _)| id.as_str()) != Some(PHONE_SHEET_PROMPT) {
+            bail!("the phone-session-sheet view's card is {card:?}, not {PHONE_SHEET_PROMPT}");
+        }
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
@@ -1674,7 +1703,8 @@ fn drive(
         | View::Toast
         | View::PhoneHome
         | View::PhoneSheet
-        | View::PhoneSession => Ok(()),
+        | View::PhoneSession
+        | View::PhoneSessionSheet => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -3198,6 +3228,15 @@ impl FakeDaemon {
     ) -> Vec<DaemonMessage> {
         if self.view == View::PhoneSession {
             return vec![phone_chat_reply(session_id, request_id)];
+        }
+        if self.view == View::PhoneSessionSheet {
+            return vec![
+                phone_chat_reply(session_id, request_id),
+                DaemonMessage::ChatScreenChanged {
+                    session_id: session_id.to_owned(),
+                    screen: question_screen(),
+                },
+            ];
         }
         let screen = match self.view {
             View::Summary => permission_screen(),
