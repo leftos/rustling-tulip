@@ -197,8 +197,8 @@ impl NetDeps {
 }
 
 /// The device tokens in the platform's credential store: Windows Credential
-/// Manager on Windows, the login Keychain on macOS, under the same service
-/// and user names on both. An empty in-memory store when it cannot be opened,
+/// Manager on Windows, the login Keychain on macOS and the iOS Keychain on
+/// iOS, under the same service and user names on all three. An empty in-memory store when it cannot be opened,
 /// so every tailnet host is dialled without a token.
 pub(crate) fn device_token_store() -> Arc<dyn DeviceTokenStore> {
     match KeyringTokens::open() {
@@ -682,9 +682,15 @@ impl Net {
     /// and pump it with the device token held for the host, or an empty one
     /// when none is held (the `daemon.json` token never leaves this machine):
     /// the host then answers "not approved" and the socket stays open as a
-    /// pairing connection.
+    /// pairing connection. A store that cannot be read (the phone is locked)
+    /// fails the attempt before any socket opens, so the backoff retries it,
+    /// rather than dialling without the token the host would refuse.
     async fn attempt_tailnet(&mut self, host: &TailnetHost) -> Next {
-        let token = self.device_token(host);
+        let token = match self.device_token(host) {
+            Ok(token) => token,
+            // The store's error already names the host.
+            Err(err) => return self.failed(err),
+        };
         self.had_token = token.is_some();
         let config = match self.tls_config() {
             Ok(config) => config,
@@ -718,19 +724,19 @@ impl Net {
         .await
     }
 
-    /// The device token held for `host`; `None` when none is held or the
-    /// store cannot be read.
-    fn device_token(&self, host: &TailnetHost) -> Option<String> {
-        match self.deps.tokens.get(host.name()) {
-            Ok(token) => token,
-            Err(err) => {
-                warn!(
-                    host = host.name(),
-                    "reading the device token failed; dialling without one: {err:#}"
-                );
-                None
-            }
-        }
+    /// The device token held for `host`; `None` when none is held.
+    ///
+    /// # Errors
+    ///
+    /// The read's error text, never the token, when the store cannot be read.
+    fn device_token(&self, host: &TailnetHost) -> Result<Option<String>, String> {
+        self.deps.tokens.get(host.name()).map_err(|err| {
+            warn!(
+                host = host.name(),
+                "reading the device token failed; waiting to retry: {err:#}"
+            );
+            format!("{err:#}")
+        })
     }
 
     /// The attempt failed before a socket opened: show `reason` and wait the
@@ -2956,6 +2962,37 @@ mod tests {
         }
     }
 
+    /// A device token store whose first reads fail, as the iOS Keychain's do
+    /// while the phone is locked, and whose later reads give `token`.
+    struct LockedTokens {
+        /// How many reads are still to fail.
+        failures: AtomicUsize,
+        token: &'static str,
+    }
+
+    impl DeviceTokenStore for LockedTokens {
+        fn get(&self, _host: &str) -> anyhow::Result<Option<String>> {
+            let locked = self
+                .failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if locked {
+                return Err(anyhow::anyhow!("the Keychain is locked"));
+            }
+            Ok(Some(self.token.to_owned()))
+        }
+
+        fn set(&self, _host: &str, _token: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _host: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn send_command(view_tx: &UnboundedSender<NetCommand>, command: NetCommand) {
         view_tx
             .unbounded_send(command)
@@ -3113,6 +3150,56 @@ mod tests {
             "the paired host never opened"
         );
         stop_net(view_tx, net);
+    }
+
+    /// A token store that cannot be read (the phone is locked) never dials
+    /// without the token, which the host would answer with a "not approved"
+    /// that lasts until a Restart: the attempt fails and waits the backoff,
+    /// and the dial once the store reads carries the token.
+    #[test]
+    fn a_token_store_that_cannot_be_read_waits_and_dials_with_the_token_later() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let deps = NetDeps {
+            tokens: Arc::new(LockedTokens {
+                failures: AtomicUsize::new(2),
+                token: "tok",
+            }),
+            ..tailnet_deps(&ca, None)
+        };
+        let target = Target::tailnet(TLS_HOST, Some(port));
+        on_paused_clock_at(deps, target, |mut view_rx, _commands| async move {
+            settle().await;
+            let states = states_so_far(&mut view_rx);
+            let first = states
+                .iter()
+                .find(|conn| !matches!(conn.state(), State::Init | State::Connecting));
+            assert!(
+                first.is_some_and(|conn| matches!(conn.state(),
+                    State::Error { reason } if reason == "the Keychain is locked")),
+                "a failed token read did not fail the attempt: {states:?}"
+            );
+
+            past_the_backoff().await;
+            past_the_backoff().await;
+            // Blocking on the fake daemon also holds the paused clock still,
+            // so no welcome deadline passes while the dial is in flight.
+            let hello = tokio::task::spawn_blocking(move || next_hello(&seen))
+                .await
+                .expect("the wait for the Hello ends");
+            assert_eq!(
+                hello.as_deref(),
+                Some("tok"),
+                "the first Hello the host saw must carry the token"
+            );
+            let states = states_so_far(&mut view_rx);
+            assert!(
+                !states
+                    .iter()
+                    .any(|conn| matches!(conn.state(), State::NotApproved { .. })),
+                "a locked token store left the host not approved: {states:?}"
+            );
+        });
     }
 
     #[test]
@@ -4030,6 +4117,15 @@ mod tests {
         F: FnOnce(UnboundedReceiver<NetEvent>, UnboundedSender<NetCommand>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        on_paused_clock_at(deps, devbox(), script);
+    }
+
+    /// [`on_paused_clock`], connecting to `target` first.
+    fn on_paused_clock_at<F, Fut>(deps: NetDeps, target: Target, script: F)
+    where
+        F: FnOnce(UnboundedReceiver<NetEvent>, UnboundedSender<NetCommand>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
@@ -4040,7 +4136,7 @@ mod tests {
             let (view_tx, commands) = unbounded();
             let (events, view_rx) = unbounded();
             let net = tokio::task::spawn_local(
-                Net::new(commands, events, deps, devbox(), WELCOME_TIMEOUT).run(),
+                Net::new(commands, events, deps, target, WELCOME_TIMEOUT).run(),
             );
             script(view_rx, view_tx.clone()).await;
             drop(view_tx);

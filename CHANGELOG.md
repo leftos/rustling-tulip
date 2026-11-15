@@ -29,6 +29,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A selected choice in a question card with several answers keeps its description readable, instead of fading into the filled button.
 - On the iPhone, one tap on a short summary in Chat opens its full text, and a single tap follows a link in Chat.
 - Chat sends your message when Claude's prompt box shows only its suggested next prompt, instead of calling it a draft.
+- On the iPhone, opening the app from a notification no longer shows your PC as not paired after a push woke the app while the phone was locked.
 
 ### Changed
 
