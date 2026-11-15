@@ -165,7 +165,7 @@ These need an iPhone on iOS 16.4 or later with Tailscale signed in as the same T
 
 These need the phone app from TestFlight on an iPhone with Tailscale signed in as the same Tailscale user, paired with the host, and a host daemon that lists `relay_push` (one built from the release that ships it, or `.\rt.ps1 restart` from a checkout with the installed app's window closed). The phone registers with `Hold while I'm at my computer` on, so each step that waits for a push first focuses another window on the host.
 
-- [ ] Open the app. **Expect:** a `Notifications` switch under the host's session list. Turn it on. **Expect:** iOS asks for permission once; after `Allow` the switch stays on with no text under it, and `daemon.log` logs `push: the device's subscription was stored`.
+- [ ] Open the app and tap `Settings`, then `Notifications`. **Expect:** a `Notifications` switch for the host. Turn it on. **Expect:** iOS asks for permission once; after `Allow` the switch stays on with no text under it, and `daemon.log` logs `push: the device's subscription was stored`.
 - [ ] Lock the phone and leave a session waiting on the host. **Expect:** a push on the Lock Screen naming the session, not `A session changed. Open the app to see it.` (the fallback alert, which means the notification extension did not run or could not decrypt), and the app icon's badge equal to the number of sessions in Needs you.
 - [ ] Tap the push. **Expect:** the app opens on that session's screen on that host.
 - [ ] Force-quit the app in the app switcher, then tap the push for a session waiting on the host. **Expect:** the app launches onto that session's screen on that host, not Home, once the host's list arrives.

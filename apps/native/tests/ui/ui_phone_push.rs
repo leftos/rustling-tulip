@@ -38,6 +38,12 @@ fn switch() -> String {
     format!("phone-host-push-{REMOTE}")
 }
 
+/// Opens Settings, then its Notifications page, where the switches draw.
+fn open_notifications(h: &mut Harness<'_>) {
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-notifications");
+}
+
 /// Reads the phone's root.
 fn read_phone<R>(h: &mut Harness<'_>, read: impl FnOnce(&PhoneRoot, &gpui::App) -> R) -> R {
     h.cx.update(|window, cx| {
@@ -391,6 +397,7 @@ fn the_switch_shows_for_a_tailnet_host_that_takes_relay_push(cx: &mut TestAppCon
     let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
     h.host(&saved_remote())
         .connect_with_features(&[FEATURE_RELAY_PUSH]);
+    open_notifications(&mut h);
 
     assert!(drawn(&mut h, &switch()), "the switch shows");
     assert!(
@@ -408,6 +415,7 @@ fn no_switch_without_relay_push(cx: &mut TestAppContext) {
         host.connect_keeping_sent();
         host.sent()
     };
+    open_notifications(&mut h);
 
     assert!(
         !drawn(&mut h, &switch()),
@@ -432,6 +440,7 @@ fn no_switch_when_the_platform_is_unsupported(cx: &mut TestAppContext) {
         host.connect_keeping_sent_with(features);
         host.sent()
     };
+    open_notifications(&mut h);
 
     assert!(!drawn(&mut h, &switch()), "a phone with no push shows none");
     assert!(
@@ -459,6 +468,7 @@ fn turning_it_on_registers_with_all_three_on(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir, platform.clone());
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
     assert!(drawn(&mut h, &format!("{}-empty", switch())), "off");
 
     h.click_on(&switch());
@@ -493,6 +503,7 @@ fn turning_it_on_when_blocked_shows_the_hint_and_sends_nothing(cx: &mut TestAppC
     let mut h = phone(cx, &dir, platform.clone());
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
 
     h.click_on(&switch());
 
@@ -540,6 +551,7 @@ fn turning_it_off_unregisters(cx: &mut TestAppContext) {
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote())
         .send(status(Some(FakePushPlatform::TOKEN), &asked));
+    open_notifications(&mut h);
     assert!(drawn(&mut h, &format!("{}-tick", switch())), "on");
     assert_eq!(
         registers(h.host(&saved_remote()).sent()),
@@ -572,7 +584,13 @@ fn the_switch_stays_reachable_once_a_host_is_open(cx: &mut TestAppContext) {
         !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
         "no host row while the sessions list"
     );
-    assert!(drawn(&mut h, &switch()), "the switch is still there");
+    assert!(!drawn(&mut h, &switch()), "Home draws no switch");
+
+    open_notifications(&mut h);
+    assert!(
+        drawn(&mut h, &switch()),
+        "Settings' Notifications page does"
+    );
     assert!(
         h.bounds(&switch()).size.height >= px(44.0),
         "a full touch target"
@@ -584,6 +602,7 @@ fn a_reopen_asks_again_and_ignores_the_first_reply(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
     let first = open_with_relay_push(&mut h);
+    open_notifications(&mut h);
     h.host(&saved_remote())
         .event(NetEvent::State(closed(saved_remote())));
 
@@ -609,6 +628,7 @@ fn the_not_asked_path_asks_then_registers(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir, platform.clone());
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
 
     h.click_on(&switch());
 
@@ -636,6 +656,7 @@ fn a_denied_prompt_answer_shows_the_blocked_hint(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir, platform.clone());
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
 
     h.click_on(&switch());
 
@@ -658,6 +679,7 @@ fn a_token_error_shows_the_failure_hint_and_sends_nothing(cx: &mut TestAppContex
     let mut h = phone(cx, &dir, platform.clone());
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
 
     h.click_on(&switch());
 
@@ -676,6 +698,7 @@ fn a_daemon_refusal_shows_its_text_and_files_no_toast(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
     let asked = open_with_relay_push(&mut h);
     h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
     h.click_on(&switch());
     let sent = registers(h.host(&saved_remote()).sent());
     let [(_, _, request_id)] = sent.as_slice() else {
@@ -718,6 +741,7 @@ fn an_ssh_host_never_shows_a_switch(cx: &mut TestAppContext) {
         host.connect_keeping_sent_with(features);
         host.sent()
     };
+    open_notifications(&mut h);
 
     assert!(
         !drawn(&mut h, "phone-host-push-devbox"),
@@ -745,6 +769,7 @@ fn two_hosts_at_push_1_stay_apart(cx: &mut TestAppContext) {
     let other = Target::tailnet(OTHER_HOST, Some(8787));
     let mine = open_with_relay_push(&mut h);
     let theirs = open_target_with_relay_push(&mut h, &other);
+    open_notifications(&mut h);
     assert_eq!(mine, theirs, "each host numbers its own requests");
 
     h.host(&saved_remote())

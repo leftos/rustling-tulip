@@ -439,8 +439,9 @@ fn field_box(
 }
 
 impl PhoneRoot {
-    /// The hosts screen: the saved hosts' rows, then the add form or the
-    /// button that shows it; the form alone while no host is saved.
+    /// The hosts screen: under the header with its `Settings` button, the
+    /// saved hosts' rows, then the add form or the button that shows it;
+    /// the form alone while no host is saved.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
         let root = self.root.read(cx);
         let rows: Vec<HostRow> = root
@@ -455,23 +456,26 @@ impl PhoneRoot {
         let row_elements: Vec<Div> = rows.iter().map(|row| Self::row(row, &t, cx)).collect();
         let tail = self.hosts_tail(form_shows, &t, cx);
         let tap_lines = self.tap_lines(&t);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .p(px(16.0))
-            .children(tap_lines)
-            .children(row_elements)
-            .child(tail)
+        let header = Self::home_header_row(&t, cx);
+        div().size_full().flex().flex_col().child(header).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .p(px(16.0))
+                .children(tap_lines)
+                .children(row_elements)
+                .child(tail),
+        )
     }
 
-    /// Home while a saved host is open, filling the height over the hosts
+    /// Home while a saved host is open: under the header with its
+    /// `Settings` button, the list filling the height over the hosts
     /// screen's tail.
     pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
         let panel = self.home_list(cx);
         let t = theme(cx);
-        let lines = self.push_lines(&t, cx);
+        let header = Self::home_header_row(&t, cx);
         let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
         let tap_lines = self.tap_lines(&t);
         let over = (!tap_lines.is_empty()).then(|| {
@@ -486,6 +490,7 @@ impl PhoneRoot {
             .size_full()
             .flex()
             .flex_col()
+            .child(header)
             .children(over)
             .child(panel)
             .child(
@@ -495,7 +500,6 @@ impl PhoneRoot {
                     .flex_col()
                     .gap(px(12.0))
                     .p(px(16.0))
-                    .children(lines)
                     .child(tail),
             )
     }
@@ -519,8 +523,8 @@ impl PhoneRoot {
     }
 
     /// One line per saved host with a Notifications switch: its name and
-    /// the switch, so the switch stays reachable while the sessions list.
-    fn push_lines(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<Div> {
+    /// the switch, for Settings' Notifications page.
+    pub(super) fn push_lines(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<Div> {
         let supported = self.platform.supported();
         let root = self.root.read(cx);
         let switches: Vec<(String, HostKey, SwitchView)> = root

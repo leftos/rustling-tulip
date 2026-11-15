@@ -239,7 +239,7 @@ The native app's side of [push-relay.md](./push-relay.md)'s contract; the relay'
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma17-notify.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-ios-notify --cargo-profile test-release`
 
   Waits on: MA.11, PR.1, PR.2. Owner's iPhone: not needed (PR.8 checks it on the device).
-- [x] **MA.18 Register the phone for push.** A Notifications switch in the phone's host screen: on, it asks for notification permission, registers for remote notifications, makes or loads the install's P-256 key pair and auth secret in the shared Keychain access group (`push-crypto`), and sends `RegisterPush` with the `apns` kind and the build's environment over that host's tailnet connection.
+- [x] **MA.18 Register the phone for push.** A Notifications switch in the phone's Settings › Notifications page: on, it asks for notification permission, registers for remote notifications, makes or loads the install's P-256 key pair and auth secret in the shared Keychain access group (`push-crypto`), and sends `RegisterPush` with the `apns` kind and the build's environment over that host's tailnet connection.
 
   On each open it compares `PushStatus.device_token` with the current token and re-registers when they differ, as the web app does with its endpoint. The register-or-compare rule is a pure model tested on Windows; the platform calls sit behind a `PushPlatform` seam with a fake.
 

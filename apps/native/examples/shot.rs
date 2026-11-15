@@ -74,6 +74,8 @@
 //! agent, opened on its Terminal page: the shell's screen in the live
 //! terminal at the phone's width, the key bar under it. The width the
 //! terminal sizes its PTY to is logged.
+//! `phone-settings` shows the same Home's Settings button tapped: Settings'
+//! header with Back and its title over the category list.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -311,10 +313,11 @@ enum View {
     PhoneSession,
     PhoneSessionSheet,
     PhoneTerminal,
+    PhoneSettings,
 }
 
 impl View {
-    const ALL: [Self; 54] = [
+    const ALL: [Self; 55] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -369,6 +372,7 @@ impl View {
         Self::PhoneSession,
         Self::PhoneSessionSheet,
         Self::PhoneTerminal,
+        Self::PhoneSettings,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -380,6 +384,7 @@ impl View {
                 | Self::PhoneSession
                 | Self::PhoneSessionSheet
                 | Self::PhoneTerminal
+                | Self::PhoneSettings
         )
     }
 
@@ -439,6 +444,7 @@ impl View {
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
             Self::PhoneTerminal => "phone-terminal",
+            Self::PhoneSettings => "phone-settings",
         }
     }
 
@@ -488,7 +494,8 @@ impl View {
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
-            | Self::PhoneTerminal => PHONE_WINDOW_SIZE,
+            | Self::PhoneTerminal
+            | Self::PhoneSettings => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -532,7 +539,8 @@ impl View {
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
-            | Self::PhoneTerminal => true,
+            | Self::PhoneTerminal
+            | Self::PhoneSettings => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -806,6 +814,7 @@ impl Shot {
             | View::PhoneSession
             | View::PhoneSessionSheet
             | View::PhoneTerminal
+            | View::PhoneSettings
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -834,11 +843,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
-            View::PhoneHome
-            | View::PhoneSheet
-            | View::PhoneSession
-            | View::PhoneSessionSheet
-            | View::PhoneTerminal => phone_home_ui_state(),
+            view if view.is_phone() => phone_home_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -1593,9 +1598,7 @@ async fn capture_phone_home(
             cx.background_executor().timer(DRIVE_WAIT).await;
         }
     }
-    if shot.view == View::PhoneTerminal {
-        open_phone_terminal(handle, cx).await?;
-    }
+    open_phone_screen(shot.view, handle, cx).await?;
     if shot.view == View::PhoneSessionSheet {
         let card = handle.update(cx, |phone, _, cx| {
             phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
@@ -1606,6 +1609,25 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// Opens the screen a phone view shows past Home: the `phone-terminal`
+/// view's Terminal page, the `phone-settings` view's Settings; nothing for
+/// the others.
+async fn open_phone_screen(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    match view {
+        View::PhoneTerminal => open_phone_terminal(handle, cx).await,
+        View::PhoneSettings => {
+            handle.update(cx, |phone, _, cx| phone.open_settings(cx))?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Opens the `phone-terminal` view's shell session, checks it shows on its
@@ -1761,7 +1783,8 @@ fn drive(
         | View::PhoneSheet
         | View::PhoneSession
         | View::PhoneSessionSheet
-        | View::PhoneTerminal => Ok(()),
+        | View::PhoneTerminal
+        | View::PhoneSettings => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),

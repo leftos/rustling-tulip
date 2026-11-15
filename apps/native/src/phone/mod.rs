@@ -17,6 +17,8 @@ mod push_ios;
 mod root_view;
 mod session;
 mod session_view;
+mod settings;
+mod settings_view;
 pub(crate) mod sheet;
 mod sweep;
 mod terminal_view;

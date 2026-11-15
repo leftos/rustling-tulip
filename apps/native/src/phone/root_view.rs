@@ -65,6 +65,8 @@ pub struct PhoneRoot {
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
     sheet: Option<Sheet>,
+    /// Settings, drawn in place of Home or the hosts screen while open.
+    pub(super) settings: Option<super::settings::Settings>,
     /// The sheet's resumes out, each until the reply its request id gets.
     /// The phone's own record: the desktop's `Duplicates` never sees them.
     resumes: Vec<home::PendingResume>,
@@ -154,6 +156,7 @@ impl PhoneRoot {
             terminal_quick: false,
             tray: super::tray::Tray::default(),
             sheet: None,
+            settings: None,
             resumes: Vec::new(),
             insets_override: None,
             logged_ready: false,
@@ -245,10 +248,12 @@ impl PhoneRoot {
                     "phone: a tap's session could not be opened"
                 );
                 self.pending_open = None;
-                // A session page hides the line, so the note returns Home.
+                // A session page or Settings hides the line, so the note
+                // returns Home.
                 if self.shown.is_some() {
                     self.close_session(cx);
                 }
+                self.settings = None;
                 self.open_note = Some(note);
                 cx.notify();
             }
@@ -316,10 +321,12 @@ impl PhoneRoot {
 
     /// Shows `host`'s session `session_id` in place of Home, on its chat
     /// when the chat is mirrored, else on its terminal, and loads its chat
-    /// while it can show. It opens no tab and lays out no pane.
+    /// while it can show. It opens no tab and lays out no pane, and closes
+    /// Settings.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
+        self.settings = None;
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
@@ -334,9 +341,9 @@ impl PhoneRoot {
     }
 
     /// Opens the sheet of `host`'s session `session_id` over Home; nothing
-    /// while a session page shows. It sends nothing.
+    /// while a session page or Settings shows. It sends nothing.
     pub(super) fn open_sheet(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
-        if self.shown.is_some() {
+        if self.shown.is_some() || self.settings.is_some() {
             return;
         }
         let Some(offer) = self.offer_of(&host, session_id, cx) else {
@@ -1063,6 +1070,8 @@ impl Render for PhoneRoot {
         self.sync_terminal(keyboard_up, padding.bottom, window, cx);
         let body = if let Some(page) = self.session_page(keyboard_up, cx) {
             page
+        } else if let Some(page) = self.settings_page(cx) {
+            page
         } else if hosts_view::any_host_open(self.root.read(cx)) {
             self.list_body(cx)
         } else {
@@ -1071,8 +1080,11 @@ impl Render for PhoneRoot {
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
-        // The sheet is Home's: no session page, no hosts screen under it.
-        let over_home = self.shown.is_none() && hosts_view::any_host_open(self.root.read(cx));
+        // The sheet is Home's: no session page, Settings or hosts screen
+        // under it.
+        let over_home = self.shown.is_none()
+            && self.settings.is_none()
+            && hosts_view::any_host_open(self.root.read(cx));
         let sheet = over_home
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten();
@@ -1090,14 +1102,15 @@ impl Render for PhoneRoot {
                 .pb(padding.bottom)
                 .pl(padding.left)
         };
-        // The whole window takes a session page's back gesture, so a swipe
-        // that starts in the safe area's bands goes back too.
-        let session_shown = self.shown.is_some();
+        // The whole window takes a session page's or Settings' back
+        // gesture, so a swipe that starts in the safe area's bands goes
+        // back too.
+        let goes_back = self.shown.is_some() || self.settings.is_some();
         div()
             .relative()
             .size_full()
-            .when(session_shown, |root| {
-                root.on_back_gesture(cx.listener(Self::session_back_gesture))
+            .when(goes_back, |root| {
+                root.on_back_gesture(cx.listener(Self::screen_back_gesture))
             })
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
