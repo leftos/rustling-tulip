@@ -5,15 +5,19 @@
 //! session's terminal on a task of its own ([`crate::inject::type_message`]),
 //! and `ChatAnswer` types the keys that answer its prompt the same way
 //! ([`crate::chat_answer::answer`]); both answer only a refusal.
+//! `ChatPullDraft` pulls the draft in the terminal's box into the chat
+//! ([`crate::chat_draft::pull`]), answering the requester alone with a
+//! `ChatDraft`, and `ChatSendDraft` sends that draft as it stands
+//! ([`crate::inject::send_draft`]), answering only a refusal.
 
 use std::sync::Arc;
 
 use super::Hub;
 use super::connection::ConnCtx;
-use crate::chat_answer;
 use crate::chat_mirror::LoadError;
 use crate::inject::{TypeTarget, check_typed_text, type_message};
 use crate::sync::lock;
+use crate::{chat_answer, chat_draft, inject};
 use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
 use protocol::{ChatAnswerKind, ClientMessage, DaemonMessage};
 use tokio::sync::mpsc;
@@ -64,8 +68,79 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             answer: kind,
             request_id,
         } => answer(hub, ctx, &session_id, prompt_id, kind, request_id),
+        ClientMessage::ChatPullDraft {
+            session_id,
+            request_id,
+        } => pull_draft(hub, ctx, &session_id, request_id),
+        ClientMessage::ChatSendDraft {
+            session_id,
+            request_id,
+        } => send_draft(hub, ctx, &session_id, request_id),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
+}
+
+/// Pull the draft in `session_id`'s terminal box into the chat on a task of
+/// its own, after the checks that need no waiting: the text is answered to
+/// this connection alone with a `ChatDraft`, and a refusal, now or from the
+/// task, with an `Error`, each carrying `request_id`.
+fn pull_draft(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, request_id: Option<String>) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        match chat_draft::pull(&target, &out_tx).await {
+            Ok(pulled) => {
+                // The draft's text stays out of the log.
+                debug!(
+                    session_id = %target.session_id,
+                    len = pulled.text.len(),
+                    cleared = pulled.cleared,
+                    "chat draft pulled"
+                );
+                // A closed outbox is a connection already ending.
+                let _ = out_tx.send(DaemonMessage::ChatDraft {
+                    session_id: target.session_id.clone(),
+                    request_id,
+                    text: pulled.text,
+                    cleared: pulled.cleared,
+                });
+            }
+            Err(refusal) => {
+                debug!(
+                    session_id = %target.session_id,
+                    code = refusal.code,
+                    message = %refusal.message,
+                    "chat draft pull refused"
+                );
+                refuse(&out_tx, refusal.code, refusal.message, request_id);
+            }
+        }
+    });
+}
+
+/// Send the draft in `session_id`'s terminal box as it stands on a task of
+/// its own, after the checks that need no waiting; a refusal, now or from
+/// the task, is answered with an `Error` carrying `request_id`.
+fn send_draft(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, request_id: Option<String>) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        if let Err(refusal) = inject::send_draft(&target).await {
+            debug!(
+                session_id = %target.session_id,
+                code = refusal.code,
+                message = %refusal.message,
+                "chat draft send refused"
+            );
+            refuse(&out_tx, refusal.code, refusal.message, request_id);
+        }
+    });
 }
 
 /// Answer the prompt `prompt_id` on `session_id`'s screen with `kind` on a
@@ -2122,6 +2197,30 @@ mod tests {
                 };
                 dispatch_on(&self.hub, msg, 9, out_tx).await;
             }
+
+            /// Ask to pull `s1`'s draft into the chat, as request `r-pull`.
+            async fn pull_draft(&self, out_tx: &Outbox) {
+                let msg = ClientMessage::ChatPullDraft {
+                    session_id: "s1".to_owned(),
+                    request_id: Some("r-pull".to_owned()),
+                };
+                dispatch_on(&self.hub, msg, 9, out_tx).await;
+            }
+
+            /// Ask to send `s1`'s draft as it stands, as request `r-send`.
+            async fn send_draft(&self, out_tx: &Outbox) {
+                let msg = ClientMessage::ChatSendDraft {
+                    session_id: "s1".to_owned(),
+                    request_id: Some("r-send".to_owned()),
+                };
+                dispatch_on(&self.hub, msg, 9, out_tx).await;
+            }
+        }
+
+        /// `capture` with `from` replaced by `to` once, which it must hold.
+        fn edited(capture: &str, from: &str, to: &str) -> String {
+            assert!(capture.contains(from), "the capture shows {from:?}");
+            capture.replacen(from, to, 1)
         }
 
         fn paste(text: &str) -> Vec<u8> {
@@ -2457,6 +2556,492 @@ mod tests {
             assert!(term.typed_now().is_empty(), "nothing is typed");
         }
 
+        /// Main's box holding a one-line draft.
+        const DRAFT_ONE_LINE: &str = include_str!("../screen/fixtures/claude--draft-one-line.txt");
+        /// Main's box holding two lines joined by a typed newline.
+        const DRAFT_TWO_LINES: &str =
+            include_str!("../screen/fixtures/claude--draft-two-lines.txt");
+        /// Main's box holding a paste drawn as its placeholder.
+        const DRAFT_PASTED: &str = include_str!("../screen/fixtures/claude--draft-pasted.txt");
+        /// Main's box holding a draft taller than it shows.
+        const DRAFT_SCROLLED: &str = include_str!("../screen/fixtures/claude--draft-scrolled.txt");
+        /// Main's box holding an image's placeholder.
+        const V186: &str = include_str!("../screen/fixtures/v186-main-image-draft.txt");
+
+        const CLEAR_LINE: &[u8] = &[0x15];
+        const ONE_LINE_TEXT: &str = "add a done command to todo.py";
+        const TWO_LINE_TEXT: &str = "add a done command\nthen a list command";
+
+        /// The one-line draft's box emptied: only its prompt is left.
+        fn one_line_cleared() -> String {
+            edited(DRAFT_ONE_LINE, "❯\u{a0}add a done command to todo.py", "❯")
+        }
+
+        /// The text and `cleared` of `msg`, which must be the pull's
+        /// `ChatDraft` for `s1`.
+        fn pulled(msg: DaemonMessage) -> (String, bool) {
+            match msg {
+                DaemonMessage::ChatDraft {
+                    session_id,
+                    request_id,
+                    text,
+                    cleared,
+                } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(request_id.as_deref(), Some("r-pull"));
+                    (text, cleared)
+                }
+                other => panic!("expected a ChatDraft, got {other:?}"),
+            }
+        }
+
+        /// The code and message of `msg`, which must be the pull's `Error`.
+        fn pull_refusal(msg: DaemonMessage) -> (String, String) {
+            match msg {
+                DaemonMessage::Error {
+                    message,
+                    code,
+                    request_id,
+                } => {
+                    assert_eq!(request_id.as_deref(), Some("r-pull"));
+                    (code.unwrap_or_default(), message)
+                }
+                other => panic!("expected an Error, got {other:?}"),
+            }
+        }
+
+        /// Pull the draft of a terminal showing `first`: the refusal, and
+        /// that nothing was typed.
+        async fn pull_refused_on(tag: &str, first: &str) -> (String, String) {
+            let (fx, mut term) = Fixture::with_terminal(tag, None, first);
+            let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            let refusal = pull_refusal(next_message(&mut p_rx).await);
+            assert!(term.typed_now().is_empty(), "{tag}: nothing is typed");
+            refusal
+        }
+
+        /// Start pulling the one-line draft and see its first ctrl+u.
+        async fn pull_one_line(tag: &str) -> (Fixture, Terminal, Inbox) {
+            let (fx, mut term) = Fixture::with_terminal(tag, None, DRAFT_ONE_LINE);
+            let (p_tx, p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            assert_eq!(term.typed().await, CLEAR_LINE, "the first ctrl+u");
+            (fx, term, p_rx)
+        }
+
+        #[tokio::test]
+        async fn a_one_line_draft_is_pulled_with_one_clear() {
+            let (_fx, mut term, mut p_rx) = pull_one_line("pull-one-line").await;
+            term.show(&one_line_cleared()).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), true)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "nothing more is typed");
+        }
+
+        #[tokio::test]
+        async fn a_two_line_draft_is_pulled_line_by_line() {
+            let (fx, mut term) = Fixture::with_terminal("pull-two-lines", None, DRAFT_TWO_LINES);
+            let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            let second_row_emptied = edited(DRAFT_TWO_LINES, "  then a list command", "  ");
+            let second_row_gone = edited(DRAFT_TWO_LINES, "\x1b[0m  then a list command\n", "");
+            let emptied = edited(&second_row_gone, "❯\u{a0}add a done command", "❯");
+            for frame in [&second_row_emptied, &second_row_gone, &emptied] {
+                assert_eq!(term.typed().await, CLEAR_LINE);
+                term.show(frame).await;
+            }
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (TWO_LINE_TEXT.to_owned(), true)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no fourth press");
+        }
+
+        #[tokio::test]
+        async fn a_pasted_draft_is_refused_before_any_key() {
+            let pasted = "the draft holds pasted text or an image; \
+                          send it as it stands or clear it in the terminal";
+            for (tag, first) in [("pull-pasted", DRAFT_PASTED), ("pull-image", V186)] {
+                assert_eq!(
+                    pull_refused_on(tag, first).await,
+                    refused(CHAT_REFUSED, pasted),
+                    "{tag}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_scrolled_draft_is_refused_before_any_key() {
+            assert_eq!(
+                pull_refused_on("pull-scrolled", DRAFT_SCROLLED).await,
+                refused(
+                    CHAT_REFUSED,
+                    "the draft is taller than the box shows; \
+                     send it as it stands or clear it in the terminal"
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn an_empty_box_or_a_suggestion_has_no_draft_to_pull() {
+            for (tag, first) in [
+                ("pull-empty", V176),
+                ("pull-suggestion", SUGGESTION),
+                ("pull-working", C32),
+            ] {
+                assert_eq!(
+                    pull_refused_on(tag, first).await,
+                    refused(CHAT_REFUSED, "the terminal's box holds no draft"),
+                    "{tag}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_dialog_or_an_overlay_pulls_nothing() {
+            assert_eq!(
+                pull_refused_on("pull-dialog", PERMISSION).await,
+                refused(CHAT_REFUSED, "a dialog is open in the terminal")
+            );
+            assert_eq!(
+                pull_refused_on("pull-overlay", V140).await,
+                refused(CHAT_REFUSED, "the terminal is not at its prompt")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_draft_in_an_agents_view_is_not_pulled() {
+            let draft = edited(
+                V174,
+                "❯\u{a0}Message @general-purpose…",
+                "❯ a draft for the agent",
+            );
+            assert_eq!(
+                pull_refused_on("pull-agent-view", &draft).await,
+                refused(
+                    CHAT_REFUSED,
+                    "the draft is in an agent's view, not the main conversation"
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn a_prompt_pending_before_a_pull_refuses() {
+            let (fx, mut term) = Fixture::with_terminal("pull-pending", None, DRAFT_ONE_LINE);
+            fx.hub.sessions.update("s1", |record| {
+                record.pending_input = Some(PendingInput::Permission {
+                    tool_name: "Bash".to_owned(),
+                    summary: "ls".to_owned(),
+                });
+            });
+            let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            assert_eq!(
+                pull_refusal(next_message(&mut p_rx).await),
+                refused(
+                    CHAT_REFUSED,
+                    "Claude is waiting for an answer in the terminal"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn an_owner_key_mid_pull_stops_it_and_returns_the_text() {
+            let (_fx, mut term, mut p_rx) = pull_one_line("pull-owner-key").await;
+            term.pty.typing().owner_typed();
+            term.show(DRAFT_ONE_LINE).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no second press");
+        }
+
+        /// On a paused clock, so the press's wait for output runs out at
+        /// once.
+        #[tokio::test(start_paused = true)]
+        async fn a_press_that_changes_nothing_ends_the_pull() {
+            let (_fx, mut term, mut p_rx) = pull_one_line("pull-no-output").await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "one press");
+        }
+
+        #[tokio::test]
+        async fn a_box_that_keeps_its_draft_stops_at_the_cap() {
+            let (_fx, mut term, mut p_rx) = pull_one_line("pull-cap").await;
+            term.show(DRAFT_ONE_LINE).await;
+            for press in 2..=4 {
+                assert_eq!(term.typed().await, CLEAR_LINE, "press {press}");
+                term.show(DRAFT_ONE_LINE).await;
+            }
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "2·1+2 presses, no more");
+        }
+
+        #[tokio::test]
+        async fn a_dialog_mid_pull_stops_it() {
+            let (_fx, mut term, mut p_rx) = pull_one_line("pull-dialog-mid").await;
+            term.show(PERMISSION).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no more presses");
+        }
+
+        #[tokio::test]
+        async fn a_prompt_raised_mid_pull_stops_it() {
+            let (fx, mut term, mut p_rx) = pull_one_line("pull-prompt-mid").await;
+            fx.hub.sessions.update("s1", |record| {
+                record.pending_input = Some(PendingInput::Permission {
+                    tool_name: "Bash".to_owned(),
+                    summary: "ls".to_owned(),
+                });
+            });
+            term.show(DRAFT_ONE_LINE).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no more presses");
+        }
+
+        #[tokio::test]
+        async fn a_removed_session_mid_pull_returns_its_text() {
+            let (fx, mut term, mut p_rx) = pull_one_line("pull-removed").await;
+            fx.hub.sessions.remove("s1");
+            term.show(DRAFT_ONE_LINE).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (ONE_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no more presses");
+        }
+
+        /// The ceiling passes while the pull waits on its first press.
+        #[tokio::test]
+        async fn a_ceiling_after_a_press_returns_the_text() {
+            let (fx, mut term) = Fixture::with_terminal("pull-ceiling", None, DRAFT_ONE_LINE);
+            let target =
+                crate::server::chat::send_target(&fx.hub, "s1").expect("s1 has a terminal");
+            let (p_tx, _p_rx) = mpsc::unbounded_channel();
+            tokio::time::pause();
+            let pulling = tokio::spawn(async move {
+                crate::chat_draft::pull_within(&target, &p_tx, crate::view_drive::KEY_WAIT / 2)
+                    .await
+            });
+            assert_eq!(term.typed().await, CLEAR_LINE);
+            let pulled = pulling.await.expect("the pull ran");
+            assert_eq!(
+                pulled.map(|pulled| (pulled.text, pulled.cleared)),
+                Ok((ONE_LINE_TEXT.to_owned(), false))
+            );
+            assert!(term.typed_now().is_empty(), "one press");
+        }
+
+        #[tokio::test]
+        async fn a_pull_while_a_send_holds_the_lane_is_busy() {
+            let (fx, mut term) = Fixture::with_terminal("pull-busy", None, DRAFT_ONE_LINE);
+            let _held = term
+                .pty
+                .typing()
+                .try_take(Holder::ChatSend)
+                .expect("a free lane");
+            let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            assert_eq!(
+                pull_refusal(next_message(&mut p_rx).await),
+                refused(BUSY, "another message is being typed")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn a_send_or_an_answer_during_a_pull_is_busy() {
+            let (fx, mut term) = Fixture::with_terminal("pull-held", None, DRAFT_ONE_LINE);
+            let _held = term
+                .pty
+                .typing()
+                .try_take(Holder::ChatPull)
+                .expect("a free lane");
+            let pulling = refused(BUSY, "the terminal's draft is being pulled into the chat");
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(next_refusal(&mut s_rx).await, pulling, "a send");
+            let answer = ClientMessage::ChatAnswer {
+                session_id: "s1".to_owned(),
+                prompt_id: "p1".to_owned(),
+                answer: protocol::ChatAnswerKind::Submit,
+                request_id: Some("r-send".to_owned()),
+            };
+            dispatch_on(&fx.hub, answer, 9, &s_tx).await;
+            assert_eq!(next_refusal(&mut s_rx).await, pulling, "an answer");
+            fx.send_draft(&s_tx).await;
+            assert_eq!(next_refusal(&mut s_rx).await, pulling, "a draft's send");
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn chat_pull_and_send_draft_are_handled() {
+            let fx = Fixture::new("pull-no-terminal", None);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            for msg in [
+                ClientMessage::ChatPullDraft {
+                    session_id: "nope".to_owned(),
+                    request_id: Some("r-pull".to_owned()),
+                },
+                ClientMessage::ChatSendDraft {
+                    session_id: "nope".to_owned(),
+                    request_id: Some("r-pull".to_owned()),
+                },
+            ] {
+                dispatch_on(&fx.hub, msg, 9, &tx).await;
+                assert_eq!(
+                    pull_refusal(next_message(&mut rx).await),
+                    refused(protocol::error_codes::NOT_FOUND, "unknown session: nope")
+                );
+            }
+            fx.pull_draft(&tx).await;
+            assert_eq!(
+                pull_refusal(next_message(&mut rx).await),
+                refused(
+                    protocol::error_codes::NO_SCREEN,
+                    "the session has no terminal"
+                )
+            );
+            fx.send_draft(&tx).await;
+            assert_eq!(
+                next_refusal(&mut rx).await,
+                refused(
+                    protocol::error_codes::NO_SCREEN,
+                    "the session has no terminal"
+                )
+            );
+        }
+
+        /// Send the draft of a terminal showing `first` on a loaded chat: the
+        /// pending entries the Enter added, once the send gave the lane back
+        /// unrefused.
+        async fn draft_sent_on(tag: &str, first: &str) -> Vec<(String, String)> {
+            let (fx, mut term) = Fixture::with_terminal(tag, Some("conv-a"), first);
+            fx.append("conv-a", &[user(1)]);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            ids_until(&mut a_rx, "u-1").await;
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send_draft(&s_tx).await;
+            assert_eq!(term.typed().await, ENTER, "{tag}: one Enter");
+            term.show(V176).await;
+            term.lane_free().await;
+            assert!(
+                drain(&mut s_rx).is_empty(),
+                "{tag}: the send was not refused"
+            );
+            assert!(term.typed_now().is_empty(), "{tag}: nothing but the Enter");
+            pending_added(&mut a_rx)
+        }
+
+        #[tokio::test]
+        async fn a_draft_is_sent_with_one_enter() {
+            let added = draft_sent_on("draft-send", DRAFT_ONE_LINE).await;
+            assert!(
+                matches!(added.as_slice(), [(id, text)]
+                    if id.starts_with("pending:") && text == ONE_LINE_TEXT),
+                "the pending entry carries the draft: {added:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_multi_row_draft_is_sent_with_no_pending_entry() {
+            let added = draft_sent_on("draft-send-two", DRAFT_TWO_LINES).await;
+            assert!(added.is_empty(), "{added:?}");
+        }
+
+        #[tokio::test]
+        async fn a_pasted_draft_is_sent_as_it_stands() {
+            let added = draft_sent_on("draft-send-pasted", DRAFT_PASTED).await;
+            assert!(added.is_empty(), "{added:?}");
+        }
+
+        #[tokio::test]
+        async fn send_draft_refuses_an_empty_box_and_a_suggestion() {
+            for (tag, first) in [("draft-send-empty", V176), ("draft-send-sugg", SUGGESTION)] {
+                let (fx, mut term) = Fixture::with_terminal(tag, None, first);
+                let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+                fx.send_draft(&s_tx).await;
+                assert_eq!(
+                    next_refusal(&mut s_rx).await,
+                    refused(CHAT_REFUSED, "the terminal's box holds no draft"),
+                    "{tag}"
+                );
+                assert!(term.typed_now().is_empty(), "{tag}: nothing is typed");
+            }
+        }
+
+        #[tokio::test]
+        async fn send_draft_refuses_while_the_first_prompt_is_held() {
+            let (fx, mut term) = Fixture::with_terminal("draft-send-held", None, DRAFT_ONE_LINE);
+            term.pty.set_first_prompt_held(true);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send_draft(&s_tx).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    BUSY,
+                    "This session's first prompt is still waiting to be typed."
+                )
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn an_owner_key_before_the_draft_enter_stops_it() {
+            let (fx, mut term) = Fixture::with_terminal("draft-send-owner", None, DRAFT_ONE_LINE);
+            let pty = Arc::clone(&term.pty);
+            enter_seam::set(&term.pty, move || pty.typing().owner_typed());
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send_draft(&s_tx).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(CHAT_REFUSED, "someone typed in the terminal")
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_dialog_drawn_before_the_draft_enter_stops_it() {
+            let (fx, mut term) = Fixture::with_terminal("draft-send-dialog", None, DRAFT_ONE_LINE);
+            let screen = Arc::clone(&term.screen);
+            enter_seam::set(&term.pty, move || {
+                draw_on(&screen, PERMISSION);
+            });
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send_draft(&s_tx).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(CHAT_REFUSED, "a dialog is open in the terminal")
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
         #[tokio::test]
         async fn a_message_that_starts_like_the_placeholder_is_sent() {
             let (fx, mut term) = Fixture::with_terminal("send-try-text", None, V176);
@@ -2700,12 +3285,6 @@ mod tests {
                 include_str!("../screen/fixtures/v192-agent-view-ask-with-chat-about-this.txt");
 
             const TAB: &[u8] = b"\t";
-
-            /// `capture` with `from` replaced by `to` once, which it must hold.
-            fn edited(capture: &str, from: &str, to: &str) -> String {
-                assert!(capture.contains(from), "the capture shows {from:?}");
-                capture.replacen(from, to, 1)
-            }
 
             /// Load `s1`'s chat on connection 1: the id the mirror gave the
             /// prompt on screen, and the loader's inbox.

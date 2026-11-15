@@ -30,6 +30,10 @@
 //! bracketed paste, then Enter once the screen shows the paste in the input
 //! box, after returning the terminal to the main conversation when an agent
 //! is in view. [`check_typed_text`] decides which text may be typed that way.
+//! [`send_draft`] sends the draft the box already holds with one Enter, and
+//! [`draft_gate`] and [`box_refusal`] decide when main's box holds a draft
+//! that a key may reach, for that send and for the chat's draft pull
+//! ([`crate::chat_draft`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,8 +49,8 @@ use tracing::{debug, info, warn};
 use crate::chat_mirror::ChatMirror;
 use crate::pty::PtyHandle;
 use crate::pty_state::AgentReading;
-use crate::screen::SharedScreen;
-use crate::screen::dialogs::next_view_key;
+use crate::screen::dialogs::{self, next_view_key};
+use crate::screen::{Screen, SharedScreen};
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::typing_lane::{Holder, TypingTurn};
@@ -851,6 +855,9 @@ const NO_RETURN: &str = "the terminal could not return to the main conversation"
 pub(crate) const OWNER_TYPED: &str = "someone typed in the terminal";
 const NOT_SHOWN: &str = "the message did not appear in the box; it may be left there";
 const AGENT_ENDED: &str = "the agent is not running in this session";
+pub(crate) const NO_DRAFT: &str = "the terminal's box holds no draft";
+pub(crate) const DRAFT_IN_AGENT_VIEW: &str =
+    "the draft is in an agent's view, not the main conversation";
 
 /// `text` as a chat send types it: `\r\n` made `\n`.
 ///
@@ -913,6 +920,7 @@ impl TypeRefusal {
             Some(Holder::ViewReturn) => "the terminal is switching views",
             Some(Holder::Injector) => "the session is starting",
             Some(Holder::ChatSend | Holder::ChatAnswer) => "another message is being typed",
+            Some(Holder::ChatPull) => "the terminal's draft is being pulled into the chat",
             None => "the terminal is busy",
         };
         Self {
@@ -962,8 +970,47 @@ pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRef
     Ok(())
 }
 
+/// Send the draft `target`'s main box holds as it stands: one Enter, once a
+/// settled reading shows the draft in main's box with nothing in the way,
+/// checked again under the record's and the screen's locks. Adds the chat's
+/// pending entry only for a one-row draft with no paste that is not a
+/// command. Holds the session's typing lane throughout, and gives it back one
+/// settled reading after the Enter.
+///
+/// # Errors
+///
+/// The session's first prompt is still held by its chain, or the lane is held
+/// by another writer ([`BUSY`]), or the box holds no draft main's Enter may
+/// send, or the owner typed, or the terminal did not answer within
+/// [`SEND_CEILING`] ([`CHAT_REFUSED`]).
+pub async fn send_draft(target: &TypeTarget) -> Result<(), TypeRefusal> {
+    // An Enter now would reach the agent ahead of its first prompt.
+    if target.pty.first_prompt_held() {
+        return Err(TypeRefusal {
+            code: BUSY,
+            message: FIRST_PROMPT_HELD.to_owned(),
+        });
+    }
+    let turn = take_lane(target, Holder::ChatSend).await?;
+    let mut reader = screen_reader(target);
+    let sent = timeout(SEND_CEILING, async {
+        let reading = reader.current().await;
+        draft_gate(target, &reading)?;
+        press_enter(target, &turn, &mut reader, Entered::Draft)
+    })
+    .await;
+    match sent {
+        Ok(sent) => sent?,
+        Err(_) => return Err(TypeRefusal::refused(NO_RESPONSE)),
+    }
+    // The next writer starts from the frame the Enter brought.
+    reader.after_key().await;
+    drop(turn);
+    Ok(())
+}
+
 /// `target`'s typing lane for `who`, a chat writer: refused at once while a
-/// send or an answer holds it, else once its holder has kept it for
+/// send, an answer or a pull holds it, else once its holder has kept it for
 /// [`SEND_LANE_WAIT`].
 ///
 /// # Errors
@@ -972,7 +1019,8 @@ pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRef
 pub(crate) async fn take_lane(target: &TypeTarget, who: Holder) -> Result<TypingTurn, TypeRefusal> {
     let lane = target.pty.typing();
     // Another message is refused at once, never queued behind the one typed.
-    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer)) = lane.holder() {
+    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer | Holder::ChatPull)) = lane.holder()
+    {
         return Err(TypeRefusal::busy(Some(holder)));
     }
     lane.take(who, SEND_LANE_WAIT)
@@ -1020,7 +1068,7 @@ pub async fn type_message_under(
     turn.press(&target.pty, bracketed_paste(text));
     *pasted = true;
     wait_for_paste(reader).await?;
-    press_enter(target, turn, reader, text)
+    press_enter(target, turn, reader, Entered::Pasted(text))
 }
 
 /// `text` as one bracketed paste.
@@ -1043,7 +1091,7 @@ fn waiting_prompt(target: &TypeTarget) -> Option<TypeRefusal> {
 }
 
 /// The refusal for a prompt `record` says is waiting for an answer.
-fn waiting_refusal(target: &TypeTarget, record: &SessionRecord) -> Option<TypeRefusal> {
+pub(crate) fn waiting_refusal(target: &TypeTarget, record: &SessionRecord) -> Option<TypeRefusal> {
     record.pending_input.is_some().then(|| {
         let label = agent_registry::plugin(&target.agent).map_or_else(
             || target.agent.0.clone(),
@@ -1058,9 +1106,50 @@ fn waiting_refusal(target: &TypeTarget, record: &SessionRecord) -> Option<TypeRe
 fn agent_ended(target: &TypeTarget) -> Option<TypeRefusal> {
     let record = target.sessions.get(&target.session_id)?;
     let record = lock(&record);
+    ended_refusal(&record)
+}
+
+/// The refusal for a session whose `record`, read under its lock, says its
+/// agent, typed into its shell, has ended.
+pub(crate) fn ended_refusal(record: &SessionRecord) -> Option<TypeRefusal> {
     let shell_named = record.shell_label.is_some() && record.program_name == record.shell_label;
     (record.agent_in_shell && (record.agent_exit_announced || shell_named))
         .then(|| TypeRefusal::refused(AGENT_ENDED))
+}
+
+/// Why a key may not reach the draft in main's box on `reading`: no prompt
+/// on screen, a dialog, the draft in an agent's view, main out of reach, or
+/// no draft in the box. Reads nothing but `reading`, so it may run under the
+/// record's and the screen's locks.
+pub(crate) fn box_refusal(target: &TypeTarget, reading: &Reading) -> Option<TypeRefusal> {
+    let Some(view) = reading.view.as_ref() else {
+        return Some(TypeRefusal::refused(NOT_AT_PROMPT));
+    };
+    let composer = reading.chat.as_ref().map(|chat| &chat.composer);
+    // An overlay also reads as a dialog in the view; it is named first.
+    if let None | Some(ComposerState::Overlay { .. } | ComposerState::Unknown) = composer {
+        return Some(TypeRefusal::refused(NOT_AT_PROMPT));
+    }
+    if view.dialog || composer == Some(&ComposerState::Dialog) {
+        return Some(TypeRefusal::refused(DIALOG));
+    }
+    if view.agent_in_view.is_some() {
+        return Some(TypeRefusal::refused(DRAFT_IN_AGENT_VIEW));
+    }
+    if next_view_key(&target.agent, ViewGoal::Main, view) != ViewStep::Done {
+        return Some(TypeRefusal::refused(NO_RETURN));
+    }
+    (composer != Some(&ComposerState::Draft)).then(|| TypeRefusal::refused(NO_DRAFT))
+}
+
+/// Refuse a settled `reading` on which no key may reach a draft in main's
+/// box: the agent ended, a prompt waiting, or [`box_refusal`]. Takes the
+/// record's lock itself, so it is called holding none.
+pub(crate) fn draft_gate(target: &TypeTarget, reading: &Reading) -> Result<(), TypeRefusal> {
+    if let Some(refusal) = agent_ended(target).or_else(|| waiting_prompt(target)) {
+        return Err(refusal);
+    }
+    box_refusal(target, reading).map_or(Ok(()), Err)
 }
 
 /// Refuse a reading that cannot take a message in any view: the agent
@@ -1173,15 +1262,26 @@ async fn wait_for_paste(reader: &mut ScreenReader) -> Result<(), TypeRefusal> {
     Err(TypeRefusal::refused(NOT_SHOWN))
 }
 
+/// What an Enter sends: a paste a chat send typed, or the draft the box
+/// already held.
+#[derive(Clone, Copy)]
+enum Entered<'a> {
+    /// The text a chat send pasted.
+    Pasted(&'a str),
+    /// The draft in the box, as it stands.
+    Draft,
+}
+
 /// Press Enter under the record's and the screen's locks, once the screen
-/// still shows the paste in main's box with no dialog and no owner key or
-/// waiting prompt came, adding the chat's pending entry just before (none
-/// for a command).
+/// still shows the paste, or for [`Entered::Draft`] the draft, in main's box
+/// with no dialog and no owner key or waiting prompt came, adding the chat's
+/// pending entry just before (none for a command, nor for a draft whose text
+/// the transcript might not match).
 fn press_enter(
     target: &TypeTarget,
     turn: &TypingTurn,
     reader: &mut ScreenReader,
-    text: &str,
+    entered: Entered<'_>,
 ) -> Result<(), TypeRefusal> {
     #[cfg(test)]
     enter_seam::run(&target.pty);
@@ -1195,14 +1295,18 @@ fn press_enter(
         .and_then(|record| waiting_refusal(target, record));
     let screen = lock(&target.screen);
     let reading = Reading::of(&target.agent, &screen);
-    if let Some(refusal) = enter_refusal(&reading, turn, waiting) {
+    let refusal = match entered {
+        Entered::Pasted(_) => enter_refusal(&reading, turn, waiting),
+        Entered::Draft => draft_enter_refusal(target, &reading, turn, waiting),
+    };
+    if let Some(refusal) = refusal {
         return Err(refusal);
     }
-    let pending = if is_command(text) {
-        None
-    } else {
-        target.mirror.note_sent(&target.session_id, text)
+    let noted = match entered {
+        Entered::Pasted(text) => (!is_command(text)).then(|| text.to_owned()),
+        Entered::Draft => noted_draft(&target.agent, &screen),
     };
+    let pending = noted.and_then(|text| target.mirror.note_sent(&target.session_id, &text));
     debug!(session_id = %target.session_id, ?pending, "chat send: pressing Enter");
     reader.arm_at(output, screen.fed());
     turn.press(&target.pty, Key::Enter.to_bytes());
@@ -1232,6 +1336,33 @@ fn enter_refusal(
         return Some(TypeRefusal::left_in_box(OWNER_TYPED));
     }
     waiting.map(|refusal| TypeRefusal::left_in_box(&refusal.message))
+}
+
+/// Why the Enter that sends the box's draft may not be pressed on
+/// `reading`; `waiting` is the refusal for a prompt the record says is
+/// waiting. Nothing was pasted, so no refusal says anything was left.
+fn draft_enter_refusal(
+    target: &TypeTarget,
+    reading: &Reading,
+    turn: &TypingTurn,
+    waiting: Option<TypeRefusal>,
+) -> Option<TypeRefusal> {
+    box_refusal(target, reading)
+        .or_else(|| {
+            turn.owner_typed_since()
+                .then(|| TypeRefusal::refused(OWNER_TYPED))
+        })
+        .or(waiting)
+}
+
+/// The text of the draft `screen`'s box holds, for the chat's pending entry:
+/// only a draft of one row with no paste that is not a command, since a
+/// draft rebuilt from several rows might never match the transcript's text
+/// and its pending entry would never clear.
+fn noted_draft(agent: &AgentId, screen: &Screen) -> Option<String> {
+    dialogs::read_draft(agent, screen)
+        .filter(|draft| !draft.pasted && draft.rows == 1 && !is_command(&draft.text))
+        .map(|draft| draft.text)
 }
 
 /// The enter seam: a test's hook that [`press_enter`] runs once the paste

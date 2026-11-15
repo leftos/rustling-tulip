@@ -156,6 +156,13 @@ pub const FEATURE_CLIENT_PRESENCE: &str = "client_presence";
 /// the connected daemon lists it.
 pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 
+/// `Welcome.features` entry: the daemon pulls the draft in a session's
+/// terminal prompt box into the chat ([`ClientMessage::ChatPullDraft`],
+/// answered with [`DaemonMessage::ChatDraft`]) and sends it as it stands
+/// ([`ClientMessage::ChatSendDraft`]). A client offers Pull only on a host
+/// that lists it.
+pub const FEATURE_CHAT_DRAFT: &str = "chat_draft";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -6162,6 +6169,24 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Pull the draft in the session's terminal prompt box into the chat:
+    /// the daemon reads the whole draft, clears the box, and answers the
+    /// requester alone with [`DaemonMessage::ChatDraft`] carrying this
+    /// `request_id`. A refusal before any key is answered with
+    /// [`DaemonMessage::Error`] carrying it.
+    ChatPullDraft {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Send the draft in the session's terminal prompt box as it stands, with
+    /// one Enter. A refusal is answered with [`DaemonMessage::Error`]
+    /// carrying this `request_id`.
+    ChatSendDraft {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Load a session's summary for this connection: every stretch line as
     /// it stands, answered with [`DaemonMessage::Summary`] carrying this
     /// `request_id`, then the changed lines as
@@ -7708,6 +7733,18 @@ pub enum DaemonMessage {
     ChatScreenChanged {
         session_id: String,
         screen: ChatScreen,
+    },
+    /// The answer to [`ClientMessage::ChatPullDraft`], sent to the requester
+    /// alone with its `request_id`: the draft's `text` as the box held it,
+    /// and whether the box last read empty (`cleared`). Once any key of the
+    /// clear was typed the pull answers with this, never an `Error`; a draft
+    /// left in the box, whole or in part, has `cleared` false.
+    ChatDraft {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        text: String,
+        cleared: bool,
     },
     /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
     /// with its `request_id`: every stretch line of the session's chat as it
@@ -17781,6 +17818,82 @@ mod tests {
                 }
                 other => panic!("unexpected variant: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn chat_pull_and_send_draft_messages_round_trip() {
+        let pull = ClientMessage::ChatPullDraft {
+            session_id: "s1".to_string(),
+            request_id: Some("req-pull".to_string()),
+        };
+        let json = serde_json::to_string(&pull).expect("serialize");
+        assert!(json.contains(r#""type":"chat_pull_draft""#), "{json}");
+        assert!(json.contains(r#""request_id":"req-pull""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ChatPullDraft {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-pull"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let send = ClientMessage::ChatSendDraft {
+            session_id: "s1".to_string(),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&send).expect("serialize");
+        assert_eq!(json, r#"{"type":"chat_send_draft","session_id":"s1"}"#);
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ChatSendDraft {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_draft_message_round_trips() {
+        let msg = DaemonMessage::ChatDraft {
+            session_id: "s1".to_string(),
+            request_id: Some("req-pull".to_string()),
+            text: "add a done command\nthen a list command".to_string(),
+            cleared: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_draft""#), "{json}");
+        assert!(json.contains(r#""request_id":"req-pull""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ChatDraft {
+                session_id,
+                request_id,
+                text,
+                cleared,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-pull"));
+                assert_eq!(text, "add a done command\nthen a list command");
+                assert!(cleared);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"chat_draft","session_id":"s1","text":"hi","cleared":false}"#;
+        match serde_json::from_str::<DaemonMessage>(bare).expect("deserialize") {
+            DaemonMessage::ChatDraft {
+                request_id,
+                cleared,
+                ..
+            } => {
+                assert_eq!(request_id, None);
+                assert!(!cleared);
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 

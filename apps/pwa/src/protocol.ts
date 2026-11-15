@@ -191,6 +191,15 @@ export const FEATURE_CLIENT_PRESENCE = "client_presence";
 export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 
 /**
+ * `Welcome.features` entry: the daemon pulls the draft in a session's
+ * terminal prompt box into the chat ([`ClientMessage::ChatPullDraft`],
+ * answered with [`DaemonMessage::ChatDraft`]) and sends it as it stands
+ * ([`ClientMessage::ChatSendDraft`]). A client offers Pull only on a host
+ * that lists it.
+ */
+export const FEATURE_CHAT_DRAFT = "chat_draft";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -4860,6 +4869,20 @@ export type ClientMessage =
    */
   | { type: "chat_answer"; session_id: string; prompt_id: string; answer: ChatAnswerKind; request_id?: string | null }
   /**
+   * Pull the draft in the session's terminal prompt box into the chat:
+   * the daemon reads the whole draft, clears the box, and answers the
+   * requester alone with [`DaemonMessage::ChatDraft`] carrying this
+   * `request_id`. A refusal before any key is answered with
+   * [`DaemonMessage::Error`] carrying it.
+   */
+  | { type: "chat_pull_draft"; session_id: string; request_id?: string | null }
+  /**
+   * Send the draft in the session's terminal prompt box as it stands, with
+   * one Enter. A refusal is answered with [`DaemonMessage::Error`]
+   * carrying this `request_id`.
+   */
+  | { type: "chat_send_draft"; session_id: string; request_id?: string | null }
+  /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this
    * `request_id`, then the changed lines as
@@ -6072,6 +6095,14 @@ export type DaemonMessage =
   | { type: "transcript_append"; source: TranscriptSource; entries?: ChatEntry[]; ended?: boolean }
   /** The dialog or composer state changed, sent to loaders only. */
   | { type: "chat_screen_changed"; session_id: string; screen: ChatScreen }
+  /**
+   * The answer to [`ClientMessage::ChatPullDraft`], sent to the requester
+   * alone with its `request_id`: the draft's `text` as the box held it,
+   * and whether the box last read empty (`cleared`). Once any key of the
+   * clear was typed the pull answers with this, never an `Error`; a draft
+   * left in the box, whole or in part, has `cleared` false.
+   */
+  | { type: "chat_draft"; session_id: string; request_id?: string | null; text: string; cleared: boolean }
   /**
    * The answer to [`ClientMessage::LoadSummary`], sent to the requester
    * with its `request_id`: every stretch line of the session's chat as it

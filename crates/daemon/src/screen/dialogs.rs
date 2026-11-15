@@ -56,6 +56,27 @@ pub fn recipe_for(
     plugin.answer_recipe(prompt, answer)
 }
 
+/// The keys that clear the prompt box holding `draft`, as `agent`'s plugin
+/// types them.
+///
+/// # Errors
+///
+/// Why the plugin has no recipe that clears this draft;
+/// [`AnswerRefusal::Unsupported`] for an agent with no registered plugin.
+pub fn clear_recipe_for(
+    agent: &AgentId,
+    draft: &DraftReading,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::warn!(
+            "no agent plugin `{}` is registered; refusing the draft's clear",
+            agent.0
+        );
+        return Err(AnswerRefusal::Unsupported);
+    };
+    plugin.clear_draft_recipe(draft)
+}
+
 /// Which conversation `screen` shows and where its keys go, as `agent`'s
 /// plugin reads it; `None` for an agent with no registered plugin or one
 /// whose views the daemon does not switch. Under a dialog with no agents
@@ -90,10 +111,6 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
 /// The draft in `screen`'s prompt box, as `agent`'s plugin reads it; `None`
 /// for an agent with no registered plugin, or one whose box holds no draft.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the chat's draft pull reads it")
-)]
 pub fn read_draft(agent: &AgentId, screen: &Screen) -> Option<DraftReading> {
     let Some(plugin) = agent_registry::plugin(agent) else {
         tracing::debug!(

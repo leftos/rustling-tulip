@@ -2,7 +2,8 @@
 //!
 //! Every writer that types a run of keys the screen must answer in order
 //! (the status watcher's view switch, the preset injector, a chat send or
-//! answer) takes the session's [`TypingLane`] for its whole run, so two runs
+//! answer, a chat pull clearing the box's draft) takes the session's
+//! [`TypingLane`] for its whole run, so two runs
 //! never interleave their keys. A [`TypingTurn`] is the lane held: it types
 //! with [`TypingTurn::press`] and gives the lane back when it is dropped,
 //! however its run ends. The owner's own keys never take the lane; they only
@@ -29,6 +30,8 @@ pub enum Holder {
     ChatSend,
     /// A chat answer to a dialog being typed.
     ChatAnswer,
+    /// A chat pull clearing the box's draft.
+    ChatPull,
 }
 
 /// A session's typing lane: at most one [`TypingTurn`] at a time.
