@@ -207,7 +207,7 @@ fn rows_do_not_move_when_a_session_starts_needing_you(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_tap_shows_the_session_page_and_sends_nothing(cx: &mut TestAppContext) {
+fn a_tap_shows_the_session_page_and_loads_its_chat(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = open_phone(cx, &dir);
     h.host(&saved_remote()).sent();
@@ -224,7 +224,13 @@ fn a_tap_shows_the_session_page_and_sends_nothing(cx: &mut TestAppContext) {
     );
     assert!(!drawn(&mut h, "phone-home"), "the page replaces Home");
     let sent: Vec<ClientMessage> = h.host(&saved_remote()).sent();
-    assert!(sent.is_empty(), "a tap sends nothing: {sent:?}");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::LoadChat { session_id, .. }] if session_id == "b"
+        ),
+        "a tap sends only its chat's load: {sent:?}"
+    );
 }
 
 #[gpui::test]
@@ -239,9 +245,13 @@ fn back_returns_to_home(cx: &mut TestAppContext) {
     assert_eq!(shown(&mut h), None);
     assert!(drawn(&mut h, "phone-home"), "Home shows again");
     assert!(!drawn(&mut h, "phone-session"));
+    let sent: Vec<ClientMessage> = h.host(&saved_remote()).sent();
     assert!(
-        h.host(&saved_remote()).sent().is_empty(),
-        "Back sends nothing"
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::UnloadChat { session_id }] if session_id == "a"
+        ),
+        "Back sends only its chat's unload: {sent:?}"
     );
 }
 
@@ -625,7 +635,7 @@ fn allow_answers_a_permission(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn open_shows_the_session_and_sends_nothing(cx: &mut TestAppContext) {
+fn open_shows_the_session_and_loads_its_chat(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = waiting_phone(
         cx,
@@ -641,7 +651,13 @@ fn open_shows_the_session_and_sends_nothing(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-session"), "the session page shows");
     assert!(!drawn(&mut h, "phone-tray"), "the tray is Home's");
     let sent: Vec<ClientMessage> = h.host(&saved_remote()).sent();
-    assert!(sent.is_empty(), "Open sends nothing: {sent:?}");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::LoadChat { session_id, .. }] if session_id == "b"
+        ),
+        "Open sends only its chat's load: {sent:?}"
+    );
 }
 
 #[gpui::test]

@@ -196,9 +196,13 @@ fn a_saved_host_with_a_token_lists_its_sessions_at_window_width(cx: &mut TestApp
     h.host(&saved_remote()).sent();
     h.click_on(row);
     assert!(drawn(&mut h, "phone-session"), "a tap shows the session");
+    let sent = h.host(&saved_remote()).sent();
     assert!(
-        h.host(&saved_remote()).sent().is_empty(),
-        "a tap sends nothing"
+        matches!(
+            sent.as_slice(),
+            [protocol::ClientMessage::LoadChat { session_id, .. }] if session_id == "s1"
+        ),
+        "a tap sends only its chat's load: {sent:?}"
     );
     assert!(
         h.host(&saved_remote()).commands().is_empty(),

@@ -64,7 +64,8 @@
 //! sheet open over a scrim: its label, Stop and Cancel.
 //! `phone-session` shows the same Home's working session opened: its
 //! page's header with Back, the label, `Working` and the Terminal toggle
-//! over the empty chat body.
+//! over its loaded chat: a message, three read calls drawn one per row, an
+//! answer with a little Markdown and a Bash call.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -148,6 +149,9 @@ const PHONE_HOME_ROWS: usize = 3;
 /// The working session whose sheet the `phone-sheet` shot opens, and
 /// whose page the `phone-session` shot shows.
 const PHONE_SHEET_SESSION: &str = "b-pwa";
+/// How many rows the `phone-session` shot's chat draws: each of its six
+/// entries, its three reads being too few to fold.
+const PHONE_SESSION_ROWS: usize = 6;
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -1531,6 +1535,16 @@ async fn capture_phone_home(
         let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
         if toggle != Some("Terminal") {
             bail!("the phone-session view's toggle reads {toggle:?}, not Terminal");
+        }
+        let rows = handle.update(cx, |phone, _, cx| {
+            phone
+                .root()
+                .read(cx)
+                .phone_chat_display_rows(PHONE_SHEET_SESSION)
+                .len()
+        })?;
+        if rows != PHONE_SESSION_ROWS {
+            bail!("the phone-session view's chat draws {rows} rows, not {PHONE_SESSION_ROWS}");
         }
     }
     check_daemon(failure)?;
@@ -3172,6 +3186,30 @@ impl FakeDaemon {
         Ok(())
     }
 
+    /// The replies to a `LoadChat` for `session_id` under `request_id`: the
+    /// view's conversation, and the `chat` shots' running work.
+    fn chat_load_replies(
+        &self,
+        session_id: &str,
+        request_id: Option<String>,
+    ) -> Vec<DaemonMessage> {
+        if self.view == View::PhoneSession {
+            return vec![phone_chat_reply(session_id, request_id)];
+        }
+        let screen = match self.view {
+            View::Summary => permission_screen(),
+            View::Chat => question_screen(),
+            _ => ChatScreen {
+                composer: ComposerState::Working,
+                prompt: None,
+            },
+        };
+        vec![
+            chat_reply(session_id, request_id, screen),
+            chat_work(self.now, session_id),
+        ]
+    }
+
     /// The replies to `msg`; requests the views do not need go unanswered.
     fn answer(&self, msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
         let reply = match msg {
@@ -3209,20 +3247,7 @@ impl FakeDaemon {
             ClientMessage::LoadChat {
                 session_id,
                 request_id,
-            } => {
-                let screen = match self.view {
-                    View::Summary => permission_screen(),
-                    View::Chat => question_screen(),
-                    _ => ChatScreen {
-                        composer: ComposerState::Working,
-                        prompt: None,
-                    },
-                };
-                return Ok(vec![
-                    chat_reply(session_id, request_id.clone(), screen),
-                    chat_work(self.now, session_id),
-                ]);
-            }
+            } => return Ok(self.chat_load_replies(session_id, request_id.clone())),
             ClientMessage::LoadSummary {
                 session_id,
                 request_id,
@@ -3868,6 +3893,66 @@ fn footer_run() -> Vec<ChatEntry> {
             Some("M footer.rs"),
         ),
     ]
+}
+
+/// The `phone-session` shot's conversation: a message, three read calls (too
+/// few to fold on the phone), an answer with a little Markdown and a Bash
+/// call, the agent working on.
+fn phone_chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
+    let tool = chat_tool;
+    let answer = "The install step now **checks the hash** before it unpacks:\n\n\
+                  - `verify()` reads the `.sha256` beside the download\n\
+                  - a mismatch stops with the expected value";
+    let entries = vec![
+        ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "Make the installer check its download before unpacking.".to_owned(),
+            pending: false,
+        },
+        tool(
+            "t1",
+            "Read",
+            ToolKind::Read,
+            "apps/pwa/src/install.ts",
+            Some("188 lines"),
+        ),
+        tool(
+            "t2",
+            "Read",
+            ToolKind::Read,
+            "apps/pwa/src/hash.ts",
+            Some("41 lines"),
+        ),
+        tool(
+            "t3",
+            "Read",
+            ToolKind::Read,
+            "apps/pwa/README.md",
+            Some("96 lines"),
+        ),
+        ChatEntry::Answer {
+            id: "a1".to_owned(),
+            text: answer.to_owned(),
+            live: false,
+        },
+        tool(
+            "t4",
+            "Bash",
+            ToolKind::Run,
+            "pnpm -C apps/pwa test",
+            Some("Tests  42 passed (42)"),
+        ),
+    ];
+    DaemonMessage::Chat {
+        session_id: session_id.to_owned(),
+        entries,
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Working,
+            prompt: None,
+        },
+        request_id,
+    }
 }
 
 /// The `chat` shot's conversation: a row of each kind, a tool card done and

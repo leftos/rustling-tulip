@@ -140,10 +140,19 @@ impl PhoneRoot {
         let page = self.shown_page(header.chat_mirrored);
         let t = theme(cx);
         let body = match page {
-            Page::Chat => div()
-                .driver_id(|| "phone-session-chat".to_owned())
-                .flex_1()
-                .min_h_0(),
+            Page::Chat => {
+                let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
+                let chat = self
+                    .root
+                    .update(cx, |root, cx| root.phone_chat_body(&id, cx));
+                div()
+                    .driver_id(|| "phone-session-chat".to_owned())
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(chat)
+            }
             Page::Terminal => terminal_body(&t, cx),
         };
         Some(

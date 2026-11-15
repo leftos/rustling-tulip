@@ -8,7 +8,11 @@ use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{BackGesturePhase, Edges, Pixels, TestAppContext, WindowInsets, point, px};
-use protocol::{DaemonMessage, SessionSnapshot};
+use protocol::{
+    ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot, ToolKind,
+    ToolOutcome,
+};
+use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
@@ -98,6 +102,87 @@ fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Harness<'a
     h.click_on(&row(id));
     assert_eq!(shown(&mut h).as_deref(), Some(id));
     h
+}
+
+/// The request ids of the `LoadChat`s for session `id` among `sent`.
+fn loads_of(sent: &[ClientMessage], id: &str) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == id => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The daemon's answer to a load of session `id`'s chat: `entries`.
+fn chat_reply(id: &str, request_id: Option<String>, entries: Vec<ChatEntry>) -> DaemonMessage {
+    DaemonMessage::Chat {
+        session_id: id.to_owned(),
+        entries,
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id,
+    }
+}
+
+fn user(id: &str) -> ChatEntry {
+    ChatEntry::User {
+        id: id.to_owned(),
+        text: format!("message {id}"),
+        pending: false,
+    }
+}
+
+fn answer(id: &str) -> ChatEntry {
+    ChatEntry::Answer {
+        id: id.to_owned(),
+        text: format!("answer {id}"),
+        live: false,
+    }
+}
+
+/// A finished call `id` of tool `name`, of `kind`.
+fn call(id: &str, name: &str, kind: ToolKind) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        summary: format!("{name} {id}"),
+        input: "{}".to_owned(),
+        result: Some(ToolOutcome {
+            text: "out".to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind,
+    }
+}
+
+/// Session `a`'s page with its chat's load answered with `entries`.
+fn chat_loaded<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    let mut h = opened(cx, dir, "a");
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, entries));
+    h
+}
+
+/// The rows the phone draws for session `id`'s chat, as plain data.
+fn phone_rows(h: &mut Harness<'_>, id: &str) -> Vec<RowShape> {
+    h.root(|root, _| root.phone_chat_display_rows(id))
 }
 
 /// A back gesture in `phase` from the page's leading edge.
@@ -191,9 +276,214 @@ fn the_back_button_returns_to_home(cx: &mut TestAppContext) {
     assert_eq!(shown(&mut h), None);
     assert!(drawn(&mut h, "phone-home"));
     assert!(!drawn(&mut h, "phone-session"));
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::UnloadChat { session_id }] if session_id == "a"
+        ),
+        "Back sends only its chat's unload: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn opening_a_session_loads_its_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+
+    let sent = h.host(&saved_remote()).sent();
+    let loads = loads_of(&sent, "a");
+    assert_eq!(loads.len(), 1, "one load, to the session's host: {sent:?}");
+    assert!(loads[0].is_some(), "under a request id");
+}
+
+#[gpui::test]
+fn the_chat_rows_draw_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(
+        cx,
+        &dir,
+        vec![user("u1"), answer("a1"), call("b1", "Bash", ToolKind::Run)],
+    );
+
+    assert!(drawn(&mut h, "phone-chat"));
+    let chat = h.bounds("phone-chat");
+    for row in [
+        "chat-row-phone-u1",
+        "chat-row-phone-a1",
+        "chat-row-phone-b1",
+    ] {
+        let bounds = h.bounds(row);
+        assert!(bounds.size.width > px(0.0), "{row} is drawn");
+        assert!(
+            chat.contains(&bounds.origin),
+            "{row} sits in the phone's chat"
+        );
+    }
+    assert_eq!(
+        phone_rows(&mut h, "a"),
+        [
+            RowShape::Entry("u1".to_owned()),
+            RowShape::Entry("a1".to_owned()),
+            RowShape::Entry("b1".to_owned()),
+        ]
+    );
+}
+
+#[gpui::test]
+fn closing_the_session_unloads_its_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+
+    h.click_on("phone-session-back");
+
+    let sent = h.host(&saved_remote()).sent();
+    let unloads = sent
+        .iter()
+        .filter(|msg| matches!(msg, ClientMessage::UnloadChat { session_id } if session_id == "a"))
+        .count();
+    assert_eq!(unloads, 1, "Back unloads the chat: {sent:?}");
+}
+
+#[gpui::test]
+fn a_reconnect_loads_the_chat_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    let target: Target = saved_remote();
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("dropped".to_owned());
+    h.host(&target).event(NetEvent::State(conn));
+
+    let mut host = h.host(&target);
+    host.connect();
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+
+    let sent = h.host(&target).sent();
+    assert_eq!(
+        loads_of(&sent, "a").len(),
+        1,
+        "the new connection loads the chat: {sent:?}"
+    );
+}
+
+/// Session `a`'s page with its chat's load refused as an agent offering no
+/// chat refuses it.
+fn chat_refused<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir, "a");
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "chat is not offered for agent `other`".to_owned(),
+        request_id: request,
+        code: Some("unsupported_message".to_owned()),
+    });
+    h
+}
+
+#[gpui::test]
+fn a_refused_phone_chat_load_is_not_asked_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_refused(cx, &dir);
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        loads_of(&sent, "a").is_empty(),
+        "a refused load is not asked again: {sent:?}"
+    );
+    assert!(drawn(&mut h, "phone-chat"));
+    assert!(
+        drawn(&mut h, "phone-chat-note"),
+        "the phone's chat shows the refusal's note"
+    );
+    assert_eq!(
+        h.root(|root, _| root.phone_chat_note().map(str::to_owned))
+            .as_deref(),
+        Some("This session offers no chat, so it shows its terminal")
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_asks_again_after_a_refusal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_refused(cx, &dir);
+    h.host(&saved_remote()).sent();
+    let target: Target = saved_remote();
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("dropped".to_owned());
+    h.host(&target).event(NetEvent::State(conn));
+
+    let mut host = h.host(&target);
+    host.connect();
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+
+    let sent = h.host(&target).sent();
+    assert_eq!(
+        loads_of(&sent, "a").len(),
+        1,
+        "the new connection asks once more: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn three_calls_in_a_row_draw_as_three_rows_and_four_fold(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(
+        cx,
+        &dir,
+        vec![
+            call("r1", "Read", ToolKind::Read),
+            call("r2", "Read", ToolKind::Read),
+            call("r3", "Read", ToolKind::Read),
+        ],
+    );
+    assert_eq!(
+        phone_rows(&mut h, "a"),
+        [
+            RowShape::Entry("r1".to_owned()),
+            RowShape::Entry("r2".to_owned()),
+            RowShape::Entry("r3".to_owned()),
+        ]
+    );
+    assert!(drawn(&mut h, "chat-row-phone-r2"));
+
+    h.host(&saved_remote()).send(DaemonMessage::ChatAppend {
+        session_id: "a".to_owned(),
+        entries: vec![call("g1", "Grep", ToolKind::Search)],
+        removed: Vec::new(),
+    });
+
+    assert_eq!(
+        phone_rows(&mut h, "a"),
+        [RowShape::Run {
+            ids: ["r1", "r2", "r3", "g1"].map(str::to_owned).to_vec(),
+            line: "3 read \u{b7} 1 searched".to_owned(),
+            running: false,
+        }]
+    );
+    assert!(drawn(&mut h, "chat-run-phone-r1"));
+}
+
+#[gpui::test]
+fn a_chat_message_for_another_session_changes_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    let before = phone_rows(&mut h, "a");
+
+    h.host(&saved_remote())
+        .send(chat_reply("e", None, vec![user("x1"), answer("x2")]));
+
+    assert_eq!(phone_rows(&mut h, "a"), before);
+    assert!(phone_rows(&mut h, "e").is_empty(), "nothing loaded for e");
+    assert!(!drawn(&mut h, "chat-row-phone-x1"));
     assert!(
         h.host(&saved_remote()).sent().is_empty(),
-        "Back sends nothing"
+        "and nothing is sent"
     );
 }
 

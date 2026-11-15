@@ -162,15 +162,18 @@ impl PhoneRoot {
     }
 
     /// Shows `host`'s session `session_id` in place of Home, on its chat
-    /// when the chat is mirrored, else on its terminal. It sends nothing:
-    /// the phone opens no tab and lays out no pane.
+    /// when the chat is mirrored, else on its terminal, and loads its chat
+    /// while it can show. It opens no tab and lays out no pane.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
-        self.shown = Some((host, session_id.to_owned()));
+        let shown = (host, session_id.to_owned());
+        self.shown = Some(shown.clone());
         self.sheet = None;
+        self.root
+            .update(cx, |root, cx| root.show_phone_chat(Some(shown), cx));
         cx.notify();
     }
 
@@ -411,10 +414,12 @@ impl PhoneRoot {
         }
     }
 
-    /// Back from the shown session to Home.
+    /// Back from the shown session to Home; its chat unloads.
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
         self.shown = None;
         self.page = None;
+        self.root
+            .update(cx, |root, cx| root.show_phone_chat(None, cx));
         cx.notify();
     }
 
@@ -434,6 +439,8 @@ impl PhoneRoot {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
             self.page = None;
+            self.root
+                .update(cx, |root, cx| root.show_phone_chat(None, cx));
         }
     }
 

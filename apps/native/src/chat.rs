@@ -505,18 +505,23 @@ struct OpenRun<'a> {
     entries: Vec<&'a ChatEntry>,
     summary: RunSummary,
     thinking: Vec<&'a ChatEntry>,
+    /// How many calls its entries hold.
+    calls: usize,
 }
 
 impl<'a> OpenRun<'a> {
-    /// Closes the run: pushes it, then the thinking rows after its last call
-    /// on their own.
-    fn flush(&mut self, rows: &mut Vec<DisplayRow<'a>>) {
-        if !self.entries.is_empty() {
-            rows.push(DisplayRow::Run {
-                entries: std::mem::take(&mut self.entries),
-                summary: std::mem::take(&mut self.summary),
-            });
+    /// Closes the run: pushes it, or its entries one by one in order when it
+    /// holds fewer than `min_run` calls, then the thinking rows after its
+    /// last call on their own.
+    fn flush(&mut self, rows: &mut Vec<DisplayRow<'a>>, min_run: usize) {
+        let entries = std::mem::take(&mut self.entries);
+        let summary = std::mem::take(&mut self.summary);
+        if self.calls >= min_run && !entries.is_empty() {
+            rows.push(DisplayRow::Run { entries, summary });
+        } else {
+            rows.extend(entries.into_iter().map(DisplayRow::Single));
         }
+        self.calls = 0;
         rows.extend(self.thinking.drain(..).map(DisplayRow::Single));
     }
 }
@@ -533,6 +538,19 @@ pub fn display_rows<'a>(
     entries: impl IntoIterator<Item = &'a ChatEntry>,
     mode: ChatMode,
 ) -> Vec<DisplayRow<'a>> {
+    display_rows_folding(entries, mode, 1)
+}
+
+/// The rows [`display_rows`] draws, except that in Compact a run holding
+/// fewer than `min_run` calls stands as its entries, each its own
+/// [`DisplayRow::Single`] in order (the thinking rows folded into it
+/// included).
+#[must_use]
+pub fn display_rows_folding<'a>(
+    entries: impl IntoIterator<Item = &'a ChatEntry>,
+    mode: ChatMode,
+    min_run: usize,
+) -> Vec<DisplayRow<'a>> {
     let mut rows = Vec::new();
     let mut run = OpenRun::default();
     for entry in entries {
@@ -541,6 +559,7 @@ pub fn display_rows<'a>(
                 run.summary.add(kind, failed, running);
                 run.entries.append(&mut run.thinking);
                 run.entries.push(entry);
+                run.calls += 1;
                 continue;
             }
             if matches!(entry, ChatEntry::Thinking { .. }) && !run.entries.is_empty() {
@@ -548,10 +567,10 @@ pub fn display_rows<'a>(
                 continue;
             }
         }
-        run.flush(&mut rows);
+        run.flush(&mut rows, min_run);
         rows.push(DisplayRow::Single(entry));
     }
-    run.flush(&mut rows);
+    run.flush(&mut rows, min_run);
     settle_finished_runs(&mut rows);
     rows
 }
@@ -2995,7 +3014,7 @@ mod strip_tests {
 mod run_tests {
     use protocol::{ChatEntry, ToolKind, ToolOutcome};
 
-    use super::{ChatLog, ChatMode, RowShape, RunSummary, display_rows};
+    use super::{ChatLog, ChatMode, RowShape, RunSummary, display_rows, display_rows_folding};
 
     fn answer(id: &str) -> ChatEntry {
         ChatEntry::Answer {
@@ -3139,6 +3158,65 @@ mod run_tests {
         assert_eq!(
             shapes(&entries, ChatMode::Compact),
             [line(&["r1", "k1", "g1"], "1 read \u{b7} 1 searched")]
+        );
+    }
+
+    fn folding_shapes(entries: &[ChatEntry], min_run: usize) -> Vec<RowShape> {
+        display_rows_folding(entries, ChatMode::Compact, min_run)
+            .iter()
+            .map(super::DisplayRow::shape)
+            .collect()
+    }
+
+    #[test]
+    fn a_run_shorter_than_the_minimum_stands_as_single_rows() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            call("r2", "Read", ToolKind::Read),
+            call("r3", "Read", ToolKind::Read),
+        ];
+        assert_eq!(
+            folding_shapes(&entries, 4),
+            [entry("r1"), entry("r2"), entry("r3")]
+        );
+    }
+
+    #[test]
+    fn a_run_of_the_minimum_folds() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            call("r2", "Read", ToolKind::Read),
+            call("g1", "Grep", ToolKind::Search),
+            call("b1", "Bash", ToolKind::Run),
+        ];
+        assert_eq!(
+            folding_shapes(&entries, 4),
+            [line(
+                &["r1", "r2", "g1", "b1"],
+                "2 read \u{b7} 1 searched \u{b7} 1 ran"
+            )]
+        );
+    }
+
+    #[test]
+    fn thinking_inside_a_short_run_stays_in_order() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            thinking("k1"),
+            call("g1", "Grep", ToolKind::Search),
+        ];
+        assert_eq!(
+            folding_shapes(&entries, 4),
+            [entry("r1"), entry("k1"), entry("g1")]
+        );
+    }
+
+    #[test]
+    fn the_desktop_folds_a_run_of_one() {
+        let entries = [call("r1", "Read", ToolKind::Read)];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["r1"], "1 read")]
         );
     }
 

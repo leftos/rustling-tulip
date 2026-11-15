@@ -382,7 +382,20 @@ pub(crate) struct ChatPanes {
     work_strip_timer: Option<Task<()>>,
     /// How many times that timer has repainted.
     work_strip_repaints: usize,
+    /// The session the phone shows, and its host: its chat loads as a pane
+    /// on it would ([`PHONE_PANE`]).
+    phone: Option<(HostKey, String)>,
+    /// The note the phone shows in place of its session's chat once the
+    /// daemon refused to load it; it is not asked again until the phone
+    /// shows a session again or its host reconnects.
+    phone_refused: Option<String>,
 }
+
+/// The pane id the phone's shown session's chat loads and scrolls under.
+pub(crate) const PHONE_PANE: &str = "phone";
+/// The fewest read, search and run calls in a row the phone folds into one
+/// row.
+const PHONE_MIN_RUN: usize = 4;
 
 /// The wall time and the view's clock reading taken together, so the wall
 /// time moves only as the view's clock does: a spec's clock moves both.
@@ -432,6 +445,16 @@ impl ChatPanes {
             wall,
             work_strip_timer: None,
             work_strip_repaints: 0,
+            phone: None,
+            phone_refused: None,
+        }
+    }
+
+    /// Session `session_id`'s load was refused with `note`: when it is the
+    /// phone's session, the phone shows `note` and asks no more.
+    fn refuse_phone(&mut self, session_id: &str, note: &str) {
+        if self.phone.as_ref().is_some_and(|(_, id)| id == session_id) {
+            self.phone_refused = Some(note.to_owned());
         }
     }
 
@@ -471,6 +494,13 @@ impl ChatPanes {
     /// its chat loads again.
     pub(crate) fn reset_connection(&mut self, host: &HostKey, cx: &App) {
         self.tails.reset_host(host);
+        if self
+            .phone
+            .as_ref()
+            .is_some_and(|(phone_host, _)| phone_host == host)
+        {
+            self.phone_refused = None;
+        }
         let gone: Vec<String> = self
             .hosts
             .iter()
@@ -595,6 +625,9 @@ pub(crate) struct RowLook<'a> {
     /// The answers that draw as their turn's final reply, in a box; none in
     /// a summary pane's look.
     pub(crate) finals: BTreeSet<String>,
+    /// The fewest calls in a row Compact folds into one row; a shorter run
+    /// draws each of its rows.
+    pub(crate) min_run: usize,
 }
 
 /// The parts of a tool call a card draws.
@@ -978,26 +1011,13 @@ impl RootView {
         self.chat
             .views
             .retain(|pane_id| panes.contains_key(pane_id));
-        let shown: Vec<(String, String, PaneView)> = self
-            .panes
-            .iter()
-            .filter_map(|(pane_id, slot)| {
-                let session_id = slot.session()?;
-                let view = self.view_shown(pane_id, Some(session_id));
-                view.hides_terminal()
-                    .then(|| (pane_id.clone(), session_id.to_owned(), view))
-            })
-            .collect();
-        for (pane_id, session_id, _) in &shown {
-            if let Some(slot) = self.panes.get(pane_id) {
-                self.chat
-                    .hosts
-                    .insert(session_id.clone(), slot.host().clone());
-            }
+        let shown = self.chats_shown();
+        for (_, session_id, _, host) in &shown {
+            self.chat.hosts.insert(session_id.clone(), host.clone());
         }
         let shown_panes: BTreeSet<&str> = shown
             .iter()
-            .map(|(pane_id, _, _)| pane_id.as_str())
+            .map(|(pane_id, _, _, _)| pane_id.as_str())
             .collect();
         self.chat
             .scrolls
@@ -1015,7 +1035,7 @@ impl RootView {
         let wanted = wanted_loads(
             shown
                 .iter()
-                .map(|(_, session_id, view)| (session_id.as_str(), *view)),
+                .map(|(_, session_id, view, _)| (session_id.as_str(), *view)),
         );
         self.sync_summary_loads(wanted.summary);
         let changes = self.chat.loads.diff(wanted.chat);
@@ -1054,6 +1074,65 @@ impl RootView {
             self.send_to(&host, msg);
         }
         self.chat.retain_loaded_hosts();
+    }
+
+    /// Every pane drawing its chat or summary, as its pane id, its session,
+    /// its view and its session's host; and, while the phone shows a session
+    /// whose chat can show, that session's chat under [`PHONE_PANE`].
+    fn chats_shown(&self) -> Vec<(String, String, PaneView, HostKey)> {
+        let mut shown: Vec<(String, String, PaneView, HostKey)> = self
+            .panes
+            .iter()
+            .filter_map(|(pane_id, slot)| {
+                let session_id = slot.session()?;
+                let view = self.view_shown(pane_id, Some(session_id));
+                view.hides_terminal().then(|| {
+                    let host = slot.host().clone();
+                    (pane_id.clone(), session_id.to_owned(), view, host)
+                })
+            })
+            .collect();
+        if let Some((host, session_id)) = &self.chat.phone
+            && self.chat.phone_refused.is_none()
+            && self.session_chat_available(session_id)
+        {
+            let phone = PHONE_PANE.to_owned();
+            shown.push((phone, session_id.clone(), PaneView::Chat, host.clone()));
+        }
+        shown
+    }
+
+    /// The phone now shows `shown`, a host's session, or no session: that
+    /// session's chat loads while it can show, as a pane's would, and the
+    /// last one shown unloads.
+    pub(crate) fn show_phone_chat(&mut self, shown: Option<(HostKey, String)>, cx: &App) {
+        self.chat.phone = shown;
+        self.chat.phone_refused = None;
+        self.sync_chat_loads(cx);
+    }
+
+    /// The note the phone shows in place of its session's chat since the
+    /// daemon refused to load it, while it does.
+    #[must_use]
+    pub fn phone_chat_note(&self) -> Option<&str> {
+        self.chat.phone_refused.as_deref()
+    }
+
+    /// The rows the phone draws for session `session_id`'s chat, as plain
+    /// data: Compact, folding only runs of four or more calls; none while it
+    /// is not loaded.
+    #[must_use]
+    pub fn phone_chat_display_rows(&self, session_id: &str) -> Vec<RowShape> {
+        self.chat
+            .sessions
+            .get(session_id)
+            .map(|chat| {
+                chat::display_rows_folding(chat.log.entries(), ChatMode::Compact, PHONE_MIN_RUN)
+                    .iter()
+                    .map(DisplayRow::shape)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Sends each of `untails` to its host while that host's connection is
@@ -1341,6 +1420,7 @@ impl RootView {
         };
         self.chat
             .forget_refused_load(&session_id, chat_refused.is_some());
+        self.chat.refuse_phone(&session_id, &note);
         let panes: Vec<String> = self
             .panes
             .iter()
@@ -2014,15 +2094,7 @@ impl RootView {
                 .unwrap_or_default(),
             ..self.row_look(pane_id, session_id, cx)
         };
-        let strip = chat.and_then(|chat| chat.work.strip(self.wall_now()));
-        let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
-        let main = if let Some(chat) = rows {
-            chat_column(&look, chat, self.chat.scrolls.get(pane_id), cx)
-        } else {
-            let loading = chat.is_none_or(|chat| chat.request.is_some());
-            let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
-            chat_note(look.text_offset, note, &look.theme).into_any_element()
-        };
+        let (main, strip) = self.rows_and_strip(&look, cx);
         let loaded = chat.filter(|chat| chat.request.is_none());
         let cards = loaded.and_then(|chat| self.card_area(session_id, chat, cx));
         let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
@@ -2043,10 +2115,68 @@ impl RootView {
             }))
             .child(main)
             .children(cards)
-            .children(
-                strip.map(|strip| strip_row(look.text_offset, &strip, &look.mono, &look.theme)),
-            )
+            .children(strip)
             .children(composer)
+            .into_any_element()
+    }
+
+    /// The look's session's chat as `look` draws it: a muted line while it
+    /// loads or has no rows, else its rows in a column that follows the
+    /// bottom until scrolled up (with the look's pane's scroll); and the
+    /// running-work strip while work runs.
+    fn rows_and_strip(
+        &self,
+        look: &RowLook<'_>,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>) {
+        let chat = self.chat.sessions.get(look.session_id);
+        let strip = chat
+            .and_then(|chat| chat.work.strip(self.wall_now()))
+            .map(|strip| {
+                strip_row(look.text_offset, &strip, &look.mono, &look.theme).into_any_element()
+            });
+        let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
+        let main = if let Some(chat) = rows {
+            chat_column(look, chat, self.chat.scrolls.get(look.pane_id), cx)
+        } else {
+            let loading = chat.is_none_or(|chat| chat.request.is_some());
+            let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
+            chat_note(look.text_offset, note, &look.theme).into_any_element()
+        };
+        (main, strip)
+    }
+
+    /// Session `session_id`'s chat as the phone's session page draws it,
+    /// tagged `phone-chat`: its rows (Compact, at the page's full width,
+    /// with no final-reply box, folding only runs of four or more calls) or
+    /// the loading or empty note, over the running-work strip while work
+    /// runs.
+    pub(crate) fn phone_chat_body(&self, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let look = RowLook {
+            mode: ChatMode::Compact,
+            max_width: None,
+            finals: BTreeSet::new(),
+            min_run: PHONE_MIN_RUN,
+            ..self.row_look(PHONE_PANE, session_id, cx)
+        };
+        let (main, strip) = match &self.chat.phone_refused {
+            Some(note) => {
+                let note = chat_note(look.text_offset, note.clone(), &look.theme)
+                    .driver_id(|| "phone-chat-note".to_owned())
+                    .into_any_element();
+                (note, None)
+            }
+            None => self.rows_and_strip(&look, cx),
+        };
+        div()
+            .driver_id(|| "phone-chat".to_owned())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .size_full()
+            .child(main)
+            .children(strip)
             .into_any_element()
     }
 
@@ -2078,6 +2208,7 @@ impl RootView {
             mode: self.sidebar.chat_mode(),
             max_width: None,
             finals: BTreeSet::new(),
+            min_run: 1,
         }
     }
 
@@ -2251,7 +2382,7 @@ fn chat_column(
     if chat.log.hidden() > 0 {
         rows.push(hidden_row(look, chat.log.hidden()));
     }
-    for row in chat::display_rows(chat.log.entries(), look.mode) {
+    for row in chat::display_rows_folding(chat.log.entries(), look.mode, look.min_run) {
         let drawn = match row {
             DisplayRow::Single(entry) => chat_row(look, chat, entry, CHAT_ROW, cx),
             DisplayRow::Run { entries, summary } => run_row(look, chat, &entries, &summary, cx),
@@ -2425,7 +2556,7 @@ fn run_row(
 }
 
 /// One muted line centred in the chat pane.
-pub(crate) fn chat_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
+pub(crate) fn chat_note(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
@@ -2434,7 +2565,7 @@ pub(crate) fn chat_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
         .justify_center()
         .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
-        .child(text)
+        .child(text.into())
 }
 
 /// One row of the chat, tagged `<prefix>-<pane>-<id>`: `chat-row` in a
