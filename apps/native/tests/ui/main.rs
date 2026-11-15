@@ -64,6 +64,7 @@ mod ui_phone_home;
 mod ui_phone_push;
 mod ui_phone_root;
 mod ui_phone_session;
+mod ui_phone_terminal;
 mod ui_popout;
 mod ui_presence;
 mod ui_preset_wizard;

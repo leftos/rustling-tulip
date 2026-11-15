@@ -1013,6 +1013,8 @@ pub struct RootView {
     popout_windows: HashMap<PopoutKey, PopoutWindow>,
     /// The popped pane whose terminal has its pop-out window's keyboard.
     popout_focused: Option<String>,
+    /// The session whose terminal the phone's Terminal page shows, in its pop-out slot.
+    phone_terminal: Option<SessionRef>,
     /// How far this launch's reopening of the pop-outs saved at the last
     /// quit has come.
     popout_restore: PopoutRestore,
@@ -1771,6 +1773,7 @@ impl RootView {
             popouts: Popouts::default(),
             popout_windows: HashMap::new(),
             popout_focused: None,
+            phone_terminal: None,
             popout_restore: PopoutRestore::Waiting,
             popouts_awaiting_hosts: Vec::new(),
             remote_lists_in: HashSet::new(),

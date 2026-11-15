@@ -653,6 +653,10 @@ impl RootView {
     /// The view it was switched to is kept, so the pane goes back to it when
     /// the session's agent starts again.
     pub(crate) fn view_shown(&self, pane_id: &str, session_id: Option<&str>) -> PaneView {
+        // The phone's Terminal page shows the terminal whatever the chat.
+        if self.is_phone_terminal(pane_id) {
+            return PaneView::Terminal;
+        }
         if session_id.is_some_and(|id| self.session_chat_available(id)) {
             self.chat.views.get(pane_id)
         } else {

@@ -672,9 +672,10 @@
         "apps/native/tests/ui/ui_phone_root.rs",
         "apps/native/tests/ui/ui_phone_push.rs",
         "apps/native/tests/ui/ui_phone_home.rs",
-        "apps/native/tests/ui/ui_phone_session.rs"
+        "apps/native/tests/ui/ui_phone_session.rs",
+        "apps/native/tests/ui/ui_phone_terminal.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_root::/) | test(/^ui_phone_push::/) | test(/^ui_phone_home::/) | test(/^ui_phone_session::/))"
+      "filter": "binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_root::/) | test(/^ui_phone_push::/) | test(/^ui_phone_home::/) | test(/^ui_phone_session::/) | test(/^ui_phone_terminal::/))"
     },
     {
       "paths": [
@@ -1899,7 +1900,7 @@
         "apps/native/src/phone/**",
         "apps/ios/**"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^phone::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_root::/) | test(/^ui_phone_push::/) | test(/^ui_phone_home::/) | test(/^ui_phone_session::/)))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^phone::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_root::/) | test(/^ui_phone_push::/) | test(/^ui_phone_home::/) | test(/^ui_phone_session::/) | test(/^ui_phone_terminal::/)))"
     },
     {
       "paths": [

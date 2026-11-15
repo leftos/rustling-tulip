@@ -27,7 +27,7 @@ use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::dispatch_view::{RunHeader, RunShown, run_header};
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
-use crate::fonts::DEFAULT_FAMILY;
+use crate::fonts::{DEFAULT_FAMILY, FontSettings};
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::link_menu::LinkMenu;
 use crate::mouse::ClickThrough;
@@ -58,6 +58,8 @@ pub(crate) const PANE_PENDING_TIP: &str = "A new session is on its way to this p
 /// What a pane's body shows in the main grid while its terminal draws in a
 /// pop-out window.
 pub const POPPED_OUT_NOTE: &str = "Popped out to its own window";
+/// The phone's terminal font size, in pixels: about 56 columns at the phone's 390 pt width.
+pub(crate) const PHONE_TERMINAL_FONT_SIZE: f32 = 11.0;
 /// What a popped pane's card's Focus window does.
 const FOCUS_WINDOW_TIP: &str = "Bring the pop-out window to the front";
 /// What a popped pane's card's Dock back does.
@@ -263,6 +265,10 @@ impl RootView {
         let mut after = self.tabs.view_counts();
         for session in self.popouts.popped_sessions() {
             *after.entry(session).or_insert(0) += 1;
+        }
+        // So does the phone's terminal, which no tab list names.
+        if let Some(session) = &self.phone_terminal {
+            *after.entry(session.clone()).or_insert(0) += 1;
         }
         let changes = tabs::session_changes(&before, &after);
         for session in changes.detach {
@@ -605,6 +611,8 @@ impl RootView {
             let slot_id = popouts::session_slot_id(&session.host, &session.id);
             !self.terminal_hidden(&slot_id, Some(&session.id))
         });
+        // The phone's terminal drives and answers for its session.
+        popped_sessions.extend(self.phone_terminal.clone());
         let drivers = tabs::size_drivers(
             &bindings,
             active,
@@ -781,7 +789,7 @@ impl RootView {
         by_user: bool,
         cx: &mut Context<Self>,
     ) {
-        let resolved: Vec<(String, Resolved, bool)> = self
+        let resolved: Vec<(String, Resolved, bool, bool)> = self
             .panes
             .iter()
             .filter(|(_, slot)| keep(slot))
@@ -790,11 +798,12 @@ impl RootView {
                 // A session pop-out's pane belongs to no tab; the window is
                 // all its own, so it draws its band as a focused pane does.
                 let focused = self.pane_place(pane_id).is_none_or(|(_, focused)| focused);
-                (pane_id.clone(), resolved, focused)
+                let phone = self.is_phone_terminal(pane_id);
+                (pane_id.clone(), resolved, focused, phone)
             })
             .collect();
         let authored = theme(cx).terminal;
-        for (pane_id, resolved, focused) in resolved {
+        for (pane_id, resolved, focused, phone) in resolved {
             let Some(slot) = self.panes.get_mut(&pane_id) else {
                 continue;
             };
@@ -810,8 +819,17 @@ impl RootView {
                 resolved.frame.value.map(appearance::term_rgb),
                 appearance::term_rgb(resolved.accent.value),
             );
+            // The phone's terminal keeps its own size, not the desktop's.
+            let font = if phone {
+                FontSettings {
+                    size: PHONE_TERMINAL_FONT_SIZE,
+                    ..resolved.font()
+                }
+            } else {
+                resolved.font()
+            };
             slot.view.update(cx, |pane, cx| {
-                pane.set_font(resolved.font(), by_user, cx);
+                pane.set_font(font, by_user, cx);
                 pane.set_colors(palette, band, resolved.frame_width.value, cx);
             });
         }
@@ -1069,9 +1087,18 @@ impl RootView {
     /// keeps its session and attaches again, on that connection, and its
     /// chats load afresh there.
     pub(crate) fn reset_host_panes(&mut self, host: &HostKey, cx: &mut Context<Self>) {
-        for slot in self.panes.values_mut().filter(|slot| slot.host == *host) {
+        let phone_slot = self
+            .phone_terminal
+            .as_ref()
+            .map(|session| popouts::session_slot_id(&session.host, &session.id));
+        for (slot_id, slot) in self.panes.iter_mut().filter(|(_, slot)| slot.host == *host) {
+            // The phone's terminal claims the PTY again once it re-attaches.
+            let phone = phone_slot.as_deref() == Some(slot_id.as_str());
             slot.view.update(cx, |pane, cx| {
                 pane.reset_for_reconnect();
+                if phone {
+                    pane.claim_next_size();
+                }
                 cx.notify();
             });
             slot.attached = false;
@@ -1165,6 +1192,95 @@ impl RootView {
                 },
             );
         }
+    }
+
+    /// Opens the phone's terminal for session `session_id` of `host`, in the
+    /// session's pop-out slot, and attaches it afresh: scrollback first, and
+    /// its next size claims the PTY. Another session's terminal, open
+    /// before, closes first; the same session's stays as it is.
+    ///
+    /// Args:
+    ///     host: The host the session runs on.
+    ///     `session_id`: The session whose terminal to show.
+    ///     window: The phone's window.
+    ///     cx: The root's context.
+    pub fn open_phone_terminal(
+        &mut self,
+        host: &HostKey,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = SessionRef::new(host.clone(), session_id);
+        match &self.phone_terminal {
+            Some(open) if *open == session => return,
+            Some(_) => self.close_phone_terminal(cx),
+            None => {}
+        }
+        // Set first, so the slot's font, view and roles already see it.
+        self.phone_terminal = Some(session.clone());
+        self.open_session_slot(&session, window, cx);
+        if let Some(view) = self.phone_terminal_view() {
+            view.update(cx, |pane, _| pane.claim_next_size());
+        }
+        self.update_pane_roles(cx);
+    }
+
+    /// Closes the phone's terminal: its slot goes, and its session is
+    /// detached while its host lists it and no other terminal shows it.
+    /// Closing with none open does nothing.
+    ///
+    /// Args:
+    ///     cx: The root's context.
+    pub fn close_phone_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.phone_terminal.take() else {
+            return;
+        };
+        self.drop_session_slot(&session, cx);
+        self.update_pane_roles(cx);
+    }
+
+    /// The phone's terminal, while one is open.
+    ///
+    /// Returns:
+    ///     The terminal of the open slot, or `None` when none is open.
+    #[must_use]
+    pub fn phone_terminal_view(&self) -> Option<Entity<TerminalPane>> {
+        let session = self.phone_terminal.as_ref()?;
+        let slot_id = popouts::session_slot_id(&session.host, &session.id);
+        Some(self.panes.get(&slot_id)?.view.clone())
+    }
+
+    /// The phone resized its terminal (the keyboard rose or fell): the next
+    /// changed size the terminal measures claims the PTY. Does nothing with
+    /// none open.
+    ///
+    /// Args:
+    ///     cx: The root's context.
+    pub fn phone_terminal_resized(&self, cx: &mut Context<Self>) {
+        if let Some(view) = self.phone_terminal_view() {
+            view.update(cx, |pane, _| pane.mark_resized());
+        }
+    }
+
+    /// Whether slot `slot_id` is the phone's terminal.
+    pub(crate) fn is_phone_terminal(&self, slot_id: &str) -> bool {
+        self.phone_terminal
+            .as_ref()
+            .is_some_and(|session| popouts::session_slot_id(&session.host, &session.id) == slot_id)
+    }
+
+    /// Whether `event` from slot `slot_id` needs the desktop's UI the phone's
+    /// terminal has none of: a link menu, a shell dot's menu, an image paste
+    /// or a copy's toast.
+    pub(crate) fn drops_phone_event(&self, slot_id: &str, event: &PaneEvent) -> bool {
+        matches!(
+            event,
+            PaneEvent::LinkMenu { .. }
+                | PaneEvent::ShellDotMenu { .. }
+                | PaneEvent::PasteImage { .. }
+                | PaneEvent::Copied { .. }
+        ) && self.is_phone_terminal(slot_id)
     }
 
     /// The pane pop-out window `here` draws: its popped pane or session, or

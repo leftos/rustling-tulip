@@ -491,6 +491,10 @@ impl RootView {
         event: &PaneEvent,
         cx: &mut Context<Self>,
     ) {
+        if self.drops_phone_event(slot_id, event) {
+            tracing::debug!(%slot_id, "a desktop-only event from the phone's terminal; dropped");
+            return;
+        }
         let target = self
             .slot_window(slot_id)
             .unwrap_or_else(|| self.layouts.main());
