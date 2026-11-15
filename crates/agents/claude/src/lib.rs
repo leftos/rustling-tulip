@@ -705,6 +705,18 @@ impl Agent for ClaudePlugin {
         Some(dialogs::read_view(rows))
     }
 
+    /// Claude's input box, dialog or overlay, read off the screen's rows and
+    /// their dim cells: a dim suggested next prompt is no draft.
+    fn read_chat_screen_styled(&self, rows: &[String], dim: &[String]) -> Option<ChatScreen> {
+        Some(dialogs::read_styled(rows, dim))
+    }
+
+    /// Which of Claude's conversations is in view and where its keys go,
+    /// read off the screen's rows and their dim cells.
+    fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading> {
+        Some(dialogs::read_view_styled(rows, dim))
+    }
+
     /// The subagents and background shells Claude's screen counts.
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {
         dialogs::read_work(rows)

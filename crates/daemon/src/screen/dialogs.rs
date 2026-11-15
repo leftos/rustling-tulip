@@ -32,7 +32,7 @@ pub fn read(agent: &AgentId, screen: &Screen) -> Option<ChatScreen> {
         );
         return None;
     };
-    plugin.read_chat_screen(&screen.rows())
+    plugin.read_chat_screen_styled(&screen.rows(), &screen.dim_rows())
 }
 
 /// The keys that give `answer` to `prompt`, as `agent`'s plugin types them.
@@ -70,7 +70,7 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
         );
         return None;
     };
-    let mut reading = plugin.read_view(&screen.rows())?;
+    let mut reading = plugin.read_view_styled(&screen.rows(), &screen.dim_rows())?;
     let title = screen.title();
     let session_name = title
         .as_deref()
@@ -168,7 +168,7 @@ pub fn expect_holds(
         ScreenExpect::ComposerReady => {
             matches!(
                 after.composer,
-                ComposerState::Ready | ComposerState::Working
+                ComposerState::Ready | ComposerState::Working | ComposerState::Suggestion { .. }
             )
         }
         ScreenExpect::OptionSelected(number) => after
@@ -725,6 +725,25 @@ mod tests {
                 "claude--fresh-idle",
                 include_str!("fixtures/claude--fresh-idle.txt"),
                 no_prompt(Ready),
+            ),
+            (
+                "claude--suggestion",
+                include_str!("fixtures/claude--suggestion.txt"),
+                no_prompt(ComposerState::Suggestion {
+                    text: "write todo.py".to_owned(),
+                }),
+            ),
+            (
+                "claude--suggestion-typed",
+                include_str!("fixtures/claude--suggestion-typed.txt"),
+                no_prompt(Draft),
+            ),
+            (
+                "claude--done",
+                include_str!("fixtures/claude--done.txt"),
+                no_prompt(ComposerState::Suggestion {
+                    text: "cat hello.txt to verify".to_owned(),
+                }),
             ),
             (
                 "v71-agents-running",

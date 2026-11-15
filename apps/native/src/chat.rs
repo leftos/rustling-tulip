@@ -1306,7 +1306,8 @@ impl SendTracker {
     /// The screen's composer now reads `state`: once it has shown the
     /// send's paste as a draft, leaving the draft settles the send. The
     /// ownership of that draft ends when the composer moves past it, the
-    /// turn starts, or a `Ready` follows the send's entry.
+    /// turn starts, or a `Ready` (or a `Suggestion`, an empty box but for
+    /// the agent's suggested next prompt) follows the send's entry.
     pub fn on_composer(&mut self, state: &ComposerState) {
         if let Some(send) = self.in_flight.as_mut() {
             if *state == ComposerState::Draft {
@@ -1324,7 +1325,10 @@ impl SendTracker {
             Some(owner) => {
                 *state == ComposerState::Working
                     || owner.saw_draft
-                    || (*state == ComposerState::Ready && owner.entry_arrived)
+                    || (matches!(
+                        state,
+                        ComposerState::Ready | ComposerState::Suggestion { .. }
+                    ) && owner.entry_arrived)
             }
             None => false,
         };
@@ -2932,6 +2936,27 @@ mod strip_tests {
         assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
         sends.on_composer(&ComposerState::Ready);
         assert_eq!(composer_note_shown(&sends, &ComposerState::Ready, at), None);
+        sends.on_composer(&ComposerState::Draft);
+        assert_eq!(
+            composer_note_shown(&sends, &ComposerState::Draft, at),
+            Some(super::ComposerNote::Draft),
+            "a draft after the send settled is the owner's"
+        );
+    }
+
+    #[test]
+    fn a_suggestion_after_the_pending_entry_ends_the_ownership_as_ready_does() {
+        let at = Instant::now();
+        let suggestion = ComposerState::Suggestion {
+            text: "write todo.py".to_owned(),
+        };
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), at);
+        sends.on_composer(&suggestion);
+        assert!(sends.in_flight(at), "the paste has not shown yet");
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        sends.on_composer(&suggestion);
+        assert_eq!(composer_note_shown(&sends, &suggestion, at), None);
         sends.on_composer(&ComposerState::Draft);
         assert_eq!(
             composer_note_shown(&sends, &ComposerState::Draft, at),

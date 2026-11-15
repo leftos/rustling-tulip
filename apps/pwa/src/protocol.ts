@@ -2805,7 +2805,15 @@ export type ComposerState =
   /** A dialog owns the keyboard. */
   | { state: "dialog" }
   /** A full-screen overlay owns the keyboard. */
-  | { state: "overlay"; name: string };
+  | { state: "overlay"; name: string }
+  /**
+   * Empty but for the agent's suggested next prompt, drawn dim; a send
+   * replaces it.
+   *
+   * `text`: The suggestion's text as the box draws it, which the agent may
+   * cut with `…` in a narrow box.
+   */
+  | { state: "suggestion"; text: string };
 
 /** The subject of the `✦ Dismissed.` step a Heads up notice's buttons lead to. */
 export const HEADS_UP_DISMISSED_SUBJECT = "Dismissed.";

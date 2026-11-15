@@ -170,6 +170,20 @@ impl Screen {
     /// Every visible row, top to bottom, with trailing spaces trimmed.
     #[must_use]
     pub fn rows(&self) -> Vec<String> {
+        self.visible_rows(false)
+    }
+
+    /// Every visible row as [`Screen::rows`] gives it, with every character
+    /// not drawn dim (SGR 2) replaced by a space, trailing spaces trimmed:
+    /// `dim_rows()[r]` lines up char for char with `rows()[r]`.
+    #[must_use]
+    pub fn dim_rows(&self) -> Vec<String> {
+        self.visible_rows(true)
+    }
+
+    /// Every visible row, top to bottom, trailing spaces trimmed; with
+    /// `dim_only`, a space for each character not drawn dim.
+    fn visible_rows(&self, dim_only: bool) -> Vec<String> {
         let grid = self.term.grid();
         (0..self.rows)
             .map(|index| {
@@ -183,9 +197,10 @@ impl Screen {
                     {
                         continue;
                     }
-                    text.push(cell.c);
+                    let shown = !dim_only || cell.flags.contains(Flags::DIM);
+                    text.push(if shown { cell.c } else { ' ' });
                     if let Some(extra) = cell.zerowidth() {
-                        text.extend(extra);
+                        text.extend(extra.iter().map(|&c| if shown { c } else { ' ' }));
                     }
                 }
                 text.trim_end().to_owned()
@@ -311,6 +326,27 @@ fn last_non_empty(rows: &[String], n: usize) -> Vec<String> {
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dim_rows_keep_only_the_dim_text_at_its_columns() {
+        let screen =
+            fixture_screen::screen_from(include_str!("screen/fixtures/claude--suggestion.txt"));
+        let rows = screen.rows();
+        let dim = screen.dim_rows();
+        assert_eq!(dim.len(), rows.len());
+        let index = rows
+            .iter()
+            .position(|row| row.starts_with('❯') && row.ends_with("write todo.py"))
+            .expect("the capture's box shows the suggestion");
+        assert_eq!(dim[index], "  write todo.py", "the prompt is not dim");
+        let column = |row: &str| row.chars().position(|c| c == 'w');
+        assert_eq!(column(&dim[index]), column(&rows[index]));
+        let rule = rows
+            .iter()
+            .position(|row| row.starts_with('─'))
+            .expect("the capture has a rule");
+        assert_eq!(dim[rule], "", "a coloured rule is not dim");
+    }
 
     #[test]
     fn feed_counts_the_bytes_it_applies() {

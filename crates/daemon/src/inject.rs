@@ -1101,7 +1101,10 @@ fn gate_in_main(target: &TypeTarget, reading: &Reading) -> Result<(), TypeRefusa
         return Err(TypeRefusal::refused(NO_RETURN));
     }
     match reading.chat.as_ref().map(|chat| &chat.composer) {
-        Some(ComposerState::Ready | ComposerState::Working) => Ok(()),
+        // A suggestion is no draft: the paste replaces it.
+        Some(ComposerState::Ready | ComposerState::Working | ComposerState::Suggestion { .. }) => {
+            Ok(())
+        }
         Some(ComposerState::Dialog) => Err(TypeRefusal::refused(DIALOG)),
         _ => Err(TypeRefusal::refused(NOT_AT_PROMPT)),
     }

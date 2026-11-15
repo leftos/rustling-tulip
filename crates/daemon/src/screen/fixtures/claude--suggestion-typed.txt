@@ -1,0 +1,40 @@
+
+[0m[38;2;215;119;87m ▐[0m[38;2;215;119;87m[48;2;0;0;0m▛███▛█[0m   [0m[1mClaude Code[0m [0m[38;2;153;153;153mv2.1.325[0m
+[0m[38;2;215;119;87m▝▜[0m[38;2;215;119;87m[48;2;0;0;0m█████[0m[38;2;215;119;87m█▀  [0m[38;2;153;153;153mHaiku 5.5 · Claude Ultra[0m
+[0m[38;2;215;119;87m ▝▝   ▝▝   [0m[38;2;153;153;153mX:\dev\scratch\prompt-suggestion-capture\todo-cli-example-projects[0m
+
+[0m[38;2;255;193;7m⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP, agents, and more)[0m
+[0m  [0m[38;2;153;153;153mRestart without --safe-mode to re-enable[0m
+[0m[38;2;255;193;7m⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mReply with the word ok.                                                                                               [0m
+
+[0m[38;2;255;255;255m● [0mok
+
+[0m[38;2;153;153;153m✻ Crunched for 1s · done 10:53 PM[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mList three file names for a tiny Python todo CLI, one per line, and nothing else. Do not create any files.            [0m
+
+[0m[38;2;255;255;255m● [0mtodo.py
+[0m  todo_cli.py
+[0m  test_todo.py
+
+[0m[38;2;153;153;153m✻ Cogitated for 1s · done 10:53 PM[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m❯ hello
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m  [0m[38;2;255;193;7m⏵⏵ auto mode on [0m[38;2;153;153;153m(shift+tab to cycle)[0m

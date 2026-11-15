@@ -184,6 +184,8 @@ A run is `launch` with `{"session": "shot"}`, then `batch` with `{"session": "sh
 
 Each `screenshot` writes `<the run's config dir>/driver-shots/<pid>-<n>.png`, that is `.tmp/driver/<session>-<server pid>/config/driver-shots/` under the checkout, outside the `.tmp/shots/` that `native-shot` writes, and its result carries the path, width and height. `stop` removes that scratch folder with them, so Read each PNG, or copy it to `.tmp/shots/`, before stopping; the `screenshot` tool avoids the question by returning the image inline.
 
+Recording a real Claude Code screen with its SGR (for a screen fixture) needs `FORCE_COLOR=3` from an agent shell, which otherwise gets no colour. A prompt suggestion appears only from a session's second turn, and `--prompt-suggestions` works only with `--print`, so turn them on in an interactive session with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true`. For a local Rust build, Git Bash's `link.exe` shadows MSVC's, so build from PowerShell.
+
 ## iPhone Simulator on the Mac mini
 
 `tools/sim/sim.ps1` drives Xcode's iPhone Simulator on the Mac mini builder from this PC, for a run that needs the phone app on a real simulator: `setup` installs idb 1.7.8 into `~/.local` with no admin rights, `boot` starts a device, `open`, `shot`, `describe`, `tap`, `text`, `swipe` and `key` drive it, and `shutdown` stops it. Screenshots come back to this PC over scp, and no Simulator window opens on the Mac. See [tools/sim/README.md](../tools/sim/README.md).

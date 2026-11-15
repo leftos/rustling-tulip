@@ -1,6 +1,6 @@
 # Screen fixtures
 
-The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` and the rest of the `v*`/`c*`/`p*` names) are Claude Code 2.1.307 screens captured for `docs/spikes/chat-mirror-tui.md`, plain text with no escape sequences.
+The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` and the rest of the `v*`/`c*`/`p*` names) are Claude Code 2.1.307 screens captured for `docs/spikes/chat-mirror-tui.md`, plain text with no escape sequences; their styled `.ansi` originals are in `docs/spikes/chat-mirror-tui/screens/`.
 
 `v160-…` to `v172-…` are Claude Code 2.1.312 screens (152 columns) captured for the "The agent in view (CV.23)" section of `docs/spikes/chat-mirror-tui.md`: the main view with the agents panel, a subagent's transcript in view, and drafts and prompts across a switch. `v169`, `v170` and `v171` show a Heads up look-alike drawn by a spike mod, not the built-in notice: its band and keys differ in look, while its draft lands through the same `prompt.fill` call.
 
@@ -25,6 +25,8 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 `v42-ask-review-cursor-on-cancel--synthesized.txt` is `v42-ask-review.txt` with the cursor moved from `1. Submit answers` to `2. Cancel`, so the review's matched row sits above the cursor.
 
 The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https://github.com/leftos/collie at commit 82c6bba7, SGR-coloured text under the MIT licence (see `LICENSE-collie` beside them). The exception is `claude--mcp-server-prompt.txt`, a plain-text capture of Claude Code's new-MCP-server dialog taken in this repo.
+
+`claude--suggestion.txt` and `claude--suggestion-typed.txt` are SGR-coloured captures taken in this repo from Claude Code 2.1.325 under ConPTY at 120x40, with prompt suggestions on and `FORCE_COLOR=3`, on a session's second turn: the idle box showing Claude's suggested next prompt drawn dim (`❯ write todo.py`, SGR 2 alone, as the empty box's `Try "…"` placeholder is drawn), and the same session with `hello` typed, which replaced the suggestion with text not drawn dim. The working folder in their banner is a neutral path of the same length in place of the scratch folder they were taken in.
 
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 

@@ -1817,7 +1817,10 @@ fn read_screen(agent: &AgentId, screen: &crate::screen::Screen) -> AgentReading 
     );
     if (shows_agent(&reading) && reads_dialog(&reading)) || dialog_composer {
         AgentReading::Dialog
-    } else if composer == Some(ComposerState::Ready) {
+    } else if matches!(
+        composer,
+        Some(ComposerState::Ready | ComposerState::Suggestion { .. })
+    ) {
         AgentReading::Ready
     } else {
         starting

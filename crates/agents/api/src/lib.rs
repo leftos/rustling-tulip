@@ -895,6 +895,13 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// [`Agent::read_chat_screen`] with the cells' style: `dim` is `rows`
+    /// with every character not drawn dim replaced by a space. Defaults to
+    /// the reading of `rows` alone.
+    fn read_chat_screen_styled(&self, rows: &[String], _dim: &[String]) -> Option<ChatScreen> {
+        self.read_chat_screen(rows)
+    }
+
     /// The keys that give `answer` to `prompt`, as this agent's screen read
     /// it.
     ///
@@ -914,6 +921,13 @@ pub trait Agent: Send + Sync + 'static {
     /// the daemon does not switch.
     fn read_view(&self, _rows: &[String]) -> Option<ViewReading> {
         None
+    }
+
+    /// [`Agent::read_view`] with the cells' style: `dim` is `rows` with
+    /// every character not drawn dim replaced by a space. Defaults to the
+    /// reading of `rows` alone.
+    fn read_view_styled(&self, rows: &[String], _dim: &[String]) -> Option<ViewReading> {
+        self.read_view(rows)
     }
 
     /// The running work the screen whose visible rows, top to bottom, are
@@ -1135,6 +1149,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::read_chat_screen`].
     fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen>;
 
+    /// See [`Agent::read_chat_screen_styled`].
+    fn read_chat_screen_styled(&self, rows: &[String], dim: &[String]) -> Option<ChatScreen>;
+
     /// See [`Agent::answer_recipe`].
     ///
     /// # Errors
@@ -1148,6 +1165,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::read_view`].
     fn read_view(&self, rows: &[String]) -> Option<ViewReading>;
+
+    /// See [`Agent::read_view_styled`].
+    fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading>;
 
     /// See [`Agent::read_work`].
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork>;
@@ -1404,6 +1424,10 @@ impl<A: Agent> AgentPlugin for A {
         Agent::read_chat_screen(self, rows)
     }
 
+    fn read_chat_screen_styled(&self, rows: &[String], dim: &[String]) -> Option<ChatScreen> {
+        Agent::read_chat_screen_styled(self, rows, dim)
+    }
+
     fn answer_recipe(
         &self,
         prompt: &ChatPrompt,
@@ -1414,6 +1438,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn read_view(&self, rows: &[String]) -> Option<ViewReading> {
         Agent::read_view(self, rows)
+    }
+
+    fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading> {
+        Agent::read_view_styled(self, rows, dim)
     }
 
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {

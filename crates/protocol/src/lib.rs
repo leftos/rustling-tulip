@@ -3670,6 +3670,13 @@ pub enum ComposerState {
     Dialog,
     /// A full-screen overlay owns the keyboard.
     Overlay { name: String },
+    /// Empty but for the agent's suggested next prompt, drawn dim; a send
+    /// replaces it.
+    Suggestion {
+        /// The suggestion's text as the box draws it, which the agent may
+        /// cut with `…` in a narrow box.
+        text: String,
+    },
     /// Forward-compat fallback: a state the current build doesn't know. The
     /// daemon sends it only while it has no reading of the session's screen.
     #[serde(other)]
@@ -18045,6 +18052,17 @@ mod tests {
                 name: "help".to_string()
             }
         );
+    }
+
+    #[test]
+    fn composer_state_suggestion_round_trips() {
+        let state = ComposerState::Suggestion {
+            text: "write todo.py".to_string(),
+        };
+        let json = serde_json::to_string(&state).expect("encode");
+        assert_eq!(json, r#"{"state":"suggestion","text":"write todo.py"}"#);
+        let back: ComposerState = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, state);
     }
 
     #[test]

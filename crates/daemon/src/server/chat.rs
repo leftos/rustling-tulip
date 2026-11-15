@@ -2425,6 +2425,38 @@ mod tests {
             assert!(term.typed_now().is_empty(), "nothing is typed");
         }
 
+        /// Main's idle box showing the agent's suggested next prompt, drawn
+        /// dim, and the same box with `hello` typed over it.
+        const SUGGESTION: &str = include_str!("../screen/fixtures/claude--suggestion.txt");
+        const SUGGESTION_TYPED: &str =
+            include_str!("../screen/fixtures/claude--suggestion-typed.txt");
+
+        #[tokio::test]
+        async fn a_send_over_a_suggestion_is_sent() {
+            let (fx, mut term) = Fixture::with_terminal("send-suggestion", None, SUGGESTION);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hello").await;
+            assert_eq!(term.typed().await, paste("hello"));
+            term.show(SUGGESTION_TYPED).await;
+            assert_eq!(term.typed().await, ENTER);
+            term.show(SUGGESTION).await;
+            term.lane_free().await;
+            assert!(drain(&mut s_rx).is_empty(), "the send was not refused");
+        }
+
+        #[tokio::test]
+        async fn a_draft_typed_over_a_suggestion_refuses() {
+            let (fx, mut term) =
+                Fixture::with_terminal("send-suggestion-typed", None, SUGGESTION_TYPED);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(CHAT_REFUSED, "a draft is in the terminal's box")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
         #[tokio::test]
         async fn a_message_that_starts_like_the_placeholder_is_sent() {
             let (fx, mut term) = Fixture::with_terminal("send-try-text", None, V176);

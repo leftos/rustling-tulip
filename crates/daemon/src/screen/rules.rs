@@ -1075,7 +1075,17 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 46] = [
+        let cases: [(&str, &str, Verdict); 48] = [
+            (
+                "claude--suggestion",
+                include_str!("fixtures/claude--suggestion.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--suggestion-typed",
+                include_str!("fixtures/claude--suggestion-typed.txt"),
+                State(Idle),
+            ),
             (
                 "v03-ready",
                 include_str!("fixtures/v03-ready.txt"),

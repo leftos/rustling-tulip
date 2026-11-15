@@ -148,6 +148,67 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     }
 }
 
+/// [`read`] of `rows`, `dim` being `rows` with every character not drawn dim
+/// replaced by a space: a box holding only the agent's suggested next
+/// prompt, drawn dim, is a suggestion rather than a draft, or working while
+/// a spinner shows above it.
+pub(crate) fn read_styled(rows: &[String], dim: &[String]) -> ChatScreen {
+    let mut screen = read(rows);
+    if screen.composer == ComposerState::Draft
+        && let Some((top, text)) = suggestion(rows, dim)
+    {
+        screen.composer = if spinner_above(&rows[..top]) {
+            ComposerState::Working
+        } else {
+            ComposerState::Suggestion { text }
+        };
+    }
+    screen
+}
+
+/// [`read_view`] of `rows`, `dim` as in [`read_styled`]: a box holding only
+/// the agent's dim suggestion shows no first line.
+pub(crate) fn read_view_styled(rows: &[String], dim: &[String]) -> ViewReading {
+    let mut view = read_view(rows);
+    if suggestion(rows, dim).is_some() {
+        view.box_first_line = None;
+    }
+    view
+}
+
+/// The agent's suggested next prompt in the box between the last two rules,
+/// with the index of the rule over the box: the box's one row of text after
+/// the prompt, at least two characters, no placeholder, and every character
+/// after the first dim in `dim` (`rows` with every character not drawn dim
+/// replaced by a space). The first may be dim or not: the agent's own cursor
+/// draws that cell.
+fn suggestion(rows: &[String], dim: &[String]) -> Option<(usize, String)> {
+    let rules = rule_indices(rows);
+    let [.., top, bottom] = rules[..] else {
+        return None;
+    };
+    let mut body = (top + 1..bottom).filter(|&index| !rows[index].trim().is_empty());
+    let index = body.next()?;
+    if body.next().is_some() {
+        return None;
+    }
+    let row = &rows[index];
+    let rest = row.trim_start().strip_prefix(CURSOR)?;
+    let text = rest.trim();
+    if text.chars().count() < 2 || is_try_placeholder(text) || is_agent_placeholder(text) {
+        return None;
+    }
+    // From the text's second character on; the first is the cursor's cell.
+    let lead = rest.chars().take_while(|c| c.is_whitespace()).count() + 1;
+    let skip = row.chars().count() - rest.chars().count() + lead;
+    let mut lit = dim.get(index).map_or("", String::as_str).chars().skip(skip);
+    let all_dim = rest.chars().skip(lead).all(|c| {
+        let shown = lit.next();
+        c.is_whitespace() || shown == Some(c)
+    });
+    all_dim.then(|| (top, text.to_owned()))
+}
+
 /// The name of the overlay whose key line is among the bottom rows.
 fn overlay(rows: &[String]) -> Option<&'static str> {
     let bottom: Vec<&String> = rows
@@ -1740,7 +1801,9 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{next_view_key, read, recipe, spinner_above};
+    use super::{
+        next_view_key, read, read_styled, read_view, read_view_styled, recipe, spinner_above,
+    };
     use agent_api::{
         AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
         ViewRefusal, ViewStep,
@@ -2338,6 +2401,118 @@ mod tests {
         assert_eq!(working.composer, ComposerState::Working);
         let typed = read(&boxed(&[], &["❯ fix the tests"]));
         assert_eq!(typed.composer, ComposerState::Draft);
+    }
+
+    /// The text the suggestion capture's box shows after its prompt.
+    const SUGGESTION: &str = "write todo.py";
+
+    /// An input box after a finished turn whose prompt row holds `text`, as
+    /// the suggestion captures draw it, and the rows' dim cells: `text`
+    /// drawn dim when `dim`, else none.
+    fn styled_box(text: &str, dim: bool) -> (Vec<String>, Vec<String>) {
+        let line = format!("❯ {text}");
+        let screen = boxed(&["✻ Cogitated for 1s · done 10:53 PM"], &[&line]);
+        let dim_rows = screen
+            .iter()
+            .map(|row| {
+                if dim && *row == line {
+                    format!("  {text}")
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        (screen, dim_rows)
+    }
+
+    #[test]
+    fn a_dim_suggestion_reads_as_a_suggestion_and_no_draft() {
+        let (screen, dim) = styled_box(SUGGESTION, true);
+        assert_eq!(
+            read_styled(&screen, &dim),
+            ChatScreen {
+                composer: ComposerState::Suggestion {
+                    text: SUGGESTION.to_owned()
+                },
+                prompt: None,
+            }
+        );
+        assert_eq!(read_view_styled(&screen, &dim).box_first_line, None);
+    }
+
+    /// `dim` with the character at `column` of its one dim row blanked: a
+    /// cell drawn not dim.
+    fn undimmed(mut dim: Vec<String>, column: usize) -> Vec<String> {
+        let row = dim
+            .iter_mut()
+            .find(|row| !row.is_empty())
+            .expect("the box has a dim row");
+        *row = row
+            .chars()
+            .enumerate()
+            .map(|(at, c)| if at == column { ' ' } else { c })
+            .collect();
+        dim
+    }
+
+    #[test]
+    fn a_suggestion_under_the_cursor_reads_as_a_suggestion() {
+        // The agent's own cursor draws the suggestion's first cell not dim.
+        let (screen, dim) = styled_box(SUGGESTION, true);
+        let dim = undimmed(dim, 2);
+        assert_eq!(
+            read_styled(&screen, &dim).composer,
+            ComposerState::Suggestion {
+                text: SUGGESTION.to_owned()
+            }
+        );
+        assert_eq!(read_view_styled(&screen, &dim).box_first_line, None);
+    }
+
+    #[test]
+    fn a_later_character_not_drawn_dim_reads_as_a_draft() {
+        let (screen, dim) = styled_box(SUGGESTION, true);
+        let dim = undimmed(dim, 3);
+        assert_eq!(read_styled(&screen, &dim).composer, ComposerState::Draft);
+        assert_eq!(
+            read_view_styled(&screen, &dim).box_first_line.as_deref(),
+            Some(SUGGESTION)
+        );
+        let (screen, dim) = styled_box("ok", false);
+        assert_eq!(read_styled(&screen, &dim).composer, ComposerState::Draft);
+    }
+
+    #[test]
+    fn text_not_drawn_dim_reads_as_a_draft() {
+        for typed in ["hello", "write todo.py and its tests", SUGGESTION] {
+            let (screen, dim) = styled_box(typed, false);
+            assert_eq!(
+                read_styled(&screen, &dim).composer,
+                ComposerState::Draft,
+                "{typed}"
+            );
+            assert_eq!(
+                read_view_styled(&screen, &dim).box_first_line.as_deref(),
+                Some(typed)
+            );
+        }
+    }
+
+    #[test]
+    fn the_dim_try_placeholder_still_reads_ready() {
+        let (screen, dim) = styled_box("Try \"fix typecheck errors\"", true);
+        assert_eq!(read_styled(&screen, &dim).composer, ComposerState::Ready);
+        assert_eq!(read_view_styled(&screen, &dim).box_first_line, None);
+    }
+
+    #[test]
+    fn the_unstyled_reading_of_a_suggestion_is_unchanged() {
+        let (screen, _) = styled_box(SUGGESTION, true);
+        assert_eq!(read(&screen).composer, ComposerState::Draft);
+        assert_eq!(
+            read_view(&screen).box_first_line.as_deref(),
+            Some(SUGGESTION)
+        );
     }
 
     #[test]
