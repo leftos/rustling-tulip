@@ -7,16 +7,19 @@
 pub(crate) enum Page {
     /// The per-host Notifications switches.
     Notifications,
+    /// The saved hosts, the add form and the phone's SSH key.
+    Hosts,
 }
 
 impl Page {
     /// Every category, in the order the list draws them.
-    pub(crate) const ALL: [Self; 1] = [Self::Notifications];
+    pub(crate) const ALL: [Self; 2] = [Self::Notifications, Self::Hosts];
 
     /// The category's name: its row's label and its page's title.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Notifications => "Notifications",
+            Self::Hosts => "Hosts",
         }
     }
 
@@ -24,6 +27,7 @@ impl Page {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Notifications => "notifications",
+            Self::Hosts => "hosts",
         }
     }
 }

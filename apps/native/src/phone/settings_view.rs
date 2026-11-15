@@ -60,6 +60,15 @@ impl PhoneRoot {
         cx.notify();
     }
 
+    /// Opens Settings on `page`, as the phone does by itself when the hosts
+    /// screen's add form would otherwise leave the screen.
+    pub(super) fn open_settings_on(&mut self, page: Page, cx: &mut Context<Self>) {
+        let mut settings = Settings::default();
+        settings.open(page);
+        self.settings = Some(settings);
+        cx.notify();
+    }
+
     /// One Back step in Settings: a page goes back to the list, the list
     /// closes Settings.
     pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
@@ -108,6 +117,7 @@ impl PhoneRoot {
         let body = match settings.page {
             None => Self::category_list(&t, cx),
             Some(Page::Notifications) => self.notifications_page(&t, cx),
+            Some(Page::Hosts) => self.hosts_content(&t, cx),
         };
         Some(
             div()

@@ -90,6 +90,10 @@ pub(crate) struct PhoneHosts {
     key: Option<Result<String, String>>,
     error: Option<String>,
     form_open: bool,
+    /// Whether any saved host's connection was open at the last root
+    /// change, so a host that just connected can be told from one that was
+    /// open already.
+    was_open: bool,
     not_paired: HashSet<String>,
     seen: SeenStates,
 }
@@ -108,6 +112,7 @@ impl PhoneHosts {
             key: None,
             error: None,
             form_open: false,
+            was_open: false,
             not_paired: HashSet::new(),
             seen: Vec::new(),
         };
@@ -119,6 +124,14 @@ impl PhoneHosts {
     /// token store gave them when a host's connection last changed state.
     pub(super) fn not_paired(&self) -> &HashSet<String> {
         &self.not_paired
+    }
+
+    /// Whether a host just connected while the add form is open: the hosts
+    /// screen that shows the form is about to give way to Home.
+    pub(super) fn form_left_by_a_connection(&mut self, open: bool) -> bool {
+        let connected = open && !self.was_open;
+        self.was_open = open;
+        connected && self.form_open
     }
 
     /// The mode the form takes.
@@ -440,9 +453,21 @@ fn field_box(
 
 impl PhoneRoot {
     /// The hosts screen: under the header with its `Settings` button, the
-    /// saved hosts' rows, then the add form or the button that shows it;
-    /// the form alone while no host is saved.
+    /// hosts' content, which Settings' Hosts page draws too.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let header = Self::home_header_row(&t, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(self.hosts_content(&t, cx))
+    }
+
+    /// The saved hosts' rows and the tail under them: the add form or the
+    /// button that shows it, the form alone while no host is saved.
+    pub(super) fn hosts_content(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let root = self.root.read(cx);
         let rows: Vec<HostRow> = root
             .sidebar
@@ -452,31 +477,24 @@ impl PhoneRoot {
             .filter_map(|host| host_row(root, host, &self.hosts.not_paired))
             .collect();
         let form_shows = rows.is_empty() || self.hosts.form_open;
-        let t = theme(cx);
-        let row_elements: Vec<Div> = rows.iter().map(|row| Self::row(row, &t, cx)).collect();
-        let tail = self.hosts_tail(form_shows, &t, cx);
-        let tap_lines = self.tap_lines(&t);
-        let header = Self::home_header_row(&t, cx);
-        div().size_full().flex().flex_col().child(header).child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .p(px(16.0))
-                .children(tap_lines)
-                .children(row_elements)
-                .child(tail),
-        )
+        let row_elements: Vec<Div> = rows.iter().map(|row| Self::row(row, t, cx)).collect();
+        let tail = self.hosts_tail(form_shows, t, cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(16.0))
+            .children(self.tap_lines(t))
+            .children(row_elements)
+            .child(tail)
     }
 
     /// Home while a saved host is open: under the header with its
-    /// `Settings` button, the list filling the height over the hosts
-    /// screen's tail.
+    /// `Settings` button, the session list filling the height.
     pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
         let panel = self.home_list(cx);
         let t = theme(cx);
         let header = Self::home_header_row(&t, cx);
-        let tail = self.hosts_tail(self.hosts.form_open, &t, cx);
         let tap_lines = self.tap_lines(&t);
         let over = (!tap_lines.is_empty()).then(|| {
             div()
@@ -493,15 +511,6 @@ impl PhoneRoot {
             .child(header)
             .children(over)
             .child(panel)
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .p(px(16.0))
-                    .child(tail),
-            )
     }
 
     /// The tap's line: what the phone is opening, or why it could not open

@@ -108,6 +108,7 @@ impl PhoneRoot {
     ) -> Self {
         let root_changed = cx.observe(&root, |this, root, cx| {
             this.hosts.root_changed(root.read(cx));
+            this.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
             this.try_open_pending(cx);
             this.forget_gone_session(cx);
             this.take_replies(cx);
@@ -167,6 +168,18 @@ impl PhoneRoot {
             open_note: None,
             _root_changed: root_changed,
             _visibility: visibility,
+        }
+    }
+
+    /// A host that connects while the hosts screen's add form is open would
+    /// take the form off screen with that screen: Settings' Hosts page shows
+    /// it in its place, with the text typed so far and its focus.
+    fn keep_the_add_form(&mut self, open: bool, cx: &mut Context<Self>) {
+        if !self.hosts.form_left_by_a_connection(open) {
+            return;
+        }
+        if self.settings.is_none() && self.shown.is_none() {
+            self.open_settings_on(super::settings::Page::Hosts, cx);
         }
     }
 

@@ -191,7 +191,15 @@ fn a_saved_host_with_a_token_lists_its_sessions_at_window_width(cx: &mut TestApp
         !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
         "Home replaces the host's row"
     );
-    assert!(drawn(&mut h, "phone-host-add-another"));
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-hosts");
+    assert!(
+        drawn(&mut h, "phone-host-add-another"),
+        "Settings' Hosts page draws it"
+    );
+    h.click_on("phone-settings-back");
+    h.click_on("phone-settings-back");
+    assert!(drawn(&mut h, "phone-home"), "Back returns Home");
 
     h.host(&saved_remote()).sent();
     h.click_on(row);

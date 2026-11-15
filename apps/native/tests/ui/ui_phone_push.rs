@@ -44,6 +44,12 @@ fn open_notifications(h: &mut Harness<'_>) {
     h.click_on("phone-settings-row-notifications");
 }
 
+/// Opens Settings, then its Hosts page, where the add form draws.
+fn open_hosts(h: &mut Harness<'_>) {
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-hosts");
+}
+
 /// Reads the phone's root.
 fn read_phone<R>(h: &mut Harness<'_>, read: impl FnOnce(&PhoneRoot, &gpui::App) -> R) -> R {
     h.cx.update(|window, cx| {
@@ -960,6 +966,7 @@ fn navigating_clears_a_pending_open(cx: &mut TestAppContext) {
     tap(&platform, REMOTE, "s1", &mut h);
     assert!(drawn(&mut h, "phone-open-pending"), "the wait shows");
 
+    open_hosts(&mut h);
     h.click_on("phone-host-add-another");
 
     h.host(&saved_remote()).send(remote_list("working", "s2"));

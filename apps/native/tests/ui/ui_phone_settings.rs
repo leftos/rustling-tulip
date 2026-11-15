@@ -13,7 +13,7 @@ use protocol::{DaemonMessage, FEATURE_RELAY_PUSH};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use serde_json::json;
-use support::{Harness, REMOTE, TestDir, saved_remote, seed_ui, session};
+use support::{Harness, REMOTE, TestDir, saved_remote, saved_ui, seed_ui, session};
 
 /// The least height of a row or a target.
 fn touch_target() -> Pixels {
@@ -23,6 +23,19 @@ fn touch_target() -> Pixels {
 /// Whether the last frame drew what `selector` tags.
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).size.width > px(0.0)
+}
+
+/// Opens Settings, then its Hosts page, where the saved hosts and the
+/// add form draw.
+fn open_hosts(h: &mut Harness<'_>) {
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-hosts");
+}
+
+/// Types `text` key by key into the focused field.
+fn type_text(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+    h.keys(&keys.join(" "));
 }
 
 /// The saved host's Notifications switch.
@@ -228,4 +241,120 @@ fn the_hosts_screen_shows_the_settings_button(cx: &mut TestAppContext) {
         drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
         "Back returns to the hosts screen"
     );
+}
+
+#[gpui::test]
+fn the_hosts_page_lists_the_saved_hosts_and_adds_one(cx: &mut TestAppContext) {
+    const TYPED: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    open_hosts(&mut h);
+
+    assert!(
+        drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
+        "the saved host's row shows"
+    );
+    assert!(
+        !drawn(&mut h, "phone-host-name"),
+        "the form waits for a tap"
+    );
+    h.click_on("phone-host-add-another");
+    assert!(
+        drawn(&mut h, "phone-host-name"),
+        "Add a host opens the form"
+    );
+
+    h.click_on("phone-host-name");
+    type_text(&mut h, TYPED);
+    h.click_on("phone-host-port");
+    h.keys("end backspace backspace backspace backspace");
+    type_text(&mut h, "8787");
+    h.click_on("phone-host-add");
+
+    let saved = saved_ui(&dir)["saved_hosts"].clone();
+    assert!(
+        saved
+            .as_array()
+            .is_some_and(|hosts| hosts.iter().any(|host| host["name"] == TYPED)),
+        "Add saves it: {saved}"
+    );
+}
+
+#[gpui::test]
+fn home_draws_no_add_host_footer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    assert!(drawn(&mut h, "phone-home"), "Home shows");
+    for gone in [
+        "phone-host-add-another",
+        "phone-host-name",
+        "phone-host-port",
+    ] {
+        assert!(!drawn(&mut h, gone), "Home draws no {gone}");
+    }
+    assert!(
+        !drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
+        "nor the saved hosts' rows"
+    );
+}
+
+#[gpui::test]
+fn the_hosts_screen_still_offers_add_a_host_with_no_host_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    assert!(
+        drawn(&mut h, &format!("phone-host-row-{REMOTE}")),
+        "the hosts screen shows"
+    );
+    assert!(!drawn(&mut h, "phone-settings"), "with no Settings open");
+    h.click_on("phone-host-add-another");
+    assert!(
+        drawn(&mut h, "phone-host-name"),
+        "Add a host opens the form"
+    );
+}
+
+#[gpui::test]
+fn a_host_connecting_while_the_add_form_is_open_keeps_the_form_on_screen(cx: &mut TestAppContext) {
+    const TYPED: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    h.click_on("phone-host-add-another");
+    h.click_on("phone-host-name");
+    type_text(&mut h, TYPED);
+    assert!(!drawn(&mut h, "phone-settings"), "no Settings yet");
+
+    h.host(&saved_remote()).connect();
+
+    assert!(
+        drawn(&mut h, "phone-settings"),
+        "Settings shows in its place"
+    );
+    assert!(
+        !drawn(&mut h, "phone-settings-row-hosts"),
+        "on the Hosts page"
+    );
+    for selector in ["phone-host-name", "phone-host-port", "phone-host-add"] {
+        assert!(drawn(&mut h, selector), "the form's {selector} paints");
+    }
+
+    h.click_on("phone-host-add");
+    let added = h
+        .opened_targets()
+        .pop()
+        .expect("Add connects the typed host");
+    assert!(
+        added
+            .tailnet_host()
+            .is_some_and(|host| host.name() == TYPED),
+        "the form kept the typed name: {added:?}"
+    );
+
+    h.click_on("phone-settings-back");
+    h.click_on("phone-settings-back");
+    assert!(drawn(&mut h, "phone-home"), "Back leads to Home");
 }
