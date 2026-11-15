@@ -202,7 +202,7 @@ These wait on MA.12, so no screen is built before the device and the connection 
   Proof: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/ma13-home.log --timeout 1800 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_phone_home`
 
   Waits on: MA.12. Owner's iPhone: not needed (MA.16 checks it on the device).
-- [ ] **MA.14 Build the phone's session screen with its chat.** The header (back, label, status, the Terminal toggle), the desktop's chat view at the phone's width in the chat look ruled above, the composer (a multi-line `TextInput` with Send, Paste, Quick and Keys buttons), the prompt bottom sheet (answer buttons typing the option's number, Esc, up, down; a swipe puts it away), and back by the button or the back gesture.
+- [x] **MA.14 Build the phone's session screen with its chat.** The header (back, label, status, the Terminal toggle), the desktop's chat view at the phone's width in the chat look ruled above, the composer (a multi-line `TextInput` with Send, Paste, Quick and Keys buttons), the prompt bottom sheet (answer buttons typing the option's number, Esc, up, down; a swipe puts it away), and back by the button or the back gesture.
 
   Files: `apps/native/src/phone/session_view.rs`, `apps/native/src/phone/prompt_sheet.rs`, `apps/native/src/chat_view.rs`, `apps/native/src/phone/root_view.rs`, `apps/native/examples/shot.rs` (view `phone-session`), `apps/native/tests/ui/ui_phone_session.rs`.
 
