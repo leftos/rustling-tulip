@@ -308,7 +308,8 @@ PR.8's first pass, on the owner's iPhone with a TestFlight build, against the PC
 - A Needs you raised while the phone was locked arrives on the Lock Screen with the session's name, so the notification extension ran and decrypted it; the badge matches the Needs you count.
 - A Needs you with Tailscale off on the phone still arrives, and a Finished push arrives when a turn ends.
 - `daemon.log` logs the stored subscription; a delivered push logs nothing at the default level.
-- Still to run: the tap opening that session (MA.19), the fallback alert, which now runs with `rustling-tulipd push-fallback`, a deleted app's token pruned after the relay's 410, and the relay's own log lines carrying no token or body.
+
+MA.16 and the rest of PR.8, the owner's pass through `docs/remote-hand-checklist.md` section 14 on a TestFlight build with the Terminal page: the owner ruled every step checked. Each fault the pass found is its own issue: Claude's suggested next prompt read as a draft (RT-1752), no way to pull or send a draft from Chat (RT-1753), no way to lower the keyboard (RT-1747), a tap on a stretch that does nothing (RT-1748), no long-press selection in Chat (RT-1754), the tray's question card (RT-1751), a selected option's unreadable description (RT-1750) and a Settings screen in place of Home's Notifications switch (RT-1755).
 
 ## How it connects
 
