@@ -13,9 +13,10 @@ use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::session;
 use super::settings::{BackStep, Page, Settings};
-use crate::buttons::ButtonKind;
+use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
+use crate::theme_store::ThemeEntry;
 use crate::ui_theme::{UiTheme, theme};
 
 /// The header's button that opens Settings.
@@ -26,6 +27,16 @@ const BACK_LABEL: &str = "Back";
 const NO_NOTIFICATIONS_TEXT: &str = "No host offers notifications yet.";
 /// The mark at a category row's right end.
 const CHEVRON: &str = "›";
+/// The Appearance page's heading over the theme list.
+const THEMES_LABEL: &str = "Theme";
+/// The Appearance page's heading over the text-size row.
+const TEXT_SIZE_LABEL: &str = "Text size";
+/// The mark beside the theme the phone draws in.
+const CHECK: &str = "✓";
+/// The stepper's button one size smaller.
+const DOWN_LABEL: &str = "−";
+/// The stepper's button one size larger.
+const UP_LABEL: &str = "+";
 
 /// A header row's frame, the session page's: at least a touch target tall,
 /// the side padding, a line under it.
@@ -40,6 +51,15 @@ fn header_frame(t: &UiTheme) -> Div {
         .py(px(6.0))
         .border_b_1()
         .border_color(gpui::rgb(t.line))
+}
+
+/// A heading over the Appearance page's two sections.
+fn section_label(label: &str, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+    div()
+        .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+        .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+        .text_color(gpui::rgb(t.muted))
+        .child(label.to_owned())
 }
 
 impl PhoneRoot {
@@ -67,6 +87,11 @@ impl PhoneRoot {
         settings.open(page);
         self.settings = Some(settings);
         cx.notify();
+    }
+
+    /// Opens Settings on its Appearance page, as the shot example does.
+    pub fn open_settings_appearance(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_on(Page::Appearance, cx);
     }
 
     /// One Back step in Settings: a page goes back to the list, the list
@@ -118,6 +143,7 @@ impl PhoneRoot {
             None => Self::category_list(&t, cx),
             Some(Page::Notifications) => self.notifications_page(&t, cx),
             Some(Page::Hosts) => self.hosts_content(&t, cx),
+            Some(Page::Appearance) => self.appearance_page(&t, cx),
         };
         Some(
             div()
@@ -214,5 +240,182 @@ impl PhoneRoot {
             .p(px(SIDE_PADDING))
             .children(lines)
             .children(empty)
+    }
+
+    /// The Appearance page: every theme that loads, the one the phone draws
+    /// in marked, over the text-size row.
+    fn appearance_page(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let entries = self.root.read(cx).theme_entries();
+        let current = Self::current_theme_id(&entries, self.saved_theme_id(cx).as_deref());
+        let rows: Vec<Stateful<Div>> = entries
+            .into_iter()
+            .filter(|entry| entry.error.is_none())
+            .map(|entry| Self::theme_row(entry, &current, t, cx))
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(SIDE_PADDING))
+            .child(section_label(THEMES_LABEL, t, cx))
+            .children(rows)
+            .child(self.text_size_section(t, cx))
+    }
+
+    /// The theme `native-ui.json` names, when it names one.
+    fn saved_theme_id(&self, cx: &Context<Self>) -> Option<String> {
+        self.root.read(cx).sidebar.ui_state().theme.clone()
+    }
+
+    /// The id of the theme the boot draws in, as the desktop's theme list
+    /// resolves it: the saved selection when a theme that loads answers to
+    /// it, else the default's.
+    fn current_theme_id(entries: &[ThemeEntry], saved: Option<&str>) -> String {
+        let loads = |id: &str| {
+            entries
+                .iter()
+                .any(|entry| entry.error.is_none() && entry.id == id)
+        };
+        match saved {
+            Some(id) if loads(id) => id.to_owned(),
+            _ => crate::theme_store::DEFAULT_ID.to_owned(),
+        }
+    }
+
+    /// One theme's row: the check when it is the one in use, then its name, a
+    /// touch target tall; a tap switches to it.
+    fn theme_row(
+        entry: ThemeEntry,
+        current: &str,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let chosen = entry.id == current;
+        let id = format!("phone-theme-{}", entry.id);
+        let mark = div()
+            .flex_none()
+            .w(px(18.0))
+            .text_size(ui_px(cx, crate::UI_TEXT_SIZE));
+        let mark = if chosen {
+            mark.driver_id(|| format!("phone-theme-check-{}", entry.id))
+                .child(CHECK)
+        } else {
+            mark
+        };
+        let theme_id = entry.id;
+        div()
+            .id(SharedString::from(id.clone()))
+            .driver_id(|| id)
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .min_h(px(TOUCH_TARGET))
+            .px(px(SIDE_PADDING))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
+            .child(mark)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+                    .child(entry.name),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.pick_theme(&theme_id, cx);
+            }))
+    }
+
+    /// Switches to the theme `id` names and saves it; one that does not load
+    /// changes nothing.
+    fn pick_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Err(err) = self.root.update(cx, |root, cx| root.select_theme(id, cx)) {
+            tracing::warn!(theme = %id, "phone: selecting a theme failed: {err}");
+            return;
+        }
+        cx.notify();
+    }
+
+    /// The text-size row: the size's name over `−`, the current size and
+    /// `+`.
+    fn text_size_section(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let offset = self.text_size_offset(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(section_label(TEXT_SIZE_LABEL, t, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(self.text_size_button(-1, t, cx))
+                    .child(
+                        div()
+                            .driver_id(|| "phone-text-size-value".to_owned())
+                            .flex_1()
+                            .flex()
+                            .justify_center()
+                            .child(crate::appearance_view::ui_text_size_label(offset)),
+                    )
+                    .child(self.text_size_button(1, t, cx)),
+            )
+    }
+
+    /// The step button for `delta`: it moves the size when that stays in
+    /// range, and is dimmed and takes no tap at its end of the range.
+    fn text_size_button(&self, delta: i8, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let offset = self.text_size_offset(cx);
+        let next = Self::text_size_step(offset, delta);
+        let (selector, label) = if delta < 0 {
+            ("phone-text-size-down", DOWN_LABEL)
+        } else {
+            ("phone-text-size-up", UP_LABEL)
+        };
+        let button = outlined_button(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            selector,
+            ButtonSize::Large,
+            next.is_some(),
+            Layer::Base,
+            t,
+        )
+        .min_h(px(TOUCH_TARGET))
+        .flex_none()
+        .child(label);
+        if next.is_some() {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.step_text_size(delta, cx);
+            }))
+        } else {
+            button
+        }
+    }
+
+    /// The size `delta` from `current`, or `None` past an end of the range.
+    fn text_size_step(current: i8, delta: i8) -> Option<i8> {
+        let next = current.checked_add(delta)?;
+        crate::fonts::UI_TEXT_SIZE_OFFSETS
+            .contains(&next)
+            .then_some(next)
+    }
+
+    /// The pixels every UI text size is offset by, as saved.
+    fn text_size_offset(&self, cx: &Context<Self>) -> i8 {
+        self.root.read(cx).sidebar.ui_state().ui_text_size
+    }
+
+    /// Steps the text size one `delta`; at an end of the range nothing
+    /// changes.
+    fn step_text_size(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let offset = self.text_size_offset(cx);
+        if let Some(next) = Self::text_size_step(offset, delta) {
+            self.root
+                .update(cx, |root, cx| root.set_ui_text_size(next, cx));
+        }
     }
 }

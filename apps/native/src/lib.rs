@@ -3206,6 +3206,13 @@ impl RootView {
         Ok(())
     }
 
+    /// Every theme the phone's Appearance page offers: the built-ins, then
+    /// the user themes under the config dir that load.
+    #[must_use]
+    pub(crate) fn theme_entries(&self) -> Vec<theme_store::ThemeEntry> {
+        theme_store::ThemeStore::new(self.themes_dir.clone().unwrap_or_default()).list()
+    }
+
     /// The active theme's accent and terminal background, the bottom of
     /// every session's appearance cascade.
     #[must_use]

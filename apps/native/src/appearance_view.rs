@@ -2067,7 +2067,7 @@ fn list_row(
 
 /// The UI text size row's value: `Default` at no offset, else the signed
 /// whole pixels, `+1 px` or `−1 px`.
-fn ui_text_size_label(offset: i8) -> String {
+pub(crate) fn ui_text_size_label(offset: i8) -> String {
     match offset {
         0 => "Default".to_owned(),
         up if up > 0 => format!("+{up} px"),

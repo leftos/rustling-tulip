@@ -10,8 +10,11 @@ use crate::support;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{BackGesturePhase, Pixels, TestAppContext, point, px};
 use protocol::{DaemonMessage, FEATURE_RELAY_PUSH};
+use rustling_tulip_native::builtin_themes::DRACULA;
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
+use rustling_tulip_native::theme_store::{BUILT_INS, THEMES_DIR};
+use rustling_tulip_native::{fonts, ui_theme};
 use serde_json::json;
 use support::{Harness, REMOTE, TestDir, saved_remote, saved_ui, seed_ui, session};
 
@@ -30,6 +33,13 @@ fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
 fn open_hosts(h: &mut Harness<'_>) {
     h.click_on("phone-settings-open");
     h.click_on("phone-settings-row-hosts");
+}
+
+/// Opens Settings, then its Appearance page, where the theme list and the
+/// text-size row draw.
+fn open_appearance(h: &mut Harness<'_>) {
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-appearance");
 }
 
 /// Types `text` key by key into the focused field.
@@ -357,4 +367,166 @@ fn a_host_connecting_while_the_add_form_is_open_keeps_the_form_on_screen(cx: &mu
     h.click_on("phone-settings-back");
     h.click_on("phone-settings-back");
     assert!(drawn(&mut h, "phone-home"), "Back leads to Home");
+}
+
+#[gpui::test]
+fn appearance_lists_the_themes_and_marks_the_current_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let themes = dir.path().join(THEMES_DIR);
+    std::fs::create_dir_all(&themes).expect("make the themes folder");
+    std::fs::write(themes.join("broken.json"), "{").expect("write a theme that does not load");
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    open_appearance(&mut h);
+
+    assert!(drawn(&mut h, "phone-settings"), "Settings shows");
+    for (id, _, _) in BUILT_INS {
+        let row = format!("phone-theme-{id}");
+        assert!(drawn(&mut h, &row), "the {id} theme shows");
+        assert!(
+            h.bounds(&row).size.height >= touch_target(),
+            "{row} is a touch target"
+        );
+    }
+    assert!(
+        drawn(&mut h, "phone-theme-check-nord"),
+        "Nord is the theme in use"
+    );
+    assert!(!drawn(&mut h, "phone-theme-check-dracula"));
+    assert!(
+        !drawn(&mut h, "phone-theme-broken"),
+        "a theme that does not load is not listed"
+    );
+    assert!(
+        !drawn(&mut h, "phone-settings-row-appearance"),
+        "the page takes the list's place"
+    );
+}
+
+#[gpui::test]
+fn tapping_a_theme_switches_and_saves_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_appearance(&mut h);
+
+    h.click_on("phone-theme-dracula");
+
+    assert_eq!(h.root(|_, cx| ui_theme::theme(cx)), DRACULA, "it draws");
+    assert_eq!(saved_ui(&dir)["theme"], "dracula", "and is saved");
+    assert!(drawn(&mut h, "phone-theme-check-dracula"), "the mark moves");
+    assert!(!drawn(&mut h, "phone-theme-check-nord"));
+
+    h.click_on("phone-theme-dracula");
+    assert_eq!(
+        saved_ui(&dir)["theme"],
+        "dracula",
+        "a tap on the theme in use changes nothing"
+    );
+}
+
+#[gpui::test]
+fn the_text_size_stepper_moves_one_step_and_stops_at_both_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_appearance(&mut h);
+
+    for selector in ["phone-text-size-down", "phone-text-size-up"] {
+        assert!(drawn(&mut h, selector), "{selector} shows");
+        assert!(h.bounds(selector).size.height >= touch_target());
+    }
+
+    h.click_on("phone-text-size-up");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 1, "one step up");
+    assert_eq!(h.root(|_, cx| fonts::ui_text_size(cx)), 1, "and it draws");
+    h.click_on("phone-text-size-down");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 0, "and one step back down");
+
+    for _ in 0..4 {
+        h.click_on("phone-text-size-up");
+    }
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 4, "the top");
+    h.click_on("phone-text-size-up");
+    assert_eq!(
+        saved_ui(&dir)["ui_text_size"],
+        4,
+        "a tap at the top changes nothing"
+    );
+
+    for _ in 0..6 {
+        h.click_on("phone-text-size-down");
+    }
+    assert_eq!(saved_ui(&dir)["ui_text_size"], -2, "the bottom");
+    h.click_on("phone-text-size-down");
+    assert_eq!(
+        saved_ui(&dir)["ui_text_size"],
+        -2,
+        "a tap at the bottom changes nothing"
+    );
+}
+
+#[gpui::test]
+fn a_phone_over_a_saved_theme_and_size_boots_in_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "theme": "dracula", "ui_text_size": 2 }));
+    let mut h = Harness::phone_with(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-appearance");
+
+    assert!(
+        drawn(&mut h, "phone-theme-check-dracula"),
+        "the saved theme is marked"
+    );
+    assert!(!drawn(&mut h, "phone-theme-check-nord"));
+
+    h.click_on("phone-text-size-up");
+    assert_eq!(
+        saved_ui(&dir)["ui_text_size"],
+        3,
+        "the stepper starts at the saved 2"
+    );
+    h.click_on("phone-text-size-down");
+    h.click_on("phone-text-size-down");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 1);
+}
+
+#[gpui::test]
+fn a_saved_theme_that_is_gone_marks_the_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "theme": "gone" }));
+    let mut h = Harness::phone_with(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-appearance");
+
+    assert!(
+        drawn(&mut h, "phone-theme-nord"),
+        "the built-in the boot falls back to is listed"
+    );
+    assert!(
+        drawn(&mut h, "phone-theme-check-nord"),
+        "and marked as the theme in use"
+    );
+}
+
+#[gpui::test]
+fn a_saved_theme_that_is_broken_marks_the_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let themes = dir.path().join(THEMES_DIR);
+    std::fs::create_dir_all(&themes).expect("make the themes folder");
+    std::fs::write(themes.join("broken.json"), "{").expect("write a theme that does not load");
+    seed_ui(&dir, &json!({ "theme": "broken" }));
+    let mut h = Harness::phone_with(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-appearance");
+
+    assert!(
+        !drawn(&mut h, "phone-theme-broken"),
+        "a theme that does not load is not listed"
+    );
+    assert!(
+        drawn(&mut h, "phone-theme-check-nord"),
+        "the built-in the boot falls back to is marked"
+    );
 }

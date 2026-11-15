@@ -76,6 +76,9 @@
 //! terminal sizes its PTY to is logged.
 //! `phone-settings` shows the same Home's Settings button tapped: Settings'
 //! header with Back and its title over the category list.
+//! `phone-settings-appearance` shows Settings' Appearance page: its header
+//! with Back and the title `Appearance`, the theme list with the one in use
+//! marked, and the text-size row under them.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -314,10 +317,11 @@ enum View {
     PhoneSessionSheet,
     PhoneTerminal,
     PhoneSettings,
+    PhoneSettingsAppearance,
 }
 
 impl View {
-    const ALL: [Self; 55] = [
+    const ALL: [Self; 56] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -373,6 +377,7 @@ impl View {
         Self::PhoneSessionSheet,
         Self::PhoneTerminal,
         Self::PhoneSettings,
+        Self::PhoneSettingsAppearance,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -385,6 +390,7 @@ impl View {
                 | Self::PhoneSessionSheet
                 | Self::PhoneTerminal
                 | Self::PhoneSettings
+                | Self::PhoneSettingsAppearance
         )
     }
 
@@ -445,6 +451,7 @@ impl View {
             Self::PhoneSessionSheet => "phone-session-sheet",
             Self::PhoneTerminal => "phone-terminal",
             Self::PhoneSettings => "phone-settings",
+            Self::PhoneSettingsAppearance => "phone-settings-appearance",
         }
     }
 
@@ -495,7 +502,8 @@ impl View {
             | Self::PhoneSession
             | Self::PhoneSessionSheet
             | Self::PhoneTerminal
-            | Self::PhoneSettings => PHONE_WINDOW_SIZE,
+            | Self::PhoneSettings
+            | Self::PhoneSettingsAppearance => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -540,7 +548,8 @@ impl View {
             | Self::PhoneSession
             | Self::PhoneSessionSheet
             | Self::PhoneTerminal
-            | Self::PhoneSettings => true,
+            | Self::PhoneSettings
+            | Self::PhoneSettingsAppearance => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -815,6 +824,7 @@ impl Shot {
             | View::PhoneSessionSheet
             | View::PhoneTerminal
             | View::PhoneSettings
+            | View::PhoneSettingsAppearance
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1626,6 +1636,11 @@ async fn open_phone_screen(
             cx.background_executor().timer(DRIVE_WAIT).await;
             Ok(())
         }
+        View::PhoneSettingsAppearance => {
+            handle.update(cx, |phone, _, cx| phone.open_settings_appearance(cx))?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1784,7 +1799,8 @@ fn drive(
         | View::PhoneSession
         | View::PhoneSessionSheet
         | View::PhoneTerminal
-        | View::PhoneSettings => Ok(()),
+        | View::PhoneSettings
+        | View::PhoneSettingsAppearance => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),

@@ -9,17 +9,20 @@ pub(crate) enum Page {
     Notifications,
     /// The saved hosts, the add form and the phone's SSH key.
     Hosts,
+    /// The theme the phone draws in and the size of its text.
+    Appearance,
 }
 
 impl Page {
     /// Every category, in the order the list draws them.
-    pub(crate) const ALL: [Self; 2] = [Self::Notifications, Self::Hosts];
+    pub(crate) const ALL: [Self; 3] = [Self::Notifications, Self::Hosts, Self::Appearance];
 
     /// The category's name: its row's label and its page's title.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
+            Self::Appearance => "Appearance",
         }
     }
 
@@ -28,6 +31,7 @@ impl Page {
         match self {
             Self::Notifications => "notifications",
             Self::Hosts => "hosts",
+            Self::Appearance => "appearance",
         }
     }
 }
