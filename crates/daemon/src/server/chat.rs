@@ -2662,6 +2662,28 @@ mod tests {
             assert!(term.typed_now().is_empty(), "no fourth press");
         }
 
+        /// After the first press the box scrolls to show a line the pull
+        /// never read, which a further press would delete.
+        #[tokio::test]
+        async fn a_line_it_never_read_coming_into_view_stops_the_pull() {
+            let scrolled = edited(
+                &edited(DRAFT_TWO_LINES, "add a done command", "an older line"),
+                "then a list command",
+                "add a done command",
+            );
+            let (fx, mut term) = Fixture::with_terminal("pull-unread-line", None, DRAFT_TWO_LINES);
+            let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+            fx.pull_draft(&p_tx).await;
+            assert_eq!(term.typed().await, CLEAR_LINE, "the first ctrl+u");
+            term.show(&scrolled).await;
+            assert_eq!(
+                pulled(next_message(&mut p_rx).await),
+                (TWO_LINE_TEXT.to_owned(), false)
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "no second press");
+        }
+
         #[tokio::test]
         async fn a_pasted_draft_is_refused_before_any_key() {
             let pasted = "the draft holds pasted text or an image; \

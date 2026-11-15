@@ -154,7 +154,10 @@ async fn clear(
 /// the screen still shows a draft in main's box with no dialog and no owner
 /// key, waiting prompt or ended agent came, and the requester still listens.
 /// The first pass reads the draft and its recipe under the same screen lock;
-/// a failed check there refuses, and on a later pass ends the clear.
+/// a failed check there refuses, and on a later pass ends the clear. A later
+/// pass also reads the box again: text outside the prefixes of the draft it
+/// read means a line it never read came into view, and the clear ends before
+/// a press could delete it.
 fn press_clear(
     target: &TypeTarget,
     turn: &TypingTurn,
@@ -179,6 +182,14 @@ fn press_clear(
         debug!(session_id = %target.session_id, reason = %refusal.message, "chat pull: stopped");
         return Ok(Step::Stop);
     }
+    if progress
+        .text
+        .as_deref()
+        .is_some_and(|read| unread_in_view(target, read, &screen))
+    {
+        debug!(session_id = %target.session_id, "chat pull: a line it never read came into view");
+        return Ok(Step::Stop);
+    }
     if first {
         let (text, recipe) = first_draft(target, &screen)?;
         progress.text = Some(text);
@@ -192,6 +203,15 @@ fn press_clear(
         turn.press(&target.pty, key.to_bytes());
     }
     Ok(Step::Pressed)
+}
+
+/// Whether `screen`'s box holds anything outside the prefixes of `read`, the
+/// draft the pull read: a line it never read has come into view, and the next
+/// press could delete it. A box holding no draft, or only a suggestion, holds
+/// nothing outside.
+fn unread_in_view(target: &TypeTarget, read: &str, screen: &Screen) -> bool {
+    dialogs::read_draft(&target.agent, screen)
+        .is_some_and(|draft| !read.starts_with(draft.text.as_str()))
 }
 
 /// Why no press may be typed now: the owner typed since the lane was taken,
