@@ -122,10 +122,16 @@ fn phone_deps() -> RootDeps {
 }
 
 /// The padding that keeps content clear of the system's UI: the safe area,
-/// which covers the notch, the status bar and the home indicator.
+/// which covers the notch, the status bar and the home indicator, with its
+/// bottom raised to the keyboard's, so the content sits above the raised
+/// keyboard too and drops back when the keyboard hides.
 #[must_use]
 pub fn content_padding(insets: &WindowInsets) -> Edges<Pixels> {
-    insets.safe_area
+    let safe_area = insets.safe_area;
+    Edges {
+        bottom: safe_area.bottom.max(insets.ime.bottom),
+        ..safe_area
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +151,71 @@ mod tests {
             ..WindowInsets::default()
         };
         assert_eq!(content_padding(&insets), safe_area);
+    }
+
+    #[test]
+    fn a_keyboard_taller_than_the_safe_area_raises_the_bottom() {
+        let safe_area = Edges {
+            top: px(62.0),
+            right: px(4.0),
+            bottom: px(34.0),
+            left: px(4.0),
+        };
+        let insets = WindowInsets {
+            safe_area,
+            ime: Edges {
+                bottom: px(336.0),
+                ..Edges::default()
+            },
+            ..WindowInsets::default()
+        };
+        assert_eq!(
+            content_padding(&insets),
+            Edges {
+                top: px(62.0),
+                right: px(4.0),
+                bottom: px(336.0),
+                left: px(4.0),
+            },
+            "the keyboard raises the bottom alone"
+        );
+    }
+
+    #[test]
+    fn the_safe_area_wins_while_no_keyboard_shows() {
+        let insets = WindowInsets {
+            safe_area: Edges {
+                top: px(62.0),
+                bottom: px(34.0),
+                ..Edges::default()
+            },
+            ..WindowInsets::default()
+        };
+        assert_eq!(
+            content_padding(&insets).bottom,
+            px(34.0),
+            "the home indicator's band stays"
+        );
+    }
+
+    #[test]
+    fn a_keyboard_shorter_than_the_safe_area_keeps_the_safe_area() {
+        let insets = WindowInsets {
+            safe_area: Edges {
+                bottom: px(34.0),
+                ..Edges::default()
+            },
+            ime: Edges {
+                bottom: px(20.0),
+                ..Edges::default()
+            },
+            ..WindowInsets::default()
+        };
+        assert_eq!(
+            content_padding(&insets).bottom,
+            px(34.0),
+            "the safe area covers the keyboard's band"
+        );
     }
 
     #[test]

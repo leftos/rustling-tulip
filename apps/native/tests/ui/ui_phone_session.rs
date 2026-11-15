@@ -1407,3 +1407,172 @@ fn the_composer_buttons_are_44_px_tall(cx: &mut TestAppContext) {
         );
     }
 }
+
+// ── The keyboard ───────────────────────────────────────────────────────────
+
+/// The insets a phone draws with a `keyboard`-tall on-screen keyboard up,
+/// its safe area the one an iPhone reports.
+fn keyboard_insets(keyboard: Pixels) -> WindowInsets {
+    WindowInsets {
+        safe_area: Edges {
+            top: px(62.0),
+            bottom: px(34.0),
+            ..Edges::default()
+        },
+        ime: Edges {
+            bottom: keyboard,
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    }
+}
+
+/// Draws `insets` around the phone's content in place of the window's.
+fn draw_insets(h: &mut Harness<'_>, insets: Option<WindowInsets>) {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.set_insets_override(insets, cx));
+    });
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_composer_sits_above_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+
+    assert!(drawn(&mut h, "phone-composer"));
+    let height = h.window_height();
+    let composer = h.bounds("phone-composer");
+    assert!(
+        composer.bottom() <= px(height - 336.0) + px(1.0),
+        "the composer sits above the keyboard: {composer:?} in a {height} px window"
+    );
+}
+
+#[gpui::test]
+fn the_prompt_sheet_keys_sit_above_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, question_prompt("q1"));
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+
+    assert!(drawn(&mut h, "phone-prompt-esc"));
+    let height = h.window_height();
+    let keys = h.bounds("phone-prompt-esc");
+    assert!(
+        keys.bottom() <= px(height - 336.0) + px(1.0),
+        "the sheet's keys sit above the keyboard: {keys:?} in a {height} px window"
+    );
+}
+
+/// An option whose description is drawn under its label.
+fn described_option(number: u32, label: &str, description: &str) -> ChatOption {
+    ChatOption {
+        number,
+        label: label.to_owned(),
+        description: Some(description.to_owned()),
+        selected: false,
+    }
+}
+
+/// A question `q1` whose card overruns the room a phone leaves it: a
+/// subject and a body over several lines, and four described options.
+fn tall_question_prompt() -> ChatPrompt {
+    ChatPrompt {
+        subject: "Which of these functions should the new tests cover first, \
+            given that the release goes out to the users on the beta channel tomorrow \
+            morning and the integer helpers changed the most since the last one, \
+            while the floating point helpers only moved files and kept their bodies?"
+            .to_owned(),
+        body: "Nothing is answered until you pick one, and the card keeps whatever \
+            you type into its box until the answer is sent, so a long question has \
+            to stay readable while the keyboard is up."
+            .to_owned(),
+        options: vec![
+            described_option(
+                1,
+                "sub",
+                "Subtraction: returns a - b, and raises on overflow, so every caller \
+                 that adds a check on the sign has to keep working unchanged.",
+            ),
+            described_option(
+                2,
+                "div",
+                "Division: returns a / b, and raises on a zero divisor and on the \
+                 overflow of the smallest integer divided by minus one.",
+            ),
+            described_option(
+                3,
+                "abs",
+                "Absolute value: returns the distance from zero, and raises on the \
+                 smallest integer, whose magnitude no integer can hold.",
+            ),
+            described_option(
+                4,
+                "pow",
+                "Power: multiplies the base by itself, and raises when the exponent \
+                 is negative or when the result would leave the integer's range.",
+            ),
+        ],
+        ..sheet_prompt("q1", ChatPromptKind::Question, &[])
+    }
+}
+
+#[gpui::test]
+fn a_tall_prompt_card_keeps_the_sheet_on_screen_above_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, tall_question_prompt());
+    // A phone's screen, the island's band and the keyboard.
+    h.cx.simulate_resize(gpui::size(px(390.0), px(874.0)));
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+
+    let height = h.window_height();
+    let handle = h.bounds("phone-prompt-handle");
+    assert!(
+        handle.origin.y >= px(62.0),
+        "the handle stays below the island: {handle:?} in a {height} px window"
+    );
+    let card = h.bounds("phone-prompt-card");
+    assert!(
+        card.size.height > px(300.0),
+        "the card keeps its room: {card:?} in a {height} px window"
+    );
+    let esc = h.bounds("phone-prompt-esc");
+    assert!(
+        esc.bottom() <= px(height - 336.0) + px(1.0),
+        "the keys stay above the keyboard: {esc:?} in a {height} px window"
+    );
+
+    // The keyboard hides: the room it held comes back and the card draws whole.
+    draw_insets(&mut h, Some(keyboard_insets(px(0.0))));
+
+    let card = h.bounds("phone-prompt-card");
+    assert!(
+        card.contains(&h.bounds("chat-card-4").center()),
+        "the whole card draws when it fits: {card:?}"
+    );
+}
+
+#[gpui::test]
+fn the_composer_drops_back_when_the_keyboard_hides(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    let height = h.window_height();
+    assert!(
+        h.bounds("phone-composer").bottom() <= px(height - 336.0) + px(1.0),
+        "the composer rises with the keyboard"
+    );
+
+    draw_insets(&mut h, Some(keyboard_insets(px(0.0))));
+
+    let composer = h.bounds("phone-composer");
+    assert!(
+        (f32::from(composer.bottom()) - (height - 34.0)).abs() <= 1.0,
+        "the composer returns to the safe area's bottom: {composer:?} in a {height} px window"
+    );
+}

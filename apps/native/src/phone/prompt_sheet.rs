@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, ClickEvent, Context, DispatchPhase, Div, Pixels, ScrollEvent, ScrollSource, TouchPhase,
-    Window, canvas, div, prelude::*, px,
+    App, ClickEvent, Context, DispatchPhase, Div, Edges, Pixels, ScrollEvent, ScrollSource,
+    TouchPhase, Window, canvas, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -305,13 +305,22 @@ impl PhoneRoot {
     }
 
     /// While the sheet is up: a scrim over the page that takes no tap, and
-    /// the sheet at the bottom, clear of `bottom`'s home indicator: a grab
-    /// handle, the chat's prompt card as the desktop draws it, then the
-    /// Esc, up and down keys. A drag down on it puts it away.
-    pub(super) fn prompt_sheet_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
+    /// the sheet at the bottom, clear of `padding.bottom`'s home indicator or
+    /// keyboard: a grab handle, the chat's prompt card as the desktop draws
+    /// it, then the Esc, up and down keys. Its top never passes
+    /// `padding.top`'s band, so a card too tall for the room scrolls between
+    /// the handle and the keys. A drag down on it puts it away.
+    pub(super) fn prompt_sheet_layer(
+        &self,
+        padding: Edges<Pixels>,
+        screen_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         if !self.prompt_sheet_up(cx) {
             return None;
         }
+        let bottom = padding.bottom;
+        let cap = screen_height - padding.top - px(8.0);
         let (_, session_id) = self.shown.as_ref()?;
         let id = session_id.clone();
         let card = self
@@ -341,7 +350,7 @@ impl PhoneRoot {
         .top_0()
         .left_0()
         .size_full();
-        let handle = div().flex().justify_center().py(px(6.0)).child(
+        let handle = div().flex_none().flex().justify_center().py(px(6.0)).child(
             div()
                 .driver_id(|| "phone-prompt-handle".to_owned())
                 .w(px(36.0))
@@ -349,6 +358,13 @@ impl PhoneRoot {
                 .rounded_full()
                 .bg(gpui::rgb(t.muted)),
         );
+        let card_area = div()
+            .id("phone-prompt-card")
+            .driver_id(|| "phone-prompt-card".to_owned())
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .child(card);
         let panel = div()
             .id("phone-prompt-sheet")
             .driver_id(|| "phone-prompt-sheet".to_owned())
@@ -360,6 +376,7 @@ impl PhoneRoot {
             .gap(px(8.0))
             .pt(px(4.0))
             .pb(bottom + px(16.0))
+            .max_h(cap)
             .rounded_t(px(14.0))
             .border_t_1()
             .border_color(gpui::rgb(t.line))
@@ -368,7 +385,7 @@ impl PhoneRoot {
             .on_scroll(cx.listener(Self::prompt_sheet_scrolled))
             .child(measure)
             .child(handle)
-            .child(card)
+            .child(card_area)
             .child(Self::sheet_keys(cx));
         Some(
             div()
@@ -387,6 +404,7 @@ impl PhoneRoot {
     /// The sheet's row of Outlined keys, each typing its bytes.
     fn sheet_keys(cx: &mut Context<Self>) -> Div {
         div()
+            .flex_none()
             .flex()
             .gap(px(8.0))
             .px(px(SIDE_PADDING))

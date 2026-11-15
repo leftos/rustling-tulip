@@ -936,10 +936,11 @@ impl Render for PhoneRoot {
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten();
         self.sync_prompt_sheet(cx);
+        let screen_height = window.viewport_size().height;
         let prompt_sheet = self
             .shown
             .is_some()
-            .then(|| self.prompt_sheet_layer(padding.bottom, cx))
+            .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
             .flatten();
         let padded = || {
             div()
