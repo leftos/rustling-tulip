@@ -52,7 +52,7 @@ const COPY_LABEL: &str = "Copy";
 const UNKNOWN_KEY_LABEL: &str = "Unknown host key";
 const TRUST_LABEL: &str = "Trust";
 const CANCEL_LABEL: &str = "Cancel";
-/// A stopped host's Retry button.
+/// An offline or stopped host's Retry button.
 const RETRY_LABEL: &str = "Retry";
 /// A row's Pair button.
 const PAIR_LABEL: &str = "Pair";
@@ -212,8 +212,8 @@ struct HostRow {
     pair: bool,
 }
 
-/// What a host shows under its head: the state word always, and the parts
-/// only the states that call for them. A host's row on the hosts screen and
+/// What a host shows beside and under its head: the state word always, and
+/// the parts only the states that call for them. A host's row on the hosts screen and
 /// its header on Home both draw these, so the two never disagree.
 pub(super) struct RowParts {
     pub(super) state_word: &'static str,
@@ -222,8 +222,13 @@ pub(super) struct RowParts {
     /// The host key the user has not trusted yet, as its fingerprint, while
     /// one is pending.
     pub(super) prompt: Option<String>,
-    /// Whether the row offers Retry.
+    /// Whether the row offers a Retry line under its reason, which a
+    /// stopped host does.
     pub(super) retry: bool,
+    /// Whether the row offers Retry for an offline host: in the head of its
+    /// Home header, so the header does not grow, and as a line on its hosts
+    /// screen row.
+    pub(super) redial: bool,
 }
 
 impl RowParts {
@@ -233,16 +238,18 @@ impl RowParts {
     fn of(state: Option<&State>, pending: Option<&str>) -> Self {
         let state_word = state_words(state);
         let parts = match state {
-            Some(State::AuthFailed { reason }) => Some((reason.clone(), true)),
-            Some(State::Error { reason }) => Some((reason.clone(), false)),
+            Some(State::AuthFailed { reason }) => Some((Some(reason.clone()), true, false)),
+            Some(State::Error { reason }) => Some((Some(reason.clone()), false, true)),
+            Some(State::Closed { .. }) => Some((None, false, true)),
             _ => None,
         };
-        let Some((reason, stopped)) = parts else {
+        let Some((reason, retry, redial)) = parts else {
             return Self {
                 state_word,
                 reason: None,
                 prompt: None,
                 retry: false,
+                redial: false,
             };
         };
         match pending {
@@ -251,12 +258,14 @@ impl RowParts {
                 reason: None,
                 prompt: Some(fingerprint.to_owned()),
                 retry: false,
+                redial: false,
             },
             None => Self {
                 state_word,
-                reason: Some(reason),
+                reason,
                 prompt: None,
-                retry: stopped,
+                retry,
+                redial,
             },
         }
     }
@@ -642,7 +651,7 @@ impl PhoneRoot {
         if let Some(reason) = row.parts.reason.as_deref() {
             card = card.child(Self::reason_line(&row.name, reason, t));
         }
-        if row.parts.retry {
+        if row.parts.retry || row.parts.redial {
             card = card.child(Self::retry_line(&row.name, &row.key, cx));
         }
         card
@@ -740,19 +749,26 @@ impl PhoneRoot {
     }
 
     /// A host's Retry button: dials it again.
-    pub(super) fn retry_line(name: &str, key: &HostKey, cx: &mut Context<Self>) -> Div {
+    pub(super) fn retry_button(name: &str, key: &HostKey, cx: &mut Context<Self>) -> Stateful<Div> {
         let key = key.clone();
-        div().flex().justify_end().child(
-            phone_button(
-                &format!("phone-host-retry-{name}"),
-                ButtonKind::Outlined,
-                cx,
-            )
-            .child(RETRY_LABEL)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.retry(&key, cx);
-            })),
+        phone_button(
+            &format!("phone-host-retry-{name}"),
+            ButtonKind::Outlined,
+            cx,
         )
+        .child(RETRY_LABEL)
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.retry(&key, cx);
+        }))
+    }
+
+    /// A host's Retry on a line of its own: a stopped host's under its
+    /// reason, and an offline host's on its hosts screen row.
+    pub(super) fn retry_line(name: &str, key: &HostKey, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .justify_end()
+            .child(Self::retry_button(name, key, cx))
     }
 
     /// The add form: its title, the mode switch, the fields that mode
@@ -993,10 +1009,11 @@ mod tests {
         );
         assert!(parts.prompt.is_none(), "nothing is pending to trust");
         assert!(parts.retry, "a stopped host offers Retry");
+        assert!(!parts.redial, "its Retry is a line under its reason");
     }
 
     #[test]
-    fn an_error_row_says_offline_with_its_reason_and_no_retry() {
+    fn an_error_row_says_offline_with_its_reason_and_redial() {
         let state = State::Error {
             reason: "no handshake".to_owned(),
         };
@@ -1004,7 +1021,38 @@ mod tests {
         assert_eq!(parts.state_word, "Offline");
         assert_eq!(parts.reason.as_deref(), Some("no handshake"));
         assert!(parts.prompt.is_none());
-        assert!(!parts.retry, "only a stopped host offers Retry");
+        assert!(
+            !parts.retry,
+            "an offline host draws no Retry under its reason"
+        );
+        assert!(parts.redial, "an offline host offers Retry in its head");
+    }
+
+    #[test]
+    fn a_closed_row_says_offline_and_offers_redial() {
+        let state = State::Closed {
+            reason: "gone".to_owned(),
+        };
+        let parts = RowParts::of(Some(&state), None);
+        assert_eq!(parts.state_word, "Offline");
+        assert!(parts.reason.is_none(), "a closed host shows no reason");
+        assert!(parts.prompt.is_none());
+        assert!(
+            !parts.retry,
+            "an offline host draws no Retry under its reason"
+        );
+        assert!(parts.redial, "an offline host offers Retry in its head");
+    }
+
+    #[test]
+    fn a_connecting_row_offers_no_retry() {
+        for state in [State::Init, State::Connecting] {
+            let parts = RowParts::of(Some(&state), None);
+            assert!(
+                !parts.retry && !parts.redial,
+                "{state:?} offers no Retry: it is dialling already"
+            );
+        }
     }
 
     #[test]
@@ -1020,5 +1068,6 @@ mod tests {
             "the prompt replaces the reason line"
         );
         assert!(!parts.retry, "the prompt replaces Retry");
+        assert!(!parts.redial, "and the Retry in the head");
     }
 }

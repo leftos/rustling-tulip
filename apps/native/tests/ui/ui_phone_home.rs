@@ -1424,6 +1424,15 @@ fn refused(target: &Target) -> Connection {
     conn
 }
 
+/// A connection to `target` that could not be reached, as a host that is
+/// switched off leaves it.
+fn offline(target: &Target) -> Connection {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    let _ = conn.on_error("no handshake".to_owned());
+    conn
+}
+
 /// A phone with [`REMOTE`] open and listing its sessions, and [`SSH`]
 /// saved beside it, so Home draws a header per host.
 fn phone_with_a_host_open_beside_an_ssh_host<'a>(
@@ -1523,4 +1532,28 @@ fn a_stopped_host_on_home_shows_its_reason_and_retry(cx: &mut TestAppContext) {
         .filter(|command| matches!(command, NetCommand::Restart))
         .count();
     assert_eq!(restarts, 1, "Retry restarts the host");
+}
+
+#[gpui::test]
+fn an_offline_host_on_home_shows_retry_and_redials_now(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_a_host_open_beside_an_ssh_host(cx, &dir);
+    let ssh = ssh_target();
+    h.host(&ssh).event(NetEvent::State(offline(&ssh)));
+
+    assert!(
+        drawn(&mut h, &format!("phone-host-retry-{SSH}")),
+        "an offline host offers Retry"
+    );
+    let _ = h.host(&ssh).commands();
+
+    h.click_on(&format!("phone-host-retry-{SSH}"));
+
+    let restarts = h
+        .host(&ssh)
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, NetCommand::Restart))
+        .count();
+    assert_eq!(restarts, 1, "Retry redials the host now");
 }

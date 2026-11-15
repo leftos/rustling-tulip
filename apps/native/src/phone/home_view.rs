@@ -507,10 +507,11 @@ impl PhoneRoot {
     }
 
     /// `host`'s header, drawn only while more than one host is listed: its
-    /// state's dot, its name, where its connection stands while not online
-    /// and, while it has not approved this phone, `Pair`, as the desktop's
-    /// host header says them; under it the parts its connection calls for,
-    /// drawn as its row on the hosts screen draws them.
+    /// state's dot, its name, where its connection stands while not online,
+    /// `Pair` while it has not approved this phone and `Retry` while it is
+    /// offline, as the desktop's host header says them; under it the parts
+    /// its connection calls for, drawn as its row on the hosts screen draws
+    /// them.
     fn host_header(
         host: &HomeHost,
         state: HostHeaderState,
@@ -543,6 +544,11 @@ impl PhoneRoot {
                 this.pair(&key, window, cx);
             }))
         });
+        let redial = parts.redial.then(|| {
+            Self::retry_button(name, &host.host, cx)
+                .flex_none()
+                .min_h(px(TOUCH_TARGET))
+        });
         let head = div()
             .flex()
             .items_center()
@@ -559,7 +565,8 @@ impl PhoneRoot {
                     .child(host.label.clone()),
             )
             .children(status)
-            .children(pair);
+            .children(pair)
+            .children(redial);
         let mut extra = div()
             .flex()
             .flex_col()

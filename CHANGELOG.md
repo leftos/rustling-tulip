@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings › Remote access tells you when Tailscale is slow to answer, while remote access keeps serving.
 - `rustling-tulipd push-fallback` sends each paired iPhone a push it cannot open, to check that its fallback alert shows.
 - A button beside the sidebar's Sessions title collapses or expands every session's subagent and dispatch-run rows at once.
+- On the iPhone, a host shown as Offline has a Retry button that tries it again at once, instead of waiting for it to redial.
 
 ### Fixed
 
