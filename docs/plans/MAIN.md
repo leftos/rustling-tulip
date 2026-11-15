@@ -43,6 +43,7 @@
 - [ ] RT-1450 Show Claude's "Make auto mode your default permission mode?" dialog as a Chat card and as needing you
 - [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule
+- [ ] RT-1752 Tell Claude's suggested next prompt apart from a draft in the prompt box · release vNext
 
 ## Updates and installer
 
@@ -218,6 +219,9 @@
 - [ ] RT-1246 Clear desktop Chat's one-Esc hold when the turn stops or the send was lost
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
+- [ ] RT-1750 Keep a selected multi-select option's description readable in Chat cards · release vNext
+- [ ] RT-1753 Pull a prompt-box draft into Chat's message box, or send it as it stands · release vNext
+- [ ] RT-1757 Draw Code Mode's REPL scripts in Chat as lines in their tool group · release vNext
 
 ## Settings and themes
 
@@ -504,6 +508,13 @@
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
+- [ ] RT-1747 Lower the phone's keyboard from the chat and the terminal · release vNext
+- [ ] RT-1748 Expand a stretch with a tap in the phone's Chat · release vNext
+- [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext+1
+- [ ] RT-1751 Draw the phone tray's AskUserQuestion card like Chat's, and offer Open on every card · release vNext
+- [ ] RT-1754 Select Chat text on the phone with a long press: handles and Copy · release vNext
+- [ ] RT-1755 Add a phone Settings screen by category: Notifications, Hosts, Appearance · release vNext
+- [ ] RT-1756 Arrange the phone's Keys in a grid in Settings, with multi-key keys like Ctrl+B · release vNext+1
 
 ## Dashboard, Gates and Linear
 
@@ -746,7 +757,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1535, RT-1695, RT-1735, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1518, RT-1535, RT-1695, RT-1735, RT-1754, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
