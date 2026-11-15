@@ -50,6 +50,10 @@ pub(crate) const STATUS_TRACK_ICON: &str = "icons/status-track.svg";
 pub(crate) const SIDEBAR_CHEVRON_DOWN_ICON: &str = "icons/sidebar-chevron-down.svg";
 /// The sessions panel's collapsed-container chevron.
 pub(crate) const SIDEBAR_CHEVRON_RIGHT_ICON: &str = "icons/sidebar-chevron-right.svg";
+/// The sessions header's fold-all button while any fold is open.
+pub(crate) const SIDEBAR_COLLAPSE_ALL_ICON: &str = "icons/sidebar-collapse-all.svg";
+/// The sessions header's fold-all button while every fold is closed.
+pub(crate) const SIDEBAR_EXPAND_ALL_ICON: &str = "icons/sidebar-expand-all.svg";
 /// A workspace container's icon.
 pub(crate) const SIDEBAR_WORKSPACE_ICON: &str = "icons/sidebar-workspace.svg";
 /// A repo container's git-branch icon.
@@ -139,7 +143,7 @@ fn agent_icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
 }
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 42] = [
+const ASSETS: [(&str, &[u8]); 44] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -207,6 +211,14 @@ const ASSETS: [(&str, &[u8]); 42] = [
     (
         SIDEBAR_CHEVRON_RIGHT_ICON,
         include_bytes!("../assets/icons/sidebar-chevron-right.svg"),
+    ),
+    (
+        SIDEBAR_COLLAPSE_ALL_ICON,
+        include_bytes!("../assets/icons/sidebar-collapse-all.svg"),
+    ),
+    (
+        SIDEBAR_EXPAND_ALL_ICON,
+        include_bytes!("../assets/icons/sidebar-expand-all.svg"),
     ),
     (
         SIDEBAR_WORKSPACE_ICON,

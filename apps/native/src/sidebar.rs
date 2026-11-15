@@ -2443,6 +2443,19 @@ impl SidebarModel {
         self.toggle_container(&session_fold_key(host, id));
     }
 
+    /// Closes the fold of every key in `keys` when `collapse`, else opens
+    /// them; a host's and a container's fold stay as they are.
+    pub fn set_session_folds(&mut self, keys: &[String], collapse: bool) {
+        let collapsed = &mut self.ui.collapsed_containers;
+        for key in keys {
+            if collapse {
+                collapsed.insert(key.clone());
+            } else {
+                collapsed.remove(key);
+            }
+        }
+    }
+
     /// Folds or unfolds `host`'s header ([`host_fold_key`]); the folds of
     /// the containers under it stay as they are.
     pub fn toggle_host(&mut self, host: &HostKey) {
@@ -3920,6 +3933,32 @@ fn container_key(kind: ContainerKind, id: &str) -> String {
 #[must_use]
 pub fn session_fold_key(host: &HostKey, id: &str) -> String {
     host_container_key(host, &format!("session:{id}"))
+}
+
+/// Every session row with rows nested under it, in the containers the
+/// sidebar draws, as the key its fold saves under ([`session_fold_key`]) and
+/// whether that fold is closed. A folded container draws no leaf, so the
+/// sessions under it offer no fold.
+#[must_use]
+pub fn session_fold_states(containers: &[Container]) -> Vec<(String, bool)> {
+    containers
+        .iter()
+        .filter(|container| !container.collapsed)
+        .flat_map(|container| container.leaves.iter())
+        .filter(|leaf| leaf.kind == LeafKind::Session && leaf.nested > 0)
+        .map(|leaf| (session_fold_key(&leaf.host, &leaf.id), leaf.collapsed))
+        .collect()
+}
+
+/// Which way a fold-all click moves: `Some(true)` closes every session
+/// fold while any is open, `Some(false)` opens them all when every one is
+/// closed, and `None` while no session has rows nested under it.
+#[must_use]
+pub fn fold_all_target(states: &[(String, bool)]) -> Option<bool> {
+    if states.is_empty() {
+        return None;
+    }
+    Some(states.iter().any(|&(_, closed)| !closed))
 }
 
 /// The per-session state the tabs view orders and marks its leaves by: each
@@ -11510,6 +11549,139 @@ pub(crate) mod tests {
         model.toggle_session_fold(&HostKey::Local, "s1");
         assert!(!find_leaf(&model.containers(), "s1").collapsed);
         assert!(!model.ui_state().collapsed_containers.contains("session:s1"));
+    }
+
+    /// This PC listing `s1` (conversation `c1`, subagents `a1` and `a2`)
+    /// and `s2` in `r1`, and run `d1` that `s1` dispatched.
+    fn fold_all_model() -> SidebarModel {
+        let mut model = model_with(vec![
+            with_subagents(
+                talking(in_repo("s1", "r1"), "c1"),
+                vec![subagent("a1", 1), subagent("a2", 1)],
+            ),
+            in_repo("s2", "r1"),
+        ]);
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+            },
+        );
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::DispatchRuns {
+                runs: vec![run_of("d1", "c1", 10)],
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn fold_all_target_is_none_without_nested_rows() {
+        let model = model_with(vec![in_repo("s1", "r1")]);
+        let states = session_fold_states(&model.containers());
+        assert!(
+            states.is_empty(),
+            "a session with no runs or subagents offers no fold: {states:?}"
+        );
+        assert_eq!(fold_all_target(&states), None, "no fold to move");
+    }
+
+    #[test]
+    fn fold_all_target_collapses_while_any_is_open() {
+        let model = fold_all_model();
+        assert_eq!(
+            session_fold_states(&model.containers()),
+            [(session_fold_key(&HostKey::Local, "s1"), false)],
+            "only the session with rows nested under it folds"
+        );
+        let mixed = [
+            (session_fold_key(&HostKey::Local, "s1"), true),
+            (session_fold_key(&HostKey::Local, "s2"), false),
+        ];
+        assert_eq!(
+            fold_all_target(&mixed),
+            Some(true),
+            "one open fold collapses them all"
+        );
+    }
+
+    #[test]
+    fn session_fold_states_skips_a_folded_container() {
+        let mut model = fold_all_model();
+        model.toggle_container("repo:r1");
+        assert!(
+            session_fold_states(&model.containers()).is_empty(),
+            "a folded repo draws no leaf, so its sessions offer no fold"
+        );
+    }
+
+    #[test]
+    fn fold_all_target_expands_when_all_are_folded() {
+        let states = [
+            (session_fold_key(&HostKey::Local, "s1"), true),
+            (session_fold_key(&HostKey::Local, "s2"), true),
+        ];
+        assert_eq!(
+            fold_all_target(&states),
+            Some(false),
+            "every fold closed opens them all"
+        );
+    }
+
+    #[test]
+    fn set_session_folds_leaves_host_and_container_folds_alone() {
+        let mut model = fold_all_model();
+        model.toggle_container("repo:r2");
+        model.toggle_host(&HostKey::Local);
+        let keys: Vec<String> = session_fold_states(&model.containers())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+
+        model.set_session_folds(&keys, true);
+
+        assert!(
+            model.ui_state().collapsed_containers.contains("session:s1"),
+            "the session's fold is stored"
+        );
+        assert!(
+            find_leaf(&model.containers(), "s1").collapsed,
+            "the session's nested rows fold away"
+        );
+        assert!(
+            !find_leaf(&model.containers(), "s2").collapsed,
+            "a session with no nested rows is untouched"
+        );
+        assert!(
+            model.ui_state().collapsed_containers.contains("repo:r2"),
+            "the container keeps its fold"
+        );
+        assert!(
+            model
+                .ui_state()
+                .collapsed_containers
+                .contains(&host_fold_key(&HostKey::Local)),
+            "the host keeps its fold"
+        );
+
+        model.set_session_folds(&keys, false);
+
+        assert!(
+            !model.ui_state().collapsed_containers.contains("session:s1"),
+            "the session fold is gone"
+        );
+        assert!(
+            model.ui_state().collapsed_containers.contains("repo:r2"),
+            "unfolding the sessions leaves the container folded"
+        );
+        assert!(
+            model
+                .ui_state()
+                .collapsed_containers
+                .contains(&host_fold_key(&HostKey::Local)),
+            "and the host folded"
+        );
     }
 
     #[test]

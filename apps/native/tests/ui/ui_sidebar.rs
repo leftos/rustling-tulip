@@ -2697,6 +2697,94 @@ fn a_session_without_runs_draws_no_fold(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn fold_all_ignores_a_session_the_tabs_view_does_not_nest(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+    assert!(
+        drawn(&mut h, "sidebar-fold-all"),
+        "precondition: the repos view draws the button"
+    );
+
+    h.click_on("sidebar-view-tabs");
+
+    assert!(
+        drawn(&mut h, "leaf-s1"),
+        "precondition: the run's host still lists, unbound"
+    );
+    assert!(
+        !drawn(&mut h, "leaf-d1"),
+        "precondition: the tabs view nests no run under an unbound session"
+    );
+    assert!(
+        !drawn(&mut h, "sidebar-fold-all"),
+        "the button counts only the chevrons the tabs view draws"
+    );
+}
+
+#[gpui::test]
+fn collapse_all_folds_every_session_with_runs_and_saves_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+    assert!(drawn(&mut h, "leaf-d1"), "precondition: the run draws");
+    assert!(
+        drawn(&mut h, "sidebar-fold-all"),
+        "precondition: a run under a session draws the button"
+    );
+    h.sent();
+
+    h.click_on("sidebar-fold-all");
+
+    assert!(!drawn(&mut h, "leaf-d1"), "the run's row folds away");
+    assert!(
+        saved_ui(&dir)["collapsed_containers"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().any(|key| key == "session:s1")),
+        "the fold is saved"
+    );
+    let sent = h.sent();
+    assert!(sent.is_empty(), "the fold sends nothing: {sent:?}");
+}
+
+#[gpui::test]
+fn expand_all_unfolds_them_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_run_harness(cx, &dir);
+    let open = h.bounds("leaf-d1").top();
+
+    h.click_on("sidebar-fold-all");
+    assert!(
+        !drawn(&mut h, "leaf-d1"),
+        "precondition: the button folded the run away"
+    );
+
+    h.click_on("sidebar-fold-all");
+
+    assert!(drawn(&mut h, "leaf-d1"), "the run draws again");
+    assert_eq!(h.bounds("leaf-d1").top(), open, "it returns to its place");
+    assert!(
+        saved_ui(&dir)["collapsed_containers"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().all(|key| key != "session:s1")),
+        "the open fold leaves the saved set"
+    );
+}
+
+#[gpui::test]
+fn no_fold_all_button_without_nested_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &runs_fixture());
+
+    assert!(
+        drawn(&mut h, "sidebar-title"),
+        "precondition: the sidebar's title draws"
+    );
+    assert!(
+        !drawn(&mut h, "sidebar-fold-all"),
+        "a sidebar whose sessions have no runs or subagents draws no fold-all button"
+    );
+}
+
+#[gpui::test]
 fn dispatch_runs_from_a_daemon_without_the_feature_are_ignored(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &runs_fixture());

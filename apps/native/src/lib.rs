@@ -290,8 +290,8 @@ use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{
-    SavedKeyClash, SidebarModel, UiState, can_attach, load_ui_state, normalize_fs_path,
-    save_ui_state,
+    SavedKeyClash, SidebarModel, UiState, can_attach, fold_all_target, load_ui_state,
+    normalize_fs_path, save_ui_state, session_fold_states,
 };
 use crate::source_control::ScModel;
 use crate::spawn_form::{BranchCache, Lock, Target};
@@ -3546,6 +3546,19 @@ impl RootView {
     /// Folds or unfolds the rows nested under `host`'s session `id`.
     fn toggle_session_fold(&mut self, host: &HostKey, id: &str, cx: &mut Context<Self>) {
         self.sidebar.toggle_session_fold(host, id);
+        self.save_ui();
+        cx.notify();
+    }
+
+    /// Folds every session's nested rows when any is open, else unfolds
+    /// them all; a host's and a container's fold stay as they are.
+    pub(crate) fn fold_all_sessions(&mut self, cx: &mut Context<Self>) {
+        let states = session_fold_states(&self.sidebar_containers());
+        let Some(collapse) = fold_all_target(&states) else {
+            return;
+        };
+        let keys: Vec<String> = states.into_iter().map(|(key, _)| key).collect();
+        self.sidebar.set_session_folds(&keys, collapse);
         self.save_ui();
         cx.notify();
     }

@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use crate::Pick;
 use crate::assets::{
     SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
-    SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON,
-    SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
+    SIDEBAR_COLLAPSE_ALL_ICON, SIDEBAR_EXPAND_ALL_ICON, SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON,
+    SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON, SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON,
+    SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, Layer, focus_ring, outlined_button, primary_button};
 use crate::connection::{Connection, State};
@@ -34,7 +35,7 @@ use crate::session_menu::{
 use crate::sidebar::{
     Activity, Container, ContainerKind, DETACHED_BANNER, FinishedSubagentRows, HostGroup, Leaf,
     LeafDensity, LeafKind, RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, can_attach,
-    chip_tip,
+    chip_tip, fold_all_target, session_fold_states,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
@@ -210,6 +211,7 @@ impl RootView {
         let t = theme(cx);
         let layout = PanelLayout { width, chrome };
         let containers = self.sidebar_containers();
+        let fold_all = fold_all_target(&session_fold_states(&containers));
         let groups = self.shown_host_groups(chrome);
         // The chip is the only way to arm, so an arm cannot outlive it.
         if !detached_stop_all_shown(&containers) {
@@ -271,7 +273,7 @@ impl RootView {
             body.children(self.sidebar_rows(&containers, &groups, layout, window, cx))
         };
         let shell_in_toolbar = groups.is_empty();
-        self.sidebar_frame(layout, body, shell_in_toolbar, window, cx)
+        self.sidebar_frame(layout, body, shell_in_toolbar, fold_all, window, cx)
     }
 
     /// The panel `layout.width` wide around `body`: its fill and, in the
@@ -281,6 +283,7 @@ impl RootView {
         layout: PanelLayout,
         body: Stateful<Div>,
         shell_in_toolbar: bool,
+        fold_all: Option<bool>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -299,6 +302,7 @@ impl RootView {
             .child(header(
                 self.sidebar.sidebar_view(),
                 self.sidebar.repo_filter(),
+                fold_all,
                 cx,
             ))
             .child(self.toolbar(shell_in_toolbar, window, cx))
@@ -1402,9 +1406,48 @@ fn segmented<C: Copy + PartialEq + 'static>(
         .children(segments)
 }
 
-/// The panel's title, the All / Active row filter the repos view gets and the
+/// The fold-all button's hover text while any session's ends are open.
+const COLLAPSE_ALL_TIP: &str = "Collapse all subagent and run trees";
+/// The fold-all button's hover text while every session's ends are closed.
+const EXPAND_ALL_TIP: &str = "Expand all subagent and run trees";
+
+/// The fold-all button: it closes every session's nested rows while any
+/// one is open, and opens them all when every one is closed.
+fn fold_all_button(collapse: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
+    let (path, tip) = if collapse {
+        (SIDEBAR_COLLAPSE_ALL_ICON, COLLAPSE_ALL_TIP)
+    } else {
+        (SIDEBAR_EXPAND_ALL_ICON, EXPAND_ALL_TIP)
+    };
+    div()
+        .id("sidebar-fold-all")
+        .driver_id(|| "sidebar-fold-all".to_owned())
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(ui_px(cx, 22.0))
+        .rounded(px(5.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(gpui::rgb(t.hover_bg)))
+        .child(icon(path, 13.0, t.subtle))
+        .tooltip(tooltip(tip.to_owned()))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.fold_all_sessions(cx);
+        }))
+}
+
+/// The panel's title, the fold-all button while a session has rows nested
+/// under it, the All / Active row filter the repos view gets and the
 /// Repos / Tabs grouping toggle.
-fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> Div {
+fn header(
+    view: SidebarView,
+    filter: RepoFilter,
+    fold_all: Option<bool>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let t = theme(cx);
     let filtering = view == SidebarView::Repos;
     let pad = if filtering { 7.0 } else { 9.0 };
@@ -1444,6 +1487,7 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
                     StyledText::new("Sessions"),
                 )),
         )
+        .children(fold_all.map(|collapse| fold_all_button(collapse, cx)))
         .child(
             div()
                 .flex()
