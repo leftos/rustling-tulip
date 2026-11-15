@@ -219,10 +219,9 @@
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
 - [ ] RT-1753 Pull a prompt-box draft into Chat's message box, or send it as it stands · release vNext
-  - [ ] RT-1777 Read the whole prompt-box draft and clear the box through the agent plugin · release vNext
-  - [ ] RT-1778 Add Pull and Send-as-is for a prompt-box draft on the wire and in the daemon · release vNext
   - [ ] RT-1779 Pull or send a prompt-box draft from desktop Chat, and tap Claude's suggestion · release vNext
   - [ ] RT-1780 Pull or send a prompt-box draft from the phone's Chat, and tap Claude's suggestion · release vNext
+  - [ ] RT-1800 Capture scrolled drafts at 24 and 30 rows and pin the draft reader's height cap · release vNext
 - [ ] RT-1757 Draw Code Mode's REPL scripts in Chat as lines in their tool group · release vNext
   - [ ] RT-1759 Model a Code Mode script and its inner calls as one row in Chat · release vNext
   - [ ] RT-1760 Draw a Code Mode script as one line in desktop Chat · release vNext
@@ -368,6 +367,7 @@
 - [ ] RT-1172 Find why a click on a This PC pane keeps focus on a remote pane after This PC reconnects
 - [ ] RT-1229 Resend the device list when a loopback connection's state events lag
 - [ ] RT-1649 Claim the size of sessions the first-connect chooser extracts into new tabs when each tab is first shown
+- [ ] RT-1801 Don't dial tailnet hosts without their token when the credential store cannot be opened
 
 ## Claude accounts
 
@@ -514,8 +514,6 @@
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 - [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext+1
 - [ ] RT-1754 Select Chat text on the phone with a long press: handles and Copy · release vNext
-  - [ ] RT-1786 Model the phone Chat selection and its copy text (chat_select) · release vNext
-  - [ ] RT-1787 Hit-test phone Chat text and paint a selection highlight · release vNext
   - [ ] RT-1788 Start a phone Chat selection with a long press, and widen it while held · release vNext
   - [ ] RT-1789 Drag the phone Chat selection handles · release vNext
   - [ ] RT-1790 Copy the phone Chat selection, and clear it on a tap, page change or reload · release vNext
@@ -532,6 +530,8 @@
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
 - [ ] RT-1785 Even out the phone Appearance page: theme row spacing and the text size label
+- [ ] RT-1793 Keep an offline host's card on Settings › Hosts from jumping on each redial
+- [ ] RT-1797 Hit-test a wrapped right- or centre-aligned Chat table cell by its own line's offset
 
 ## Dashboard, Gates and Linear
 
@@ -759,6 +759,9 @@
 - [ ] RT-1746 Fix the phone key bar's Ctrl after Backspace, Ctrl+C over a selection, and Back over its Quick dock
 - [ ] RT-1763 Forget a link press released off the text in the gpui fork's InteractiveText
 - [ ] RT-1775 Log a chat context the agent adapter cannot downcast instead of silently replacing it
+- [ ] RT-1794 Bound how long a tailnet dial to a switched-off host stays Connecting
+- [ ] RT-1795 Count a pulled draft's row widths in terminal columns, and keep a split long word whole
+- [ ] RT-1796 Report a draft pull that the owner's own key cut short as not cleared
 
 ## Design files
 
