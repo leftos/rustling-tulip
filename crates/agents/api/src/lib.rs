@@ -35,8 +35,8 @@ pub use activity::{
     MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
 pub use dialogs::{
-    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ScreenWork, ViewGoal,
-    ViewReading, ViewRefusal, ViewStep,
+    AnswerRecipe, AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect,
+    ScreenWork, ViewGoal, ViewReading, ViewRefusal, ViewStep,
 };
 pub use screen_rules::{
     LineMatcher, ReadySignal, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
@@ -941,6 +941,23 @@ pub trait Agent: Send + Sync + 'static {
         self.read_view(rows)
     }
 
+    /// The draft in the agent's prompt box on the screen whose visible rows,
+    /// top to bottom, are `rows`; `None` for an agent whose box the daemon
+    /// does not read, or a box holding no draft. `dim` has the meaning
+    /// [`Agent::read_chat_screen_styled`] gives it.
+    fn read_draft(&self, _rows: &[String], _dim: &[String]) -> Option<DraftReading> {
+        None
+    }
+
+    /// The keys that clear the agent's prompt box holding `draft`.
+    ///
+    /// # Errors
+    ///
+    /// Why the agent has no recipe that clears this draft.
+    fn clear_draft_recipe(&self, _draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal> {
+        Err(AnswerRefusal::Unsupported)
+    }
+
     /// The running work the screen whose visible rows, top to bottom, are
     /// `rows` counts; `None` for an agent whose screen the daemon does not
     /// count, or a frame that shows no count (a dialog is up).
@@ -1188,6 +1205,16 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::read_view_styled`].
     fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading>;
+
+    /// See [`Agent::read_draft`].
+    fn read_draft(&self, rows: &[String], dim: &[String]) -> Option<DraftReading>;
+
+    /// See [`Agent::clear_draft_recipe`].
+    ///
+    /// # Errors
+    ///
+    /// Why the agent has no recipe that clears this draft.
+    fn clear_draft_recipe(&self, draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal>;
 
     /// See [`Agent::read_work`].
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork>;
@@ -1470,6 +1497,14 @@ impl<A: Agent> AgentPlugin for A {
 
     fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading> {
         Agent::read_view_styled(self, rows, dim)
+    }
+
+    fn read_draft(&self, rows: &[String], dim: &[String]) -> Option<DraftReading> {
+        Agent::read_draft(self, rows, dim)
+    }
+
+    fn clear_draft_recipe(&self, draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal> {
+        Agent::clear_draft_recipe(self, draft)
     }
 
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {

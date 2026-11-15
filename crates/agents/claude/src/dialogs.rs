@@ -20,8 +20,8 @@
 use std::cmp::Ordering;
 
 use agent_api::{
-    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ScreenWork, ViewGoal,
-    ViewReading, ViewRefusal, ViewStep,
+    AnswerRecipe, AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect,
+    ScreenWork, ViewGoal, ViewReading, ViewRefusal, ViewStep,
 };
 use protocol::{
     ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
@@ -176,6 +176,157 @@ pub(crate) fn read_view_styled(rows: &[String], dim: &[String]) -> ViewReading {
     view
 }
 
+/// The rule over the input box and the one under it: the last two rule rows;
+/// `None` for a screen showing fewer.
+fn box_rules(rows: &[String]) -> Option<(usize, usize)> {
+    let rules = rule_indices(rows);
+    let [.., top, bottom] = rules[..] else {
+        return None;
+    };
+    Some((top, bottom))
+}
+
+/// The draft the input box between the last two rules holds, as the user
+/// typed it: `None` for a box holding no text, the agent's placeholder or
+/// suggestion, bash mode, or a first row with no cursor on it. `dim` is
+/// `rows` with every character not drawn dim replaced by a space, as
+/// [`suggestion`] takes it.
+///
+/// The box's first row loses its prompt and the one space after it, and
+/// every later row the box's two-column indent; trailing spaces go from all
+/// of them. A row takes the next one with it when the box wrapped it at its
+/// inner width (Ink wraps at a word boundary, and a row's wrap flag does not
+/// tell that from a newline the user typed); otherwise the two are separate
+/// lines, and a blank row is a new empty one.
+pub(crate) fn read_draft(rows: &[String], dim: &[String]) -> Option<DraftReading> {
+    let (top, bottom) = box_rules(rows)?;
+    if suggestion(rows, dim).is_some() {
+        return None;
+    }
+    let boxed = &rows[top + 1..bottom];
+    let first = boxed.iter().position(|row| !row.trim().is_empty())?;
+    let last = boxed.iter().rposition(|row| !row.trim().is_empty())?;
+    let head = draft_first_text(&boxed[first])?;
+    if first == last && head.trim().is_empty() {
+        return None;
+    }
+    if is_try_placeholder(head.trim()) || is_agent_placeholder(head.trim()) {
+        return None;
+    }
+    let mut text_rows = Vec::with_capacity(last - first + 1);
+    text_rows.push(head.trim_end().to_owned());
+    text_rows.extend(
+        boxed[first + 1..=last]
+            .iter()
+            .map(|row| box_row_text(row).to_owned()),
+    );
+    // The box wraps at its inner width: the rule's width less the prompt's
+    // `❯ ` and the box's two columns of right padding.
+    let inner = rows[top].chars().count().saturating_sub(4);
+    let text = join_draft(&text_rows, inner);
+    let height = bottom - top - 1;
+    // The box's height is capped by the screen and by the box's own tallest
+    // draw; the lower of the two only refuses a clear the box might still
+    // hold more of.
+    let screen = rows.len();
+    let cap = (screen * 3 / 8).min((screen / 2).saturating_sub(5).max(3));
+    Some(DraftReading {
+        pasted: holds_paste_placeholder(&text.replace('\n', " ")),
+        whole: height < cap,
+        text,
+        rows: height,
+    })
+}
+
+/// The keys that clear the box holding `draft`: a step per line clear, each
+/// one press of its own, since a burst of them is dropped whole. ctrl+u
+/// deletes to the start of its line and at a line's start the newline before
+/// it, so N lines take 2N-1 presses; the recipe sends 2·rows+2, and a press
+/// on the empty box does nothing. No key moves the keys out of the box, so
+/// the presses all reach it. A paste, or a draft the box shows only the end
+/// of, is refused.
+///
+/// # Errors
+///
+/// [`AnswerRefusal::NotThisDialog`] for a draft whose text the box does not
+/// show whole: its keys would clear less than the draft.
+pub(crate) fn clear_draft_recipe(draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal> {
+    if draft.pasted || !draft.whole {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    Ok(AnswerRecipe {
+        steps: (0..2 * draft.rows + 2)
+            .map(|_| RecipeStep {
+                keys: vec![Key::ClearLine],
+                expect: ScreenExpect::Any,
+            })
+            .collect(),
+    })
+}
+
+/// The text of the box's first row: the prompt and the one space after it
+/// taken off; `None` for a row holding no prompt, bash mode's `!` among them.
+fn draft_first_text(row: &str) -> Option<&str> {
+    let rest = row.trim_start().strip_prefix(CURSOR)?;
+    Some(match rest.chars().next() {
+        Some(space) if space.is_whitespace() => &rest[space.len_utf8()..],
+        _ => rest,
+    })
+}
+
+/// A box row after the first as its draft reads it: up to two leading spaces
+/// (the box's indent) and its trailing spaces taken off.
+fn box_row_text(row: &str) -> &str {
+    let trimmed = row.trim_end();
+    let unindented = trimmed.strip_prefix(' ').unwrap_or(trimmed);
+    unindented.strip_prefix(' ').unwrap_or(unindented)
+}
+
+/// The box's body rows joined into the draft's text: a row the box wrapped
+/// runs on into the next with one space, and any other pair is two lines.
+fn join_draft(text_rows: &[String], inner: usize) -> String {
+    let mut text = String::new();
+    for (index, row) in text_rows.iter().enumerate() {
+        if let Some(previous) = index.checked_sub(1).map(|previous| &text_rows[previous]) {
+            text.push(if wraps(previous, row, inner) {
+                ' '
+            } else {
+                '\n'
+            });
+        }
+        text.push_str(row);
+    }
+    text
+}
+
+/// Whether the box wrapped `previous` onto `row`: `row` holds text, starts
+/// with no whitespace (the box never wraps onto an indented row), and
+/// `previous`'s width, one space and `row`'s first word are over the box's
+/// inner width, which a newline the user typed never is.
+fn wraps(previous: &str, row: &str, inner: usize) -> bool {
+    if row.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some(word) = row.split_whitespace().next() else {
+        return false;
+    };
+    previous.chars().count() + 1 + word.chars().count() > inner
+}
+
+/// Whether `text` holds a paste's or an image's placeholder — `[Pasted text
+/// #1 +40 lines]`, `[Image #1]` — so it is not the whole draft.
+fn holds_paste_placeholder(text: &str) -> bool {
+    const LEADS: [&str; 2] = ["[Pasted text #", "[Image #"];
+    LEADS.iter().any(|lead| {
+        text.match_indices(lead).any(|(start, _)| {
+            text[start + lead.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        })
+    })
+}
+
 /// The agent's suggested next prompt in the box between the last two rules,
 /// with the index of the rule over the box: the box's one row of text after
 /// the prompt, at least two characters, no placeholder, and every character
@@ -183,10 +334,7 @@ pub(crate) fn read_view_styled(rows: &[String], dim: &[String]) -> ViewReading {
 /// replaced by a space). The first may be dim or not: the agent's own cursor
 /// draws that cell.
 fn suggestion(rows: &[String], dim: &[String]) -> Option<(usize, String)> {
-    let rules = rule_indices(rows);
-    let [.., top, bottom] = rules[..] else {
-        return None;
-    };
+    let (top, bottom) = box_rules(rows)?;
     let mut body = (top + 1..bottom).filter(|&index| !rows[index].trim().is_empty());
     let index = body.next()?;
     if body.next().is_some() {
@@ -946,8 +1094,7 @@ fn review_body(rows: &[String]) -> String {
 /// `Message @…` one), or more than one row, is a draft; an empty box is working while a spinner shows above
 /// it.
 fn composer(rows: &[String]) -> ComposerState {
-    let rules = rule_indices(rows);
-    let [.., top, bottom] = rules[..] else {
+    let Some((top, bottom)) = box_rules(rows) else {
         return ComposerState::Unknown;
     };
     let body: Vec<&str> = rows[top + 1..bottom]
@@ -1554,7 +1701,7 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
     // still carries the session's own name; the daemon drops a label equal
     // to the session's terminal title.
     let agent_shown = if panel.is_empty() {
-        dialog || box_first_row(rows, &rules).is_some_and(is_agent_placeholder)
+        dialog || box_first_row(rows).is_some_and(is_agent_placeholder)
     } else {
         panel_in_view.is_some_and(|row| row > 0)
     };
@@ -1562,11 +1709,7 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
         agent_in_view: agent_in_view(rows, &rules).filter(|_| agent_shown),
         key_holder: key_holder(under, mode_line),
         stashed: mode_line.is_some_and(|line| line.ends_with(STASHED)),
-        box_first_line: if dialog {
-            None
-        } else {
-            box_first_line(rows, &rules)
-        },
+        box_first_line: if dialog { None } else { box_first_line(rows) },
         dialog,
         panel_cursor: panel.iter().position(|row| row.cursor),
         panel_in_view,
@@ -1717,17 +1860,15 @@ fn panel_row(row: &str) -> Option<PanelRow> {
 
 /// The box's first line of text, its prompt taken off; `None` for an empty
 /// box or one showing only a placeholder.
-fn box_first_line(rows: &[String], rules: &[usize]) -> Option<String> {
-    let text = box_first_row(rows, rules)?;
+fn box_first_line(rows: &[String]) -> Option<String> {
+    let text = box_first_row(rows)?;
     let placeholder = is_try_placeholder(text) || is_agent_placeholder(text);
     (!text.is_empty() && !placeholder).then(|| text.to_owned())
 }
 
 /// The box's first non-empty row, trimmed and its prompt taken off.
-fn box_first_row<'a>(rows: &'a [String], rules: &[usize]) -> Option<&'a str> {
-    let [.., top, bottom] = rules[..] else {
-        return None;
-    };
+fn box_first_row(rows: &[String]) -> Option<&str> {
+    let (top, bottom) = box_rules(rows)?;
     let first = rows[top + 1..bottom]
         .iter()
         .map(|row| row.trim())
@@ -1802,11 +1943,12 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
 )]
 mod tests {
     use super::{
-        next_view_key, read, read_styled, read_view, read_view_styled, recipe, spinner_above,
+        clear_draft_recipe, next_view_key, read, read_draft, read_styled, read_view,
+        read_view_styled, recipe, spinner_above,
     };
     use agent_api::{
-        AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
-        ViewRefusal, ViewStep,
+        AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal,
+        ViewReading, ViewRefusal, ViewStep,
     };
     use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
 
@@ -1963,6 +2105,23 @@ mod tests {
         screen.push(rule());
         screen.push("  ? for shortcuts".to_owned());
         screen
+    }
+
+    /// An input box `width` columns wide holding `body`, on a screen
+    /// `screen_rows` rows tall: blank rows above the box's top rule.
+    fn draft_box(width: usize, body: &[String], screen_rows: usize) -> Vec<String> {
+        let rule = "─".repeat(width);
+        let mut screen = vec![String::new(); screen_rows.saturating_sub(body.len() + 3)];
+        screen.push(rule.clone());
+        screen.extend(body.iter().cloned());
+        screen.push(rule);
+        screen.push("  ? for shortcuts".to_owned());
+        screen
+    }
+
+    /// `screen` read as a draft with nothing drawn dim.
+    fn draft_of(screen: &[String]) -> Option<DraftReading> {
+        read_draft(screen, &vec![String::new(); screen.len()])
     }
 
     /// A permission dialog with `options` and `footer` (none for a frame
@@ -3404,5 +3563,176 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_draft_of_two_lines_keeps_its_break() {
+        let screen = draft_box(
+            40,
+            &rows(&["❯ add a done command", "  then a list command"]),
+            5,
+        );
+        let draft = draft_of(&screen).expect("a draft");
+        assert_eq!(draft.text, "add a done command\nthen a list command");
+        assert_eq!(draft.rows, 2);
+    }
+
+    #[test]
+    fn a_row_one_over_the_wrap_width_runs_on() {
+        let long = "x".repeat(21);
+        let first = format!("❯ {long}");
+        let screen = draft_box(30, &rows(&[first.as_str(), "  items more"]), 5);
+        assert_eq!(
+            draft_of(&screen).expect("a draft").text,
+            format!("{long} items more")
+        );
+    }
+
+    #[test]
+    fn a_row_at_the_wrap_width_is_a_new_line() {
+        let long = "x".repeat(21);
+        let first = format!("❯ {long}");
+        let screen = draft_box(30, &rows(&[first.as_str(), "  item more"]), 5);
+        assert_eq!(
+            draft_of(&screen).expect("a draft").text,
+            format!("{long}\nitem more")
+        );
+    }
+
+    #[test]
+    fn a_blank_row_inside_a_draft_stays_blank() {
+        let screen = draft_box(40, &rows(&["❯ a", "", "  b"]), 6);
+        let draft = draft_of(&screen).expect("a draft");
+        assert_eq!(draft.text, "a\n\nb");
+        assert_eq!(draft.rows, 3);
+    }
+
+    #[test]
+    fn a_draft_keeps_the_users_own_indentation() {
+        let screen = draft_box(40, &rows(&["❯ fn x() {", "      y"]), 5);
+        assert_eq!(draft_of(&screen).expect("a draft").text, "fn x() {\n    y");
+    }
+
+    #[test]
+    fn a_placeholder_is_no_draft() {
+        let screen = draft_box(40, &rows(&["❯ Try \"fix the tests\""]), 4);
+        assert_eq!(draft_of(&screen), None);
+    }
+
+    #[test]
+    fn an_empty_box_is_no_draft() {
+        let screen = draft_box(40, &rows(&["❯"]), 4);
+        assert_eq!(draft_of(&screen), None);
+    }
+
+    #[test]
+    fn bash_mode_is_no_draft() {
+        let screen = draft_box(40, &rows(&["! ls -la"]), 4);
+        assert_eq!(draft_of(&screen), None);
+    }
+
+    #[test]
+    fn an_image_placeholder_reads_as_pasted() {
+        let screen = draft_box(40, &rows(&["❯ [Image #1] what colour"]), 4);
+        assert!(draft_of(&screen).expect("a draft").pasted);
+    }
+
+    #[test]
+    fn a_tall_box_may_show_only_its_end() {
+        // 40 rows of screen: the box may show 15 of them.
+        assert!(!whole_of(&draft_lines(15), 40));
+        assert!(whole_of(&draft_lines(14), 40));
+        // Its last row blank still counts towards the box's height.
+        let mut blank_tail = draft_lines(14);
+        blank_tail.push(String::new());
+        assert_eq!(rows_of(&blank_tail, 40), 15);
+        assert!(!whole_of(&blank_tail, 40));
+        // 24 rows: the box's own cap, 7, is the lower of the two.
+        assert!(!whole_of(&draft_lines(7), 24));
+        assert!(whole_of(&draft_lines(6), 24));
+        // 10 rows: the cap never drops under 3.
+        assert!(!whole_of(&draft_lines(3), 10));
+        assert!(whole_of(&draft_lines(2), 10));
+    }
+
+    /// A box's rows holding `text_rows` lines of text, the cursor on the
+    /// first.
+    fn draft_lines(text_rows: usize) -> Vec<String> {
+        std::iter::once("❯ line 1".to_owned())
+            .chain((2..=text_rows).map(|n| format!("  line {n}")))
+            .collect()
+    }
+
+    /// Whether the box `body` holds in a screen `screen_rows` tall reads as
+    /// whole.
+    fn whole_of(body: &[String], screen_rows: usize) -> bool {
+        draft_of(&draft_box(40, body, screen_rows))
+            .expect("a draft")
+            .whole
+    }
+
+    /// How many rows the box `body` holds in a screen `screen_rows` tall
+    /// reads as taking.
+    fn rows_of(body: &[String], screen_rows: usize) -> usize {
+        draft_of(&draft_box(40, body, screen_rows))
+            .expect("a draft")
+            .rows
+    }
+
+    #[test]
+    fn clearing_three_rows_sends_eight_line_clears() {
+        let draft = DraftReading {
+            text: "a\nb\nc".to_owned(),
+            pasted: false,
+            whole: true,
+            rows: 3,
+        };
+        let steps = clear_draft_recipe(&draft).expect("a recipe").steps;
+        assert_eq!(steps.len(), 8);
+        for step in &steps {
+            assert_eq!(step.keys, vec![Key::ClearLine]);
+            assert_eq!(step.expect, ScreenExpect::Any);
+        }
+    }
+
+    #[test]
+    fn an_indented_row_is_never_a_wrap() {
+        let screen = draft_box(30, &rows(&["❯ check the condition:", "      return"]), 5);
+        assert_eq!(
+            draft_of(&screen).expect("a draft").text,
+            "check the condition:\n    return"
+        );
+    }
+
+    #[test]
+    fn a_paste_split_across_rows_reads_as_pasted() {
+        let screen = draft_box(44, &rows(&["❯ fix [Pasted", "  text #1 +4 lines] now"]), 5);
+        let draft = draft_of(&screen).expect("a draft");
+        assert_eq!(draft.text, "fix [Pasted\ntext #1 +4 lines] now");
+        assert!(draft.pasted);
+    }
+
+    #[test]
+    fn a_draft_the_box_cannot_show_whole_is_not_cleared() {
+        let pasted = DraftReading {
+            text: String::new(),
+            pasted: true,
+            whole: true,
+            rows: 1,
+        };
+        assert_eq!(
+            clear_draft_recipe(&pasted),
+            Err(AnswerRefusal::NotThisDialog)
+        );
+        let scrolled = DraftReading {
+            text: String::new(),
+            pasted: false,
+            whole: false,
+            rows: 15,
+        };
+        assert_eq!(
+            clear_draft_recipe(&scrolled),
+            Err(AnswerRefusal::NotThisDialog)
+        );
     }
 }

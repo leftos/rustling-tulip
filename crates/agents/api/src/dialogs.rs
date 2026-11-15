@@ -3,7 +3,8 @@
 //! daemon waits for before it types the next group.
 //!
 //! Keys are a closed set: there is no Esc and no general ctrl key (only the
-//! prompt stash, ctrl+s), so no recipe can open Rewind or interrupt a turn.
+//! prompt stash, ctrl+s, and the line clear, ctrl+u), so no recipe can open
+//! Rewind or interrupt a turn.
 //! These types never cross the wire.
 
 use protocol::ChatPromptKind;
@@ -31,6 +32,8 @@ pub enum Key {
     Text(String),
     /// ctrl+s: the prompt stash.
     Stash,
+    /// ctrl+u: the line clear.
+    ClearLine,
 }
 
 impl Key {
@@ -54,6 +57,7 @@ impl Key {
             Self::Left => b"\x1b[D".to_vec(),
             Self::Text(text) => text.as_bytes().to_vec(),
             Self::Stash => vec![0x13],
+            Self::ClearLine => vec![0x15],
         }
     }
 }
@@ -144,6 +148,21 @@ pub struct ViewReading {
     pub panel_in_view: Option<usize>,
 }
 
+/// The draft an agent's prompt box holds, as the agent's plugin reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftReading {
+    /// The draft's text, its rows joined the way the agent's box wraps them.
+    pub text: String,
+    /// The box shows a paste or an image as a placeholder, so `text` is not
+    /// the whole draft.
+    pub pasted: bool,
+    /// The box shows the whole draft; `false` when it scrolls and may show
+    /// only its end.
+    pub whole: bool,
+    /// The box rows the draft takes.
+    pub rows: usize,
+}
+
 /// The running work a session's screen counts, as the agent's plugin reads
 /// it: counts only, with no names or ages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -215,6 +234,11 @@ mod tests {
     #[test]
     fn stash_key_writes_ctrl_s() {
         assert_eq!(Key::Stash.to_bytes(), vec![0x13]);
+    }
+
+    #[test]
+    fn clear_line_writes_ctrl_u() {
+        assert_eq!(Key::ClearLine.to_bytes(), vec![0x15]);
     }
 
     #[test]

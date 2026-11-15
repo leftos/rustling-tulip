@@ -30,9 +30,9 @@ pub use transcripts::encode_project_dir;
 
 use agent_api::{
     ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal,
-    ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
-    HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
-    ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext, SummarizerRequest,
+    ConversationPlan, ConversationQuery, DraftReading, EnvPlan, FoundConversation, HeadlessEvent,
+    HookPlan, HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun,
+    Refusal, ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext, SummarizerRequest,
     SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal, ViewReading,
     ViewStep, hook_vocabulary, workspace_prelude,
 };
@@ -719,6 +719,16 @@ impl Agent for ClaudePlugin {
     /// read off the screen's rows and their dim cells.
     fn read_view_styled(&self, rows: &[String], dim: &[String]) -> Option<ViewReading> {
         Some(dialogs::read_view_styled(rows, dim))
+    }
+
+    /// The draft in Claude's input box, read off the screen's rows.
+    fn read_draft(&self, rows: &[String], dim: &[String]) -> Option<DraftReading> {
+        dialogs::read_draft(rows, dim)
+    }
+
+    /// The keys that clear Claude's input box holding `draft`.
+    fn clear_draft_recipe(&self, draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal> {
+        dialogs::clear_draft_recipe(draft)
     }
 
     /// The subagents and background shells Claude's screen counts.

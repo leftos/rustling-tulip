@@ -12,8 +12,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use agent_api::{
-    AnswerRecipe, AnswerRefusal, ScreenExpect, ScreenWork, ViewGoal, ViewReading, ViewRefusal,
-    ViewStep,
+    AnswerRecipe, AnswerRefusal, DraftReading, ScreenExpect, ScreenWork, ViewGoal, ViewReading,
+    ViewRefusal, ViewStep,
 };
 use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen, ComposerState};
 
@@ -85,6 +85,24 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
         reading.agent_in_view = None;
     }
     Some(reading)
+}
+
+/// The draft in `screen`'s prompt box, as `agent`'s plugin reads it; `None`
+/// for an agent with no registered plugin, or one whose box holds no draft.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the chat's draft pull reads it")
+)]
+pub fn read_draft(agent: &AgentId, screen: &Screen) -> Option<DraftReading> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::debug!(
+            "no agent plugin `{}` is registered; its screen has no draft reading",
+            agent.0
+        );
+        return None;
+    };
+    plugin.read_draft(&screen.rows(), &screen.dim_rows())
 }
 
 /// The running work `screen` counts, as `agent`'s plugin reads it; `None`
@@ -2083,6 +2101,107 @@ mod tests {
         assert_ne!(
             prompt_identity(&prompt_of(include_str!("fixtures/v51-plan-dialog.txt"))),
             prompt_identity(&prompt_of(include_str!("fixtures/v21-perm-bash.txt")))
+        );
+    }
+
+    /// The draft a capture reads as by Claude's plugin.
+    fn draft_of(text: &str) -> Option<DraftReading> {
+        read_draft(&agent_registry::default_agent(), &screen_from(text))
+    }
+
+    #[test]
+    fn a_one_line_draft_reads_its_text() {
+        let draft = draft_of(include_str!("fixtures/claude--draft-one-line.txt")).expect("a draft");
+        assert_eq!(draft.text, "add a done command to todo.py");
+        assert_eq!(draft.rows, 1);
+        assert!(!draft.pasted);
+        assert!(draft.whole);
+    }
+
+    #[test]
+    fn a_wrapped_row_joins_its_draft() {
+        let draft = draft_of(include_str!("fixtures/claude--draft-wrapped.txt")).expect("a draft");
+        assert_eq!(
+            draft.text,
+            "add a done command to todo.py that takes the index of an item, marks it as finished \
+             in todo.json, and prints the item with a check mark so the user can see what \
+             changed; keep the list command showing done items last"
+        );
+        assert_eq!(draft.rows, 2);
+    }
+
+    #[test]
+    fn a_typed_newline_stays_a_line_break() {
+        let draft =
+            draft_of(include_str!("fixtures/claude--draft-two-lines.txt")).expect("a draft");
+        assert_eq!(draft.text, "add a done command\nthen a list command");
+        assert_eq!(draft.rows, 2);
+    }
+
+    #[test]
+    fn a_ten_row_draft_keeps_its_lines() {
+        let draft = draft_of(include_str!("fixtures/claude--draft-ten-rows.txt")).expect("a draft");
+        assert_eq!(
+            draft.text,
+            "step one: read README.md\nstep two: write todo.py\nstep three: add the add command\n\
+             step four: add the list command\nstep five: add the done command\nstep six: store \
+             items in todo.json\nstep seven: handle a missing file\nstep eight: print a check \
+             mark for done items\nstep nine: write a short usage line\nstep ten: run it once"
+        );
+        assert_eq!(draft.rows, 10);
+        assert!(draft.whole);
+    }
+
+    #[test]
+    fn a_scrolled_draft_is_not_whole() {
+        let draft = draft_of(include_str!("fixtures/claude--draft-scrolled.txt")).expect("a draft");
+        assert_eq!(draft.rows, 15);
+        assert!(!draft.whole);
+        assert!(draft.text.starts_with("line 31"));
+    }
+
+    #[test]
+    fn a_pasted_draft_is_not_the_whole_text() {
+        let draft = draft_of(include_str!("fixtures/claude--draft-pasted.txt")).expect("a draft");
+        assert_eq!(
+            draft.text,
+            "fix these: [Pasted text #1 +40 lines]  then sort them"
+        );
+        assert!(draft.pasted);
+        assert!(
+            draft_of(include_str!("fixtures/v186-main-image-draft.txt"))
+                .expect("a draft")
+                .pasted
+        );
+    }
+
+    #[test]
+    fn an_idle_or_suggesting_box_is_no_draft() {
+        for capture in [
+            include_str!("fixtures/claude--fresh-idle.txt"),
+            include_str!("fixtures/v03-ready.txt"),
+            include_str!("fixtures/claude--suggestion.txt"),
+        ] {
+            assert_eq!(draft_of(capture), None);
+        }
+    }
+
+    #[test]
+    fn a_clear_hint_above_the_box_is_no_draft() {
+        let capture = include_str!("fixtures/claude--draft-one-line.txt");
+        let mut lines: Vec<&str> = capture.lines().collect();
+        let draft_row = lines
+            .iter()
+            .position(|line| line.contains("add a done command"))
+            .expect("the capture holds the draft's row");
+        lines.insert(draft_row - 1, "  Ctrl+Y to paste deleted text");
+        let hinted = screen_from(&lines.join("\n"));
+        let plain = screen_from(capture);
+        let agent = agent_registry::default_agent();
+        assert_eq!(read_draft(&agent, &hinted), read_draft(&agent, &plain));
+        assert_eq!(
+            read(&agent, &hinted).expect("a reading").composer,
+            read(&agent, &plain).expect("a reading").composer
         );
     }
 }
