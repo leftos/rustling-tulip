@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
 - Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 - Settings › Remote access tells you when Tailscale is slow to answer, while remote access keeps serving.

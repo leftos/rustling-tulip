@@ -1,8 +1,9 @@
-//! The main window's taskbar badge: the App title count over every tab,
-//! drawn on Windows as a disc in the palette's danger colour with white
+//! The main window's taskbar badge: the App title count over every tab.
+//! Windows draws it as a disc in the palette's danger colour with white
 //! digits on the window's taskbar button, or in its working blue for the
-//! sessions that finished unseen while nothing needs the owner. Pop-out
-//! windows carry none, and other platforms draw none yet.
+//! sessions that finished unseen while nothing needs the owner; macOS sets
+//! the Dock icon's badge label to the same text. Pop-out windows carry
+//! none, and other platforms draw none.
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -40,6 +41,14 @@ pub fn overlay_text(n: usize) -> Option<String> {
     }
 }
 
+/// Whether the badge starts unsure, so its first update re-applies the
+/// count: macOS keeps a Dock badge a crash or a quit left behind, which only
+/// a set clears, while a taskbar button starts with no overlay.
+#[must_use]
+pub(crate) fn starts_unsure(macos: bool) -> bool {
+    macos
+}
+
 /// Puts the badge on a window's taskbar button.
 pub trait TaskbarBadge {
     /// Shows `overlay` on `window`'s taskbar button, or clears it with
@@ -66,7 +75,7 @@ impl TaskbarBadge for NoTaskbarBadge {
 }
 
 /// The badge the client runs with: the taskbar button's overlay icon on
-/// Windows, nothing elsewhere.
+/// Windows, the Dock icon's badge label on macOS, nothing elsewhere.
 #[derive(Default)]
 pub struct SystemTaskbarBadge {
     /// The taskbar list, created at the first change and kept; dropped
@@ -98,7 +107,12 @@ impl TaskbarBadge for SystemTaskbarBadge {
             .ok()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    fn show(&self, _window: &Window, overlay: Option<&BadgeOverlay>) -> bool {
+        mac::show(overlay)
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn show(&self, _window: &Window, _overlay: Option<&BadgeOverlay>) -> bool {
         true
     }
@@ -241,6 +255,42 @@ impl RootView {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    /// Asks once, at launch, for the badge permission macOS needs before it
+    /// will draw the Dock badge, and re-applies the count once it is
+    /// granted: the grant arrives after the first update, which the Dock
+    /// dropped.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn request_badge_permission(window: &mut Window, cx: &mut Context<Self>) {
+        let Some(answer) = mac::request_badge_permission() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            if !answer.await {
+                tracing::warn!("the Dock badge permission was not granted: the Dock shows none");
+                return;
+            }
+            RootView::update_in_task_window(&this, cx, |this, window, cx| {
+                this.badge_unsure = true;
+                this.schedule_taskbar_badge(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Clears the Dock icon's badge as the app quits: macOS keeps a badge the
+    /// app set, so one left behind would sit on the Dock until the next
+    /// launch's first update.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn clear_badge_on_quit(cx: &mut App) {
+        cx.on_app_quit(|_| {
+            // `show` logs a failure itself.
+            mac::show(None);
+            async {}
         })
         .detach();
     }
@@ -617,9 +667,77 @@ mod win {
     }
 }
 
+/// The `AppKit` and notification-center calls behind the macOS badge: the
+/// Dock icon's badge label, and the permission the Dock draws none without.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::sync::{Mutex, PoisonError};
+
+    use block2::RcBlock;
+    use futures::FutureExt as _;
+    use futures::channel::oneshot;
+    use futures::future::BoxFuture;
+    use objc2::MainThreadMarker;
+    use objc2::runtime::Bool;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::{NSBundle, NSError, NSString};
+    use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+
+    use super::BadgeOverlay;
+
+    /// Sets the Dock icon's badge label to `overlay`'s text, or clears it
+    /// with `None`. The label is drawn in the Dock's own red, so the
+    /// overlay's colour is unused. Answered `false` off the main thread,
+    /// where `AppKit` refuses to be touched.
+    pub(super) fn show(overlay: Option<&BadgeOverlay>) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::warn!("the Dock badge was not shown: not on the main thread");
+            return false;
+        };
+        let label = overlay.map(|shown| NSString::from_str(&shown.text));
+        NSApplication::sharedApplication(mtm)
+            .dockTile()
+            .setBadgeLabel(label.as_deref());
+        true
+    }
+
+    /// Asks the system once for the badge permission macOS ignores the label
+    /// without, and answers whether it was granted. `None` when nothing is
+    /// asked: off the main thread, where the notification center may not be
+    /// touched, or without a bundle identifier, which an unbundled binary
+    /// has and whose request raises.
+    pub(super) fn request_badge_permission() -> Option<BoxFuture<'static, bool>> {
+        if MainThreadMarker::new().is_none() {
+            tracing::warn!("the Dock badge asks for no badge permission: not on the main thread");
+            return None;
+        }
+        if NSBundle::mainBundle().bundleIdentifier().is_none() {
+            tracing::info!(
+                "the Dock badge asks for no badge permission: the app has no bundle identifier"
+            );
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        let slot = Mutex::new(Some(tx));
+        let block = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
+            let sender = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(sender) = sender {
+                // The receiver is gone only when nobody waits any more.
+                let _unheard = sender.send(granted.as_bool());
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Badge,
+                &block,
+            );
+        Some(rx.map(|answer| answer.unwrap_or(false)).boxed())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BadgeOverlay, overlay_for, overlay_text};
+    use super::{BadgeOverlay, overlay_for, overlay_text, starts_unsure};
     use crate::sidebar::CountMode;
     use crate::tabs::TabCounts;
     use crate::ui_theme::UiTheme;
@@ -694,5 +812,11 @@ mod tests {
         }
         assert_eq!(overlay_text(10), Some("9+".to_owned()));
         assert_eq!(overlay_text(250), Some("9+".to_owned()));
+    }
+
+    #[test]
+    fn the_badge_starts_unsure_only_on_macos() {
+        assert!(starts_unsure(true));
+        assert!(!starts_unsure(false));
     }
 }

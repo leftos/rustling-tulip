@@ -1584,6 +1584,14 @@ impl RootView {
             shape: RootShape::Desktop,
         };
         let mut root = Self::with_transport(deps, window, cx);
+        // macOS draws no Dock badge until the app has asked for the badge
+        // permission: ask once, and re-apply the count once it is granted.
+        #[cfg(target_os = "macos")]
+        RootView::request_badge_permission(window, cx);
+        // A Dock badge outlives the process, so the app clears its own on the
+        // way out instead of leaving it for the next launch.
+        #[cfg(target_os = "macos")]
+        RootView::clear_badge_on_quit(cx);
         // Presses the toast activator receives, those that arrived before
         // this window among them, go to this window's pairing actions.
         toast_activation::attach(&root.pairing_sink());
@@ -1837,7 +1845,7 @@ impl RootView {
             title_timer: None,
             taskbar_badge: badge,
             badge_shown: None,
-            badge_unsure: false,
+            badge_unsure: taskbar_badge::starts_unsure(cfg!(target_os = "macos")),
             badge_pending: None,
             badge_timer: None,
             container_sends: HashMap::new(),
