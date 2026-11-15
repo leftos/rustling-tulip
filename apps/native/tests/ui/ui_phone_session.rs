@@ -1576,3 +1576,43 @@ fn the_composer_drops_back_when_the_keyboard_hides(cx: &mut TestAppContext) {
         "the composer returns to the safe area's bottom: {composer:?} in a {height} px window"
     );
 }
+
+/// Answer `id`, whose first paragraph is one stretch's short form long
+/// enough to wrap over most of the row, so a point at the row's middle
+/// lands on it.
+fn stretched(id: &str) -> ChatEntry {
+    let short = "tap here to open the long form and read it all ".repeat(12);
+    ChatEntry::Answer {
+        id: id.to_owned(),
+        text: format!("{{{{{}|the long form, opened.}}}} today.", short.trim_end()),
+        live: false,
+    }
+}
+
+/// Answer `a1`'s stretchtext links: each one's drawn text and its key.
+fn stretch_links(h: &mut Harness<'_>) -> Vec<(String, String)> {
+    h.root(|root, _| root.chat_answer_stretchtext("a", "a1"))
+}
+
+#[gpui::test]
+fn a_tap_on_a_stretch_opens_its_long_form(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![stretched("a1")]);
+    let [(_, key)]: [(String, String); 1] = stretch_links(&mut h)
+        .try_into()
+        .expect("the answer draws one closed stretch");
+    let answer = h.bounds("chat-row-phone-a1");
+    let at = point(
+        answer.origin.x + px(30.0),
+        answer.origin.y + answer.size.height / 2.0,
+    );
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        stretch_links(&mut h),
+        [("\u{2039}".to_owned(), key)],
+        "one tap opens the stretch, leaving its closer as the answer's only link"
+    );
+}

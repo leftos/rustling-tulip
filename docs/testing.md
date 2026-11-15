@@ -174,7 +174,7 @@ An OS toast press is tested through the `NotifyRecorder` notifier: `Harness::not
 
 A phone-shape window is opened with `Harness::phone(cx, dir)`, and `h.opened_targets()` lists the targets it dialled; `tests/ui/ui_phone_root.rs` is its spec, and `tools/test-map.json` maps the phone-shape sources to it: the `apps/native/src/phone/**` row selects it beside the `phone::` unit tests. `Harness::phone_with(cx, dir, platform)` opens the same window over a given `PushPlatform` (a `FakePushPlatform` scripts permission and the token), which `tests/ui/ui_phone_push.rs` drives for the Notifications switch; the `apps/native/src/phone/**` row selects it too.
 
-A phone spec drives a finger through `Harness::touch(phase, point)`, which hands gpui's recogniser a touch as the phone's platform reports it, `tap_on(selector)` (a finger down and up on what the selector tags) and `long_press_on(selector)` (held past the long-press time, then lifted); `tests/ui/ui_phone_home.rs` uses them for a row's tap and its long-press sheet.
+A phone spec drives a finger through `Harness::touch(phase, point)`, which hands gpui's recogniser a touch as the phone's platform reports it, `tap_on(selector)` (a finger down and up on what the selector tags) and `long_press_on(selector)` (held past the long-press time, then lifted); `tests/ui/ui_phone_home.rs` uses them for a row's tap and its long-press sheet. `h.click` sends a mouse press, a draw and a release, while `h.tap_on` and `h.touch` send a tap's press and release in one dispatch, so a phone control is tested with a tap: a click can pass where a tap fails, as it did for `InteractiveText` links (`tests/ui/ui_phone_session.rs`).
 
 ### Show a change in a live client
 

@@ -13,9 +13,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla,
-    InteractiveText, ListOffset, ListState, Modifiers, SharedString, StrikethroughStyle,
-    StyledText, UnderlineStyle, Window, div, list, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FontStyle, FontWeight,
+    HighlightStyle, Hsla, InteractiveText, ListOffset, ListState, Modifiers, SharedString,
+    StrikethroughStyle, StyledText, UnderlineStyle, Window, div, list, prelude::*, px,
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
@@ -133,6 +133,16 @@ impl LinkRoute {
             Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
         }
     }
+}
+
+/// The window's `RootView`: the window root on the desktop, or the one the phone's `PhoneRoot` holds.
+fn window_root_view(window: &Window, cx: &App) -> Option<Entity<RootView>> {
+    window.root::<RootView>().flatten().or_else(|| {
+        window
+            .root::<crate::phone::PhoneRoot>()
+            .flatten()
+            .map(|phone| phone.read(cx).root().clone())
+    })
 }
 
 /// Whether a click on a file link with `modifiers` held views the file:
@@ -667,7 +677,7 @@ impl Painter {
                 tracing::debug!(index, "a Markdown link click outside every link");
                 return;
             };
-            let Some(Some(root)) = window.root::<RootView>() else {
+            let Some(root) = window_root_view(window, cx) else {
                 tracing::debug!("a Markdown link click in a window without the root view");
                 return;
             };
