@@ -154,6 +154,23 @@ pub struct TextInput {
     scroll_x: Pixels,
     /// How the platform's soft keyboard serves this input.
     input_config: TextInputConfiguration,
+    /// What the app changed since the last draw, which the next draw reports
+    /// to the platform's text input so its keyboard reads it anew.
+    platform_report: PlatformReport,
+}
+
+/// What the app (not the platform's own text input) changed since the last
+/// draw. The order is the upgrade order: a text change also reports the
+/// selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum PlatformReport {
+    /// Nothing to report.
+    #[default]
+    None,
+    /// The selection or the caret moved.
+    Selection,
+    /// The text changed.
+    Content,
 }
 
 /// What an input draws: its text, or while masked a [`MASK`] for each
@@ -250,6 +267,7 @@ impl TextInput {
             scroll_y: px(0.),
             scroll_x: px(0.),
             input_config: TextInputConfiguration::default(),
+            platform_report: PlatformReport::None,
         }
     }
 
@@ -282,6 +300,7 @@ impl TextInput {
             self.splice(&marked, "");
             self.selected_range = marked.start..marked.start;
             self.selection_reversed = false;
+            self.report_to_platform(PlatformReport::Content);
             cx.emit(TextChanged);
         }
         self.read_only = read_only;
@@ -311,6 +330,8 @@ impl TextInput {
         let draws = if masked { Draws::Dots } else { Draws::Text };
         if self.draws != draws {
             self.draws = draws;
+            // The platform reads the dots or the text anew; the draw tells it only while focused.
+            self.report_to_platform(PlatformReport::Content);
             cx.notify();
         }
     }
@@ -319,7 +340,7 @@ impl TextInput {
     /// the [`Paste`] action does: newlines normalized in a multi-line input,
     /// one line in a single-line one. A clipboard with no text changes
     /// nothing, and a read-only input takes none.
-    pub fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn paste_clipboard(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
@@ -329,7 +350,7 @@ impl TextInput {
             } else {
                 single_line(&text)
             };
-            self.replace_text_in_range(None, &text, window, cx);
+            self.replace_from_app(&text, cx);
         }
     }
 
@@ -405,7 +426,8 @@ impl TextInput {
     }
 
     /// Replaces the text, the cursor at its end, without [`TextChanged`]:
-    /// the owner is setting it, not the user.
+    /// the owner is setting it, not the user. The next draw tells the
+    /// platform's text input of the change while the input has the keyboard.
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = self.mode.accept(text.into());
         let end = self.content.len();
@@ -413,6 +435,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.goal_x = None;
+        self.report_to_platform(PlatformReport::Content);
         cx.notify();
     }
 
@@ -494,32 +517,32 @@ impl TextInput {
         self.move_to(end, cx);
     }
 
-    fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
         if self.selected_range.is_empty() {
             self.select_to(previous_boundary(&self.content, self.cursor_offset()), cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.replace_from_app("", cx);
     }
 
-    fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
         if self.selected_range.is_empty() {
             self.select_to(next_boundary(&self.content, self.cursor_offset()), cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.replace_from_app("", cx);
     }
 
     fn enter(_: &mut Self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submit);
     }
 
-    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, "\n", window, cx);
+    fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace_from_app("\n", cx);
     }
 
     fn escape(_: &mut Self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
@@ -570,13 +593,13 @@ impl TextInput {
 
     /// Copies the selection and, unless the input is read-only, deletes it.
     /// A masked input does neither.
-    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if !self.is_masked() && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_owned(),
             ));
             if !self.read_only {
-                self.replace_text_in_range(None, "", window, cx);
+                self.replace_from_app("", cx);
             }
         }
     }
@@ -584,6 +607,7 @@ impl TextInput {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.goal_x = None;
+        self.report_to_platform(PlatformReport::Selection);
         cx.notify();
     }
 
@@ -691,6 +715,7 @@ impl TextInput {
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
         self.goal_x = None;
+        self.report_to_platform(PlatformReport::Selection);
         cx.notify();
     }
 
@@ -710,6 +735,113 @@ impl TextInput {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone())
+    }
+
+    /// Applies the platform's replacement of `range_utf16` (else the marked
+    /// text, else the selection) with `new_text`. Return with no range in a
+    /// single-line input submits instead.
+    ///
+    /// Args:
+    ///     `range_utf16`: The UTF-16 range the platform names, if any.
+    ///     `new_text`: The text that replaces it.
+    ///     `cx`: The input's context, for its events.
+    fn replace_from_platform(
+        &mut self,
+        range_utf16: Option<&Range<usize>>,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only {
+            return;
+        }
+        // iOS delivers Return as an inserted line break, never as a key event.
+        // A ranged replacement (UIKit's `replaceRange:withText:`) is an edit.
+        if new_text == "\n" && range_utf16.is_none() && !self.mode.is_multi_line() {
+            self.marked_range = None;
+            cx.emit(TextInputEvent::Submit);
+            cx.notify();
+            return;
+        }
+        let range = self.edit_range(range_utf16);
+        let caret = self.caret_after_replace(range_utf16.is_some(), &range, new_text.len());
+        self.splice(&range, new_text);
+        self.selected_range = caret..caret;
+        self.marked_range = None;
+        cx.emit(TextChanged);
+        cx.notify();
+    }
+
+    /// Applies the app's own replacement of the marked text, else the
+    /// selection, with `new_text` (paste, cut and the deleting and newline
+    /// keys), as the platform's would apply, and marks it for the next draw
+    /// to report to the platform's text input.
+    ///
+    /// Args:
+    ///     `new_text`: The text that replaces it.
+    ///     `cx`: The input's context, for its events.
+    fn replace_from_app(&mut self, new_text: &str, cx: &mut Context<Self>) {
+        self.replace_from_platform(None, new_text, cx);
+        if !self.read_only {
+            self.report_to_platform(PlatformReport::Content);
+        }
+    }
+
+    /// Marks an app change for the next draw to report to the platform's
+    /// text input, keeping a larger one already marked.
+    ///
+    /// Args:
+    ///     `report`: What the app changed.
+    fn report_to_platform(&mut self, report: PlatformReport) {
+        self.platform_report = self.platform_report.max(report);
+    }
+
+    /// Where the caret lands once `range` holds `new_len` bytes.
+    ///
+    /// Args:
+    ///     `explicit`: Whether the platform named the range, rather than the
+    ///         edit falling on the marked text or the selection.
+    ///     `range`: The byte range being replaced.
+    ///     `new_len`: The replacement's length in bytes.
+    ///
+    /// Returns:
+    ///     For a caret at or after an explicit range's end (autocorrect
+    ///     behind the caret), the caret's own place shifted by the change in
+    ///     length; for a caret before it, the caret's own place; else the end
+    ///     of the replacement.
+    fn caret_after_replace(&self, explicit: bool, range: &Range<usize>, new_len: usize) -> usize {
+        let old = &self.selected_range;
+        if explicit && old.is_empty() && old.start >= range.end {
+            old.start - range.len() + new_len
+        } else if explicit && old.is_empty() && old.end <= range.start {
+            old.start
+        } else {
+            range.start + new_len
+        }
+    }
+
+    /// Logs one call from the platform's text input at debug, under the
+    /// `text_input::platform` target, so a detailed log shows the sequence a
+    /// soft keyboard sends.
+    ///
+    /// Args:
+    ///     `call`: The input handler method the platform called.
+    ///     `range_utf16`: The UTF-16 range the call named, if any.
+    ///     `new_text`: The text the call carried, if any; only its length in
+    ///         characters is logged, since a masked input holds secrets.
+    fn log_platform_call(
+        &self,
+        call: &str,
+        range_utf16: Option<&Range<usize>>,
+        new_text: Option<&str>,
+    ) {
+        tracing::debug!(
+            target: "text_input::platform",
+            call,
+            range = ?range_utf16,
+            new_chars = ?new_text.map(|text| text.chars().count()),
+            selection = ?self.range_to_utf16(&self.selected_range),
+            "platform text input call"
+        );
     }
 
     fn splice(&mut self, range: &Range<usize>, new_text: &str) {
@@ -1074,8 +1206,10 @@ impl EntityInputHandler for TextInput {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked_range = None;
+        self.log_platform_call("unmark_text", None, None);
     }
 
+    // A ranged replacement leaves a caret after the range where it was, shifted by the change in length.
     fn replace_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -1083,24 +1217,12 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
-            return;
-        }
-        // iOS delivers Return as an inserted line break, never as a key event.
-        // A ranged replacement (UIKit's `replaceRange:withText:`) is an edit.
-        if new_text == "\n" && range_utf16.is_none() && !self.mode.is_multi_line() {
-            self.marked_range = None;
-            cx.emit(TextInputEvent::Submit);
-            cx.notify();
-            return;
-        }
-        let range = self.edit_range(range_utf16.as_ref());
-        self.splice(&range, new_text);
-        let end = range.start + new_text.len();
-        self.selected_range = end..end;
-        self.marked_range = None;
-        cx.emit(TextChanged);
-        cx.notify();
+        self.replace_from_platform(range_utf16.as_ref(), new_text, cx);
+        self.log_platform_call(
+            "replace_text_in_range",
+            range_utf16.as_ref(),
+            Some(new_text),
+        );
     }
 
     fn replace_and_mark_text_in_range(
@@ -1111,25 +1233,44 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
-            return;
+        if !self.read_only {
+            let range = self.edit_range(range_utf16.as_ref());
+            self.splice(&range, new_text);
+            self.marked_range =
+                (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+            let end = range.start + new_text.len();
+            self.selected_range = new_selected_range_utf16
+                .as_ref()
+                .map(|selected| {
+                    offset_from_utf16(new_text, selected.start)
+                        ..offset_from_utf16(new_text, selected.end)
+                })
+                .map_or(end..end, |selected| {
+                    range.start + selected.start..range.start + selected.end
+                });
+            cx.emit(TextChanged);
+            cx.notify();
         }
-        let range = self.edit_range(range_utf16.as_ref());
-        self.splice(&range, new_text);
-        self.marked_range =
-            (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        let end = range.start + new_text.len();
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|selected| {
-                offset_from_utf16(new_text, selected.start)
-                    ..offset_from_utf16(new_text, selected.end)
-            })
-            .map_or(end..end, |selected| {
-                range.start + selected.start..range.start + selected.end
-            });
-        cx.emit(TextChanged);
+        self.log_platform_call(
+            "replace_and_mark_text_in_range",
+            range_utf16.as_ref(),
+            Some(new_text),
+        );
+    }
+
+    // UIKit sets the selection before a soft-keyboard backspace and before
+    // smart punctuation's delete; the edit that follows replaces it.
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_range = self.range_from_utf16(&range_utf16);
+        self.selection_reversed = false;
+        self.goal_x = None;
         cx.notify();
+        self.log_platform_call("set_selected_text_range", Some(&range_utf16), None);
     }
 
     /// The range's box on the row it starts on: to its end when it ends on
@@ -1172,7 +1313,18 @@ impl EntityInputHandler for TextInput {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The app's own edits and caret moves, told to the platform's keyboard while this input has it.
+        let report = std::mem::take(&mut self.platform_report);
+        if self.focus_handle.is_focused(window) {
+            match report {
+                PlatformReport::Content => window.notify_text_input_changed(&self.focus_handle),
+                PlatformReport::Selection => {
+                    window.notify_text_selection_changed(&self.focus_handle);
+                }
+                PlatformReport::None => {}
+            }
+        }
         let context = if self.mode.is_multi_line() {
             MULTI_LINE_CONTEXT
         } else {
@@ -1496,17 +1648,19 @@ impl Element for TextElement {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ops::Range;
     use std::rc::Rc;
 
     use gpui::{
         AppContext as _, Autocapitalize, ClipboardItem, Entity, EntityInputHandler as _,
-        IntoElement, ParentElement, Pixels, Render, Styled, TestAppContext, TextInputAction,
-        TextInputConfiguration, VisualTestContext, Window, div, px,
+        IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render, Styled,
+        TestAppContext, TextInputAction, TextInputConfiguration, VisualTestContext, Window, div,
+        point, px,
     };
 
     use super::{
-        TextChanged, TextInput, TextInputEvent, bind_keys, caret_scroll_x, next_boundary,
-        offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
+        PlatformReport, TextChanged, TextInput, TextInputEvent, bind_keys, caret_scroll_x,
+        next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
     };
 
     #[test]
@@ -2131,6 +2285,187 @@ mod tests {
         for utf8 in [0, THUMB, E, B, TEXT.len()] {
             assert_eq!(offset_from_utf16(TEXT, offset_to_utf16(TEXT, utf8)), utf8);
         }
+    }
+
+    /// Sets the selection as the platform does (`UIKit`'s `setSelectedTextRange:`).
+    fn platform_select(
+        input: &Entity<TextInput>,
+        range_utf16: Range<usize>,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_selected_text_range(range_utf16, window, cx);
+            });
+        });
+    }
+
+    /// Replaces text as the platform does (`UIKit`'s `insertText:` with no
+    /// range, `replaceRange:withText:` with one).
+    fn platform_replace(
+        input: &Entity<TextInput>,
+        range_utf16: Option<Range<usize>>,
+        text: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(range_utf16, text, window, cx);
+            });
+        });
+    }
+
+    /// The selection as the platform reads it, in UTF-16.
+    fn platform_selection(
+        input: &Entity<TextInput>,
+        cx: &mut VisualTestContext,
+    ) -> Option<Range<usize>> {
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input
+                    .selected_text_range(false, window, cx)
+                    .map(|selection| selection.range)
+            })
+        })
+    }
+
+    #[gpui::test]
+    fn the_platform_selection_is_what_its_next_edit_replaces(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "Word ");
+        platform_select(&input, 3..5, cx);
+        platform_replace(&input, None, ".", cx);
+        assert_eq!(text_of(&input, cx), "Wor.");
+        assert_eq!(platform_selection(&input, cx), Some(4..4));
+    }
+
+    #[gpui::test]
+    fn a_platform_delete_after_selecting_one_character_removes_it(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "Word ");
+        platform_select(&input, 4..5, cx);
+        platform_replace(&input, None, "", cx);
+        assert_eq!(text_of(&input, cx), "Word");
+        assert_eq!(platform_selection(&input, cx), Some(4..4));
+    }
+
+    #[gpui::test]
+    fn a_ranged_replace_before_the_caret_keeps_the_caret_after_it(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "teh x");
+        platform_replace(&input, Some(0..3), "the", cx);
+        assert_eq!(text_of(&input, cx), "the x");
+        assert_eq!(caret(&input, cx), (5, 5));
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("teh", cx)));
+        platform_replace(&input, Some(0..3), "The", cx);
+        assert_eq!(text_of(&input, cx), "The");
+        assert_eq!(caret(&input, cx), (3, 3));
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("teh x", cx)));
+        platform_replace(&input, Some(0..3), "these", cx);
+        assert_eq!(text_of(&input, cx), "these x");
+        assert_eq!(caret(&input, cx), (7, 7));
+    }
+
+    #[gpui::test]
+    fn a_ranged_replace_around_the_caret_puts_it_after_the_replacement(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "abcd");
+        cx.update(|_, cx| input.update(cx, |input, _| input.selected_range = 2..2));
+        platform_replace(&input, Some(1..3), "XY", cx);
+        assert_eq!(text_of(&input, cx), "aXYd");
+        assert_eq!(caret(&input, cx), (3, 3));
+    }
+
+    /// The test platform's record of `notify_text_input_changed` is private to
+    /// gpui, so this pins the mark the draw reports and clears. The mark is
+    /// read inside the update that sets the text, since the update's end draws.
+    #[gpui::test]
+    fn an_app_set_text_reports_the_change_to_the_platform(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "draft");
+        let set_text = |text: &'static str, cx: &mut VisualTestContext| {
+            report_after(&input, cx, |input, _, cx| input.set_text(text, cx))
+        };
+        assert_eq!(
+            set_text("", cx),
+            PlatformReport::Content,
+            "set_text marks the text stale"
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            report_of(&input, cx),
+            PlatformReport::None,
+            "the draw of a focused input reports it"
+        );
+
+        cx.update(Window::blur);
+        assert_eq!(set_text("sent", cx), PlatformReport::Content);
+        cx.run_until_parked();
+        assert_eq!(
+            report_of(&input, cx),
+            PlatformReport::None,
+            "an unfocused input's draw clears the mark too"
+        );
+    }
+
+    /// The report the input holds for its next draw.
+    fn report_of(input: &Entity<TextInput>, cx: &mut VisualTestContext) -> PlatformReport {
+        cx.update(|_, cx| input.read(cx).platform_report)
+    }
+
+    /// Runs `change` on the input and reads the report it leaves, in one
+    /// update: the update's end draws, which takes the report.
+    fn report_after(
+        input: &Entity<TextInput>,
+        cx: &mut VisualTestContext,
+        change: impl FnOnce(&mut TextInput, &mut Window, &mut gpui::Context<TextInput>),
+    ) -> PlatformReport {
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                change(input, window, cx);
+                input.platform_report
+            })
+        })
+    }
+
+    #[gpui::test]
+    fn a_ranged_replace_after_the_caret_leaves_the_caret(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "abc def");
+        cx.update(|_, cx| input.update(cx, |input, _| input.selected_range = 1..1));
+        platform_replace(&input, Some(4..7), "DEF", cx);
+        assert_eq!(text_of(&input, cx), "abc DEF");
+        assert_eq!(caret(&input, cx), (1, 1));
+    }
+
+    #[gpui::test]
+    fn an_app_paste_marks_the_platform_stale(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "a");
+        cx.write_to_clipboard(ClipboardItem::new_string("b".to_owned()));
+        let report = report_after(&input, cx, TextInput::paste_clipboard);
+        assert_eq!(text_of(&input, cx), "ab");
+        assert_eq!(report, PlatformReport::Content);
+    }
+
+    #[gpui::test]
+    fn a_click_marks_the_platform_selection_stale(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "abc");
+        let click = MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(0.), px(0.)),
+            ..MouseDownEvent::default()
+        };
+        let report = report_after(&input, cx, |input, window, cx| {
+            input.on_mouse_down(&click, window, cx);
+        });
+        assert_eq!(report, PlatformReport::Selection);
+    }
+
+    #[gpui::test]
+    fn a_platform_edit_does_not_mark_the_platform_stale(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "abc");
+        let report = report_after(&input, cx, |input, window, cx| {
+            input.replace_text_in_range(None, "x", window, cx);
+            input.set_selected_text_range(0..0, window, cx);
+        });
+        assert_eq!(text_of(&input, cx), "abcx");
+        assert_eq!(report, PlatformReport::None);
     }
 
     /// A new input seeded with `SEED`, all of it selected, never focused.

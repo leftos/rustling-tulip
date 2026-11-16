@@ -309,6 +309,8 @@ The changelog bullets for the iPhone app's features, kept out of the desktop rel
 - On the iPhone, one tap on a short summary in Chat opens its full text, and a single tap follows a link in Chat.
 - On the iPhone, opening the app from a notification no longer shows your PC as not paired after a push woke the app while the phone was locked.
 
+- On the iPhone, typing stays in step with the keyboard: smart punctuation, autocorrect and backspace no longer double or lose a word's last letter.
+
 ## Measured on a real iPhone
 
 MA.12, on the owner's iPhone with the TestFlight build and the Tailscale app, against the PC's daemon over the tailnet:
