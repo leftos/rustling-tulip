@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Each Claude account in the accounts panel and Settings › Accounts shows its extra-usage spend and its prepaid credit balance.
 - Settings › Accounts can let an account spend its prepaid credits once every account's usage is used up.
 - Select text in a subagent or dispatch run pane by dragging or double- or triple-clicking, and copy it with Ctrl+C.
+- On a host that supports it, Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
 
 ### Fixed
 
