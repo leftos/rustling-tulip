@@ -741,6 +741,11 @@ impl TextInput {
     /// text, else the selection) with `new_text`. Return with no range in a
     /// single-line input submits instead.
     ///
+    /// A composition marked outside an explicitly named range is kept, moved
+    /// past the edit: `UIKit` still holds it, and its next edit would
+    /// otherwise insert the composed text a second time. An edit on the
+    /// marked text itself, or one overlapping it, drops it.
+    ///
     /// Args:
     ///     `range_utf16`: The UTF-16 range the platform names, if any.
     ///     `new_text`: The text that replaces it.
@@ -764,9 +769,16 @@ impl TextInput {
         }
         let range = self.edit_range(range_utf16);
         let caret = self.caret_after_replace(range_utf16.is_some(), &range, new_text.len());
+        let marked = if range_utf16.is_some() {
+            self.marked_range
+                .clone()
+                .and_then(|marked| marked_after_replace(&marked, &range, new_text.len()))
+        } else {
+            None
+        };
         self.splice(&range, new_text);
         self.selected_range = caret..caret;
-        self.marked_range = None;
+        self.marked_range = marked;
         cx.emit(TextChanged);
         cx.notify();
     }
@@ -848,6 +860,34 @@ impl TextInput {
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.goal_x = None;
+    }
+}
+
+/// Where the IME's marked range lands once `replaced` holds `new_len` bytes in
+/// its place.
+///
+/// Args:
+///     `marked`: The marked range before the replacement.
+///     `replaced`: The byte range being replaced.
+///     `new_len`: The replacement's length in bytes.
+///
+/// Returns:
+///     The marked range shifted by the change in length when it lies wholly
+///     after `replaced`, unchanged when it lies wholly before it, and None
+///     when the two overlap.
+fn marked_after_replace(
+    marked: &Range<usize>,
+    replaced: &Range<usize>,
+    new_len: usize,
+) -> Option<Range<usize>> {
+    if marked.start >= replaced.end {
+        let start = replaced.start + new_len + (marked.start - replaced.end);
+        let end = replaced.start + new_len + (marked.end - replaced.end);
+        Some(start..end)
+    } else if marked.end <= replaced.start {
+        Some(marked.clone())
+    } else {
+        None
     }
 }
 
@@ -1178,9 +1218,12 @@ impl EntityInputHandler for TextInput {
         actual_range.replace(self.range_to_utf16(&range));
         let text = &self.content[range];
         // A masked input's text never reaches the platform's input handler
-        // (prediction, a touch keyboard's learning): it reads the dots.
+        // (prediction, a touch keyboard's learning): it reads the dots, one
+        // per UTF-16 unit so the string is as long as the range it serves.
         Some(if self.is_masked() {
-            text.chars().map(masked_char).collect()
+            text.chars()
+                .flat_map(|c| std::iter::repeat_n(masked_char(c), c.len_utf16()))
+                .collect()
         } else {
             text.to_owned()
         })
@@ -1660,7 +1703,8 @@ mod tests {
 
     use super::{
         PlatformReport, TextChanged, TextInput, TextInputEvent, bind_keys, caret_scroll_x,
-        next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
+        marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary,
+        single_line,
     };
 
     #[test]
@@ -1712,6 +1756,35 @@ mod tests {
             ..gpui::TextStyle::default()
         };
         assert_eq!(super::input_font(&style).weight, gpui::FontWeight::NORMAL);
+    }
+
+    #[test]
+    fn a_marked_range_after_a_replacement_shifts_with_it() {
+        assert_eq!(
+            marked_after_replace(&(2..5), &(0..1), 2),
+            Some(3..6),
+            "growing before the composition moves it right"
+        );
+        assert_eq!(
+            marked_after_replace(&(5..9), &(0..3), 1),
+            Some(3..7),
+            "shrinking before it moves it left"
+        );
+    }
+
+    #[test]
+    fn a_marked_range_before_a_replacement_stays() {
+        assert_eq!(marked_after_replace(&(2..5), &(6..8), 1), Some(2..5));
+    }
+
+    #[test]
+    fn a_marked_range_overlapping_a_replacement_is_dropped() {
+        assert_eq!(marked_after_replace(&(2..5), &(4..6), 1), None);
+        assert_eq!(
+            marked_after_replace(&(2..5), &(2..5), 1),
+            None,
+            "the marked text itself is what an unmarked edit replaces"
+        );
     }
 
     /// A focused, drawn input in its own window holding `text`, the cursor at
@@ -1896,6 +1969,32 @@ mod tests {
         assert!(
             seen.borrow().is_empty(),
             "a ranged replacement is not Return"
+        );
+    }
+
+    #[gpui::test]
+    fn a_composition_survives_a_replacement_before_it(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "ab");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "か", None, window, cx);
+            });
+        });
+        let marked = cx
+            .update(|window, cx| input.update(cx, |input, cx| input.marked_text_range(window, cx)));
+        assert_eq!(marked, Some(2..3), "the composition is marked at the end");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(Some(0..1), "XY", window, cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "XYbか");
+        let marked = cx
+            .update(|window, cx| input.update(cx, |input, cx| input.marked_text_range(window, cx)));
+        assert_eq!(
+            marked,
+            Some(3..4),
+            "the composition shifts by the replacement's growth"
         );
     }
 
@@ -2124,6 +2223,41 @@ mod tests {
         cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(false, cx)));
         let (text, _) = handler_text(&input, cx);
         assert_eq!(text.as_deref(), Some("sk-é1xy"), "unmasked, the text");
+    }
+
+    #[gpui::test]
+    fn masked_text_for_range_keeps_the_utf16_length(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "a😀b");
+        let handler_text =
+            |input: &Entity<TextInput>, cx: &mut VisualTestContext, range: Range<usize>| {
+                cx.update(|window, cx| {
+                    input.update(cx, |input, cx| {
+                        let mut actual = None;
+                        let text = input.text_for_range(range, &mut actual, window, cx);
+                        (text, actual)
+                    })
+                })
+            };
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(true, cx)));
+        let whole = 0..4;
+        let (text, actual) = handler_text(&input, cx, whole.clone());
+        assert_eq!(
+            text.as_deref(),
+            Some("••••"),
+            "an emoji is two units, so two dots"
+        );
+        assert_eq!(
+            text.map(|text| text.encode_utf16().count()),
+            Some(whole.len()),
+            "the string is as long as the range the platform asked for"
+        );
+        assert_eq!(actual, Some(whole));
+        let (text, _) = handler_text(&input, cx, 0..3);
+        assert_eq!(
+            text.as_deref(),
+            Some("•••"),
+            "up to the caret after the emoji"
+        );
     }
 
     /// A window root holding one input, so the input keeps its own measured height (gpui stretches an auto-sized window root to the window).
