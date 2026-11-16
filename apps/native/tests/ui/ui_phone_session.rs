@@ -2538,6 +2538,206 @@ fn a_hold_with_a_small_move_keeps_the_word(cx: &mut TestAppContext) {
     );
 }
 
+// ── Dragging the selection's handles ───────────────────────────────────────
+
+/// The window points the phone chat's start and end selection handles aim
+/// at, once the frames in flight have drawn.
+fn handle_aims(h: &mut Harness<'_>) -> (Point<Pixels>, Point<Pixels>) {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.phone_chat_handle_aims())
+        .expect("both handles are drawn")
+}
+
+/// Drags the selection handle tagged `phone-chat-handle-{end}` from its
+/// knob by what puts its aim on window point `to`, and lifts it there.
+fn drag_handle(h: &mut Harness<'_>, end: &str, to: Point<Pixels>) {
+    let (start_aim, end_aim) = handle_aims(h);
+    let aim = if end == "start" { start_aim } else { end_aim };
+    let from = h.center(&format!("phone-chat-handle-{end}"));
+    let finger = to - (aim - from);
+    h.touch(TouchPhase::Started, from);
+    h.touch(TouchPhase::Moved, finger);
+    h.touch(TouchPhase::Ended, finger);
+}
+
+#[gpui::test]
+fn a_selection_shows_a_handle_at_each_end(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo")]);
+    assert!(
+        !drawn(&mut h, "phone-chat-handle-start"),
+        "no selection, no start handle"
+    );
+    assert!(
+        !drawn(&mut h, "phone-chat-handle-end"),
+        "no selection, no end handle"
+    );
+
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+
+    assert!(
+        drawn(&mut h, "phone-chat-handle-start"),
+        "the start's handle"
+    );
+    assert!(drawn(&mut h, "phone-chat-handle-end"), "the end's handle");
+    let (start, end) = handle_aims(&mut h);
+    assert_eq!(
+        hit(&mut h, start),
+        Some(pos("a1", 0, 6)),
+        "the start handle aims at the selection's start"
+    );
+    assert_eq!(
+        hit(&mut h, end),
+        Some(pos("a1", 0, 11)),
+        "the end handle aims at the selection's end"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_handle_reaches_the_card_under_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![tailing_tool("t1")]);
+    let closed = h.bounds("chat-row-phone-t1");
+    // Its one-liner is "cargo build > build.log": the "log".
+    select(&mut h, "a", pos("t1", 0, 21), pos("t1", 0, 24));
+    let (start, _) = handle_aims(&mut h);
+    assert!(
+        h.bounds("phone-chat-handle-start").contains(&start),
+        "the tap lands on the start handle's hit area"
+    );
+    // A finger's jitter inside the tap slop leaves it a tap.
+    let jittered = point(start.x, start.y + px(2.0));
+
+    h.touch(TouchPhase::Started, start);
+    h.touch(TouchPhase::Moved, jittered);
+    h.touch(TouchPhase::Ended, jittered);
+
+    assert!(
+        h.bounds("chat-row-phone-t1").size.height > closed.size.height,
+        "the tap opens the card under the handle"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_handle_that_jitters_keeps_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    let start = h.center("phone-chat-handle-start");
+    let jittered = point(start.x, start.y + px(2.0));
+
+    h.touch(TouchPhase::Started, start);
+    h.touch(TouchPhase::Moved, jittered);
+    h.touch(TouchPhase::Ended, jittered);
+
+    assert_eq!(
+        selected_text(&mut h),
+        "bravo",
+        "a move inside the tap slop moves no end"
+    );
+}
+
+#[gpui::test]
+fn a_touch_under_the_rows_is_not_a_handles(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo"));
+    let mut h = chat_loaded(cx, &dir, entries);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    assert!(drawn(&mut h, "phone-chat-handle-end"), "the end's handle");
+    let square = h.bounds("phone-chat-handle-end");
+    let rows = h.bounds("phone-chat");
+    let at = point(square.center().x, rows.bottom() + px(2.0));
+    assert!(
+        square.contains(&at),
+        "the end handle's square would reach under the rows: {square:?} over {rows:?}"
+    );
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Moved, point(at.x, at.y - px(30.0)));
+    h.touch(TouchPhase::Ended, point(at.x, at.y - px(30.0)));
+
+    assert_eq!(
+        selected_text(&mut h),
+        "bravo",
+        "a touch outside the rows is never a handle's"
+    );
+}
+
+#[gpui::test]
+fn dragging_the_end_handle_widens_to_the_next_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let second = "delta echo foxtrot";
+    let entries = vec![answer_with("a1", "alpha bravo"), answer_with("a2", second)];
+    let mut h = chat_loaded(cx, &dir, entries);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    let to = on_bytes(&mut h, "chat-row-phone-a2", "a2", 7..9);
+    let (_, _, byte) = hit(&mut h, to).expect("the handle aims at a2");
+
+    drag_handle(&mut h, "end", to);
+
+    assert_eq!(
+        selected_text(&mut h),
+        format!("bravo\n\n{}", &second[..byte]),
+        "from the start that stayed to where the end handle aims"
+    );
+}
+
+#[gpui::test]
+fn dragging_the_end_handle_past_the_start_swaps_the_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let text = "alpha bravo charlie";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", text)]);
+    select(&mut h, "a", pos("a1", 0, 12), pos("a1", 0, 19));
+    let to = on_bytes(&mut h, "chat-row-phone-a1", "a1", 1..4);
+    let (_, _, byte) = hit(&mut h, to).expect("the handle aims at a1");
+
+    drag_handle(&mut h, "end", to);
+
+    assert_eq!(
+        selected_text(&mut h),
+        &text[byte..12],
+        "from where the end handle aims to the old start"
+    );
+}
+
+#[gpui::test]
+fn dragging_the_start_handle_moves_only_the_start(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let text = "alpha bravo charlie";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", text)]);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    let to = on_bytes(&mut h, "chat-row-phone-a1", "a1", 1..4);
+    let (_, _, byte) = hit(&mut h, to).expect("the handle aims at a1");
+
+    drag_handle(&mut h, "start", to);
+
+    assert_eq!(
+        selected_text(&mut h),
+        &text[byte..11],
+        "from where the start handle aims to the end that stayed"
+    );
+}
+
+#[gpui::test]
+fn a_pan_off_the_handles_scrolls_and_keeps_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo"));
+    let mut h = chat_loaded(cx, &dir, entries);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    assert!(drawn(&mut h, "phone-chat-handle-end"), "the end's handle");
+    let before = chat_offset(&mut h);
+    let at = h.bounds("chat-row-phone-u37").center();
+
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    pan_at(&mut h, at, px(100.0), TouchPhase::Moved);
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+
+    assert_ne!(chat_offset(&mut h), before, "the pan scrolls the chat");
+    assert_eq!(selected_text(&mut h), "bravo", "the selection stays");
+}
+
 #[gpui::test]
 fn a_hold_beside_a_wrapped_line_selects_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();

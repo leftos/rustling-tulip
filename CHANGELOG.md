@@ -21,7 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the iPhone, a host shown as Offline has a Retry button that tries it again at once, instead of waiting for it to redial.
 - A draft left in the terminal's prompt box can be pulled into Chat's message box for editing, or sent as it stands, from desktop Chat.
 - Desktop Chat shows Claude's suggested next prompt above the message box, to send with one click or pull in to edit.
-- On the iPhone, holding a finger on Chat text selects the word under it, and dragging while still holding widens the selection.
+- On the iPhone, holding a finger on Chat text selects the word under it, and dragging while still holding widens the selection; handles at its ends move either end.
 - Chat, on the desktop and the iPhone, draws each Code Mode script as one line: its description, number, time and the calls it ran, with a failed script's error under it.
 - A file link in a Chat answer now opens the file, and Ctrl+Shift+click on it offers the link menu, Follow in tab included.
 

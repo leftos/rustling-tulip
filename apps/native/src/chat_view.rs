@@ -183,6 +183,8 @@ pub(crate) struct SessionChat {
     /// The (start, end) of the word the phone's latest hold picked, which
     /// the held finger widens the selection from.
     hold: Option<(TextPos, TextPos)>,
+    /// The selection handle's drag in progress on the phone, if any.
+    handle_drag: Option<HandleDrag>,
 }
 
 /// What one daemon refusal ended in a chat: the text of a send it refused
@@ -479,9 +481,38 @@ pub(crate) struct TextRegistry {
     painted: bool,
     /// Each unit's entry id, unit index and the bytes drawn selected.
     painted_ranges: Vec<(String, u32, Range<usize>)>,
+    /// Where the selection's handles go, as the latest frame measured them;
+    /// the next frame draws its handles there. [`Self::forget`] keeps them.
+    handles: Option<HandleSpots>,
 }
 
 impl TextRegistry {
+    /// Where the handle of the selection's end `pos` goes, relative to
+    /// `origin`: the caret before byte `pos.byte` of its drawn text, snapped
+    /// to whole pixels, and its line's height; `None` when that text was not
+    /// drawn or the caret lies outside `viewport` (the chat's scroll area).
+    fn spot(
+        &self,
+        pos: &TextPos,
+        origin: Point<Pixels>,
+        viewport: Option<Bounds<Pixels>>,
+    ) -> Option<HandleSpot> {
+        let text = self
+            .texts
+            .iter()
+            .find(|text| text.entry == pos.entry && text.unit == pos.unit)?;
+        let layout = &text.layout;
+        let at = layout.position_for_index(pos.byte)?;
+        let caret = point(at.x + align_shift(layout, text.align), at.y);
+        if !viewport.is_none_or(|view| view.contains(&caret)) {
+            return None;
+        }
+        Some(HandleSpot {
+            caret: point((caret.x - origin.x).round(), (caret.y - origin.y).round()),
+            line_height: layout.line_height(),
+        })
+    }
+
     /// Forgets the last frame's texts: before a new frame registers its
     /// own, and while the phone draws no chat, so no hit reads stale ones.
     fn forget(&mut self) {
@@ -547,6 +578,186 @@ impl TextRegistry {
         }
         best.map(|(_, text)| text)
     }
+}
+
+/// The side of a hit area that takes a finger: the phone's touch target
+/// (`TOUCH_TARGET` in `phone/home_view.rs`).
+const HANDLE_TARGET: f32 = 44.0;
+/// A selection handle's stem width.
+const HANDLE_STEM: f32 = 2.0;
+/// A selection handle's knob diameter.
+const HANDLE_KNOB: f32 = 10.0;
+
+/// Which end of the phone chat's selection a handle moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandleEnd {
+    /// The selection's first end, in reading order; its knob sits above.
+    Start,
+    /// The selection's last end, in reading order; its knob sits below.
+    End,
+}
+
+impl HandleEnd {
+    /// The handle's driver id, also the key of its touch-drag state.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            HandleEnd::Start => "phone-chat-handle-start",
+            HandleEnd::End => "phone-chat-handle-end",
+        }
+    }
+}
+
+/// Where one selection handle draws: its end's caret point (the top of the
+/// caret's line, where the stem's left edge starts) and that line's height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HandleSpot {
+    caret: Point<Pixels>,
+    line_height: Pixels,
+}
+
+impl HandleSpot {
+    /// The middle of the stem, where the handle aims.
+    fn stem_middle(self) -> Point<Pixels> {
+        point(
+            self.caret.x + px(HANDLE_STEM / 2.0),
+            self.caret.y + self.line_height / 2.0,
+        )
+    }
+
+    /// The knob's centre: centred on the stem, half a knob above its top
+    /// for the start, half a knob below its bottom for the end.
+    fn knob_centre(self, end: HandleEnd) -> Point<Pixels> {
+        let x = self.caret.x + px(HANDLE_STEM / 2.0);
+        match end {
+            HandleEnd::Start => point(x, self.caret.y - px(HANDLE_KNOB / 2.0)),
+            HandleEnd::End => point(x, self.caret.y + self.line_height + px(HANDLE_KNOB / 2.0)),
+        }
+    }
+
+    /// The vector from `grab`, where a finger took the handle (in the
+    /// spot's own coordinates), to the stem's middle, which a drag adds to
+    /// the finger to find the text it aims at: the end moves from where it
+    /// is, wherever on the hit area the finger took it.
+    fn aim_offset(self, grab: Point<Pixels>) -> Point<Pixels> {
+        self.stem_middle() - grab
+    }
+
+    /// The top-left of the handle's square hit area, centred on its knob.
+    fn hit_origin(self, end: HandleEnd) -> Point<Pixels> {
+        let knob = self.knob_centre(end);
+        let half = px(HANDLE_TARGET / 2.0);
+        point(knob.x - half, knob.y - half)
+    }
+}
+
+/// The selection handles a frame measured: each end's spot, relative to
+/// `origin` (the window point of the rows' box the handles draw in); an
+/// end is `None` when its caret was not drawn inside the chat's scroll area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HandleSpots {
+    origin: Point<Pixels>,
+    start: Option<HandleSpot>,
+    end: Option<HandleSpot>,
+}
+
+impl HandleSpots {
+    /// End `end`'s spot.
+    fn of(self, end: HandleEnd) -> Option<HandleSpot> {
+        match end {
+            HandleEnd::Start => self.start,
+            HandleEnd::End => self.end,
+        }
+    }
+}
+
+/// A selection handle's drag in progress: the selection's end that stays,
+/// and the vector added to the finger to find the end that moves.
+struct HandleDrag {
+    fixed: TextPos,
+    aim: Point<Pixels>,
+}
+
+/// The touch-drag areas of the two selection handles, which the phone's
+/// session view makes (each over its handle's hit area).
+pub(crate) struct HandleAreas {
+    /// The start handle's area.
+    pub(crate) start: AnyElement,
+    /// The end handle's area.
+    pub(crate) end: AnyElement,
+}
+
+/// A selection handle drawn at `spot` in `color`: a 44 px square hit area
+/// centred on its knob, tagged with its driver id and holding `area`, with
+/// the stem and the knob drawn inside it; they take no input.
+fn handle_element(end: HandleEnd, spot: HandleSpot, color: Hsla, area: AnyElement) -> AnyElement {
+    let origin = spot.hit_origin(end);
+    let knob = spot.knob_centre(end) - origin;
+    div()
+        .driver_id(|| end.key().to_owned())
+        .absolute()
+        .left(origin.x)
+        .top(origin.y)
+        .size(px(HANDLE_TARGET))
+        .child(
+            div()
+                .absolute()
+                .left(spot.caret.x - origin.x)
+                .top(spot.caret.y - origin.y)
+                .w(px(HANDLE_STEM))
+                .h(spot.line_height)
+                .bg(color),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(knob.x - px(HANDLE_KNOB / 2.0))
+                .top(knob.y - px(HANDLE_KNOB / 2.0))
+                .size(px(HANDLE_KNOB))
+                .rounded_full()
+                .bg(color),
+        )
+        .child(area)
+        .into_any_element()
+}
+
+/// The (start, end) spots of `spots`, as a frame draws its handles from.
+fn spot_pair(spots: Option<HandleSpots>) -> Option<(Option<HandleSpot>, Option<HandleSpot>)> {
+    spots.map(|spots| (spots.start, spots.end))
+}
+
+/// A canvas over the rows' box that measures, once the rows before it are
+/// laid out, where the handles of the selection's ordered `ends` go, and
+/// stores that in `registry`; when it differs from `drawn`, the spots this
+/// frame drew its handles at, the window draws again, so frames settle.
+fn handle_measure(
+    registry: Rc<RefCell<TextRegistry>>,
+    ends: Option<(TextPos, TextPos)>,
+    viewport: Option<ScrollHandle>,
+    drawn: Option<HandleSpots>,
+) -> impl IntoElement {
+    canvas(
+        move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
+            let view = viewport.as_ref().map(ScrollHandle::bounds);
+            let measured = ends.as_ref().map(|(start, end)| {
+                let registry = registry.borrow();
+                HandleSpots {
+                    origin: bounds.origin,
+                    start: registry.spot(start, bounds.origin, view),
+                    end: registry.spot(end, bounds.origin, view),
+                }
+            });
+            registry.borrow_mut().handles = measured;
+            if spot_pair(measured) != spot_pair(drawn) {
+                // A refresh while drawing is ignored: ask once this frame is done.
+                window.defer(cx, |window, _| window.refresh());
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// How far `y` is above or below `bounds`; zero inside its rows.
@@ -635,6 +846,9 @@ fn align_shift(layout: &TextLayout, align: TextAlign) -> Pixels {
 pub(crate) struct SelectDraw {
     units: Rc<Units>,
     selected: Option<SelectedSpan>,
+    /// The selection's (start, end) in reading order, which the handles
+    /// mark.
+    ends: Option<(TextPos, TextPos)>,
     background: Hsla,
     registry: Rc<RefCell<TextRegistry>>,
 }
@@ -1586,6 +1800,97 @@ impl RootView {
             chat.selection = widened;
             cx.notify();
         }
+    }
+
+    /// A finger took selection handle `end` of session `session_id`'s
+    /// phone chat at window point `grab`: the selection's other end stays
+    /// where it is, and the moving end aims at the finger plus the vector
+    /// from `grab` to the handle's stem's middle, as the handle stands now.
+    pub(crate) fn phone_handle_start(
+        &mut self,
+        session_id: &str,
+        end: HandleEnd,
+        grab: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let aim = self
+            .chat
+            .phone_text
+            .borrow()
+            .handles
+            .and_then(|spots| Some(spots.of(end)?.aim_offset(grab - spots.origin)));
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        let units = phone_units(chat);
+        let ordered = chat
+            .selection
+            .as_ref()
+            .and_then(|selection| clamped(&units, selection))
+            .and_then(|selection| selection.ordered(&units));
+        chat.handle_drag = aim.zip(ordered).map(|(aim, (start, last))| HandleDrag {
+            fixed: match end {
+                HandleEnd::Start => last,
+                HandleEnd::End => start,
+            },
+            aim,
+        });
+        cx.notify();
+    }
+
+    /// The finger dragging a selection handle of session `session_id`'s
+    /// phone chat is at window point `finger`: the selection runs from the
+    /// end that stays to the text nearest the point the handle aims at, so
+    /// dragging past the other end swaps the ends; an empty selection is
+    /// allowed while dragging.
+    pub(crate) fn phone_handle_move(
+        &mut self,
+        session_id: &str,
+        finger: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = self.phone_viewport();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        let Some(drag) = chat.handle_drag.as_ref() else {
+            return;
+        };
+        let aimed = finger + drag.aim;
+        let Some(hit) = self.chat.phone_text.borrow().hit(aimed, viewport) else {
+            return;
+        };
+        let moved = Some(Selection {
+            anchor: drag.fixed.clone(),
+            focus: text_pos(hit),
+        });
+        if moved != chat.selection {
+            chat.selection = moved;
+            cx.notify();
+        }
+    }
+
+    /// The finger dragging a selection handle of session `session_id`'s
+    /// phone chat lifted or was cancelled: the drag ends, and the selection
+    /// stays as it last moved.
+    pub(crate) fn phone_handle_end(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.handle_drag = None;
+            cx.notify();
+        }
+    }
+
+    /// Spec hook: the window points the phone chat's start and end
+    /// selection handles aim at (each stem's middle), as the latest frame
+    /// measured them; `None` unless both handles are drawn.
+    #[must_use]
+    pub fn phone_chat_handle_aims(&self) -> Option<(Point<Pixels>, Point<Pixels>)> {
+        let spots = self.chat.phone_text.borrow().handles?;
+        let (start, end) = spots.start.zip(spots.end)?;
+        Some((
+            spots.origin + start.stem_middle(),
+            spots.origin + end.stem_middle(),
+        ))
     }
 
     /// Spec hook: selects session `session_id`'s chat text from `anchor` to
@@ -2873,15 +3178,19 @@ impl RootView {
     /// phase, before the row, link or button the tap hit acts, which is how
     /// the phone puts the keyboard away whatever a child does with the click.
     /// `hold`, an area over the rows (not the strip), takes their long
-    /// presses.
+    /// presses; `handles` are the selection handles' drag areas, drawn over
+    /// the rows while the chat has a selection
+    /// ([`Self::phone_handle_layer`]).
     pub(crate) fn phone_chat_body(
         &self,
         session_id: &str,
         on_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
         hold: impl IntoElement,
+        handles: HandleAreas,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let select = self.phone_select_draw(session_id, cx);
+        let ends = select.as_ref().and_then(|select| select.ends.clone());
         let look = RowLook {
             mode: ChatMode::Compact,
             max_width: None,
@@ -2920,11 +3229,51 @@ impl RootView {
                     .min_h(px(0.0))
                     .w_full()
                     .child(main)
-                    .child(hold),
+                    .child(hold)
+                    .child(self.phone_handle_layer(ends, handles, cx)),
             )
             .children(strip)
             .child(painted_mark(self.chat.phone_text.clone()))
             .into_any_element()
+    }
+
+    /// The selection handles over the phone chat's rows: one at each of
+    /// the selection's ordered `ends` whose caret the previous frame drew
+    /// inside the chat's scroll area, each holding its drag area from
+    /// `areas`, then the canvas that measures where they go this frame
+    /// ([`handle_measure`]). No selection draws no handle. The layer is
+    /// clipped to the rows' box, so no handle reaches over the work strip,
+    /// the composer or the header, nor takes a touch there.
+    fn phone_handle_layer(
+        &self,
+        ends: Option<(TextPos, TextPos)>,
+        areas: HandleAreas,
+        cx: &App,
+    ) -> Div {
+        let drawn = ends
+            .as_ref()
+            .and_then(|_| self.chat.phone_text.borrow().handles);
+        let color: Hsla = gpui::rgb(theme(cx).accent).into();
+        let mut layer = Vec::new();
+        for (end, area) in [(HandleEnd::Start, areas.start), (HandleEnd::End, areas.end)] {
+            if let Some(spot) = drawn.and_then(|spots| spots.of(end)) {
+                layer.push(handle_element(end, spot, color, area));
+            }
+        }
+        let viewport = self
+            .chat
+            .scrolls
+            .get(PHONE_PANE)
+            .map(|scroll| scroll.handle().clone());
+        let registry = self.chat.phone_text.clone();
+        layer.push(handle_measure(registry, ends, viewport, drawn).into_any_element());
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .overflow_hidden()
+            .children(layer)
     }
 
     /// What the phone draws session `session_id`'s selectable texts with,
@@ -2935,15 +3284,16 @@ impl RootView {
         self.chat.phone_text.borrow_mut().forget();
         let chat = self.chat.sessions.get(session_id)?;
         let units = phone_units(chat);
-        let selected = chat
+        let ends = chat
             .selection
             .as_ref()
             .and_then(|selection| clamped(&units, selection))
-            .and_then(|selection| selection.ordered(&units))
-            .and_then(|ordered| units.resolve(&ordered));
+            .and_then(|selection| selection.ordered(&units));
+        let selected = ends.as_ref().and_then(|ordered| units.resolve(ordered));
         Some(SelectDraw {
             units: Rc::new(units),
             selected,
+            ends,
             background: gpui::rgba(theme(cx).input_selection).into(),
             registry: self.chat.phone_text.clone(),
         })
@@ -4179,5 +4529,56 @@ fn span(secs: u64) -> String {
         0..60 => format!("{secs}s"),
         60..3600 => format!("{}m {}s", secs / 60, secs % 60),
         _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_knob_and_aim_for_a_caret() {
+        let spot = HandleSpot {
+            caret: point(px(100.0), px(200.0)),
+            line_height: px(20.0),
+        };
+        assert_eq!(
+            spot.caret.x,
+            px(100.0),
+            "the stem's left edge is the caret's x"
+        );
+        assert_eq!(spot.stem_middle(), point(px(101.0), px(210.0)));
+        assert_eq!(
+            spot.knob_centre(HandleEnd::Start),
+            point(px(101.0), px(195.0)),
+            "the start's knob sits above the stem"
+        );
+        assert_eq!(
+            spot.knob_centre(HandleEnd::End),
+            point(px(101.0), px(225.0)),
+            "the end's knob sits below the stem"
+        );
+        let start_knob = spot.knob_centre(HandleEnd::Start);
+        let end_knob = spot.knob_centre(HandleEnd::End);
+        assert_eq!(spot.aim_offset(start_knob), point(px(0.0), px(15.0)));
+        assert_eq!(spot.aim_offset(end_knob), point(px(0.0), px(-15.0)));
+        assert_eq!(
+            spot.aim_offset(point(px(90.0), px(180.0))),
+            point(px(11.0), px(30.0)),
+            "a grab off the knob aims from where the finger took the handle"
+        );
+    }
+
+    #[test]
+    fn handle_hit_area_is_centred_on_the_knob() {
+        let spot = HandleSpot {
+            caret: point(px(100.0), px(200.0)),
+            line_height: px(20.0),
+        };
+        assert_eq!(
+            spot.hit_origin(HandleEnd::Start),
+            point(px(79.0), px(173.0))
+        );
+        assert_eq!(spot.hit_origin(HandleEnd::End), point(px(79.0), px(203.0)));
     }
 }

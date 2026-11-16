@@ -4,8 +4,8 @@
 //! takes the back gesture. It only renders and forwards taps.
 
 use gpui::{
-    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Stateful, Window,
-    div, prelude::*, px,
+    AnyElement, App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent,
+    Stateful, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -13,11 +13,11 @@ use super::composer::{self, Dock};
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
-use super::long_press::long_press_drag_area;
+use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
-use crate::chat_view::{chat_available, composer_line_disables};
+use crate::chat_view::{HandleAreas, HandleEnd, chat_available, composer_line_disables};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
@@ -250,6 +250,54 @@ impl PhoneRoot {
         )
     }
 
+    /// The drag areas of the two selection handles over session
+    /// `session_id`'s chat body: a drag on one moves its end of the
+    /// selection.
+    fn chat_handles(&self, session_id: &str) -> HandleAreas {
+        HandleAreas {
+            start: self.chat_handle(session_id, HandleEnd::Start),
+            end: self.chat_handle(session_id, HandleEnd::End),
+        }
+    }
+
+    /// The drag area of selection handle `end` over session `session_id`'s
+    /// chat body.
+    fn chat_handle(&self, session_id: &str, end: HandleEnd) -> AnyElement {
+        let roots = [
+            self.root.downgrade(),
+            self.root.downgrade(),
+            self.root.downgrade(),
+        ];
+        let [start_root, move_root, end_root] = roots;
+        let (start_id, move_id, end_id) = (
+            session_id.to_owned(),
+            session_id.to_owned(),
+            session_id.to_owned(),
+        );
+        // Each update fails only when the app's root is gone.
+        touch_drag_area(
+            end.key(),
+            move |grab, _, cx| {
+                start_root
+                    .update(cx, |root, cx| {
+                        root.phone_handle_start(&start_id, end, grab, cx);
+                    })
+                    .ok();
+            },
+            move |at, _, cx| {
+                move_root
+                    .update(cx, |root, cx| root.phone_handle_move(&move_id, at, cx))
+                    .ok();
+            },
+            move |_, cx| {
+                end_root
+                    .update(cx, |root, cx| root.phone_handle_end(&end_id, cx))
+                    .ok();
+            },
+        )
+        .into_any_element()
+    }
+
     /// While a session is shown: its page, the header over the body of the
     /// page it is on, with whether the on-screen keyboard is up for the
     /// composer's buttons and the chat's tap.
@@ -271,9 +319,10 @@ impl PhoneRoot {
                     Self::chat_tapped(keyboard_up, window);
                 });
                 let hold = self.chat_hold(&id);
-                let chat = self
-                    .root
-                    .update(cx, |root, cx| root.phone_chat_body(&id, on_tap, hold, cx));
+                let handles = self.chat_handles(&id);
+                let chat = self.root.update(cx, |root, cx| {
+                    root.phone_chat_body(&id, on_tap, hold, handles, cx)
+                });
                 let composer = self.composer(&id, keyboard_up, cx);
                 div()
                     .driver_id(|| "phone-session-chat".to_owned())
