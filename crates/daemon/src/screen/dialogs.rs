@@ -228,7 +228,7 @@ pub fn expect_holds(
 )]
 mod tests {
     use super::*;
-    use crate::screen::fixture_screen::screen_from;
+    use crate::screen::fixture_screen::{screen_at_height, screen_from};
     use agent_api::{Key, KeyHolder, ScreenExpect};
     use protocol::{ChatPromptKind, ComposerState};
 
@@ -2126,6 +2126,12 @@ mod tests {
         read_draft(&agent_registry::default_agent(), &screen_from(text))
     }
 
+    /// The draft a capture reads as on a screen exactly as tall as the
+    /// capture, for a reading that depends on the box's height cap.
+    fn draft_at_height_of(text: &str) -> Option<DraftReading> {
+        read_draft(&agent_registry::default_agent(), &screen_at_height(text))
+    }
+
     #[test]
     fn a_one_line_draft_reads_its_text() {
         let draft = draft_of(include_str!("fixtures/claude--draft-one-line.txt")).expect("a draft");
@@ -2175,6 +2181,54 @@ mod tests {
         assert_eq!(draft.rows, 15);
         assert!(!draft.whole);
         assert!(draft.text.starts_with("line 31"));
+    }
+
+    #[test]
+    fn a_box_at_its_tallest_on_24_rows_may_be_scrolled() {
+        let draft = draft_at_height_of(include_str!("fixtures/claude--draft-tallest-24.txt"))
+            .expect("a draft");
+        assert_eq!(draft.rows, 7);
+        assert!(!draft.whole);
+        assert_eq!(
+            draft.text,
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_draft_on_24_rows_is_not_whole() {
+        let draft = draft_at_height_of(include_str!("fixtures/claude--draft-scrolled-24.txt"))
+            .expect("a draft");
+        assert_eq!(draft.rows, 7);
+        assert!(!draft.whole);
+        assert_eq!(
+            draft.text,
+            "line 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14"
+        );
+    }
+
+    #[test]
+    fn a_box_at_its_tallest_on_30_rows_may_be_scrolled() {
+        let draft = draft_at_height_of(include_str!("fixtures/claude--draft-tallest-30.txt"))
+            .expect("a draft");
+        assert_eq!(draft.rows, 10);
+        assert!(!draft.whole);
+        assert_eq!(
+            draft.text,
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_draft_on_30_rows_is_not_whole() {
+        let draft = draft_at_height_of(include_str!("fixtures/claude--draft-scrolled-30.txt"))
+            .expect("a draft");
+        assert_eq!(draft.rows, 10);
+        assert!(!draft.whole);
+        assert_eq!(
+            draft.text,
+            "line 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20"
+        );
     }
 
     #[test]

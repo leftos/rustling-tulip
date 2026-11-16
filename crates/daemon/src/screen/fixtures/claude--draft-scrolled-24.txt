@@ -1,0 +1,24 @@
+
+[0m[38;2;215;119;87m ▐[0m[38;2;215;119;87m[48;2;0;0;0m▛███▛█[0m   [0m[1mClaude Code[0m [0m[38;2;153;153;153mv2.1.325[0m
+[0m[38;2;215;119;87m▝▜[0m[38;2;215;119;87m[48;2;0;0;0m█████[0m[38;2;215;119;87m█▀  [0m[38;2;153;153;153mHaiku 5.5 · Claude Ultra[0m
+[0m[38;2;215;119;87m ▝▝   ▝▝   [0m[38;2;153;153;153mX:\dev\scratch\prompt-box-draft-scroll-height-capture\todo-cli-example-projects[0m
+
+[0m[38;2;255;193;7m⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP, agents, and more)[0m
+[0m  [0m[38;2;153;153;153mRestart without --safe-mode to re-enable[0m
+[0m[38;2;255;193;7m⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on[0m
+
+
+
+
+
+[0m                                                                                                    [0m[38;2;153;153;153m◐ medium · /effort[0m
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m❯ line 8
+[0m  line 9
+[0m  line 10
+[0m  line 11
+[0m  line 12
+[0m  line 13
+[0m  line 14
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m  [0m[38;2;255;193;7m⏵⏵ auto mode on [0m[38;2;153;153;153m(shift+tab to cycle)[0m
