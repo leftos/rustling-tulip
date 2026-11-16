@@ -172,11 +172,12 @@
 - [!] RT-1688 Let russh take patch releases and check advisories on a schedule · release vNext
 - [ ] RT-1699 Map apps/native/src/ssh_inproc.rs in the test map so -Validate passes
 - [ ] RT-1722 Make rt.ps1 refuse a routable verb run inside an outer local gate
-- [ ] RT-1821 Run the ui_driver specs in rt.ps1 test's driver pass, and fix its stale method list · release vNext
-- [ ] RT-1822 Make the tail tests for a file that appears later see it missing first · release vNext
-- [ ] RT-1830 Let a driven run reach a second isolated daemon as an SSH host, to smoke remote features · release vNext
-- [ ] RT-1832 Keep a driven run's Gates pill off the machine's real gate state · release vNext
 - [ ] RT-1853 Map the follow tab and tab close files in the test map
+- [ ] RT-1859 Drive the remote link menu end to end in a live-tier spec
+- [ ] RT-1861 Refuse a driven run whose RUSTLING_TULIP_SSH is not the fake ssh, or whose fake ssh state is outside .tmp
+- [ ] RT-1863 Keep a seeded gates override off the machine's slot locks and cutover flag
+- [ ] RT-1864 Route the driver MCP live check to a builder desktop
+- [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
 
 ## Elevated daemon and security
 
@@ -250,7 +251,6 @@
 - [ ] RT-308 Show the focused session's name without its UUID in the status bar
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
 - [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying
-- [ ] RT-1820 Keep the sidebar header one row tall when the fold-all button appears · release vNext
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-944 Draw the sidebar's Active-filter empty line under its host header
@@ -289,6 +289,7 @@
 - [ ] RT-1620 Keep the status bar readable at narrow widths with CPU and RAM pills
 - [ ] RT-1725 Remove the single-variant SidebarChrome enum and its always-true checks
 - [ ] RT-1762 Follow Markdown links and stretches in a popped-out pane window
+- [ ] RT-1866 Show the Sessions header title whole, not as Ses…, at the default sidebar width
 
 ## Terminal, panes and links
 
@@ -452,7 +453,6 @@
   - [ ] RT-358 Send picks and notes from a mock page back to Claude
   - [ ] RT-395 Show a remote session's mock locally with its files fetched on demand, discarded when the pane closes
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
-- [ ] RT-1831 Keep a follow tab's first line clear of its header border · release vNext
 - [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
 - [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits
 - [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more
@@ -495,9 +495,7 @@
 - [ ] RT-1827 Assert the iOS text-input notifications in TextInput specs through the gpui test window · release vNext
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
-- [ ] RT-1828 Let backspace work in a masked iPhone field that holds an emoji · release vNext
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
-- [ ] RT-1829 Keep an iPhone IME composition when iOS replaces text before it · release vNext
 - [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards
 - [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply
 - [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
@@ -642,11 +640,9 @@
   - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N
   - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row
 - [ ] RT-1587 Keep a wrapped transcript line's indent in a followed run's pane
-- [ ] RT-1836 Let subagent and dispatch panes select text, open path links and use the terminal's font size · release vNext
-  - [/] RT-1845 Open path and URL links from subagent and dispatch transcripts with Ctrl+click and Ctrl+Shift+click · release vNext
 - [ ] RT-1849 Fall back for an uninstalled terminal font in subagent and dispatch transcripts as the terminal does
-- [ ] RT-1856 Update a transcript link's underline when Ctrl goes down or up without a pointer move
 - [ ] RT-1857 Find why a terminal pane answering its scrollback stops a transcript hit in the same tab
+- [ ] RT-1860 Resolve a remote dispatch run's relative links when its worktree sits outside every registered repo
 
 ## macOS and Unix
 
