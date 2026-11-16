@@ -219,13 +219,10 @@
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
 - [ ] RT-1753 Pull a prompt-box draft into Chat's message box, or send it as it stands · release vNext
-  - [ ] RT-1779 Pull or send a prompt-box draft from desktop Chat, and tap Claude's suggestion · release vNext
-  - [ ] RT-1780 Pull or send a prompt-box draft from the phone's Chat, and tap Claude's suggestion · release vNext
-  - [ ] RT-1800 Capture scrolled drafts at 24 and 30 rows and pin the draft reader's height cap · release vNext
 - [ ] RT-1757 Draw Code Mode's REPL scripts in Chat as lines in their tool group · release vNext
-  - [ ] RT-1759 Model a Code Mode script and its inner calls as one row in Chat · release vNext
   - [ ] RT-1760 Draw a Code Mode script as one line in desktop Chat · release vNext
   - [ ] RT-1761 Draw Code Mode script lines in the phone's Chat · release vNext
+- [ ] RT-1804 Keep the Chat message box focused after a composer-row button click
 
 ## Settings and themes
 
@@ -477,6 +474,8 @@
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
 - [ ] RT-1366 Rename, delete and make folders on a host from the file manager
 - [ ] RT-1367 Upload files from this machine to a host folder in the file manager
+- [ ] RT-1807 Follow a linked log file in an in-app tab from the link's Ctrl+Shift+click menu · release vNext
+  - [ ] RT-1811 Open the link menu from a Chat file link · release vNext
 
 ## Phone app
 
@@ -514,7 +513,6 @@
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 - [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext+1
 - [ ] RT-1754 Select Chat text on the phone with a long press: handles and Copy · release vNext
-  - [ ] RT-1788 Start a phone Chat selection with a long press, and widen it while held · release vNext
   - [ ] RT-1789 Drag the phone Chat selection handles · release vNext
   - [ ] RT-1790 Copy the phone Chat selection, and clear it on a tap, page change or reload · release vNext
   - [ ] RT-1791 Scroll phone Chat while a selection drag nears its edge, and document selection · release vNext
@@ -762,6 +760,9 @@
 - [ ] RT-1794 Bound how long a tailnet dial to a switched-off host stays Connecting
 - [ ] RT-1795 Count a pulled draft's row widths in terminal columns, and keep a split long word whole
 - [ ] RT-1796 Report a draft pull that the owner's own key cut short as not cleared
+- [ ] RT-1802 Keep a pulled draft when Chat unloads the session mid-pull
+- [ ] RT-1806 Give the main window's dialogs one order for drawing and keys
+- [ ] RT-1813 Move follow tabs to the kept host key when two host keys reach one daemon
 
 ## Design files
 
