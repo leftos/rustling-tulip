@@ -7,12 +7,12 @@
 //! show a chat and which chats are loaded live in [`crate::chat`]; the Tail
 //! boxes' state in [`crate::chat_tail`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -476,7 +476,27 @@ pub(crate) struct ChatPanes {
     phone_refused: Option<String>,
     /// The phone chat's selectable texts as its last frame drew them.
     phone_text: Rc<RefCell<TextRegistry>>,
+    /// The finger of the selection drag the phone has claimed, while one is
+    /// under way: its session, its window point and what it drags. Only the
+    /// edge scroll's tick reads it.
+    drag_finger: Option<(String, Point<Pixels>, DragKind)>,
+    /// Whether the edge scroll's tick runs ([`RootView::start_edge_tick`]).
+    edge_ticking: bool,
+    /// How many times the phone's chat body has been built, for specs.
+    phone_chat_renders: Cell<usize>,
 }
+
+/// What a selection drag on the phone's chat moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragKind {
+    /// The held finger of a hold that picked a word.
+    Hold,
+    /// A selection handle.
+    Handle,
+}
+
+/// How often the edge scroll's tick runs.
+const EDGE_TICK: Duration = Duration::from_millis(16);
 
 /// The selectable texts the phone's chat drew in its latest frame, each
 /// with its layout, for the hit test, and the selected bytes it drew.
@@ -766,6 +786,22 @@ fn copy_button(
         .into_any_element()
 }
 
+/// The (start, end) spots of `spots` the Copy button is placed from: each
+/// end whose caret lies inside `view` (the chat's scroll area), the one in
+/// view standing in for the other when only one is; none when neither is.
+/// A dragged handle's spot outside the view keeps its drag area but never
+/// places the button.
+fn copy_spots(
+    spots: HandleSpots,
+    view: Option<Bounds<Pixels>>,
+) -> Option<(HandleSpot, HandleSpot)> {
+    let shown = |spot: Option<HandleSpot>| {
+        spot.filter(|spot| view.is_none_or(|view| view.contains(&(spots.origin + spot.caret))))
+    };
+    let (start, end) = (shown(spots.start), shown(spots.end));
+    Some((start.or(end)?, end.or(start)?))
+}
+
 /// The gap between the Copy button and the handle hit area it sits beside.
 const COPY_GAP: f32 = 4.0;
 
@@ -799,9 +835,11 @@ fn copy_button_origin(
     point(px(x), px(y))
 }
 
-/// A selection handle's drag in progress: the selection's end that stays,
-/// and the vector added to the finger to find the end that moves.
+/// A selection handle's drag in progress: the handle the finger took, the
+/// selection's end that stays, and the vector added to the finger to find
+/// the end that moves.
 struct HandleDrag {
+    end: HandleEnd,
     fixed: TextPos,
     aim: Point<Pixels>,
 }
@@ -862,22 +900,26 @@ fn spot_pair(spots: Option<HandleSpots>) -> Option<SpotPair> {
 /// laid out, where the handles of the selection's ordered `ends` go, and
 /// stores that in `registry`; when it differs from `drawn`, the spots this
 /// frame drew its handles at, the window draws again, so frames settle.
+/// The handle a finger drags (`dragged`) is measured wherever its caret
+/// is, inside the chat's scroll area or not, so it keeps its drag area.
 fn handle_measure(
     registry: Rc<RefCell<TextRegistry>>,
     ends: Option<(TextPos, TextPos)>,
     viewport: Option<ScrollHandle>,
     drawn: Option<HandleSpots>,
+    dragged: Option<HandleEnd>,
 ) -> impl IntoElement {
     canvas(
         move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             let view = viewport.as_ref().map(ScrollHandle::bounds);
+            let view_of = |end: HandleEnd| view.filter(|_| dragged != Some(end));
             let measured = ends.as_ref().map(|(start, end)| {
                 let registry = registry.borrow();
                 HandleSpots {
                     origin: bounds.origin,
                     layer: bounds.size,
-                    start: registry.spot(start, bounds.origin, view),
-                    end: registry.spot(end, bounds.origin, view),
+                    start: registry.spot(start, bounds.origin, view_of(HandleEnd::Start)),
+                    end: registry.spot(end, bounds.origin, view_of(HandleEnd::End)),
                 }
             });
             registry.borrow_mut().handles = measured;
@@ -1144,6 +1186,9 @@ impl ChatPanes {
             phone: None,
             phone_refused: None,
             phone_text: Rc::default(),
+            drag_finger: None,
+            edge_ticking: false,
+            phone_chat_renders: Cell::new(0),
         }
     }
 
@@ -1927,6 +1972,10 @@ impl RootView {
         point: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let held = self.chat.sessions.get(session_id);
+        if held.is_some_and(|chat| chat.hold.is_some()) {
+            self.track_drag_finger(session_id, point, DragKind::Hold, cx);
+        }
         let hit = self
             .chat
             .phone_text
@@ -1973,6 +2022,7 @@ impl RootView {
             .and_then(|selection| clamped(&units, selection))
             .and_then(|selection| selection.ordered(&units));
         chat.handle_drag = aim.zip(ordered).map(|(aim, (start, last))| HandleDrag {
+            end,
             fixed: match end {
                 HandleEnd::Start => last,
                 HandleEnd::End => start,
@@ -1993,6 +2043,10 @@ impl RootView {
         finger: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let dragging = self.chat.sessions.get(session_id);
+        if dragging.is_some_and(|chat| chat.handle_drag.is_some()) {
+            self.track_drag_finger(session_id, finger, DragKind::Handle, cx);
+        }
         let viewport = self.phone_viewport();
         let Some(chat) = self.chat.sessions.get_mut(session_id) else {
             return;
@@ -2018,10 +2072,157 @@ impl RootView {
     /// phone chat lifted or was cancelled: the drag ends, and the selection
     /// stays as it last moved.
     pub(crate) fn phone_handle_end(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.end_drag_finger(session_id);
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.handle_drag = None;
             cx.notify();
         }
+    }
+
+    /// The held finger of a hold on session `session_id`'s phone chat
+    /// lifted or was cancelled: its drag ends, and the selection stays as
+    /// it last widened.
+    pub(crate) fn phone_select_hold_end(&mut self, session_id: &str) {
+        self.end_drag_finger(session_id);
+    }
+
+    /// The finger of a selection drag the phone claimed on session
+    /// `session_id`'s chat, dragging `kind`, is at window point `finger`:
+    /// the edge scroll reads it, and its tick starts unless one runs.
+    fn track_drag_finger(
+        &mut self,
+        session_id: &str,
+        finger: Point<Pixels>,
+        kind: DragKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.drag_finger = Some((session_id.to_owned(), finger, kind));
+        self.start_edge_tick(cx);
+    }
+
+    /// The selection drag on session `session_id`'s phone chat is over:
+    /// the edge scroll has no finger to follow.
+    fn end_drag_finger(&mut self, session_id: &str) {
+        if self
+            .chat
+            .drag_finger
+            .as_ref()
+            .is_some_and(|(id, _, _)| id == session_id)
+        {
+            self.chat.drag_finger = None;
+        }
+    }
+
+    /// Starts the edge scroll's tick unless one runs or no drag is under
+    /// way: every [`EDGE_TICK`] it scrolls the phone chat by [`edge_step`]
+    /// over the time since the last tick ([`Self::edge_tick`]), until that
+    /// stops it or the view is gone.
+    fn start_edge_tick(&mut self, cx: &mut Context<Self>) {
+        if self.chat.edge_ticking || self.chat.drag_finger.is_none() {
+            return;
+        }
+        self.chat.edge_ticking = true;
+        cx.spawn(async move |this, cx| {
+            let mut last = cx.background_executor().now();
+            loop {
+                cx.background_executor().timer(EDGE_TICK).await;
+                let now = cx.background_executor().now();
+                let dt = now.saturating_duration_since(last).as_secs_f32();
+                last = now;
+                match this.update(cx, |root, cx| root.edge_tick(dt, cx)) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(err) => {
+                        tracing::debug!("the edge scroll's root view has gone: {err:#}");
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// One tick of the edge scroll, `dt` seconds after the last: whether
+    /// it goes on ([`Self::edge_scroll`]); when it does not, the tick ends.
+    fn edge_tick(&mut self, dt: f32, cx: &mut Context<Self>) -> bool {
+        let going = self.edge_scroll(dt, cx);
+        if !going {
+            self.chat.edge_ticking = false;
+        }
+        going
+    }
+
+    /// While a selection drag's finger is in the phone chat's edge band,
+    /// with its session the one the phone shows: scrolls the chat by
+    /// [`edge_step`] over `dt` seconds ([`leave_bottom`]), within its rows,
+    /// and moves the drag again at the finger, so the selection follows the
+    /// rows under it; a chat already at its end there neither scrolls nor
+    /// redraws, and waits. Whether the tick goes on: no drag, another
+    /// session, no chat drawn or a finger outside the bands stop it, and so
+    /// does a selection gone or no longer in the chat's texts, which also
+    /// ends the drag's finger.
+    fn edge_scroll(&mut self, dt: f32, cx: &mut Context<Self>) -> bool {
+        let Some((session_id, finger, kind)) = self.chat.drag_finger.clone() else {
+            return false;
+        };
+        let Some((view, handle)) = self.phone_scroll_of(&session_id) else {
+            return false;
+        };
+        if !self.phone_selection_resolves(&session_id) {
+            self.chat.drag_finger = None;
+            return false;
+        }
+        let unit = px(1.0);
+        let step = edge_step(finger.y / unit, view.top() / unit, view.bottom() / unit, dt);
+        if step == 0.0 {
+            return false;
+        }
+        let offset = handle.offset();
+        let max = (handle.max_offset().y / unit).max(0.0);
+        let from = -offset.y / unit;
+        let to = (from + leave_bottom(step, from, max)).clamp(0.0, max);
+        if (to - from).abs() > f32::EPSILON {
+            handle.set_offset(point(offset.x, px(-to)));
+            match kind {
+                DragKind::Handle => self.phone_handle_move(&session_id, finger, cx),
+                DragKind::Hold => self.phone_select_widen(&session_id, finger, cx),
+            }
+            cx.notify();
+        }
+        true
+    }
+
+    /// The phone chat's scroll area, in window coordinates, and its scroll
+    /// handle, while the phone shows session `session_id`'s chat.
+    fn phone_scroll_of(&self, session_id: &str) -> Option<(Bounds<Pixels>, ScrollHandle)> {
+        let shown = self
+            .chat
+            .phone
+            .as_ref()
+            .is_some_and(|(_, id)| id == session_id);
+        let scroll = self.chat.scrolls.get(PHONE_PANE).filter(|_| shown)?;
+        let handle = scroll.handle().clone();
+        Some((handle.bounds(), handle))
+    }
+
+    /// Whether session `session_id`'s chat has a selection that still lies
+    /// in its texts.
+    fn phone_selection_resolves(&self, session_id: &str) -> bool {
+        self.chat.sessions.get(session_id).is_some_and(|chat| {
+            let units = phone_units(chat);
+            chat.selection
+                .as_ref()
+                .and_then(|selection| clamped(&units, selection))
+                .and_then(|selection| selection.ordered(&units))
+                .and_then(|ordered| units.resolve(&ordered))
+                .is_some()
+        })
+    }
+
+    /// Spec hook: how many times the phone's chat body has been built.
+    #[must_use]
+    pub fn phone_chat_renders(&self) -> usize {
+        self.chat.phone_chat_renders.get()
     }
 
     /// Spec hook: the window points the phone chat's start and end
@@ -2059,6 +2260,7 @@ impl RootView {
     /// Ends session `session_id`'s phone chat selection, with the hold it
     /// grew from and any handle drag; specs call it too.
     pub fn clear_phone_chat_selection(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.end_drag_finger(session_id);
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.drop_selection();
             cx.notify();
@@ -3353,6 +3555,8 @@ impl RootView {
         handles: HandleAreas,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let renders = &self.chat.phone_chat_renders;
+        renders.set(renders.get() + 1);
         let select = self.phone_select_draw(session_id, cx);
         let ends = select.as_ref().and_then(|select| select.ends.clone());
         let look = RowLook {
@@ -3403,7 +3607,8 @@ impl RootView {
 
     /// The selection handles over the phone chat's rows: one at each of
     /// the selection's ordered `ends` whose caret the previous frame drew
-    /// inside the chat's scroll area, each holding its drag area from
+    /// inside the chat's scroll area, and the handle a finger drags wherever
+    /// its caret is (so its drag goes on), each holding its drag area from
     /// `areas`, then the canvas that measures where they go this frame
     /// ([`handle_measure`]). While a handle draws, so does the Copy button
     /// beside them ([`copy_button_origin`]), which copies session
@@ -3429,7 +3634,8 @@ impl RootView {
         }
         // An empty selection keeps its handles but has nothing to copy.
         if ends.as_ref().is_some_and(|(start, end)| start != end) {
-            layer.extend(Self::phone_copy_button(session_id, drawn, cx));
+            let view = self.phone_viewport();
+            layer.extend(Self::phone_copy_button(session_id, drawn, view, cx));
         }
         let viewport = self
             .chat
@@ -3437,7 +3643,14 @@ impl RootView {
             .get(PHONE_PANE)
             .map(|scroll| scroll.handle().clone());
         let registry = self.chat.phone_text.clone();
-        layer.push(handle_measure(registry, ends, viewport, drawn).into_any_element());
+        let dragged = self
+            .chat
+            .sessions
+            .get(session_id)
+            .and_then(|chat| chat.handle_drag.as_ref())
+            .map(|drag| drag.end);
+        let measure = handle_measure(registry, ends, viewport, drawn, dragged);
+        layer.push(measure.into_any_element());
         div()
             .absolute()
             .top_0()
@@ -3453,10 +3666,11 @@ impl RootView {
     fn phone_copy_button(
         session_id: &str,
         drawn: Option<HandleSpots>,
+        view: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let spots = drawn?;
-        let (start, end) = (spots.start.or(spots.end)?, spots.end.or(spots.start)?);
+        let (start, end) = copy_spots(spots, view)?;
         let measured = copy_button_size(cx);
         let origin = copy_button_origin(start, end, spots.layer, measured.0);
         let root = cx.entity().downgrade();
@@ -3904,6 +4118,41 @@ pub(crate) fn follow_bottom(handle: &ScrollHandle) {
     });
     if chat::follows_bottom(laid_out) {
         handle.scroll_to_bottom();
+    }
+}
+
+/// How far inside the phone chat's top or bottom edge, in pixels, a
+/// selection drag's finger scrolls the chat.
+const EDGE_BAND: f32 = 48.0;
+/// The edge scroll's top speed, in pixels a second, with the finger at the
+/// edge or past it.
+const EDGE_SPEED: f32 = 600.0;
+
+/// How far, in pixels, the phone chat scrolls over `dt` seconds while a
+/// selection drag's finger is at window height `y` over a scroll area from
+/// `top` to `bottom`: nothing more than [`EDGE_BAND`] inside both edges;
+/// inside a band, [`EDGE_SPEED`] scaled by how deep in the band the finger
+/// is (all of it at the edge and past it), negative toward earlier rows
+/// near the top and positive toward later rows near the bottom.
+pub(crate) fn edge_step(y: f32, top: f32, bottom: f32, dt: f32) -> f32 {
+    let into_top = (EDGE_BAND - (y - top)).clamp(0.0, EDGE_BAND);
+    let into_bottom = (EDGE_BAND - (bottom - y)).clamp(0.0, EDGE_BAND);
+    (into_bottom - into_top) * EDGE_SPEED / EDGE_BAND * dt
+}
+
+/// The least step up, in pixels, from a chat at its bottom: one more than
+/// the slack within which [`chat::follows_bottom`] keeps a chat at its
+/// bottom, so the next layout does not snap the chat back.
+const LEAVE_BOTTOM: f32 = 2.0;
+
+/// The edge scroll's `step` from a chat scrolled `scrolled` of its
+/// `max_scroll` pixels: a step up from a chat at its bottom is at least
+/// [`LEAVE_BOTTOM`]; any other step stands.
+fn leave_bottom(step: f32, scrolled: f32, max_scroll: f32) -> f32 {
+    if step < 0.0 && chat::follows_bottom(Some((scrolled, max_scroll))) {
+        step.min(-LEAVE_BOTTOM)
+    } else {
+        step
     }
 }
 
@@ -4728,6 +4977,146 @@ fn span(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scroll area from 100 to 700 px, as the edge scroll sees it.
+    const TOP: f32 = 100.0;
+    const BOTTOM: f32 = 700.0;
+
+    #[test]
+    fn edge_step_is_zero_in_the_middle() {
+        assert_eq!(edge_step(400.0, TOP, BOTTOM, 0.5), 0.0);
+    }
+
+    #[test]
+    fn edge_step_is_zero_at_the_bands_inner_line() {
+        assert_eq!(
+            edge_step(TOP + 48.0, TOP, BOTTOM, 0.5),
+            0.0,
+            "48 px under the top"
+        );
+        assert_eq!(
+            edge_step(BOTTOM - 48.0, TOP, BOTTOM, 0.5),
+            0.0,
+            "48 px over the bottom"
+        );
+    }
+
+    #[test]
+    fn edge_step_scrolls_up_near_the_top_and_down_near_the_bottom() {
+        assert!(
+            edge_step(TOP + 20.0, TOP, BOTTOM, 0.5) < 0.0,
+            "toward earlier rows"
+        );
+        assert!(
+            edge_step(BOTTOM - 20.0, TOP, BOTTOM, 0.5) > 0.0,
+            "toward later rows"
+        );
+    }
+
+    #[test]
+    fn edge_step_is_full_speed_at_the_edge_and_past_it() {
+        assert_eq!(edge_step(TOP, TOP, BOTTOM, 0.5), -300.0, "at the top");
+        assert_eq!(
+            edge_step(TOP - 30.0, TOP, BOTTOM, 0.5),
+            -300.0,
+            "over the top"
+        );
+        assert_eq!(edge_step(BOTTOM, TOP, BOTTOM, 0.5), 300.0, "at the bottom");
+        assert_eq!(
+            edge_step(BOTTOM + 30.0, TOP, BOTTOM, 0.5),
+            300.0,
+            "under the bottom"
+        );
+    }
+
+    #[test]
+    fn edge_step_speed_grows_with_depth() {
+        assert_eq!(
+            edge_step(TOP + 36.0, TOP, BOTTOM, 1.0),
+            -150.0,
+            "12 px into the top band"
+        );
+        assert_eq!(
+            edge_step(TOP + 12.0, TOP, BOTTOM, 1.0),
+            -450.0,
+            "36 px into the top band"
+        );
+        assert_eq!(
+            edge_step(BOTTOM - 36.0, TOP, BOTTOM, 1.0),
+            150.0,
+            "12 px into the bottom band"
+        );
+        assert_eq!(
+            edge_step(BOTTOM - 12.0, TOP, BOTTOM, 1.0),
+            450.0,
+            "36 px into the bottom band"
+        );
+    }
+
+    #[test]
+    fn edge_step_up_from_the_bottom_clears_the_follow_slack() {
+        let max = 1000.0;
+        let left = leave_bottom(-0.5, max, max);
+        assert!(left <= -2.0, "at least the slack and one more: {left}");
+        assert!(
+            !chat::follows_bottom(Some((max + left, max))),
+            "the next layout does not snap it back to the bottom"
+        );
+        let nearly = leave_bottom(-0.5, max - 0.5, max);
+        assert!(
+            nearly <= -2.0,
+            "within the slack is at the bottom: {nearly}"
+        );
+        assert_eq!(leave_bottom(-0.5, 500.0, max), -0.5, "away from the bottom");
+        assert_eq!(leave_bottom(3.0, max, max), 3.0, "a step down");
+        assert_eq!(
+            leave_bottom(-5.0, max, max),
+            -5.0,
+            "a step already past the slack"
+        );
+    }
+
+    #[test]
+    fn copy_spots_place_copy_by_the_start_when_the_dragged_end_is_below_the_rows() {
+        let view = Bounds::new(point(px(0.0), px(100.0)), gpui::size(px(390.0), px(600.0)));
+        let start = HandleSpot {
+            caret: point(px(50.0), px(4.0)),
+            line_height: px(20.0),
+        };
+        let below = HandleSpot {
+            caret: point(px(80.0), px(700.0)),
+            line_height: px(20.0),
+        };
+        let spots = HandleSpots {
+            origin: view.origin,
+            layer: view.size,
+            start: Some(start),
+            end: Some(below),
+        };
+        let pair = copy_spots(spots, Some(view));
+        assert_eq!(
+            pair,
+            Some((start, start)),
+            "the start stands in for the end"
+        );
+        let button = gpui::size(px(60.0), px(44.0));
+        let origin = copy_button_origin(start, start, spots.layer, button);
+        assert!(
+            origin.y < px(100.0),
+            "by the start near the top: {origin:?}"
+        );
+        let gone = HandleSpots {
+            start: None,
+            ..spots
+        };
+        assert_eq!(copy_spots(gone, Some(view)), None, "neither end in view");
+    }
+
+    #[test]
+    fn edge_step_over_no_time_is_zero() {
+        assert_eq!(edge_step(TOP, TOP, BOTTOM, 0.0), 0.0);
+        assert_eq!(edge_step(BOTTOM, TOP, BOTTOM, 0.0), 0.0);
+    }
 
     #[test]
     fn handle_knob_and_aim_for_a_caret() {

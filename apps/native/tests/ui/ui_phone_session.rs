@@ -3170,3 +3170,277 @@ fn an_empty_selection_has_no_copy(cx: &mut TestAppContext) {
         "copying nothing leaves the clipboard as it was"
     );
 }
+
+// ── Scrolling while a selection drag nears the chat's edge ─────────────────
+
+/// How long the specs hold a finger in a band: about eighteen ticks.
+const HELD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Session `a`'s page on a phone-sized window, its chat 40 user rows and
+/// then answers, panned up from its bottom so it can scroll either way.
+fn scrollable_chat<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo charlie"));
+    entries.push(answer_with("a2", "delta echo foxtrot"));
+    let mut h = chat_loaded_on_a_phone(cx, dir, entries);
+    let at = h.bounds("phone-chat").center();
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    pan_at(&mut h, at, px(300.0), TouchPhase::Moved);
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+    h
+}
+
+/// The driver id of the phone chat's row of entry `id`.
+fn row_tag(id: &str) -> String {
+    format!("chat-row-phone-{id}")
+}
+
+/// The id of the user row whose middle lies nearest the chat's middle.
+fn middle_row(h: &mut Harness<'_>) -> String {
+    let middle = h.bounds("phone-chat").center().y;
+    let mut best: Option<(f32, String)> = None;
+    for n in 0..40 {
+        let id = format!("u{n}");
+        let distance = ((h.bounds(&row_tag(&id)).center().y - middle) / px(1.0)).abs();
+        if best.as_ref().is_none_or(|(least, _)| distance < *least) {
+            best = Some((distance, id));
+        }
+    }
+    best.expect("the chat draws its user rows").1
+}
+
+/// [`scrollable_chat`] with "message" of its middle row selected.
+fn selected_in_the_middle<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = scrollable_chat(cx, dir);
+    let id = middle_row(&mut h);
+    select(&mut h, "a", pos(&id, 0, 0), pos(&id, 0, 7));
+    assert_eq!(selected_text(&mut h), "message");
+    h
+}
+
+/// Puts a finger on the centre of the selection handle tagged
+/// `phone-chat-handle-{end}` and moves it `dy` down, past the tap slop, so
+/// it drags; the finger stays down. Where it took the handle.
+fn grab_handle(h: &mut Harness<'_>, end: &str, dy: Pixels) -> Point<Pixels> {
+    h.cx.run_until_parked();
+    let from = h.center(&format!("phone-chat-handle-{end}"));
+    h.touch(TouchPhase::Started, from);
+    h.touch(TouchPhase::Moved, point(from.x, from.y + dy));
+    from
+}
+
+#[gpui::test]
+fn dragging_the_end_handle_into_the_bottom_band_scrolls_and_follows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = selected_in_the_middle(cx, &dir);
+    let before = chat_offset(&mut h).expect("the chat is drawn");
+    let from = grab_handle(&mut h, "end", px(12.0));
+    let band = point(from.x, h.bounds("phone-chat").bottom() - px(10.0));
+    h.touch(TouchPhase::Moved, band);
+    let at_band = selected_text(&mut h);
+
+    h.advance(HELD);
+
+    let scrolled = chat_offset(&mut h).expect("the chat is drawn");
+    assert!(
+        scrolled > before,
+        "the chat scrolls toward later rows: {before} to {scrolled}"
+    );
+    let followed = selected_text(&mut h);
+    assert!(
+        followed.contains('\n'),
+        "the selection runs past its first row: {followed:?}"
+    );
+    assert!(
+        followed.len() > at_band.len(),
+        "the end follows the rows scrolling under the finger: {at_band:?} to {followed:?}"
+    );
+
+    h.touch(TouchPhase::Ended, band);
+    h.advance(HELD);
+
+    assert_eq!(
+        chat_offset(&mut h),
+        Some(scrolled),
+        "the lift stops the scroll"
+    );
+}
+
+#[gpui::test]
+fn dragging_the_start_handle_into_the_top_band_scrolls_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = selected_in_the_middle(cx, &dir);
+    let before = chat_offset(&mut h).expect("the chat is drawn");
+    let from = grab_handle(&mut h, "start", px(-12.0));
+    let band = point(from.x, h.bounds("phone-chat").top() + px(10.0));
+    h.touch(TouchPhase::Moved, band);
+    let at_band = selected_text(&mut h);
+
+    h.advance(HELD);
+
+    let scrolled = chat_offset(&mut h).expect("the chat is drawn");
+    assert!(
+        scrolled < before,
+        "the chat scrolls toward earlier rows: {before} to {scrolled}"
+    );
+    let followed = selected_text(&mut h);
+    assert!(
+        followed.ends_with("message") && followed.contains('\n'),
+        "the end stays and the start is on an earlier row: {followed:?}"
+    );
+    assert!(
+        followed.len() > at_band.len(),
+        "the start follows the rows scrolling under the finger: {at_band:?} to {followed:?}"
+    );
+
+    h.touch(TouchPhase::Ended, band);
+    h.advance(HELD);
+
+    assert_eq!(
+        chat_offset(&mut h),
+        Some(scrolled),
+        "the lift stops the scroll"
+    );
+}
+
+#[gpui::test]
+fn a_hold_drag_into_the_bottom_band_scrolls(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = scrollable_chat(cx, &dir);
+    let id = middle_row(&mut h);
+    let at = on_bytes(&mut h, &row_tag(&id), &id, 1..6);
+    let before = chat_offset(&mut h).expect("the chat is drawn");
+    h.touch(TouchPhase::Started, at);
+    h.advance(
+        gpui::GestureTuning::default().long_press_duration + std::time::Duration::from_millis(1),
+    );
+    assert_eq!(selected_text(&mut h), "message", "the hold picks the word");
+    let band = point(at.x, h.bounds("phone-chat").bottom() - px(10.0));
+    h.touch(TouchPhase::Moved, band);
+    let at_band = selected_text(&mut h);
+
+    h.advance(HELD);
+
+    let scrolled = chat_offset(&mut h).expect("the chat is drawn");
+    assert!(
+        scrolled > before,
+        "the chat scrolls toward later rows: {before} to {scrolled}"
+    );
+    let widened = selected_text(&mut h);
+    assert!(
+        widened.len() > at_band.len(),
+        "the selection widens with the rows scrolling under the finger: {at_band:?} to {widened:?}"
+    );
+
+    h.touch(TouchPhase::Ended, band);
+    h.advance(HELD);
+
+    assert_eq!(
+        chat_offset(&mut h),
+        Some(scrolled),
+        "the lift stops the scroll"
+    );
+}
+
+#[gpui::test]
+fn a_handle_dragged_out_of_view_keeps_its_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = selected_in_the_middle(cx, &dir);
+    let from = grab_handle(&mut h, "end", px(12.0));
+    let rows = h.bounds("phone-chat");
+    // Under the rows: the end's caret goes past the chat's bottom edge.
+    let past = point(from.x, rows.bottom() + px(40.0));
+    h.touch(TouchPhase::Moved, past);
+    h.advance(std::time::Duration::from_millis(200));
+    let far = selected_text(&mut h);
+
+    let back = point(from.x, rows.center().y);
+    h.touch(TouchPhase::Moved, back);
+
+    let moved = selected_text(&mut h);
+    assert!(
+        moved.len() < far.len(),
+        "the drag still moves the end once its caret is back: {far:?} to {moved:?}"
+    );
+    h.touch(TouchPhase::Ended, back);
+}
+
+/// How many times the phone's chat body has been built.
+fn chat_renders(h: &mut Harness<'_>) -> usize {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.phone_chat_renders())
+}
+
+#[gpui::test]
+fn a_handle_held_in_the_band_at_the_chats_end_does_not_redraw(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo charlie"));
+    // At its bottom, as it loads: it cannot scroll down any further.
+    let mut h = chat_loaded_on_a_phone(cx, &dir, entries);
+    let id = middle_row(&mut h);
+    select(&mut h, "a", pos(&id, 0, 0), pos(&id, 0, 7));
+    let before = chat_offset(&mut h);
+    let from = grab_handle(&mut h, "end", px(12.0));
+    let band = point(from.x, h.bounds("phone-chat").bottom() - px(10.0));
+    h.touch(TouchPhase::Moved, band);
+    let renders = chat_renders(&mut h);
+
+    h.advance(HELD);
+
+    let redrawn = chat_renders(&mut h) - renders;
+    assert!(
+        redrawn <= 2,
+        "a chat at its end redraws for no tick: {redrawn} renders"
+    );
+    assert_eq!(chat_offset(&mut h), before, "nor scrolls");
+    h.touch(TouchPhase::Ended, band);
+}
+
+#[gpui::test]
+fn a_press_on_a_handle_in_the_band_does_not_scroll(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = scrollable_chat(cx, &dir);
+    let id = middle_row(&mut h);
+    select(&mut h, "a", pos(&id, 0, 0), pos(&id, 0, 7));
+    h.cx.run_until_parked();
+    // Pan its row down until the end handle sits 20 px over the bottom.
+    let rows = h.bounds("phone-chat");
+    let knob = h.center("phone-chat-handle-end");
+    let at = h.bounds(&row_tag(&id)).center();
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    pan_at(
+        &mut h,
+        at,
+        rows.bottom() - px(20.0) - knob.y,
+        TouchPhase::Moved,
+    );
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+    h.cx.run_until_parked();
+    let knob = h.center("phone-chat-handle-end");
+    assert!(
+        knob.y > rows.bottom() - px(48.0) && knob.y < rows.bottom(),
+        "the end handle sits in the bottom band: {knob:?} over {rows:?}"
+    );
+    let before = chat_offset(&mut h);
+
+    h.touch(TouchPhase::Started, knob);
+    h.advance(HELD);
+
+    assert_eq!(chat_offset(&mut h), before, "a press holds still");
+    assert_eq!(selected_text(&mut h), "message", "and moves no end");
+    h.touch(TouchPhase::Ended, knob);
+}
+
+#[gpui::test]
+fn a_finger_in_the_middle_does_not_scroll(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = selected_in_the_middle(cx, &dir);
+    let before = chat_offset(&mut h);
+    let from = grab_handle(&mut h, "end", px(12.0));
+
+    h.advance(HELD);
+
+    assert_eq!(chat_offset(&mut h), before, "no scroll away from the edges");
+    h.touch(TouchPhase::Ended, point(from.x, from.y + px(12.0)));
+}

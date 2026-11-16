@@ -92,6 +92,13 @@ fn step(claimed: bool, phase: TouchPhase, claim: bool) -> (Hold, bool) {
     (hold, hold.holds(claimed, phase))
 }
 
+/// Whether a drag area runs its end callback for `hold`, seen in the
+/// dispatch phase where `bubble` says: the claimed press's end or cancel,
+/// once, in the bubble phase.
+fn ends(hold: Hold, bubble: bool) -> bool {
+    hold == Hold::Done && bubble
+}
+
 /// The area's hitbox and its keyed "holds the touch" flag, which outlives
 /// a frame drawn while the finger is down.
 fn drag_hitbox(
@@ -107,12 +114,13 @@ fn drag_hitbox(
 
 /// [`long_press_area`] that also follows the press it claimed: `on_press`
 /// runs with where the press started, then `on_move` with the finger's
-/// position for each of that press's moves, until it ends or is cancelled.
-/// Whether it holds the press outlives a frame drawn while the finger is
-/// down.
+/// position for each of that press's moves, and `on_end` once when it ends
+/// or is cancelled. Whether it holds the press outlives a frame drawn while
+/// the finger is down.
 pub(crate) fn long_press_drag_area(
     on_press: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
     on_move: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
+    on_end: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     canvas(
         |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
@@ -133,6 +141,7 @@ pub(crate) fn long_press_drag_area(
                         on_press(event.start_position, window, cx);
                     }
                     Hold::Move if phase.bubble() => on_move(event.position, window, cx),
+                    _ if ends(hold, phase.bubble()) => on_end(window, cx),
                     _ => {}
                 }
             });
@@ -446,6 +455,50 @@ mod tests {
     #[test]
     fn a_cancelled_claimed_touch_is_no_tap() {
         assert!(!tap((100.0, 100.0), 0, false));
+    }
+
+    /// How many times a long-press drag area runs its end callback over
+    /// `phases`, each event dispatched in the capture phase and then the
+    /// bubble phase, as gpui does, each start claimed (in the bubble phase
+    /// only, as [`claims`] says) when `claim` is.
+    fn end_calls(phases: &[TouchPhase], claim: bool) -> usize {
+        let mut held = false;
+        let mut calls = 0;
+        for &phase in phases {
+            for bubble in [false, true] {
+                let claimed = claim && bubble && phase == TouchPhase::Started;
+                let (hold, holds) = step(held, phase, claimed);
+                if bubble {
+                    held = holds;
+                }
+                calls += usize::from(ends(hold, bubble));
+            }
+        }
+        calls
+    }
+
+    #[test]
+    fn a_claimed_press_runs_its_end_once_when_it_ends() {
+        let phases = [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended];
+        assert_eq!(end_calls(&phases, true), 1);
+    }
+
+    #[test]
+    fn a_claimed_press_runs_its_end_once_when_it_is_cancelled() {
+        let phases = [
+            TouchPhase::Started,
+            TouchPhase::Moved,
+            TouchPhase::Cancelled,
+        ];
+        assert_eq!(end_calls(&phases, true), 1);
+    }
+
+    #[test]
+    fn a_press_the_area_did_not_claim_never_runs_its_end() {
+        let ended = [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended];
+        let cancelled = [TouchPhase::Started, TouchPhase::Cancelled];
+        assert_eq!(end_calls(&ended, false), 0, "ended");
+        assert_eq!(end_calls(&cancelled, false), 0, "cancelled");
     }
 
     #[test]

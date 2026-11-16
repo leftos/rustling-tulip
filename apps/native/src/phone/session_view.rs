@@ -258,14 +258,16 @@ impl PhoneRoot {
     }
 
     /// The area over session `session_id`'s chat body that takes a long
-    /// press: the hold selects the word under the finger, and the held
-    /// finger's moves widen the selection.
+    /// press: the hold selects the word under the finger, the held finger's
+    /// moves widen the selection, and its lift ends the drag.
     fn chat_hold(&self, session_id: &str) -> impl IntoElement + use<> {
         let (press_root, move_root) = (self.root.downgrade(), self.root.downgrade());
+        let end_root = self.root.downgrade();
         let (press_id, move_id) = (session_id.to_owned(), session_id.to_owned());
+        let end_id = session_id.to_owned();
+        // Each update fails only when the app's root is gone.
         long_press_drag_area(
             move |at, _, cx| {
-                // Fails only when the app's root is gone.
                 press_root
                     .update(cx, |root, cx| root.phone_select_start(&press_id, at, cx))
                     .ok();
@@ -273,6 +275,11 @@ impl PhoneRoot {
             move |at, _, cx| {
                 move_root
                     .update(cx, |root, cx| root.phone_select_widen(&move_id, at, cx))
+                    .ok();
+            },
+            move |_, cx| {
+                end_root
+                    .update(cx, |root, _| root.phone_select_hold_end(&end_id))
                     .ok();
             },
         )

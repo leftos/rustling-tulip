@@ -1101,7 +1101,9 @@ Two handles mark a selection's ends: a 2 px `accent` stem the height of the end'
 
   They are placed from the last frame's text layout by a measuring canvas, which asks for one more frame when they moved. A handle takes its touch from its first pixel (a gpui `TouchDragEvent`, claimed by `touch_drag_area` in `phone/long_press.rs`), so the chat does not pan under it.
 
-  Once the finger strays past the tap slop the dragged end follows it, keeping the offset between where the finger took the handle and the stem's middle, and the other end stays, so dragging past it swaps the ends (`phone_handle_start`, `phone_handle_move`).
+  Once the finger strays past the tap slop the dragged end follows it, keeping the offset between where the finger took the handle and the stem's middle, and the other end stays, so dragging past it swaps the ends (`phone_handle_start`, `phone_handle_move`). The handle the finger took stays alive while the finger is down, even when its caret leaves the rows, so a drag never drops.
+
+  While a handle drag or a hold drag has its finger within 48 px of the chat's top or bottom, a 16 ms tick scrolls the chat, up to 600 px/s scaled by how deep the finger is in the band (`edge_step`), and moves the dragged end to the text at the finger again; it stops when the finger leaves the band or lifts, or the selection ends.
 
   A touch on a handle that never strays past the slop and ends before a long press is replayed as an ordinary tap at its point (`is_tap`, `replay_tap`), so a tap beside a selection's ends still opens a link, a stretch or a card. A Copy button (`phone-chat-copy`) shows with the handles while the selection is not empty: above the start handle, centred on the start caret, else below the end handle, else clamped inside the rows.
 
