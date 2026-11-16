@@ -102,7 +102,7 @@ async fn start(
             format!("refusing to follow {path:?}: {why}"),
         )
     };
-    let normal = file_tail::check(working.as_deref(), &path).map_err(refuse)?;
+    let normal = crate::host_path::check(working.as_deref(), &path).map_err(refuse)?;
     file_tail::prepare(normal.clone()).await.map_err(refuse)?;
     let key = (session_id.clone(), path.clone());
     let old = ctx.tails.lock().await.remove(&key);

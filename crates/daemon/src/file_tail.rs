@@ -4,10 +4,10 @@
 //! tick. Any regular file the daemon's user can read may be followed; a
 //! relative path is taken from the session's working folder.
 //!
-//! A requested path is judged twice. [`check`] reads only its text and
-//! refuses empty, network and device paths, over-long or over-deep paths,
-//! drive- or root-relative paths and paths climbing above their root before
-//! the disk is touched; the disk work after it ([`prepare`], each follow's
+//! A requested path is judged twice. [`crate::host_path::check`] reads only
+//! its text and refuses empty, network and device paths, over-long or
+//! over-deep paths, drive- or root-relative paths and paths climbing above
+//! their root before the disk is touched; the disk work after it ([`prepare`], each follow's
 //! read) runs on a blocking thread, bounded by [`STEP_BOUND`] and stopped
 //! early by the follow's cancel token, follows links to the file they name
 //! (a share a link or a mapped drive reaches included), and reads only a
@@ -23,7 +23,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 use protocol::{DaemonMessage, SpawnTarget};
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -37,10 +37,6 @@ pub const TAIL_CHUNK: usize = 64 * 1024;
 /// How often a follow looks at its file when no watcher event woke it, for
 /// file systems and folders a watcher does not cover.
 const POLL: Duration = Duration::from_secs(1);
-/// The longest path a follow takes, in characters.
-const MAX_PATH_CHARS: usize = 1024;
-/// The most components a followed path may have.
-const MAX_PATH_DEPTH: usize = 64;
 /// How long one blocking step (resolving, opening, reading) is waited on
 /// before the follow gives up on it for that poll.
 pub const STEP_BOUND: Duration = Duration::from_secs(5);
@@ -72,91 +68,6 @@ pub fn session_folders(record: &SessionRecord) -> Vec<PathBuf> {
         }
     }
     folders
-}
-
-/// The path `path` names, absolute and with `.` and `..` applied, judged
-/// from its text alone: a relative `path` is taken from `working`, the
-/// session's working folder. Touches no disk.
-///
-/// # Errors
-/// Why the path is refused: empty, longer than [`MAX_PATH_CHARS`], deeper
-/// than [`MAX_PATH_DEPTH`], a network or device path, drive- or
-/// root-relative, climbing above its root, or relative with no `working`.
-pub fn check(working: Option<&Path>, path: &str) -> Result<PathBuf, String> {
-    check_shape(path)?;
-    let named = Path::new(path);
-    let joined = if named.is_absolute() {
-        named.to_path_buf()
-    } else {
-        let Some(working) = working else {
-            return Err("the session has no folder".to_owned());
-        };
-        working.join(named)
-    };
-    normalize(&joined).ok_or_else(|| format!("{path:?} climbs above its root"))
-}
-
-/// Refuse a path by its shape: empty, too long, too deep, naming a network
-/// share or a device, or relative to a drive or root.
-fn check_shape(path: &str) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("the path is empty".to_owned());
-    }
-    if path.chars().count() > MAX_PATH_CHARS {
-        return Err(format!(
-            "the path is longer than {MAX_PATH_CHARS} characters"
-        ));
-    }
-    if is_network_or_device(path) {
-        return Err(format!("{path:?} names a network or device path"));
-    }
-    let named = Path::new(path);
-    if named.components().count() > MAX_PATH_DEPTH {
-        return Err(format!(
-            "the path is more than {MAX_PATH_DEPTH} components deep"
-        ));
-    }
-    let starts_bare = matches!(named.components().next(), Some(Component::Prefix(_)));
-    if !named.is_absolute() && (named.has_root() || starts_bare) {
-        return Err(format!(
-            "{path:?} is relative to a drive or root, not a folder"
-        ));
-    }
-    Ok(())
-}
-
-/// Whether `path` opens with two separators (a UNC share, `\\?\`, `\\.\`)
-/// or a Windows prefix other than a drive letter.
-fn is_network_or_device(path: &str) -> bool {
-    let mut chars = path.chars();
-    let two_separators = matches!(
-        (chars.next(), chars.next()),
-        (Some('\\' | '/'), Some('\\' | '/'))
-    );
-    let odd_prefix = matches!(
-        Path::new(path).components().next(),
-        Some(Component::Prefix(prefix)) if !matches!(prefix.kind(), Prefix::Disk(_))
-    );
-    two_separators || odd_prefix
-}
-
-/// `path` with `.` dropped and each `..` taking off the component before it;
-/// `None` when a `..` would climb above the root.
-fn normalize(path: &Path) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !matches!(out.components().next_back(), Some(Component::Normal(_))) {
-                    return None;
-                }
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    Some(out)
 }
 
 /// The canonical folders a folder fetch's opens must land inside.
@@ -218,21 +129,23 @@ pub fn locate(normal: &Path, cancel: &CancellationToken) -> Result<PathBuf, Stri
 }
 
 /// The canonical form of `path`'s nearest existing ancestor, with the rest
-/// of `path` after it.
+/// of `path` after it. `path` is resolved in its verbatim spelling
+/// ([`crate::host_path::verbatim`]), so each of its names is taken literally;
+/// every message names it, and its ancestors, as the caller spelled them.
 fn canonical_allowing_missing(path: &Path, cancel: &CancellationToken) -> Result<PathBuf, String> {
-    let mut existing = path;
+    let spelled = crate::host_path::verbatim(path);
+    // The ancestor being tried, as the OS is asked for it and as messages
+    // name it; both lose one name per step up.
+    let mut existing = spelled.as_path();
+    let mut shown = path;
     loop {
         if cancel.is_cancelled() {
             return Err(STOPPED.to_owned());
         }
         match std::fs::canonicalize(existing) {
             Ok(canonical) => {
-                let rest = path.strip_prefix(existing).map_err(|err| {
-                    format!(
-                        "{} is not under {}: {err}",
-                        path.display(),
-                        existing.display()
-                    )
+                let rest = spelled.strip_prefix(existing).map_err(|err| {
+                    format!("{} is not under {}: {err}", path.display(), shown.display())
                 })?;
                 return Ok(if rest.as_os_str().is_empty() {
                     canonical
@@ -244,20 +157,50 @@ fn canonical_allowing_missing(path: &Path, cancel: &CancellationToken) -> Result
                 if std::fs::symlink_metadata(existing).is_ok() {
                     return Err(format!(
                         "{} is a link whose target does not resolve",
-                        existing.display()
+                        shown.display()
                     ));
                 }
                 existing = existing
                     .parent()
                     .ok_or_else(|| format!("no part of {} exists", path.display()))?;
+                shown = shown.parent().unwrap_or(shown);
             }
-            Err(err) => return Err(format!("{} does not resolve: {err}", existing.display())),
+            Err(err) => return Err(format!("{} does not resolve: {err}", shown.display())),
         }
     }
 }
 
 /// Why a blocking step gave up when its follow was stopped.
 const STOPPED: &str = "the follow was stopped";
+
+/// Why [`bounded`] has no result for its step.
+#[derive(Debug)]
+pub(crate) enum StepWait {
+    /// The step had not returned when the bound passed; it is left to
+    /// finish on its own, and its result is dropped.
+    TimedOut,
+    /// The step panicked or was cancelled.
+    Failed(tokio::task::JoinError),
+}
+
+/// Run `step` on a blocking thread and wait at most `bound` for it. A step
+/// that has not returned by then is not waited for: it runs on and its
+/// result is dropped.
+///
+/// # Errors
+/// [`StepWait::TimedOut`] past `bound`, [`StepWait::Failed`] when the step
+/// panicked.
+pub(crate) async fn bounded<T: Send + 'static>(
+    bound: Duration,
+    step: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, StepWait> {
+    let task = tokio::task::spawn_blocking(step);
+    match tokio::time::timeout(bound, task).await {
+        Ok(Ok(found)) => Ok(found),
+        Ok(Err(err)) => Err(StepWait::Failed(err)),
+        Err(_) => Err(StepWait::TimedOut),
+    }
+}
 
 /// Why a read found nothing to send.
 #[derive(Debug)]
@@ -465,7 +408,7 @@ pub struct Follow {
     pub session_id: String,
     /// The path as the request named it, echoed on every message.
     pub path: String,
-    /// The path [`check`] made of it.
+    /// The path [`crate::host_path::check`] made of it.
     pub normal: PathBuf,
 }
 
@@ -881,9 +824,10 @@ mod tests {
         (base, folder)
     }
 
-    /// [`check`] against the first of `folders`, then [`locate`].
+    /// [`crate::host_path::check`] against the first of `folders`, then
+    /// [`locate`].
     fn resolve(folders: &[PathBuf], path: &str) -> Result<PathBuf, String> {
-        let normal = check(folders.first().map(PathBuf::as_path), path)?;
+        let normal = crate::host_path::check(folders.first().map(PathBuf::as_path), path)?;
         locate(&normal, &CancellationToken::new())
     }
 
@@ -1012,6 +956,47 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_path_as_the_request_spelled_it() {
+        let (base, folder) = folder_with_sibling("refusal-spelling");
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("create folder");
+        // No link without developer mode, elevation or `cmd`: nothing to test.
+        if !hooks::make_dir_link(&folder.join("link"), &elsewhere) {
+            return;
+        }
+        std::fs::remove_dir(&elsewhere).expect("leave the link dangling");
+        let err = resolve(std::slice::from_ref(&folder), "link/a.log").expect_err("dangling");
+        assert!(!err.contains(r"\\?\"), "{err}");
+        let link = folder.join("link").display().to_string();
+        assert!(err.contains(&link), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_bounded_step_that_has_not_returned_times_out_and_runs_on() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished_tx, finished) = tokio::sync::oneshot::channel();
+        // The step returns only once released, so a zero bound cannot see it
+        // done, whatever the machine's load.
+        let waited = bounded(Duration::ZERO, move || {
+            let _ = held.recv();
+            let _ = finished_tx.send(());
+        })
+        .await;
+        assert!(matches!(waited, Err(StepWait::TimedOut)), "{waited:?}");
+        release.send(()).expect("the step still waits");
+        tokio::time::timeout(Duration::from_secs(120), finished)
+            .await
+            .expect("hung: the step never finished after its release")
+            .expect("the step finished");
+    }
+
+    #[tokio::test]
+    async fn a_bounded_step_that_returns_gives_its_result() {
+        let found = bounded(Duration::from_secs(120), || 7).await;
+        assert_eq!(found.ok(), Some(7));
     }
 
     /// The bound every wait on an open takes here; passing it fails as hung.

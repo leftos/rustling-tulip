@@ -8,6 +8,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The Rebind dialog can bind only a host's sessions that have no pane yet, leaving the tabs you arranged as they are.
 
+### Fixed
+
+- Fetching a file from a remote host no longer hangs on a stalled network drive, a pipe, or a file that keeps growing.
+
 ### Changed
 
 - Subagent and dispatch rows in the sidebar now draw All comfortable, Finished compact or All compact, chosen in Settings › General.

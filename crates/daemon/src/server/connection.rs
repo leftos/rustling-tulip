@@ -485,7 +485,7 @@ pub(super) async fn client_session_until<S: Socket>(
     recv_loop(&hub, &mut receiver, &ctx, &conn, live.as_ref()).await;
 
     info!("client_session: recv_loop returned; tearing down");
-    stop_transfers(&conn.lane, &fetches, &tails).await;
+    end_transfers(&conn.lane, &fetches, &tails, connection).await;
     drop((watches, file_tx, out_tx));
     event_task.abort();
     tab_event_task.abort();
@@ -527,6 +527,18 @@ async fn end_served<S: Outbound, R: Inbound>(
         },
     )
     .await;
+}
+
+/// [`stop_transfers`] for a closing connection, then drop its permits for
+/// blocking file work.
+async fn end_transfers(
+    pty_lane: &PtyLane,
+    fetches: &FetchRegistry,
+    tails: &TailRegistry,
+    connection: u64,
+) {
+    stop_transfers(pty_lane, fetches, tails).await;
+    super::folder::forget_file_work(connection);
 }
 
 /// Abort every PTY forwarder and cancel every file fetch and file follow of

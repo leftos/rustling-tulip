@@ -2,6 +2,7 @@
 //! a confined file to one client connection. A folder fetch's target is
 //! confined here too ([`confine_dir`]); its walk is [`crate::folder_pack`].
 
+use crate::file_tail::{self, STEP_BOUND, StepError, StepWait};
 use anyhow::Context as _;
 use base64::Engine as _;
 use protocol::DaemonMessage;
@@ -168,13 +169,18 @@ pub fn check_relative(rel: &str) -> anyhow::Result<()> {
 
 /// Resolve `rel` against `root` and return the canonical target, refusing
 /// anything that is not a relative path resolving (through symlinks and
-/// junctions) to a location inside the canonical `root`.
+/// junctions) to a location inside the canonical `root`. The joined path is
+/// resolved in its verbatim spelling ([`crate::host_path::verbatim`]), so a
+/// name with a trailing dot or space, or a reserved name such as `CON`,
+/// names exactly that entry.
 ///
 /// # Errors
 /// Every error names `rel`, `root` and the reason. A target that does not
 /// exist is reported as [`ConfineError::NotFound`]; see [`is_not_found`].
 pub fn confine_path(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
-    confine_joined(root, rel, rel, |_| root.join(rel))
+    confine_joined(root, rel, rel, |_| {
+        crate::host_path::verbatim(&root.join(rel))
+    })
 }
 
 /// Whether `err` came from [`confine_path`] finding no file at the path.
@@ -189,9 +195,10 @@ pub fn is_not_found(err: &anyhow::Error) -> bool {
 /// Stream the file at `path` over `tx` as `FileFetchStarted` and one
 /// `FileChunk` per [`CHUNK_SIZE`] bytes, and return the final message,
 /// unsent: `FileFetchDone`, or a `FileFetchError` when the path is a
-/// directory or cannot be opened or read (then with nothing sent before it).
-/// `tx` is bounded, so a slow consumer stalls the reads. Once `cancel` fires,
-/// or a send fails, nothing further is sent and `None` is returned.
+/// directory or not a regular file, or cannot be opened in time or read
+/// (then with nothing sent before it). `tx` is bounded, so a slow consumer
+/// stalls the reads. Once `cancel` fires, or a send fails, nothing further is
+/// sent and `None` is returned.
 pub async fn stream_file(
     id: String,
     path: PathBuf,
@@ -203,32 +210,61 @@ pub async fn stream_file(
         () = cancel.cancelled() => return None,
         opened = open_for_streaming(&path) => opened,
     };
-    let (mut file, size) = match opened {
-        Ok(opened) => opened,
+    match opened {
+        Ok(opened) => stream_opened(id, &path, opened, &tx, &cancel).await,
         Err(err) => {
             let error = format!("{err:#}");
-            return Some(DaemonMessage::FileFetchError { id, error });
+            Some(DaemonMessage::FileFetchError { id, error })
         }
-    };
+    }
+}
+
+/// A file opened for a fetch, and its size as its own handle read it at
+/// open.
+struct Opened {
+    file: tokio::fs::File,
+    size: u64,
+}
+
+/// [`stream_file`]'s sending, once `opened` is open: `FileFetchStarted`,
+/// then the file's bytes as `FileChunk`s, and the final message, unsent.
+async fn stream_opened(
+    id: String,
+    path: &Path,
+    opened: Opened,
+    tx: &mpsc::Sender<DaemonMessage>,
+    cancel: &CancellationToken,
+) -> Option<DaemonMessage> {
+    let Opened { mut file, size } = opened;
     let started = DaemonMessage::FileFetchStarted {
         id: id.clone(),
         resolved_path: path.display().to_string(),
         size,
     };
-    if !send_unless_cancelled(&tx, &cancel, started).await {
+    if !send_unless_cancelled(tx, cancel, started).await {
         return None;
     }
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut seq: u64 = 0;
+    // What is still to send: never more than the size seen at open, so a
+    // file that grows while it is sent ends where it was.
+    let mut left = size;
     loop {
+        let want = usize::try_from(left).map_or(CHUNK_SIZE, |left| left.min(CHUNK_SIZE));
+        if want == 0 {
+            return Some(DaemonMessage::FileFetchDone { id });
+        }
         let filled = tokio::select! {
             biased;
             () = cancel.cancelled() => return None,
-            filled = fill_buf(&mut file, &mut buf) => filled,
+            filled = fill_buf(&mut file, &mut buf[..want]) => filled,
         };
         let n = match filled {
             Ok(0) => return Some(DaemonMessage::FileFetchDone { id }),
-            Ok(n) => n,
+            Ok(n) => {
+                left = left.saturating_sub(u64::try_from(n).unwrap_or(u64::MAX));
+                n
+            }
             Err(err) => {
                 let error = format!("reading {}: {err}", path.display());
                 return Some(DaemonMessage::FileFetchError { id, error });
@@ -239,23 +275,63 @@ pub async fn stream_file(
             seq,
             data_b64: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
         };
-        if !send_unless_cancelled(&tx, &cancel, chunk).await {
+        if !send_unless_cancelled(tx, cancel, chunk).await {
             return None;
         }
         seq += 1;
     }
 }
 
-async fn open_for_streaming(path: &Path) -> anyhow::Result<(tokio::fs::File, u64)> {
-    let meta = tokio::fs::metadata(path)
-        .await
+/// Open `path` for a fetch on a blocking thread, waiting at most
+/// [`STEP_BOUND`] for it.
+///
+/// # Errors
+/// Why the file cannot be fetched: those of [`open_checked`], the open not
+/// finishing in time, or its thread failing.
+async fn open_for_streaming(path: &Path) -> anyhow::Result<Opened> {
+    let owned = path.to_path_buf();
+    match file_tail::bounded(STEP_BOUND, move || open_checked(&owned)).await {
+        Ok(Ok((file, size))) => Ok(Opened {
+            file: tokio::fs::File::from_std(file),
+            size,
+        }),
+        Ok(Err(err)) => Err(err),
+        Err(StepWait::TimedOut) => anyhow::bail!(
+            "opening {} did not finish within {} s",
+            path.display(),
+            STEP_BOUND.as_secs()
+        ),
+        Err(StepWait::Failed(err)) => {
+            anyhow::bail!("opening {} stopped unexpectedly: {err}", path.display())
+        }
+    }
+}
+
+/// Open `path` as a follow does ([`file_tail::open_regular`]) and judge the
+/// opened handle itself: a regular file, whose size it reads. Disk work: run
+/// it on a blocking thread.
+///
+/// # Errors
+/// `path` is a directory, not a regular file, or cannot be read.
+fn open_checked(path: &Path) -> anyhow::Result<(std::fs::File, u64)> {
+    let meta = std::fs::metadata(path)
         .with_context(|| format!("reading metadata of {}", path.display()))?;
     if meta.is_dir() {
         anyhow::bail!("{} is a directory", path.display());
     }
-    let file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = file_tail::open_regular(path).map_err(|err| match err {
+        StepError::Missing => anyhow::anyhow!("opening {}: it no longer exists", path.display()),
+        StepError::Failed(why) => anyhow::anyhow!(why),
+    })?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading metadata of {}", path.display()))?;
+    if meta.is_dir() {
+        anyhow::bail!("{} is a directory", path.display());
+    }
+    if !meta.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
     Ok((file, meta.len()))
 }
 
@@ -715,6 +791,90 @@ mod tests {
         };
         assert_eq!(id, "d");
         assert!(error.contains(&dir.path().display().to_string()), "{error}");
+    }
+
+    /// The bytes of every `FileChunk` in `msgs`, joined.
+    fn chunk_bytes(msgs: &[DaemonMessage]) -> Vec<u8> {
+        let mut joined = Vec::new();
+        for msg in msgs {
+            if let DaemonMessage::FileChunk { data_b64, .. } = msg {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data_b64)
+                    .expect("valid base64");
+                joined.extend_from_slice(&bytes);
+            }
+        }
+        joined
+    }
+
+    #[tokio::test]
+    async fn a_fetch_sends_at_most_the_size_seen_at_open() {
+        let dir = TestDir::new("stream-grows");
+        let path = dir.path().join("grows.log");
+        std::fs::write(&path, b"0123456789").expect("write source");
+        let opened = open_for_streaming(&path).await.expect("opens");
+        assert_eq!(opened.size, 10);
+        let mut more = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for append");
+        std::io::Write::write_all(&mut more, b"appended").expect("append");
+        drop(more);
+        let (tx, rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let last = stream_opened("g".into(), &path, opened, &tx, &cancel).await;
+        drop(tx);
+        let msgs = collect(rx).await;
+        assert!(
+            matches!(&msgs[0], DaemonMessage::FileFetchStarted { size: 10, .. }),
+            "{msgs:?}"
+        );
+        assert_eq!(chunk_bytes(&msgs), b"0123456789", "{msgs:?}");
+        assert!(
+            matches!(last, Some(DaemonMessage::FileFetchDone { .. })),
+            "{last:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_still_answers_is_a_directory() {
+        let dir = TestDir::new("stream-is-dir");
+        let (tx, rx) = mpsc::channel(2);
+        stream_to_end(
+            "d".into(),
+            dir.path().to_path_buf(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+        let msgs = collect(rx).await;
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        let DaemonMessage::FileFetchError { error, .. } = &msgs[0] else {
+            unreachable!("expected an error, got {:?}", msgs[0]);
+        };
+        assert!(error.ends_with("is a directory"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_answers_not_a_regular_file_without_blocking() {
+        let dir = TestDir::new("stream-fifo");
+        let fifo = dir.path().join("pipe");
+        assert!(
+            crate::file_tail::hooks::make_fifo(&fifo),
+            "a FIFO could not be made"
+        );
+        let (tx, rx) = mpsc::channel(2);
+        let streamed = stream_to_end("p".into(), fifo, tx, CancellationToken::new());
+        tokio::time::timeout(HANG_GUARD, streamed)
+            .await
+            .expect("hung: the fetch of a FIFO never answered");
+        let msgs = collect(rx).await;
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        let DaemonMessage::FileFetchError { error, .. } = &msgs[0] else {
+            unreachable!("expected an error, got {:?}", msgs[0]);
+        };
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     #[tokio::test]

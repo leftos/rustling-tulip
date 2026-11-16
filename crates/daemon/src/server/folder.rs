@@ -5,7 +5,10 @@
 //! work, the root's `canonicalize` included, runs on a blocking thread, and
 //! the git listing their check needs ([`listing_for`]) runs in a task of its
 //! own, never on the connection's reader. All are served on the same
-//! connections.
+//! connections. Each request's resolve step (and a `StatPath`'s whole stat)
+//! is waited on for at most [`STEP_BOUND`], and takes one of its
+//! connection's [`FILE_WORK_PERMITS`] first ([`file_work`]), so one
+//! connection cannot fill the blocking pool.
 //!
 //! The boundary is folder against repo, decided on each request
 //! ([`target_root`]): a `worktree_path` must be the registered path, a folder
@@ -21,6 +24,7 @@ use super::Hub;
 use super::connection::{ConnCtx, start_fetch};
 use super::git::repo_target_or_err;
 use crate::file_fetch::{self, CanonicalRoot};
+use crate::file_tail::{STEP_BOUND, StepWait};
 use crate::folder_pack::{self, Limits};
 use crate::paths::{normalize_path_key, simplify_path};
 use crate::sync::lock;
@@ -28,9 +32,11 @@ use crate::{git, history};
 use anyhow::Context as _;
 use futures::future::join_all;
 use protocol::{ClientMessage, DaemonMessage, RepoEntry, SessionFolder, SessionMember};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -58,6 +64,61 @@ enum Listing {
 /// The folder answer to `ListSessionFolders`: the folders, and why any did
 /// not read.
 type FolderAnswer = (Vec<SessionFolder>, Option<String>);
+
+/// How many blocking file steps one connection may have waited on at once.
+const FILE_WORK_PERMITS: usize = 4;
+
+/// Each connection's permits for blocking file steps, by connection id,
+/// made on first use and dropped when the connection ends.
+static FILE_WORK: LazyLock<Mutex<HashMap<u64, Arc<Semaphore>>>> = LazyLock::new(Mutex::default);
+
+/// `connection`'s permits, made on first use.
+fn file_work_gate(connection: u64) -> Arc<Semaphore> {
+    let mut gates = lock(&FILE_WORK);
+    Arc::clone(
+        gates
+            .entry(connection)
+            .or_insert_with(|| Arc::new(Semaphore::new(FILE_WORK_PERMITS))),
+    )
+}
+
+/// Drop `connection`'s permits: it has ended.
+pub(super) fn forget_file_work(connection: u64) {
+    lock(&FILE_WORK).remove(&connection);
+}
+
+/// Run `step` on a blocking thread once one of `gate`'s permits is free,
+/// waiting at most `bound` for the permit and the step together. The permit
+/// goes with the step onto its thread and is released only when the step
+/// really returns, so a step left running past `bound` still counts.
+async fn file_work<T: Send + 'static>(
+    gate: Arc<Semaphore>,
+    bound: Duration,
+    step: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, StepWait> {
+    let run = async move {
+        // The gate is never closed, so the acquire cannot fail.
+        let permit = gate.acquire_owned().await.ok();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            step()
+        })
+        .await
+    };
+    match tokio::time::timeout(bound, run).await {
+        Ok(Ok(found)) => Ok(found),
+        Ok(Err(err)) => Err(StepWait::Failed(err)),
+        Err(_) => Err(StepWait::TimedOut),
+    }
+}
+
+/// Why a fetch's resolve step gave no answer in time.
+fn resolve_timed_out(rel: &str) -> String {
+    format!(
+        "resolving {rel} did not finish within {} s",
+        STEP_BOUND.as_secs()
+    )
+}
 
 impl Request {
     fn new(repo_id: String, worktree_path: Option<String>, path: String) -> Self {
@@ -140,8 +201,12 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         } => {
             let request = Request::new(repo_id, worktree_path, path);
             let hub = hub.clone();
+            // Looked up here, on the reader, so it is never made again once
+            // the connection has ended and dropped it.
+            let gate = file_work_gate(ctx.connection);
             start_fetch(ctx, id, Ok(request), move |id, request, tx, token| {
-                tokio::spawn(folder_worker(hub, id, request, tx, token))
+                let work = FetchWork { hub, gate };
+                tokio::spawn(folder_worker(work, id, request, tx, token))
             })
             .await;
         }
@@ -153,8 +218,12 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         } => {
             let request = Request::new(repo_id, worktree_path, path);
             let hub = hub.clone();
+            // Looked up here, on the reader, so it is never made again once
+            // the connection has ended and dropped it.
+            let gate = file_work_gate(ctx.connection);
             start_fetch(ctx, id, Ok(request), move |id, request, tx, token| {
-                tokio::spawn(file_worker(hub, id, request, tx, token))
+                let work = FetchWork { hub, gate };
+                tokio::spawn(file_worker(work, id, request, tx, token))
             })
             .await;
         }
@@ -176,14 +245,11 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             let request = Request::new(repo_id, worktree_path, path);
             let hub = hub.clone();
             let out_tx = ctx.out_tx.clone();
+            // Looked up here, on the reader, so it is never made again once
+            // the connection has ended and dropped it.
+            let gate = file_work_gate(ctx.connection);
             tokio::spawn(async move {
-                let request = request.listed(&hub).await;
-                let stat = tokio::task::spawn_blocking(move || stat_request(&hub, &request))
-                    .await
-                    .unwrap_or_else(|err| {
-                        warn!(%id, error = %err, "folder: a StatPath failed");
-                        folder_pack::PathStat::MISSING
-                    });
+                let stat = answer_stat(hub, gate, &id, request).await;
                 // A closed outbox is a connection already ending.
                 let _ = out_tx.send(DaemonMessage::PathStat {
                     id,
@@ -286,54 +352,70 @@ fn worker_failed(id: String, err: &tokio::task::JoinError) -> DaemonMessage {
     DaemonMessage::FileFetchError { id, error }
 }
 
+/// What a fetch's worker runs with: the hub, and its connection's permits,
+/// one of which its resolve step takes.
+struct FetchWork {
+    hub: Hub,
+    gate: Arc<Semaphore>,
+}
+
 /// A `FetchFile`'s worker: decide on the request, then stream the file. Hands
 /// back the final message for [`start_fetch`] to send, a refusal included.
 async fn file_worker(
-    hub: Hub,
+    work: FetchWork,
     id: String,
     request: Request,
     tx: mpsc::Sender<DaemonMessage>,
     token: CancellationToken,
 ) -> Option<DaemonMessage> {
+    let FetchWork { hub, gate } = work;
     let request = request.listed(&hub).await;
     let repo_id = request.repo_id.clone();
     let worktree_path = request.worktree_path.clone();
     let rel = request.path.clone();
-    let confined = tokio::task::spawn_blocking(move || {
+    let confined = file_work(gate, STEP_BOUND, move || {
         let root = target_root(&hub, &request)?;
         file_fetch::confine_path(&root, &request.path)
     })
     .await;
-    match confined {
-        Ok(Ok(path)) => file_fetch::stream_file(id, path, tx, token).await,
-        Ok(Err(err)) => {
-            info!(
-                %id,
-                %repo_id,
-                worktree_path = worktree_path.as_deref().unwrap_or_default(),
-                rel = %rel,
-                error = %format!("{err:#}"),
-                "file fetch failed"
-            );
-            let error = format!("{err:#}");
-            Some(DaemonMessage::FileFetchError { id, error })
-        }
-        Err(err) => Some(worker_failed(id, &err)),
-    }
+    let refused = match confined {
+        Ok(Ok(path)) => return file_fetch::stream_file(id, path, tx, token).await,
+        Ok(Err(err)) => format!("{err:#}"),
+        Err(StepWait::TimedOut) => resolve_timed_out(&rel),
+        Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
+    };
+    info!(
+        %id,
+        %repo_id,
+        worktree_path = worktree_path.as_deref().unwrap_or_default(),
+        rel = %rel,
+        error = %refused,
+        "file fetch failed"
+    );
+    Some(DaemonMessage::FileFetchError { id, error: refused })
 }
 
-/// A `FetchFolder`'s worker: read git's listing, then do the disk work on a
-/// blocking thread ([`fetch_folder`]).
+/// A `FetchFolder`'s worker: read git's listing, resolve the folder
+/// ([`resolve_step`], bounded and under a permit), then walk and pack it on a
+/// blocking thread ([`pack_folder`]).
 async fn folder_worker(
-    hub: Hub,
+    work: FetchWork,
     id: String,
     request: Request,
     tx: mpsc::Sender<DaemonMessage>,
     token: CancellationToken,
 ) -> Option<DaemonMessage> {
+    let FetchWork { hub, gate } = work;
     let request = request.listed(&hub).await;
+    let rel = request.path.clone();
+    let step = move || resolve_step(&hub, &request);
+    let resolved = match file_work(gate, STEP_BOUND, step).await {
+        Ok(resolved) => resolved,
+        Err(StepWait::TimedOut) => Err(anyhow::anyhow!(resolve_timed_out(&rel))),
+        Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
+    };
     let watched = id.clone();
-    tokio::task::spawn_blocking(move || fetch_folder(&hub, id, &request, &tx, &token))
+    tokio::task::spawn_blocking(move || pack_folder(id, resolved, &tx, &token))
         .await
         .unwrap_or_else(|err| Some(worker_failed(watched, &err)))
 }
@@ -510,12 +592,45 @@ fn stat_request(hub: &Hub, request: &Request) -> folder_pack::PathStat {
     })
 }
 
-/// A `FetchFolder`'s worker, on a blocking thread: resolve and walk the
-/// folder, send `FolderFetchStarted` and the packed folder on `tx` (the
-/// connection's file queue), and hand back the final message, unsent, for
-/// [`start_fetch`] to send once the id is free: `FileFetchDone`, or one
-/// `FileFetchError` when the folder was refused or failed. `None` once the
-/// fetch was cancelled or its connection closed.
+/// The answer to `StatPath` `id`: git's listing, then [`stat_request`],
+/// bounded and under one of `gate`'s permits, its connection's. A stat that
+/// fails or does not finish in time reads as missing.
+async fn answer_stat(
+    hub: Hub,
+    gate: Arc<Semaphore>,
+    id: &str,
+    request: Request,
+) -> folder_pack::PathStat {
+    let request = request.listed(&hub).await;
+    let path = request.path.clone();
+    match file_work(gate, STEP_BOUND, move || stat_request(&hub, &request)).await {
+        Ok(stat) => stat,
+        Err(StepWait::TimedOut) => {
+            warn!(
+                %id,
+                %path,
+                "folder: a StatPath did not finish within {} s; answering missing",
+                STEP_BOUND.as_secs()
+            );
+            folder_pack::PathStat::MISSING
+        }
+        Err(StepWait::Failed(err)) => {
+            warn!(%id, error = %err, "folder: a StatPath failed");
+            folder_pack::PathStat::MISSING
+        }
+    }
+}
+
+/// A `FetchFolder`'s resolve step, on a blocking thread: [`resolve`].
+fn resolve_step(hub: &Hub, request: &Request) -> anyhow::Result<CanonicalRoot> {
+    #[cfg(test)]
+    hooks::before_scan(&request.path);
+    resolve(hub, request)
+}
+
+/// A `FetchFolder`'s work in one blocking call: resolve, then
+/// [`pack_folder`].
+#[cfg(test)]
 fn fetch_folder(
     hub: &Hub,
     id: String,
@@ -523,25 +638,37 @@ fn fetch_folder(
     tx: &mpsc::Sender<DaemonMessage>,
     token: &CancellationToken,
 ) -> Option<DaemonMessage> {
+    pack_folder(id, resolve_step(hub, request), tx, token)
+}
+
+/// A `FetchFolder`'s walk, on a blocking thread, of the folder `resolved`
+/// names: send `FolderFetchStarted` and the packed folder on `tx` (the
+/// connection's file queue), and hand back the final message, unsent, for
+/// [`start_fetch`] to send once the id is free: `FileFetchDone`, or one
+/// `FileFetchError` when the folder was refused or failed. `None` once the
+/// fetch was cancelled or its connection closed.
+fn pack_folder(
+    id: String,
+    resolved: anyhow::Result<CanonicalRoot>,
+    tx: &mpsc::Sender<DaemonMessage>,
+    token: &CancellationToken,
+) -> Option<DaemonMessage> {
     #[cfg(test)]
     let watched = id.clone();
-    let last = walk_and_pack(hub, id, request, tx, token);
+    let last = walk_and_pack(id, resolved, tx, token);
     #[cfg(test)]
     hooks::worker_ended(&watched);
     last
 }
 
-/// [`fetch_folder`]'s work.
+/// [`pack_folder`]'s work.
 fn walk_and_pack(
-    hub: &Hub,
     id: String,
-    request: &Request,
+    resolved: anyhow::Result<CanonicalRoot>,
     tx: &mpsc::Sender<DaemonMessage>,
     token: &CancellationToken,
 ) -> Option<DaemonMessage> {
-    #[cfg(test)]
-    hooks::before_scan(&request.path);
-    let walked = resolve(hub, request).and_then(|dir| {
+    let walked = resolved.and_then(|dir| {
         let scan = folder_pack::scan(&dir, Limits::FETCH, token)?;
         Ok((dir, scan))
     });
@@ -1130,6 +1257,98 @@ mod tests {
         registry.reached(1).await;
         drop(client);
         worker.ended().await;
+    }
+
+    /// Connection ids no real connection of a test daemon reaches.
+    const CONN_FULL: u64 = u64::MAX - 11;
+    const CONN_FREE: u64 = u64::MAX - 12;
+    const CONN_GONE: u64 = u64::MAX - 13;
+    const CONN_ENDED: u64 = u64::MAX - 14;
+
+    fn stat_of(path: &str) -> Request {
+        Request::new("r1".to_owned(), None, path.to_owned())
+    }
+
+    /// Every permit of one connection's gate.
+    fn all_permits() -> u32 {
+        u32::try_from(FILE_WORK_PERMITS).expect("a few permits")
+    }
+
+    #[tokio::test]
+    async fn a_stat_waits_for_a_permit_of_its_own_connection_only() {
+        let (hub, _scratch, _repo) = repo_hub("folder-file-work");
+        let gate = file_work_gate(CONN_FULL);
+        let held = Arc::clone(&gate)
+            .acquire_many_owned(all_permits())
+            .await
+            .expect("the gate is open");
+        let request = stat_of("a.txt");
+        let step_hub = hub.clone();
+        let step = move || stat_request(&step_hub, &request);
+        // Bounded by the hang guard, so a slow machine cannot time it out.
+        let waiting = tokio::spawn(file_work(Arc::clone(&gate), HANG_GUARD, step));
+        let other = tokio::time::timeout(
+            HANG_GUARD,
+            answer_stat(
+                hub.clone(),
+                file_work_gate(CONN_FREE),
+                "s1",
+                stat_of("a.txt"),
+            ),
+        )
+        .await
+        .expect("hung: the other connection's stat never answered");
+        assert_eq!(other.kind, PathKind::File);
+        drop(held);
+        // A released permit goes to the queued fifth stat at once.
+        assert_eq!(gate.available_permits(), FILE_WORK_PERMITS - 1);
+        let fifth = tokio::time::timeout(HANG_GUARD, waiting)
+            .await
+            .expect("hung: the fifth stat never ran after a permit freed")
+            .expect("the stat task")
+            .expect("the stat returned");
+        assert_eq!(fifth.kind, PathKind::File);
+        forget_file_work(CONN_FULL);
+        forget_file_work(CONN_FREE);
+    }
+
+    #[tokio::test]
+    async fn a_step_left_running_past_its_bound_keeps_its_permit() {
+        let gate = Arc::new(Semaphore::new(FILE_WORK_PERMITS));
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        // The step returns only once released, so a zero bound cannot see it
+        // done, whatever the machine's load.
+        let waited = file_work(Arc::clone(&gate), Duration::ZERO, move || {
+            let _ = held.recv();
+        })
+        .await;
+        assert!(matches!(waited, Err(StepWait::TimedOut)), "{waited:?}");
+        assert_eq!(gate.available_permits(), FILE_WORK_PERMITS - 1);
+        release.send(()).expect("the step still waits");
+        let all = tokio::time::timeout(HANG_GUARD, gate.acquire_many(all_permits()))
+            .await
+            .expect("hung: the step never gave its permit back");
+        drop(all);
+    }
+
+    #[test]
+    fn forget_file_work_drops_the_connections_permits() {
+        drop(file_work_gate(CONN_GONE));
+        assert!(lock(&FILE_WORK).contains_key(&CONN_GONE));
+        forget_file_work(CONN_GONE);
+        assert!(!lock(&FILE_WORK).contains_key(&CONN_GONE));
+    }
+
+    #[tokio::test]
+    async fn a_stat_ending_after_its_connection_makes_no_gate_again() {
+        let (hub, _scratch, _repo) = repo_hub("folder-file-work-gone");
+        let gate = file_work_gate(CONN_ENDED);
+        forget_file_work(CONN_ENDED);
+        let stat = tokio::time::timeout(HANG_GUARD, answer_stat(hub, gate, "s", stat_of("a.txt")))
+            .await
+            .expect("hung: the stat never answered");
+        assert_eq!(stat.kind, PathKind::File);
+        assert!(!lock(&FILE_WORK).contains_key(&CONN_ENDED));
     }
 
     // ---- worktree_path: every folder git names for the repo ----
