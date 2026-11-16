@@ -112,17 +112,61 @@ pub enum LeafDensity {
     Comfortable,
 }
 
-/// How a finished or failed subagent row draws in the sidebar.
+/// How subagent rows and dispatch run rows draw in the sidebar, whatever the
+/// leaf density. A missing value, or one this build does not know, loads as
+/// what the file's older keys say (`general_migrated`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FinishedSubagentRows {
-    /// One line, as Compact draws, whatever the leaf density.
-    Compact,
-    /// The leaf density's drawing; also what a value this build does not
-    /// know loads as (`serde(other)` must be the last variant).
+#[serde(rename_all = "snake_case")]
+pub enum SubagentRows {
+    /// Every one draws comfortable.
     #[default]
-    #[serde(other)]
-    Follow,
+    Comfortable,
+    /// A finished one draws compact, a running one comfortable.
+    FinishedCompact,
+    /// Every one draws compact.
+    Compact,
+}
+
+/// The [`SubagentRows`] a file saved before that setting existed draws as:
+/// with a compact leaf density every row drew compact; with a comfortable one
+/// a finished subagent drew compact only when `finished_compact` (the old
+/// `finished_subagent_rows: "compact"`).
+fn migrated_subagent_rows(density: LeafDensity, finished_compact: bool) -> SubagentRows {
+    match (density, finished_compact) {
+        (LeafDensity::Compact, _) => SubagentRows::Compact,
+        (LeafDensity::Comfortable, false) => SubagentRows::Comfortable,
+        (LeafDensity::Comfortable, true) => SubagentRows::FinishedCompact,
+    }
+}
+
+/// Reads `general`, taking `subagent_rows` from the older keys when it is
+/// missing or not a known choice: the leaf density and
+/// `finished_subagent_rows` (`"follow"` or `"compact"`, a missing or unknown
+/// value read as `"follow"`), which releases up to v0.15.0-alpha saved and
+/// which is read only here.
+fn general_migrated<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<GeneralSettings, D::Error> {
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    let saved = value.get("subagent_rows").cloned();
+    let finished_compact = value
+        .get("finished_subagent_rows")
+        .and_then(serde_json::Value::as_str)
+        == Some("compact");
+    if let Some(group) = value.as_object_mut() {
+        group.remove("subagent_rows");
+        group.remove("finished_subagent_rows");
+    }
+    let mut general = GeneralSettings::deserialize(value).map_err(serde::de::Error::custom)?;
+    let known = saved
+        .as_ref()
+        .and_then(|rows| SubagentRows::deserialize(rows).ok());
+    if let (Some(rows), None) = (&saved, known) {
+        tracing::warn!("general.subagent_rows {rows} is not a known choice; using the older keys");
+    }
+    general.subagent_rows =
+        known.unwrap_or_else(|| migrated_subagent_rows(general.leaf_density, finished_compact));
+    Ok(general)
 }
 
 /// How many of a repo or workspace's sessions show under its row.
@@ -243,6 +287,9 @@ pub struct Leaf {
     /// The dispatch run a subagent row belongs to; `None` for every other
     /// row.
     pub run_id: Option<String>,
+    /// A dispatch run row's run status, which tells a finished run from a
+    /// stopping one; `None` for every other row.
+    pub run_status: Option<protocol::DispatchRunStatus>,
     /// How many nested rows follow this session's row: its subagents, then
     /// its dispatch runs.
     pub nested: usize,
@@ -559,7 +606,7 @@ pub struct UiState {
     #[serde(default, deserialize_with = "decodable_popouts")]
     pub popouts: Vec<SavedPopout>,
     /// The Settings modal's General tab.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "general_migrated")]
     pub general: GeneralSettings,
     /// The Settings modal's App title tab.
     #[serde(default)]
@@ -1297,8 +1344,9 @@ pub struct GeneralSettings {
     /// Whether finished and failed subagent rows show in the sidebar;
     /// running ones always do.
     pub show_finished_subagents: bool,
-    /// How a finished or failed subagent row draws.
-    pub finished_subagent_rows: FinishedSubagentRows,
+    /// How subagent rows and dispatch run rows draw, whatever the leaf
+    /// density.
+    pub subagent_rows: SubagentRows,
     /// How many of a repo or workspace's sessions show under its row.
     pub sessions_under_repos: SessionsUnderRepos,
     /// How the repos view orders its repo and workspace rows.
@@ -1318,7 +1366,7 @@ impl Default for GeneralSettings {
             click_through_inactive_pane: true,
             leaf_density: LeafDensity::Comfortable,
             show_finished_subagents: true,
-            finished_subagent_rows: FinishedSubagentRows::Follow,
+            subagent_rows: SubagentRows::Comfortable,
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
             check_updates: true,
@@ -2780,18 +2828,18 @@ impl SidebarModel {
         true
     }
 
-    /// How a finished or failed subagent row draws.
-    pub fn finished_subagent_rows(&self) -> FinishedSubagentRows {
-        self.ui.general.finished_subagent_rows
+    /// How subagent rows and dispatch run rows draw.
+    pub fn subagent_rows(&self) -> SubagentRows {
+        self.ui.general.subagent_rows
     }
 
-    /// Records how a finished or failed subagent row draws; returns whether
+    /// Records how subagent rows and dispatch run rows draw; returns whether
     /// it changed.
-    pub fn set_finished_subagent_rows(&mut self, rows: FinishedSubagentRows) -> bool {
-        if self.ui.general.finished_subagent_rows == rows {
+    pub fn set_subagent_rows(&mut self, rows: SubagentRows) -> bool {
+        if self.ui.general.subagent_rows == rows {
             return false;
         }
-        self.ui.general.finished_subagent_rows = rows;
+        self.ui.general.subagent_rows = rows;
         true
     }
 
@@ -3803,6 +3851,7 @@ fn leaf(
         depth: 0,
         host_session: None,
         run_id: None,
+        run_status: None,
         nested: 0,
         nested_subagents: 0,
         collapsed: false,
@@ -6870,7 +6919,7 @@ pub(crate) mod tests {
                 click_through_inactive_pane: false,
                 leaf_density: LeafDensity::Compact,
                 show_finished_subagents: false,
-                finished_subagent_rows: FinishedSubagentRows::Compact,
+                subagent_rows: SubagentRows::FinishedCompact,
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,
                 check_updates: false,
@@ -7137,6 +7186,7 @@ pub(crate) mod tests {
         GeneralSettings {
             copy_on_select: false,
             leaf_density: LeafDensity::Compact,
+            subagent_rows: SubagentRows::Compact,
             sessions_under_repos: SessionsUnderRepos::Busy,
             repo_sort: RepoSort::Active,
             ..GeneralSettings::default()
@@ -8251,47 +8301,148 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn finished_subagent_rows_round_trips_and_loads_follow_when_missing_or_unknown() {
-        let dir = TestDir::new("finished-subagent-rows");
+    fn subagent_rows_round_trips_and_never_writes_the_old_key() {
+        let dir = TestDir::new("subagent-rows");
         let mut model = SidebarModel::new(UiState::default());
         assert_eq!(
-            model.finished_subagent_rows(),
-            FinishedSubagentRows::Follow,
+            model.subagent_rows(),
+            SubagentRows::Comfortable,
             "the default"
         );
         for (rows, saved) in [
-            (FinishedSubagentRows::Compact, "compact"),
-            (FinishedSubagentRows::Follow, "follow"),
+            (SubagentRows::Compact, "compact"),
+            (SubagentRows::FinishedCompact, "finished_compact"),
+            (SubagentRows::Comfortable, "comfortable"),
         ] {
-            assert!(model.set_finished_subagent_rows(rows), "{saved}");
-            assert!(!model.set_finished_subagent_rows(rows), "unchanged");
+            assert!(model.set_subagent_rows(rows), "{saved}");
+            assert!(!model.set_subagent_rows(rows), "unchanged");
             save_ui_state(&dir.0, model.ui_state()).expect("save");
             let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
             let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-            assert_eq!(written["general"]["finished_subagent_rows"], saved);
-            assert_eq!(load_ui_state(&dir.0).general.finished_subagent_rows, rows);
+            assert_eq!(written["general"]["subagent_rows"], saved);
+            assert!(
+                written["general"].get("finished_subagent_rows").is_none(),
+                "the old key is not written: {text}"
+            );
+            assert_eq!(load_ui_state(&dir.0).general.subagent_rows, rows);
         }
+    }
 
+    #[test]
+    fn a_file_with_neither_rows_key_loads_comfortable() {
+        let dir = TestDir::new("subagent-rows-missing");
         for older in [
             r#"{ "sidebar_collapsed": true }"#,
             r#"{ "general": { "copy_on_select": false } }"#,
         ] {
             std::fs::write(dir.0.join(UI_FILE), older).expect("write");
             assert_eq!(
-                load_ui_state(&dir.0).general.finished_subagent_rows,
-                FinishedSubagentRows::Follow,
+                load_ui_state(&dir.0).general.subagent_rows,
+                SubagentRows::Comfortable,
                 "{older}"
             );
         }
+    }
 
-        let unknown =
-            r#"{ "general": { "copy_on_select": false, "finished_subagent_rows": "dense" } }"#;
-        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
-        let loaded = load_ui_state(&dir.0);
+    /// `native-ui.json` as v0.15.0-alpha wrote it, its General group holding
+    /// `leaf_density` and, when `Some`, `finished_subagent_rows`; every other
+    /// General key away from its default.
+    fn v0_15_0_alpha_ui_file(leaf_density: &str, rows: Option<&str>) -> serde_json::Value {
+        let mut general = serde_json::json!({
+            "copy_on_select": false,
+            "click_through_inactive_pane": false,
+            "leaf_density": leaf_density,
+            "show_finished_subagents": false,
+            "sessions_under_repos": "busy",
+            "repo_sort": "active",
+            "check_updates": false,
+            "detailed_logging": true
+        });
+        if let Some(rows) = rows {
+            general["finished_subagent_rows"] = serde_json::json!(rows);
+        }
+        serde_json::json!({ "sidebar_collapsed": true, "general": general })
+    }
+
+    /// The General group the v0.15.0-alpha file of `leaf_density` and `rows`
+    /// loads as; the rest of the group is checked to load too.
+    fn loaded_v0_15_0_alpha(name: &str, leaf_density: &str, rows: Option<&str>) -> SubagentRows {
+        let dir = TestDir::new(name);
+        let file = v0_15_0_alpha_ui_file(leaf_density, rows);
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let ui = load_ui_state(&dir.0);
+        assert!(ui.sidebar_collapsed, "the rest of the file loads");
+        let general = ui.general;
+        assert!(!general.copy_on_select, "the rest of the group loads");
+        assert!(!general.click_through_inactive_pane);
+        assert!(!general.show_finished_subagents);
+        assert_eq!(general.sessions_under_repos, SessionsUnderRepos::Busy);
+        assert_eq!(general.repo_sort, RepoSort::Active);
+        assert!(!general.check_updates);
+        assert!(general.detailed_logging);
+        general.subagent_rows
+    }
+
+    #[test]
+    fn a_v0_15_0_alpha_comfortable_follow_file_loads_comfortable() {
         assert_eq!(
-            loaded.general.finished_subagent_rows,
-            FinishedSubagentRows::Follow
+            loaded_v0_15_0_alpha("v0-15-comfortable-follow", "comfortable", Some("follow")),
+            SubagentRows::Comfortable
         );
+    }
+
+    #[test]
+    fn a_v0_15_0_alpha_comfortable_compact_file_loads_finished_compact() {
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-comfortable-compact", "comfortable", Some("compact")),
+            SubagentRows::FinishedCompact
+        );
+    }
+
+    #[test]
+    fn a_v0_15_0_alpha_compact_follow_file_loads_compact() {
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-compact-follow", "compact", Some("follow")),
+            SubagentRows::Compact
+        );
+    }
+
+    #[test]
+    fn a_v0_15_0_alpha_compact_compact_file_loads_compact() {
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-compact-compact", "compact", Some("compact")),
+            SubagentRows::Compact
+        );
+    }
+
+    #[test]
+    fn a_v0_15_0_alpha_comfortable_file_without_the_rows_key_loads_comfortable() {
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-comfortable-missing", "comfortable", None),
+            SubagentRows::Comfortable
+        );
+    }
+
+    #[test]
+    fn an_unknown_old_rows_value_reads_as_follow() {
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-comfortable-dense", "comfortable", Some("dense")),
+            SubagentRows::Comfortable
+        );
+        assert_eq!(
+            loaded_v0_15_0_alpha("v0-15-compact-dense", "compact", Some("dense")),
+            SubagentRows::Compact
+        );
+    }
+
+    #[test]
+    fn an_unknown_new_rows_value_derives_from_the_old_key() {
+        let dir = TestDir::new("subagent-rows-unknown");
+        let file = r#"{ "general": { "copy_on_select": false, "subagent_rows": "dense",
+            "finished_subagent_rows": "compact" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), file).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.general.subagent_rows, SubagentRows::FinishedCompact);
         assert!(
             !loaded.general.copy_on_select,
             "the rest of the group loads"
@@ -8299,13 +8450,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_v0_5_1_alpha_ui_file_loads_show_finished_subagents_and_follow_rows() {
+    fn a_saved_new_rows_value_wins_over_the_old_key() {
+        let dir = TestDir::new("subagent-rows-both");
+        let file = r#"{ "general": { "leaf_density": "compact", "subagent_rows": "comfortable",
+            "finished_subagent_rows": "compact" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), file).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).general.subagent_rows,
+            SubagentRows::Comfortable
+        );
+    }
+
+    #[test]
+    fn a_v0_5_1_alpha_ui_file_loads_show_finished_subagents_and_compact_rows() {
         let dir = TestDir::new("released-subagent-rows");
         let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
         assert!(ui.general.show_finished_subagents, "it shows them");
         assert_eq!(
-            ui.general.finished_subagent_rows,
-            FinishedSubagentRows::Follow
+            ui.general.subagent_rows,
+            SubagentRows::Compact,
+            "its compact leaf density drew every subagent row compact"
         );
     }
 

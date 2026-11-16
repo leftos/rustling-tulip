@@ -393,8 +393,8 @@ fn general_entries() -> Vec<Entry> {
         },
         entry(
             SettingsTab::General,
-            "settings-finished-subagent-rows-follow",
-            "Finished subagent rows",
+            "settings-subagent-rows-comfortable",
+            "Subagent and dispatch rows",
             "Sidebar",
             Gate::Always,
         ),
@@ -1002,8 +1002,12 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
         "another choice of the Show finished subagents row",
     ),
     (
-        "settings-finished-subagent-rows-compact",
-        "another choice of the Finished subagent rows row",
+        "settings-subagent-rows-finished-compact",
+        "another choice of the Subagent and dispatch rows row",
+    ),
+    (
+        "settings-subagent-rows-compact",
+        "another choice of the Subagent and dispatch rows row",
     ),
     (
         "settings-subagent-cap-3",

@@ -4,7 +4,7 @@
 
 use protocol::{AgentState, DispatchRunSnapshot, SessionMode, SessionStatus, SubagentSnapshot};
 
-use crate::sidebar::{FinishedSubagentRows, Leaf, LeafDensity, LeafKind, LeafState};
+use crate::sidebar::{Leaf, LeafDensity, LeafKind, LeafState, SubagentRows};
 use crate::target::HostKey;
 
 /// The shallowest row a subagent draws at: one the session's main
@@ -49,19 +49,21 @@ pub fn shown(list: &[SubagentSnapshot], show_finished: bool) -> Vec<&SubagentSna
     kept
 }
 
-/// The density `leaf` draws at: `Compact` for a finished or failed subagent
-/// when `finished_rows` draws those so, else the sidebar's `density`.
+/// The density `leaf` draws at: a subagent or dispatch run row's is the one
+/// `rows` gives it, whatever the sidebar's `density`; a session's is
+/// `density`. A subagent is finished when it no longer works, a run when
+/// [`crate::dispatch_runs::finished`] says so.
 #[must_use]
-pub fn row_density(
-    leaf: &Leaf,
-    density: LeafDensity,
-    finished_rows: FinishedSubagentRows,
-) -> LeafDensity {
-    let finished = leaf.kind == LeafKind::Subagent && leaf.status != SessionStatus::Working;
-    if finished && finished_rows == FinishedSubagentRows::Compact {
-        LeafDensity::Compact
-    } else {
-        density
+pub fn row_density(leaf: &Leaf, density: LeafDensity, rows: SubagentRows) -> LeafDensity {
+    let finished = match leaf.kind {
+        LeafKind::Session => return density,
+        LeafKind::Subagent => leaf.status != SessionStatus::Working,
+        LeafKind::Dispatch => leaf.run_status.is_none_or(crate::dispatch_runs::finished),
+    };
+    match rows {
+        SubagentRows::Comfortable => LeafDensity::Comfortable,
+        SubagentRows::FinishedCompact if !finished => LeafDensity::Comfortable,
+        SubagentRows::FinishedCompact | SubagentRows::Compact => LeafDensity::Compact,
     }
 }
 
@@ -199,6 +201,7 @@ fn base_leaf(host: &HostKey, snapshot: &SubagentSnapshot) -> Leaf {
         depth: snapshot.depth.clamp(MIN_DEPTH, MAX_DEPTH),
         host_session: None,
         run_id: None,
+        run_status: None,
         nested: 0,
         nested_subagents: 0,
         collapsed: false,
@@ -432,65 +435,104 @@ mod tests {
         subagent_leaf(&HostKey::Local, "s1", &in_state("a1", 1, state))
     }
 
-    #[test]
-    fn row_density_draws_a_finished_subagent_compact_when_asked() {
-        for state in [
-            AgentState::Finished,
-            AgentState::Failed,
-            AgentState::Unknown,
-        ] {
-            assert_eq!(
-                row_density(
-                    &subagent_row(state),
-                    LeafDensity::Comfortable,
-                    FinishedSubagentRows::Compact,
-                ),
-                LeafDensity::Compact,
-                "{state:?}"
-            );
-        }
+    /// What a row draws at under one setting.
+    #[derive(Debug, Clone, Copy)]
+    enum Want {
+        Comfy,
+        Compact,
+        /// The leaf density, whichever it is.
+        Follows,
+    }
+
+    /// Dispatch run `d1`'s leaf with its run at `status`.
+    fn run_row(status: protocol::DispatchRunStatus) -> Leaf {
+        let snapshot = crate::sidebar::tests::run("d1", "C:\\r1.wt\\a", None, 0, status);
+        crate::dispatch_runs::dispatch_leaf(&snapshot, &HostKey::Local)
     }
 
     #[test]
-    fn row_density_keeps_a_running_subagent_at_the_leaf_density() {
-        for state in [AgentState::Running, AgentState::Queued] {
-            for density in [LeafDensity::Comfortable, LeafDensity::Compact] {
-                assert_eq!(
-                    row_density(&subagent_row(state), density, FinishedSubagentRows::Compact),
-                    density,
-                    "{state:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn row_density_follows_by_default() {
-        for density in [LeafDensity::Comfortable, LeafDensity::Compact] {
-            assert_eq!(
-                row_density(
-                    &subagent_row(AgentState::Finished),
-                    density,
-                    FinishedSubagentRows::Follow,
-                ),
-                density
-            );
-        }
-    }
-
-    #[test]
-    fn row_density_leaves_a_session_leaf_alone() {
+    fn row_density_follows_the_setting_for_each_row_and_leaf_density() {
+        use Want::{Comfy, Compact, Follows};
+        use protocol::DispatchRunStatus;
         let session = Leaf {
             kind: LeafKind::Session,
             ..subagent_row(AgentState::Finished)
         };
-        assert_eq!(
-            row_density(
-                &session,
-                LeafDensity::Comfortable,
-                FinishedSubagentRows::Compact,
+        // Each row: what it draws at under All comfortable, Finished
+        // compact and All compact.
+        let table = [
+            (
+                "running subagent",
+                subagent_row(AgentState::Running),
+                [Comfy, Comfy, Compact],
             ),
-            LeafDensity::Comfortable
-        );
+            (
+                "queued subagent",
+                subagent_row(AgentState::Queued),
+                [Comfy, Comfy, Compact],
+            ),
+            (
+                "finished subagent",
+                subagent_row(AgentState::Finished),
+                [Comfy, Compact, Compact],
+            ),
+            (
+                "failed subagent",
+                subagent_row(AgentState::Failed),
+                [Comfy, Compact, Compact],
+            ),
+            (
+                "unknown subagent",
+                subagent_row(AgentState::Unknown),
+                [Comfy, Compact, Compact],
+            ),
+            (
+                "Starting run",
+                run_row(DispatchRunStatus::Starting),
+                [Comfy, Comfy, Compact],
+            ),
+            (
+                "Working run",
+                run_row(DispatchRunStatus::Working),
+                [Comfy, Comfy, Compact],
+            ),
+            (
+                "Stopping run",
+                run_row(DispatchRunStatus::Stopping),
+                [Comfy, Comfy, Compact],
+            ),
+            (
+                "Ended run",
+                run_row(DispatchRunStatus::Ended),
+                [Comfy, Compact, Compact],
+            ),
+            (
+                "Unknown run",
+                run_row(DispatchRunStatus::Unknown),
+                [Comfy, Compact, Compact],
+            ),
+            ("session leaf", session, [Follows, Follows, Follows]),
+        ];
+        let settings = [
+            SubagentRows::Comfortable,
+            SubagentRows::FinishedCompact,
+            SubagentRows::Compact,
+        ];
+        for (name, leaf, wants) in &table {
+            for (setting, want) in settings.iter().zip(wants) {
+                for density in [LeafDensity::Comfortable, LeafDensity::Compact] {
+                    let expected = match want {
+                        Comfy => LeafDensity::Comfortable,
+                        Compact => LeafDensity::Compact,
+                        Follows => density,
+                    };
+                    assert_eq!(
+                        row_density(leaf, density, *setting),
+                        expected,
+                        "{name} under {setting:?}, leaf density {density:?}"
+                    );
+                }
+            }
+        }
     }
 }

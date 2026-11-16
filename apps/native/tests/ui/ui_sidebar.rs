@@ -3103,6 +3103,8 @@ fn finished_subagents_hide_when_the_setting_is_off(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "leaf-runtime-a2"));
 }
 
+/// The old `finished_subagent_rows: "compact"` with a comfortable leaf
+/// density loads as Finished compact.
 #[gpui::test]
 fn finished_subagent_rows_draw_compact_in_a_comfortable_sidebar(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -3137,6 +3139,33 @@ fn finished_subagent_rows_draw_compact_in_a_comfortable_sidebar(cx: &mut TestApp
     assert!(
         h.bounds("leaf-a2").size.height > px(26.0),
         "the running row draws two lines"
+    );
+}
+
+#[gpui::test]
+fn all_compact_draws_a_running_dispatch_run_compact_in_a_comfortable_sidebar(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "leaf_density": "comfortable", "subagent_rows": "compact" } }"#,
+    )
+    .expect("write the layout");
+    let mut h = nested_subagent_harness(cx, &dir, Vec::new(), vec![s1_run()]);
+
+    assert!(
+        drawn(&mut h, "leaf-runtime-d1"),
+        "precondition: the working run draws"
+    );
+    assert_eq!(
+        h.bounds("leaf-d1").size.height,
+        px(26.0),
+        "the running run draws on one line"
+    );
+    assert!(
+        h.bounds("leaf-s1").size.height > px(26.0),
+        "its session keeps the comfortable leaf density"
     );
 }
 

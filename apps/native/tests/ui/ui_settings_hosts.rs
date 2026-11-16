@@ -898,7 +898,8 @@ fn subagent_listing_rows_hide_for_a_host_without_the_feature(cx: &mut TestAppCon
     assert!(
         !ring
             .iter()
-            .any(|selector| selector.starts_with("settings-subagent-")),
+            .any(|selector| selector.starts_with("settings-subagent-cap-")
+                || selector.starts_with("settings-subagent-keep-")),
         "This PC's daemon has no such setting, so its ring holds neither row: {ring:?}"
     );
     assert_eq!(listing_shown(&mut h), None, "This PC reported none");

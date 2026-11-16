@@ -33,9 +33,9 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, FinishedSubagentRows, HostGroup, Leaf,
-    LeafDensity, LeafKind, RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, can_attach,
-    chip_tip, fold_all_target, session_fold_states,
+    Activity, Container, ContainerKind, DETACHED_BANNER, HostGroup, Leaf, LeafDensity, LeafKind,
+    RepoFilter, RepoSort, SessionsUnderRepos, SidebarView, SubagentRows, can_attach, chip_tip,
+    fold_all_target, session_fold_states,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
@@ -340,7 +340,7 @@ impl RootView {
                 .map(|s| s.id.as_str())
                 .collect(),
             density: self.sidebar.leaf_density(),
-            finished_subagent_rows: self.sidebar.finished_subagent_rows(),
+            subagent_rows: self.sidebar.subagent_rows(),
             under_repos: self.sidebar.sessions_under_repos(),
             focused_row,
             hovered_row: crate::sidebar::shown_hovered_row(
@@ -2349,8 +2349,8 @@ struct LeafRows<'a> {
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
     density: LeafDensity,
-    /// How a finished or failed subagent row draws.
-    finished_subagent_rows: FinishedSubagentRows,
+    /// How subagent rows and dispatch run rows draw.
+    subagent_rows: SubagentRows,
     /// How many of a repo or workspace's sessions show under its row.
     under_repos: SessionsUnderRepos,
     /// The width a Comfortable subline's text and chips share, in px.
@@ -3051,7 +3051,7 @@ fn leaf_row(
     let accent = ctx.accents.get(id).copied().unwrap_or(t.accent);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let key = leaf_key(host, id);
-    let density = crate::subagents::row_density(leaf, ctx.density, ctx.finished_subagent_rows);
+    let density = crate::subagents::row_density(leaf, ctx.density, ctx.subagent_rows);
     let row = leaf_click(
         leaf_frame(leaf, &key, ground, accent, density, cx),
         leaf,
@@ -3591,7 +3591,7 @@ impl RootView {
             leaf.hover(crate::subagents::row_density(
                 &leaf,
                 self.sidebar.leaf_density(),
-                self.sidebar.finished_subagent_rows(),
+                self.sidebar.subagent_rows(),
             ))
         })
     }
@@ -3720,6 +3720,7 @@ mod tests {
             depth: 0,
             host_session: None,
             run_id: None,
+            run_status: None,
             nested: 0,
             nested_subagents: 0,
             collapsed: false,

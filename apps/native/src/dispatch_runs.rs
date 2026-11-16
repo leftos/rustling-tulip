@@ -29,6 +29,16 @@ pub fn marks_active(status: DispatchRunStatus) -> bool {
     )
 }
 
+/// Whether a run with `status` has finished: it ended, or its status is one
+/// this build does not know. A stopping run has not.
+#[must_use]
+pub fn finished(status: DispatchRunStatus) -> bool {
+    matches!(
+        status,
+        DispatchRunStatus::Ended | DispatchRunStatus::Unknown
+    )
+}
+
 /// The folder a run is placed by: its main checkout, else its worktree.
 #[must_use]
 pub fn run_home(run: &DispatchRunSnapshot) -> &str {
@@ -81,6 +91,7 @@ pub fn dispatch_leaf(run: &DispatchRunSnapshot, host: &HostKey) -> Leaf {
         depth: 0,
         host_session: None,
         run_id: None,
+        run_status: Some(run.status),
         nested: 0,
         nested_subagents: 0,
         collapsed: false,

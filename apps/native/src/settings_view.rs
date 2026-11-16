@@ -49,8 +49,8 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_search::{self, DrawnTab, TabHits, Visibility};
 use crate::shell_choice::{self, HostShell, RowState, ShellEntry, ShellSetting};
 use crate::sidebar::{
-    CountMode, FINISHED_GRACE_CHOICES, FinishedSubagentRows, LeafDensity, NotifySkip, RepoSort,
-    SessionsUnderRepos, SidebarView, ToastSound, ToastStyle,
+    CountMode, FINISHED_GRACE_CHOICES, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos,
+    SidebarView, SubagentRows, ToastSound, ToastStyle,
 };
 use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
@@ -420,9 +420,13 @@ const LEAF_DENSITY_CHOICES: [LeafDensity; 2] = [LeafDensity::Comfortable, LeafDe
 /// The General tab's Show finished subagents choices, On then Off.
 const SHOW_FINISHED_SUBAGENTS_CHOICES: [bool; 2] = [true, false];
 
-/// The General tab's Finished subagent rows choices, in the order they show.
-const FINISHED_SUBAGENT_ROWS_CHOICES: [FinishedSubagentRows; 2] =
-    [FinishedSubagentRows::Follow, FinishedSubagentRows::Compact];
+/// The General tab's Subagent and dispatch rows choices, in the order they
+/// show.
+const SUBAGENT_ROWS_CHOICES: [SubagentRows; 3] = [
+    SubagentRows::Comfortable,
+    SubagentRows::FinishedCompact,
+    SubagentRows::Compact,
+];
 
 /// The Finished subagents kept choices, in the order they show.
 const SUBAGENT_CAP_CHOICES: [u32; 5] = [1, 3, 5, 10, 20];
@@ -584,7 +588,7 @@ pub(crate) enum SettingsControl {
     LeafDensity(LeafDensity),
     /// A Show finished subagents choice: On (`true`) or Off.
     ShowFinishedSubagents(bool),
-    FinishedSubagentRows(FinishedSubagentRows),
+    SubagentRows(SubagentRows),
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect,
@@ -706,18 +710,17 @@ pub(crate) enum KeySourceChoice {
 const KEY_SOURCE_CHOICES: [KeySourceChoice; 2] = [KeySourceChoice::Stored, KeySourceChoice::Env];
 
 impl SettingsControl {
-    /// The selector of a finished-subagent control: the two Sidebar rows'
-    /// and the shown host's two listing rows'.
+    /// The selector of a subagent control: the two Sidebar rows' and the
+    /// shown host's two listing rows'.
     const fn subagent_selector(self) -> &'static str {
         match self {
             Self::ShowFinishedSubagents(true) => "settings-show-finished-subagents-on",
             Self::ShowFinishedSubagents(false) => "settings-show-finished-subagents-off",
-            Self::FinishedSubagentRows(FinishedSubagentRows::Follow) => {
-                "settings-finished-subagent-rows-follow"
+            Self::SubagentRows(SubagentRows::Comfortable) => "settings-subagent-rows-comfortable",
+            Self::SubagentRows(SubagentRows::FinishedCompact) => {
+                "settings-subagent-rows-finished-compact"
             }
-            Self::FinishedSubagentRows(FinishedSubagentRows::Compact) => {
-                "settings-finished-subagent-rows-compact"
-            }
+            Self::SubagentRows(SubagentRows::Compact) => "settings-subagent-rows-compact",
             Self::SubagentCap(1) => "settings-subagent-cap-1",
             Self::SubagentCap(3) => "settings-subagent-cap-3",
             Self::SubagentCap(5) => "settings-subagent-cap-5",
@@ -747,7 +750,7 @@ impl SettingsControl {
             Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
             Self::LeafDensity(LeafDensity::Compact) => "settings-leaf-density-compact",
             Self::ShowFinishedSubagents(_)
-            | Self::FinishedSubagentRows(_)
+            | Self::SubagentRows(_)
             | Self::SubagentCap(_)
             | Self::SubagentKeep(_) => self.subagent_selector(),
             Self::SessionsUnderRepos(SessionsUnderRepos::Every) => {
@@ -2280,11 +2283,11 @@ impl RootView {
         self.shown_local().general.show_finished_subagents
     }
 
-    /// Whether Finished subagent rows draws Always compact: the saved value
-    /// with any pending press over it.
+    /// The selector of the Subagent and dispatch rows choice shown marked:
+    /// the saved value with any pending press over it.
     #[must_use]
-    pub fn finished_subagent_rows_compact_shown(&self) -> bool {
-        self.shown_local().general.finished_subagent_rows == FinishedSubagentRows::Compact
+    pub fn subagent_rows_shown(&self) -> &'static str {
+        SettingsControl::SubagentRows(self.shown_local().general.subagent_rows).selector()
     }
 
     /// The keep-awake status line of the host Settings shows.
@@ -3781,7 +3784,7 @@ impl RootView {
             | SettingsControl::SidebarView(_)
             | SettingsControl::LeafDensity(_)
             | SettingsControl::ShowFinishedSubagents(_)
-            | SettingsControl::FinishedSubagentRows(_)
+            | SettingsControl::SubagentRows(_)
             | SettingsControl::SessionsUnderRepos(_)
             | SettingsControl::RepoSort(_)
             | SettingsControl::CopyOnSelect
@@ -3867,7 +3870,7 @@ impl RootView {
             SettingsControl::ShowFinishedSubagents(show) => {
                 LocalPending::ShowFinishedSubagents(show)
             }
-            SettingsControl::FinishedSubagentRows(rows) => LocalPending::FinishedSubagentRows(rows),
+            SettingsControl::SubagentRows(rows) => LocalPending::SubagentRows(rows),
             SettingsControl::SessionsUnderRepos(mode) => LocalPending::SessionsUnderRepos(mode),
             SettingsControl::RepoSort(sort) => LocalPending::RepoSort(sort),
             SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
@@ -5428,9 +5431,7 @@ impl RootView {
             LocalPending::ShowFinishedSubagents(show) => {
                 self.sidebar.set_show_finished_subagents(show)
             }
-            LocalPending::FinishedSubagentRows(rows) => {
-                self.sidebar.set_finished_subagent_rows(rows)
-            }
+            LocalPending::SubagentRows(rows) => self.sidebar.set_subagent_rows(rows),
             LocalPending::SessionsUnderRepos(mode) => self.sidebar.set_sessions_under_repos(mode),
             LocalPending::RepoSort(sort) => self.sidebar.set_repo_sort(sort),
             LocalPending::CopyOnSelect(on) => {
@@ -7743,7 +7744,7 @@ impl RootView {
         });
         let general = self.shown_local().general;
         let finished = show_finished_subagents_choices(general.show_finished_subagents);
-        let finished_rows = finished_subagent_rows_choices(general.finished_subagent_rows);
+        let subagent_rows = subagent_rows_choices(general.subagent_rows);
         let under = sessions_under_repos_choices(general.sessions_under_repos);
         let sorts = repo_sort_choices(general.repo_sort);
         section(
@@ -7773,8 +7774,8 @@ impl RootView {
             cx,
         ))
         .child(choice_row(
-            "Finished subagent rows",
-            &finished_rows,
+            "Subagent and dispatch rows",
+            &subagent_rows,
             RowLock::Live,
             focused,
             cx,
@@ -9201,7 +9202,7 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
         .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
         .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
         .chain(SHOW_FINISHED_SUBAGENTS_CHOICES.map(SettingsControl::ShowFinishedSubagents))
-        .chain(FINISHED_SUBAGENT_ROWS_CHOICES.map(SettingsControl::FinishedSubagentRows))
+        .chain(SUBAGENT_ROWS_CHOICES.map(SettingsControl::SubagentRows))
         .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
         .chain([
@@ -9314,7 +9315,7 @@ pub(crate) enum LocalPending {
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
     ShowFinishedSubagents(bool),
-    FinishedSubagentRows(FinishedSubagentRows),
+    SubagentRows(SubagentRows),
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect(bool),
@@ -9842,7 +9843,7 @@ impl ShownLocal {
             LocalPending::ShowFinishedSubagents(show) => {
                 self.general.show_finished_subagents = show;
             }
-            LocalPending::FinishedSubagentRows(rows) => self.general.finished_subagent_rows = rows,
+            LocalPending::SubagentRows(rows) => self.general.subagent_rows = rows,
             LocalPending::SessionsUnderRepos(mode) => self.general.sessions_under_repos = mode,
             LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
             LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
@@ -9875,9 +9876,7 @@ impl ShownLocal {
             LocalPending::ShowFinishedSubagents(_) => {
                 LocalPending::ShowFinishedSubagents(general.show_finished_subagents)
             }
-            LocalPending::FinishedSubagentRows(_) => {
-                LocalPending::FinishedSubagentRows(general.finished_subagent_rows)
-            }
+            LocalPending::SubagentRows(_) => LocalPending::SubagentRows(general.subagent_rows),
             LocalPending::SessionsUnderRepos(_) => {
                 LocalPending::SessionsUnderRepos(general.sessions_under_repos)
             }
@@ -10298,17 +10297,16 @@ fn show_finished_subagents_choices(current: bool) -> [(SettingsControl, &'static
     })
 }
 
-/// The Finished subagent rows row's choices, `current` marked.
-fn finished_subagent_rows_choices(
-    current: FinishedSubagentRows,
-) -> [(SettingsControl, &'static str, bool); 2] {
-    FINISHED_SUBAGENT_ROWS_CHOICES.map(|choice| {
+/// The Subagent and dispatch rows row's choices, `current` marked.
+fn subagent_rows_choices(current: SubagentRows) -> [(SettingsControl, &'static str, bool); 3] {
+    SUBAGENT_ROWS_CHOICES.map(|choice| {
         let text = match choice {
-            FinishedSubagentRows::Follow => "Follow leaf density",
-            FinishedSubagentRows::Compact => "Always compact",
+            SubagentRows::Comfortable => "All comfortable",
+            SubagentRows::FinishedCompact => "Finished compact",
+            SubagentRows::Compact => "All compact",
         };
         (
-            SettingsControl::FinishedSubagentRows(choice),
+            SettingsControl::SubagentRows(choice),
             text,
             choice == current,
         )

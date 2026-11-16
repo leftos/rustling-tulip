@@ -1088,8 +1088,9 @@ fn show_finished_shown(h: &mut Harness<'_>) -> bool {
     h.root(|root, _| root.show_finished_subagents_shown())
 }
 
-fn finished_rows_compact_shown(h: &mut Harness<'_>) -> bool {
-    h.root(|root, _| root.finished_subagent_rows_compact_shown())
+/// The selector of the Subagent and dispatch rows choice drawn marked.
+fn subagent_rows_shown(h: &mut Harness<'_>) -> &'static str {
+    h.root(|root, _| root.subagent_rows_shown())
 }
 
 #[gpui::test]
@@ -1126,42 +1127,58 @@ fn show_finished_subagents_pends_until_apply_and_saves(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn finished_subagent_rows_pends_until_apply_and_saves(cx: &mut TestAppContext) {
+fn subagent_rows_pends_until_apply_and_saves(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
-    let before = saved_general(&dir, "finished_subagent_rows");
-    assert!(
-        !finished_rows_compact_shown(&mut h),
-        "Follow leaf density by default"
+    let before = saved_general(&dir, "subagent_rows");
+    assert_eq!(
+        subagent_rows_shown(&mut h),
+        "settings-subagent-rows-comfortable",
+        "All comfortable by default"
     );
 
-    click_general(&mut h, "settings-finished-subagent-rows-compact");
+    click_general(&mut h, "settings-subagent-rows-compact");
     assert!(
         h.root(|root, _| root.settings_have_pending_edits()),
         "the choice pends"
     );
-    assert!(
-        finished_rows_compact_shown(&mut h),
+    assert_eq!(
+        subagent_rows_shown(&mut h),
+        "settings-subagent-rows-compact",
         "the pending choice draws"
     );
     assert_eq!(
-        saved_general(&dir, "finished_subagent_rows"),
+        saved_general(&dir, "subagent_rows"),
         before,
         "nothing saved before Apply"
     );
     h.click_on("settings-apply");
     assert_eq!(
-        saved_general(&dir, "finished_subagent_rows"),
+        saved_general(&dir, "subagent_rows"),
         Some(serde_json::json!("compact"))
     );
 
-    click_general(&mut h, "settings-finished-subagent-rows-follow");
-    h.click_on("settings-apply");
-    assert_eq!(
-        saved_general(&dir, "finished_subagent_rows"),
-        Some(serde_json::json!("follow"))
-    );
+    for (id, saved) in [
+        (
+            "settings-subagent-rows-finished-compact",
+            "finished_compact",
+        ),
+        ("settings-subagent-rows-comfortable", "comfortable"),
+    ] {
+        click_general(&mut h, id);
+        h.click_on("settings-apply");
+        assert_eq!(
+            saved_general(&dir, "subagent_rows"),
+            Some(serde_json::json!(saved)),
+            "{id}"
+        );
+        assert_eq!(
+            saved_general(&dir, "finished_subagent_rows"),
+            None,
+            "the old key is never written"
+        );
+    }
 }
 
 #[gpui::test]
@@ -1170,9 +1187,9 @@ fn cancel_discards_a_pending_finished_subagent_choice(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
     let shown_before = saved_general(&dir, "show_finished_subagents");
-    let rows_before = saved_general(&dir, "finished_subagent_rows");
+    let rows_before = saved_general(&dir, "subagent_rows");
     click_general(&mut h, "settings-show-finished-subagents-off");
-    click_general(&mut h, "settings-finished-subagent-rows-compact");
+    click_general(&mut h, "settings-subagent-rows-compact");
     h.click_on("settings-cancel");
     assert!(
         !h.root(|root, _| root.settings_open()),
@@ -1183,7 +1200,7 @@ fn cancel_discards_a_pending_finished_subagent_choice(cx: &mut TestAppContext) {
         shown_before,
         "nothing was saved"
     );
-    assert_eq!(saved_general(&dir, "finished_subagent_rows"), rows_before);
+    assert_eq!(saved_general(&dir, "subagent_rows"), rows_before);
 
     h.keys("ctrl-,");
     assert!(
@@ -1191,9 +1208,10 @@ fn cancel_discards_a_pending_finished_subagent_choice(cx: &mut TestAppContext) {
         "nothing pends"
     );
     assert!(show_finished_shown(&mut h), "On draws again");
-    assert!(
-        !finished_rows_compact_shown(&mut h),
-        "Follow leaf density draws again"
+    assert_eq!(
+        subagent_rows_shown(&mut h),
+        "settings-subagent-rows-comfortable",
+        "All comfortable draws again"
     );
 }
 
@@ -1210,12 +1228,12 @@ fn sessions_under_repos_choice_saves_and_is_reached_by_tab(cx: &mut TestAppConte
 
     h.keys("ctrl-,");
     assert_eq!(settings_focus(&mut h), Some("list"));
-    h.keys("tab tab tab tab tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-sessions-under-repos-every"),
-        "one tab past the two Leaf density, the two Show finished subagents and the two Finished \
-         subagent rows choices"
+        "one tab past the two Leaf density, the two Show finished subagents and the three \
+         Subagent and dispatch rows choices"
     );
 }
 
@@ -1235,7 +1253,7 @@ fn repo_sort_choice_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
 
     h.keys("ctrl-,");
     assert_eq!(settings_focus(&mut h), Some("list"));
-    h.keys("tab tab tab tab tab tab tab tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-repo-sort-manual"),
@@ -1275,13 +1293,13 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "the choice waits for Apply"
     );
 
-    h.keys("tab tab tab tab tab tab tab tab tab tab tab tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab tab tab tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
         "past Always, the two Default view, the two Leaf density, the two Show finished subagents, \
-         the two Finished subagent rows, the three Sessions under repos and the three Sort repos \
-         choices"
+         the three Subagent and dispatch rows, the three Sessions under repos and the three Sort \
+         repos choices"
     );
     h.keys("space");
     h.keys("enter");
@@ -1316,7 +1334,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys(&["shift-tab"; 17].join(" "));
+    h.keys(&["shift-tab"; 18].join(" "));
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-keep-awake-off"),
