@@ -176,6 +176,10 @@ The typed-prompt time comes from the plugin: `ActivitySnapshot.last_typed_prompt
 
 In the Claude plugin, a subagent sidecar's `finished: true` counts only when the sidecar was written at least as late as the transcript's last write (an unknown time still counts), so a resumed subagent reads as running again, and a sidecar without the field keeps the transcript rules.
 
+A subagent that ends its turn with a text reply while a background command or subagent it launched is still running reads as running, not finished, so its row neither drops out of a hidden-finished sidebar nor flickers back. It turns finished or failed only when a task notification in its own transcript names that task's id, as the text of a `user` record or as a `queued_command` attachment, or when a rule ahead of it applies (a sidecar `stoppedByUser`, the launcher's notice that ended the task, a transcript older than the agent process); a sidecar `finished` flag does not end the wait. The ordered rules are in the module header of `crates/agents/claude/src/subagents.rs`.
+
+Claude Code also writes an interim notice into the launcher's transcript at that moment (`completed`, its summary saying the agent "is waiting on its own background work"). The reader keeps such a notice as the task's newest but never as an end: the subagent stays running, the task stays in the background list, and the final notice ends it. A `TaskStop` result ends the task it names at once, a stopped shell moving to the ended list as `killed`.
+
 The list is in tree order (each first-layer subagent, oldest first, then its subtree) and carries only fields that change when a subagent starts, finishes or first replies, never its open call or last text, since each change costs a `SessionUpdated`. It is written through `SessionRegistry::update` only when it changed, and a reading for a session that stopped or changed conversation while it was read is dropped; a pass whose lists match the records sends nothing.
 
 ### A dispatch run's own subagents

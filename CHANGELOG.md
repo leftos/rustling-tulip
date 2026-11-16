@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Fetching a file from a remote host no longer hangs on a stalled network drive, a pipe, or a file that keeps growing.
+- A subagent waiting on its own background command stays in the sidebar while finished subagents are hidden, instead of vanishing and flickering back.
 
 ### Changed
 

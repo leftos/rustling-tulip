@@ -39,6 +39,11 @@ pub(crate) fn is_denied_or_interrupted(text: &str) -> bool {
 /// The tag a task notification closes with.
 const NOTIFICATION_END: &str = "</task-notification>";
 
+/// The summary an interim task notification carries: Claude Code writes one
+/// into a launcher's transcript when a task ends its turn while its own
+/// background work runs, and the task goes on.
+pub(crate) const INTERIM_SUMMARY: &str = "is waiting on its own background work";
+
 /// One task notification: Claude Code's note to a launcher that a background
 /// task (a shell or a subagent) ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,16 +56,21 @@ pub(crate) struct TaskNotification<'a> {
     pub(crate) status: Option<&'a str>,
     /// Its one-line summary.
     pub(crate) summary: Option<&'a str>,
+    /// Whether it is interim: it only says the task waits on its own
+    /// background work, so nothing has ended.
+    pub(crate) interim: bool,
 }
 
 /// Each whole task notification in `text` that names a task, in order.
 pub(crate) fn task_notifications(text: &str) -> impl Iterator<Item = TaskNotification<'_>> {
     tag_values(text, NOTIFICATION_TAG, NOTIFICATION_END).filter_map(|body| {
+        let summary = tag_values(body, "<summary>", "</summary>").next();
         Some(TaskNotification {
             task_id: tag_values(body, "<task-id>", "</task-id>").next()?,
             tool_use_id: tag_values(body, "<tool-use-id>", "</tool-use-id>").next(),
             status: task_notification_status(body),
-            summary: tag_values(body, "<summary>", "</summary>").next(),
+            summary,
+            interim: summary.is_some_and(|text| text.contains(INTERIM_SUMMARY)),
         })
     })
 }
@@ -97,6 +107,20 @@ pub(crate) struct LaunchedTask<'a> {
     pub(crate) id: &'a str,
     /// Whether the task is a subagent, its id an agent id.
     pub(crate) is_agent: bool,
+}
+
+/// The start of the message Claude Code records when the user stops a
+/// background task with the `TaskStop` tool.
+const STOPPED_TASK_PREFIX: &str = "Successfully stopped task";
+
+/// The background task a `user` record's `toolUseResult` says the user
+/// stopped with `TaskStop`; `None` for any other result.
+pub(crate) fn stopped_task(result: &Value) -> Option<&str> {
+    let message = result["message"].as_str()?;
+    if !message.starts_with(STOPPED_TASK_PREFIX) {
+        return None;
+    }
+    result["task_id"].as_str().filter(|id| !id.is_empty())
 }
 
 /// The background task a `user` record's `toolUseResult` launches: a

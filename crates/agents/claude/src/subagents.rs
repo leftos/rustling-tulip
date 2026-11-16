@@ -22,12 +22,17 @@
 //!    launcher's transcript that ended the task and is newer than the
 //!    transcript's last line, ends it: `completed` as finished, any other
 //!    end as failed.
-//! 3. A sidecar marked `finished` and written no earlier than the
+//! 3. An interim task notification in the launcher's transcript, newer than
+//!    the transcript's last line, keeps it running: it only says the agent is
+//!    waiting on its own background work.
+//! 4. A background command or subagent it launched that no task notification
+//!    in its own transcript has ended yet keeps it running.
+//! 5. A sidecar marked `finished` and written no earlier than the
 //!    transcript's last write finishes it, whether or not its last reply was
 //!    read.
-//! 4. A last reply with `end_turn` and no tool call, followed only by
+//! 6. A last reply with `end_turn` and no tool call, followed only by
 //!    attachments, finishes it.
-//! 5. Otherwise it runs; lines after a finished state make it run again.
+//! 7. Otherwise it runs; lines after a finished state make it run again.
 
 use std::collections::HashMap;
 use std::fs;
@@ -417,12 +422,19 @@ fn ending(
         return ended(AgentState::Failed, Some(STOPPED_BY_USER), last);
     }
     if let Some(notice) = notice
-        && let Some(end) = activity::ended_state(notice.status.as_deref())
         && notice
             .at
             .is_some_and(|at| last.is_none_or(|last| at > last))
     {
-        return ended(end, notice.status.as_deref(), notice.at);
+        if notice.interim {
+            return ended(AgentState::Running, None, None);
+        }
+        if let Some(end) = activity::ended_state(notice.status.as_deref()) {
+            return ended(end, notice.status.as_deref(), notice.at);
+        }
+    }
+    if state.waits_on_background() {
+        return ended(AgentState::Running, None, None);
     }
     if flag_current && sidecar.is_some_and(|fields| fields.finished) {
         return ended(AgentState::Finished, None, last);
@@ -526,6 +538,8 @@ mod tests {
     const RUNNING_META: &str = include_str!("../tests/fixtures/subagents/running.meta.json");
     const FINISHED: &str = include_str!("../tests/fixtures/subagents/finished.jsonl");
     const FINISHED_META: &str = include_str!("../tests/fixtures/subagents/finished.meta.json");
+    const WAITING: &str = include_str!("../tests/fixtures/subagents/waiting.jsonl");
+    const WAITING_META: &str = include_str!("../tests/fixtures/subagents/waiting.meta.json");
     const NESTED_PARENT: &str = include_str!("../tests/fixtures/subagents/nested_parent.jsonl");
     const NESTED_CHILD: &str = include_str!("../tests/fixtures/subagents/nested_child.jsonl");
     const NESTED_CHILD_META: &str =
@@ -725,6 +739,233 @@ mod tests {
             ..running_node()
         };
         assert_eq!(tree(&scratch, None, NOW), [expected]);
+    }
+
+    /// The text of the task notification that ended task `id`.
+    fn ended_text(id: &str) -> String {
+        format!(
+            "<task-notification><task-id>{id}</task-id><status>completed</status><summary>done</summary></task-notification>"
+        )
+    }
+
+    /// The `user` record a subagent's own transcript holds when task `id`'s
+    /// end notification arrives as its text, written at `when`.
+    fn text_notice(id: &str, when: &str) -> String {
+        format!(
+            r#"{{"type":"user","isSidechain":true,"agentId":"a21","timestamp":"{when}","message":{{"role":"user","content":"{}"}}}}"#,
+            ended_text(id)
+        ) + "\n"
+    }
+
+    /// The `attachment` record Claude Code writes in a subagent's transcript
+    /// for the same notification, at `when`.
+    fn queued_notice(id: &str, when: &str) -> String {
+        format!(
+            r#"{{"type":"attachment","isSidechain":true,"agentId":"a21","timestamp":"{when}","attachment":{{"type":"queued_command","prompt":"{}"}}}}"#,
+            ended_text(id)
+        ) + "\n"
+    }
+
+    /// An `end_turn` reply with the one text `text`, written at `when`.
+    fn ending_reply(text: &str, when: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"agentId":"a21","timestamp":"{when}","message":{{"id":"msg_s7","role":"assistant","model":"fake-model","content":[{{"type":"text","text":"{text}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        ) + "\n"
+    }
+
+    #[test]
+    fn a_background_command_with_no_end_notice_keeps_a_subagent_running_though_its_sidecar_says_finished()
+     {
+        let scratch = conversation("waiting", &[("a21", WAITING, Some(WAITING_META))]);
+
+        let nodes = tree(&scratch, None, NOW);
+
+        let node = only(&nodes);
+        assert_eq!(node.state, AgentState::Running);
+        assert_eq!(node.finished_at, None);
+        assert_eq!(node.end_status, None);
+    }
+
+    #[test]
+    fn a_task_notification_in_the_subagents_own_transcript_ends_its_background_wait() {
+        let scratch = conversation(
+            "waiting-text-notice",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.add(
+            "agent-a21.jsonl",
+            &format!(
+                "{}{}",
+                text_notice("bwait1", "2026-09-27T10:00:30.000Z"),
+                ending_reply("Done.", "2026-09-27T10:00:31.000Z")
+            ),
+        );
+
+        let nodes = tree(&scratch, None, NOW);
+
+        assert_eq!(only(&nodes).state, AgentState::Finished);
+    }
+
+    #[test]
+    fn a_queued_command_attachment_ends_the_background_wait() {
+        let scratch = conversation(
+            "waiting-queued-notice",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.add(
+            "agent-a21.jsonl",
+            &format!(
+                "{}{}",
+                queued_notice("bwait1", "2026-09-27T10:00:30.000Z"),
+                ending_reply("Done.", "2026-09-27T10:00:31.000Z")
+            ),
+        );
+
+        let nodes = tree(&scratch, None, NOW);
+
+        assert_eq!(only(&nodes).state, AgentState::Finished);
+    }
+
+    #[test]
+    fn a_transcript_written_before_the_process_started_finishes_a_waiting_subagent() {
+        let scratch = conversation(
+            "waiting-old-process",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+
+        let nodes = tree(
+            &scratch,
+            Some("2026-09-27T10:30:00Z"),
+            "2026-09-27T10:31:00Z",
+        );
+
+        let node = only(&nodes);
+        assert_eq!(node.state, AgentState::Finished);
+        assert_eq!(node.finished_at, Some(at("2026-09-27T10:00:22Z")));
+    }
+
+    #[test]
+    fn a_stopped_by_user_sidecar_fails_a_waiting_subagent() {
+        let sidecar = WAITING_META.replace(
+            "\"finished\":true",
+            "\"finished\":true,\"stoppedByUser\":true",
+        );
+        let scratch = conversation("waiting-stopped", &[("a21", WAITING, Some(&sidecar))]);
+
+        let nodes = tree(&scratch, None, NOW);
+
+        let node = only(&nodes);
+        assert_eq!(node.state, AgentState::Failed);
+        assert_eq!(node.end_status.as_deref(), Some("stoppedByUser"));
+        assert_eq!(node.finished_at, Some(at("2026-09-27T10:00:22Z")));
+    }
+
+    #[test]
+    fn a_notification_for_another_task_leaves_a_waiting_subagent_running() {
+        let scratch = conversation(
+            "waiting-other-task",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.add(
+            "agent-a21.jsonl",
+            &format!(
+                "{}{}",
+                text_notice("bother", "2026-09-27T10:00:30.000Z"),
+                ending_reply("Done.", "2026-09-27T10:00:31.000Z")
+            ),
+        );
+
+        let nodes = tree(&scratch, None, NOW);
+
+        let node = only(&nodes);
+        assert_eq!(node.state, AgentState::Running);
+        assert_eq!(node.finished_at, None);
+    }
+
+    /// The interim `queue-operation` line Claude Code writes into the
+    /// launcher's transcript when subagent `a21` ends its turn waiting on its
+    /// own background work, at `when`.
+    fn interim_notice(when: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{when}","content":"<task-notification><task-id>a21</task-id><status>completed</status><summary>Agent \"Review the diff\" is waiting on its own background work</summary></task-notification>"}}"#
+        ) + "\n"
+    }
+
+    /// The launcher's final `queue-operation` line ending subagent `a21`, at
+    /// `when`.
+    fn final_notice(when: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{when}","content":"<task-notification><task-id>a21</task-id><status>completed</status><summary>Agent \"Review the diff\" completed</summary></task-notification>"}}"#
+        ) + "\n"
+    }
+
+    /// The `TaskStop` call for shell `bwait1`, written at `when`.
+    fn stop_call(when: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"agentId":"a21","timestamp":"{when}","message":{{"id":"msg_s8","role":"assistant","model":"fake-model","content":[{{"type":"tool_use","id":"toolu_stop1","name":"TaskStop","input":{{"task_id":"bwait1"}}}}],"stop_reason":"tool_use","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        ) + "\n"
+    }
+
+    /// Its result, which records the stop in `toolUseResult`, at `when`.
+    fn stop_result(when: &str) -> String {
+        format!(
+            r#"{{"type":"user","isSidechain":true,"agentId":"a21","timestamp":"{when}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_stop1","content":"Successfully stopped task: bwait1 (cargo test)","is_error":false}}]}},"toolUseResult":{{"message":"Successfully stopped task: bwait1 (cargo test)","task_id":"bwait1","task_type":"local_bash"}}}}"#
+        ) + "\n"
+    }
+
+    #[test]
+    fn an_interim_launcher_notice_leaves_a_waiting_subagent_running() {
+        let scratch = conversation(
+            "waiting-interim-notice",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.append(&interim_notice("2026-09-27T10:00:23.000Z"));
+
+        let nodes = tree(&scratch, None, NOW);
+
+        let node = only(&nodes);
+        assert_eq!(node.state, AgentState::Running);
+        assert_eq!(node.finished_at, None);
+        assert_eq!(node.end_status, None);
+    }
+
+    #[test]
+    fn a_final_launcher_notice_after_an_interim_one_finishes_a_waiting_subagent() {
+        let scratch = conversation(
+            "waiting-final-notice",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.append(&interim_notice("2026-09-27T10:00:23.000Z"));
+        let mut reader = scratch.reader(None);
+
+        let interim = reader.read(at(NOW)).subagents;
+        assert_eq!(only(&interim).state, AgentState::Running);
+
+        scratch.append(&final_notice("2026-09-27T10:00:40.000Z"));
+        let finished = reader.read(at(NOW)).subagents;
+
+        assert_eq!(only(&finished).state, AgentState::Finished);
+    }
+
+    #[test]
+    fn a_task_stopped_with_task_stop_ends_the_subagents_background_wait() {
+        let scratch = conversation(
+            "waiting-stopped-task",
+            &[("a21", WAITING, Some(WAITING_META))],
+        );
+        scratch.add(
+            "agent-a21.jsonl",
+            &format!(
+                "{}{}{}",
+                stop_call("2026-09-27T10:00:30.000Z"),
+                stop_result("2026-09-27T10:00:31.000Z"),
+                ending_reply("Done.", "2026-09-27T10:00:32.000Z")
+            ),
+        );
+
+        let nodes = tree(&scratch, None, NOW);
+
+        assert_eq!(only(&nodes).state, AgentState::Finished);
     }
 
     /// Moves the last write of subagent `id`'s transcript a minute past its

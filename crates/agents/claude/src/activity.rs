@@ -172,6 +172,9 @@ pub(crate) struct Notice {
     pub(crate) status: Option<String>,
     /// When the record holding it was written.
     pub(crate) at: Option<DateTime<Utc>>,
+    /// Whether it is interim: it says the task waits on its own background
+    /// work, and nothing has ended.
+    pub(crate) interim: bool,
 }
 
 /// What a subagent tool call asked for.
@@ -428,8 +431,8 @@ impl State {
 
     /// Adds a `user` record: the first prompt, when the reads began at the
     /// file's start and none was found yet; the results it holds; the
-    /// background task it launches; and, when `notifies`, the tasks its text
-    /// names as finished. `at` is the record's time.
+    /// background task it launches or stops; and, when `notifies`, the tasks
+    /// its text names as finished. `at` is the record's time.
     fn merge_user(&mut self, record: &Value, notifies: bool, at: Option<DateTime<Utc>>) {
         if self.prompt_from_lines && self.first_prompt.is_none() {
             self.first_prompt = prompt_of(record);
@@ -446,6 +449,9 @@ impl State {
         }
         if let Some(task) = records::launched_task(&record["toolUseResult"]) {
             self.launch(task, launching_call, at);
+        }
+        if let Some(id) = records::stopped_task(&record["toolUseResult"]) {
+            self.stop_task(id, at);
         }
         if notifies && let Some(text) = content.as_str() {
             self.finish_tasks(text, at);
@@ -499,11 +505,14 @@ impl State {
     }
 
     /// Takes each task notification of `text`, recorded at `at`: it becomes
-    /// its task's newest notice, and the running background task it names
-    /// ends, a shell moving to the ended list.
+    /// its task's newest notice, and, unless it is interim, the running
+    /// background task it names ends, a shell moving to the ended list.
     fn finish_tasks(&mut self, text: &str, at: Option<DateTime<Utc>>) {
         for notification in records::task_notifications(text) {
             self.note(&notification, at);
+            if notification.interim {
+                continue;
+            }
             let Some(index) = self
                 .background
                 .iter()
@@ -528,18 +537,57 @@ impl State {
         }
     }
 
+    /// Ends background task `id` when the user stopped it with `TaskStop`: its
+    /// newest notice says `killed`, a shell moves to the ended list, and a
+    /// background subagent leaves the list.
+    fn stop_task(&mut self, id: &str, at: Option<DateTime<Utc>>) {
+        let status = "killed";
+        self.note_status(id, Some(status.to_owned()), false, at);
+        let Some(index) = self.background.iter().position(|task| task.id == id) else {
+            return;
+        };
+        let task = self.background.remove(index);
+        if self.agent_launches.contains_key(&task.id) {
+            return;
+        }
+        self.ended.push(EndedTask {
+            task,
+            state: ended_state(Some(status)).unwrap_or(AgentState::Unknown),
+            status: Some(status.to_owned()),
+            summary: None,
+            ended_at: at,
+        });
+    }
+
     /// Keeps `notification` as its task's notice unless a newer one is kept.
     fn note(&mut self, notification: &TaskNotification<'_>, at: Option<DateTime<Utc>>) {
-        let newer = self
-            .notices
-            .get(notification.task_id)
-            .is_none_or(|kept| kept.at <= at);
+        self.note_status(
+            notification.task_id,
+            notification.status.map(str::to_owned),
+            notification.interim,
+            at,
+        );
+    }
+
+    /// Keeps a notice that task `id` ended with `status` unless a newer one
+    /// is kept.
+    fn note_status(
+        &mut self,
+        id: &str,
+        status: Option<String>,
+        interim: bool,
+        at: Option<DateTime<Utc>>,
+    ) {
+        let newer = self.notices.get(id).is_none_or(|kept| kept.at <= at);
         if newer {
-            let notice = Notice {
-                status: notification.status.map(str::to_owned),
-                at,
-            };
-            self.notices.insert(notification.task_id.to_owned(), notice);
+            self.notices.insert(
+                id.to_owned(),
+                Notice {
+                    status,
+                    at,
+                    interim,
+                },
+            );
         }
     }
 
@@ -555,6 +603,12 @@ impl State {
             .values()
             .max_by(|left, right| (left.started, &left.id).cmp(&(right.started, &right.id)))
             .cloned()
+    }
+
+    /// The background tasks still running, shells and background subagents
+    /// alike, until a notification names them.
+    pub(crate) fn waits_on_background(&self) -> bool {
+        !self.background.is_empty()
     }
 
     /// Tool calls started in each of the ten minutes up to `now`, oldest
@@ -1014,6 +1068,83 @@ pub(crate) mod tests {
 
         scratch.append(&lines(BACKGROUND, 5, 6));
         assert_eq!(reader.read(now).background, []);
+    }
+
+    #[test]
+    fn an_interim_notice_for_a_launched_subagent_keeps_it_in_the_background_list() {
+        let scratch = Scratch::new("background-interim");
+        scratch.write(&lines(BACKGROUND, 0, 4));
+        let mut reader = scratch.reader(None);
+        let now = at("2026-09-27T10:01:00Z");
+        let shell = task(
+            "b1",
+            "toolu_10",
+            "2026-09-27T10:00:00Z",
+            Some("cargo build"),
+        );
+        let agent = task("a1", "toolu_11", "2026-09-27T10:00:02Z", None);
+        assert_eq!(reader.read(now).background, [shell.clone(), agent.clone()]);
+
+        scratch.append(&interim_agent_notice("2026-09-27T10:00:30.000Z"));
+
+        let snapshot = reader.read(now);
+        assert_eq!(snapshot.background, [shell, agent]);
+        assert_eq!(
+            snapshot.ended_background,
+            [],
+            "an interim notice ends nothing"
+        );
+    }
+
+    /// The interim `queue-operation` line for background subagent `a1`.
+    fn interim_agent_notice(when: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{when}","content":"<task-notification><task-id>a1</task-id><status>completed</status><summary>Agent \"Explore the map\" is waiting on its own background work</summary></task-notification>"}}"#
+        ) + "\n"
+    }
+
+    #[test]
+    fn a_task_stopped_with_task_stop_moves_its_shell_to_the_ended_list() {
+        let scratch = Scratch::new("background-stopped-task");
+        scratch.write(&lines(BACKGROUND, 0, 2));
+        let mut reader = scratch.reader(None);
+        let now = at("2026-09-27T10:01:00Z");
+        let shell = task(
+            "b1",
+            "toolu_10",
+            "2026-09-27T10:00:00Z",
+            Some("cargo build"),
+        );
+        assert_eq!(reader.read(now).background, std::slice::from_ref(&shell));
+
+        scratch.append(&stop_task_records("2026-09-27T10:00:30.000Z"));
+
+        let snapshot = reader.read(now);
+        assert_eq!(snapshot.background, []);
+        assert_eq!(
+            snapshot.ended_background,
+            [EndedTask {
+                task: shell,
+                state: AgentState::Failed,
+                status: Some("killed".to_owned()),
+                summary: None,
+                ended_at: Some(at("2026-09-27T10:00:30Z")),
+            }]
+        );
+    }
+
+    /// The `TaskStop` call for shell `b1` and its result, written at `when`.
+    fn stop_task_records(when: &str) -> String {
+        [
+            format!(
+                r#"{{"type":"assistant","isSidechain":false,"timestamp":"{when}","message":{{"id":"msg_210","role":"assistant","model":"fake-model","content":[{{"type":"tool_use","id":"toolu_12","name":"TaskStop","input":{{"task_id":"b1"}}}}],"stop_reason":"tool_use","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","isSidechain":false,"timestamp":"{when}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_12","content":"Successfully stopped task: b1 (cargo build)","is_error":false}}]}},"toolUseResult":{{"message":"Successfully stopped task: b1 (cargo build)","task_id":"b1","task_type":"local_bash"}}}}"#
+            ),
+        ]
+        .join("\n")
+            + "\n"
     }
 
     fn task(id: &str, call: &str, started: &str, command: Option<&str>) -> BackgroundTask {
