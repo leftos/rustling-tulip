@@ -7,6 +7,7 @@ use protocol::{
 };
 
 use crate::layout_picker::LayoutPicker;
+use crate::tabs::{PaneBinding, SessionRef};
 use crate::target::HostKey;
 
 /// What a layout with no name reads.
@@ -30,6 +31,11 @@ pub(crate) struct HostRebind {
     host_name: Option<String>,
     /// The host's active sessions, oldest first.
     session_ids: Vec<String>,
+    /// The active sessions no pane of this client's layout shows, host and
+    /// id both, in the same order.
+    unbound_ids: Vec<String>,
+    /// Whether the confirm binds only [`Self::unbound_ids`].
+    unbound_only: bool,
     picker: LayoutPicker,
     choice: RebindChoice,
     /// The host's own name as its daemon reported it with its layouts.
@@ -38,19 +44,24 @@ pub(crate) struct HostRebind {
 }
 
 impl HostRebind {
-    /// The dialog for `host`, named `host_name`, over its `sessions`: the
-    /// active ones, on the Auto grid with at most four per tab.
+    /// The dialog for `host`, named `host_name`, over its `sessions`, with
+    /// the panes showing them as `bindings` has them: the active ones, on the
+    /// Auto grid with at most four per tab.
     pub(crate) fn new(
         host: HostKey,
         host_name: Option<String>,
         sessions: &[SessionSnapshot],
+        bindings: &[PaneBinding],
     ) -> Self {
         let session_ids = active_session_ids(sessions);
+        let unbound_ids = unbound_ids(&host, &session_ids, bindings);
         let picker = LayoutPicker::new(session_ids.len(), Some(DEFAULT_MAX_PER_TAB));
         Self {
             host,
             host_name,
             session_ids,
+            unbound_ids,
+            unbound_only: false,
             picker,
             choice: RebindChoice::Auto,
             own_layout_name: None,
@@ -83,11 +94,56 @@ impl HostRebind {
         &self.choice
     }
 
-    /// Rebuilds the session list from the host's `sessions`, keeping the
-    /// picker's mode, its grid shape while still offered (else Auto), its max
-    /// per tab, and the choice.
-    pub(crate) fn refresh(&mut self, sessions: &[SessionSnapshot]) {
+    /// The sessions the confirm binds: the host's active ones, or, with only
+    /// the unbound chosen, the ones no pane shows.
+    pub(crate) fn target_ids(&self) -> &[String] {
+        if self.unbound_only {
+            &self.unbound_ids
+        } else {
+            &self.session_ids
+        }
+    }
+
+    /// Whether only the sessions without a pane are chosen.
+    pub(crate) fn unbound_only(&self) -> bool {
+        self.unbound_only
+    }
+
+    /// Chooses between binding every active session and only the ones no
+    /// pane shows.
+    pub(crate) fn toggle_unbound_only(&mut self) {
+        self.unbound_only = !self.unbound_only;
+    }
+
+    /// Whether Rebind has something to send: always with every active session
+    /// chosen, and with only the unbound ones while at least one has no pane.
+    pub(crate) fn rebind_enabled(&self) -> bool {
+        !self.unbound_only || !self.unbound_ids.is_empty()
+    }
+
+    /// The line under the title: how many sessions the confirm binds.
+    pub(crate) fn count_line(&self) -> String {
+        let count = self.target_ids().len();
+        if self.unbound_only {
+            return match count {
+                0 => "No session without a pane".to_owned(),
+                1 => "1 session without a pane".to_owned(),
+                count => format!("{count} sessions without a pane"),
+            };
+        }
+        match count {
+            0 => "No active sessions".to_owned(),
+            1 => "1 active session".to_owned(),
+            count => format!("{count} active sessions"),
+        }
+    }
+
+    /// Rebuilds the session list from the host's `sessions` and the panes
+    /// showing them from `bindings`, keeping the picker's mode, its grid
+    /// shape while still offered (else Auto), its max per tab, and the choice.
+    pub(crate) fn refresh(&mut self, sessions: &[SessionSnapshot], bindings: &[PaneBinding]) {
         self.session_ids = active_session_ids(sessions);
+        self.unbound_ids = unbound_ids(&self.host, &self.session_ids, bindings);
         let old = &self.picker;
         let mut picker = LayoutPicker::new(self.session_ids.len(), old.max_per_tab());
         picker.set_mode(old.mode());
@@ -95,6 +151,12 @@ impl HostRebind {
             picker.set_shape(old.cols());
         }
         self.picker = picker;
+    }
+
+    /// Takes the panes showing the host's sessions as `bindings` has them
+    /// now: the set the confirm sends.
+    pub(crate) fn set_bindings(&mut self, bindings: &[PaneBinding]) {
+        self.unbound_ids = unbound_ids(&self.host, &self.session_ids, bindings);
     }
 
     /// Keeps the host's answer: its own name and its clients' layouts. The
@@ -149,14 +211,20 @@ impl HostRebind {
 
     /// What unbinds every session of the host and binds its active ones
     /// again as chosen, with `ids` the unbind's and the bind's request ids;
-    /// `aspect` is the pane area's width over its height.
+    /// `aspect` is the pane area's width over its height. With only the
+    /// unbound chosen nothing is unbound, and only [`Self::target_ids`] are
+    /// bound.
     pub(crate) fn rebind_messages(&self, aspect: f32, ids: (String, String)) -> Vec<ClientMessage> {
         let (unbind_id, bind_id) = ids;
-        let mut out = vec![self.unbind_message(unbind_id)];
-        if !self.session_ids.is_empty() {
+        let mut out = Vec::new();
+        if !self.unbound_only {
+            out.push(self.unbind_message(unbind_id));
+        }
+        let target = self.target_ids();
+        if !target.is_empty() {
             out.push(ClientMessage::BindHostSessions {
                 host: self.host.wire().map(str::to_owned),
-                session_ids: self.session_ids.clone(),
+                session_ids: target.to_vec(),
                 arrangement: self.arrangement(aspect),
                 request_id: Some(bind_id),
             });
@@ -199,6 +267,23 @@ fn active_session_ids(sessions: &[SessionSnapshot]) -> Vec<String> {
         .into_iter()
         .map(|session| session.id.clone())
         .collect()
+}
+
+/// The `ids` of `host`'s sessions no pane in `bindings` shows, in the order
+/// given.
+fn unbound_ids(host: &HostKey, ids: &[String], bindings: &[PaneBinding]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| !is_shown(host, id, bindings))
+        .cloned()
+        .collect()
+}
+
+/// Whether a pane in `bindings` shows session `id` of `host`, host and id
+/// both.
+fn is_shown(host: &HostKey, id: &str, bindings: &[PaneBinding]) -> bool {
+    bindings
+        .iter()
+        .any(|binding| binding.shows(&SessionRef::new(host.clone(), id)))
 }
 
 /// Whether `session` is active: running or starting, not parked or
@@ -309,14 +394,14 @@ mod tests {
             login,
             session("b", 7),
         ];
-        let rebind = HostRebind::new(HostKey::Local, None, &sessions);
+        let rebind = HostRebind::new(HostKey::Local, None, &sessions, &[]);
         assert_eq!(rebind.session_ids(), ["a", "b"]);
     }
 
     #[test]
     fn active_sessions_are_ordered_by_start() {
         let sessions = vec![session("c", 5), session("b", 1), session("a", 5)];
-        let rebind = HostRebind::new(HostKey::Local, None, &sessions);
+        let rebind = HostRebind::new(HostKey::Local, None, &sessions, &[]);
         assert_eq!(
             rebind.session_ids(),
             ["b", "a", "c"],
@@ -326,7 +411,7 @@ mod tests {
 
     #[test]
     fn unbind_names_the_host_or_this_pc() {
-        let local = HostRebind::new(HostKey::Local, None, &[]);
+        let local = HostRebind::new(HostKey::Local, None, &[], &[]);
         assert!(
             matches!(
                 local.unbind_message("r1".to_owned()),
@@ -334,7 +419,7 @@ mod tests {
             ),
             "This PC is no host on the wire"
         );
-        let remote = HostRebind::new(remote(), Some("box".to_owned()), &[]);
+        let remote = HostRebind::new(remote(), Some("box".to_owned()), &[], &[]);
         assert!(
             matches!(
                 remote.unbind_message("r2".to_owned()),
@@ -348,7 +433,7 @@ mod tests {
     #[test]
     fn rebind_sends_unbind_then_an_auto_bind() {
         let sessions = running(5);
-        let mut rebind = HostRebind::new(remote(), None, &sessions);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
         rebind.picker_mut().max_down();
         rebind.picker_mut().max_down();
         let sent = rebind.rebind_messages(ASPECT, ids());
@@ -376,7 +461,7 @@ mod tests {
     #[test]
     fn side_by_side_and_all_in_one_tab() {
         let sessions = running(3);
-        let mut rebind = HostRebind::new(HostKey::Local, None, &sessions);
+        let mut rebind = HostRebind::new(HostKey::Local, None, &sessions, &[]);
         rebind.picker_mut().set_mode(Mode::SideBySide);
         for _ in 0..4 {
             rebind.picker_mut().max_down();
@@ -395,7 +480,7 @@ mod tests {
     #[test]
     fn follow_sends_the_chosen_layouts_tabs() {
         let sessions = running(2);
-        let mut rebind = HostRebind::new(remote(), None, &sessions);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
         rebind.set_layouts(
             Some("box".to_owned()),
             vec![layout("c1", Some("lab")), layout("c2", Some("box"))],
@@ -413,7 +498,7 @@ mod tests {
 
     #[test]
     fn the_hosts_own_layout_is_offered_first() {
-        let mut rebind = HostRebind::new(remote(), Some("box".to_owned()), &[]);
+        let mut rebind = HostRebind::new(remote(), Some("box".to_owned()), &[], &[]);
         rebind.set_layouts(
             Some("box".to_owned()),
             vec![layout("c1", Some("lab")), layout("c2", Some("box"))],
@@ -429,7 +514,7 @@ mod tests {
 
     #[test]
     fn an_unnamed_layout_reads_unnamed() {
-        let mut rebind = HostRebind::new(remote(), None, &[]);
+        let mut rebind = HostRebind::new(remote(), None, &[], &[]);
         rebind.set_layouts(None, vec![layout("c2", Some("lab")), layout("c1", None)]);
         assert_eq!(
             rebind.follow_options(),
@@ -445,7 +530,7 @@ mod tests {
     #[test]
     fn a_vanished_follow_choice_falls_back_to_auto() {
         let sessions = running(2);
-        let mut rebind = HostRebind::new(remote(), None, &sessions);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
         rebind.set_layouts(Some("box".to_owned()), vec![layout("c1", Some("box"))]);
         rebind.choose_follow("c9".to_owned());
         let sent = rebind.rebind_messages(ASPECT, ids());
@@ -458,24 +543,24 @@ mod tests {
     #[test]
     fn refresh_takes_a_new_session_and_drops_a_stopped_one() {
         let mut sessions = running(3);
-        let mut rebind = HostRebind::new(remote(), None, &sessions);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
         if let Some(stopped) = sessions.get_mut(1) {
             stopped.status = SessionStatus::Stopped;
         }
         sessions.push(session("s9", 30));
-        rebind.refresh(&sessions);
+        rebind.refresh(&sessions, &[]);
         assert_eq!(rebind.session_ids(), ["s0", "s2", "s9"]);
         assert_eq!(rebind.picker().count(), 3, "the picker counts the new list");
     }
 
     #[test]
     fn refresh_keeps_the_mode_max_and_follow_choice() {
-        let mut rebind = HostRebind::new(remote(), None, &running(5));
+        let mut rebind = HostRebind::new(remote(), None, &running(5), &[]);
         rebind.set_layouts(Some("box".to_owned()), vec![layout("c1", Some("box"))]);
         rebind.picker_mut().set_mode(Mode::Stacked);
         rebind.picker_mut().max_up();
         rebind.choose_follow("c1".to_owned());
-        rebind.refresh(&running(6));
+        rebind.refresh(&running(6), &[]);
         assert_eq!(rebind.session_ids().len(), 6);
         assert_eq!(rebind.picker().mode(), Mode::Stacked);
         assert_eq!(rebind.picker().max_per_tab(), Some(5));
@@ -489,11 +574,11 @@ mod tests {
 
     #[test]
     fn refresh_falls_back_to_auto_when_the_shape_is_no_longer_offered() {
-        let mut rebind = HostRebind::new(remote(), None, &running(5));
+        let mut rebind = HostRebind::new(remote(), None, &running(5), &[]);
         rebind.picker_mut().set_shape(4);
-        rebind.refresh(&running(5));
+        rebind.refresh(&running(5), &[]);
         assert_eq!(rebind.picker().cols(), 4, "a shape still offered stays");
-        rebind.refresh(&running(3));
+        rebind.refresh(&running(3), &[]);
         assert_eq!(
             rebind.picker().cols(),
             0,
@@ -507,7 +592,7 @@ mod tests {
         for session in &mut sessions {
             session.status = SessionStatus::Stopped;
         }
-        let rebind = HostRebind::new(remote(), None, &sessions);
+        let rebind = HostRebind::new(remote(), None, &sessions, &[]);
         let sent = rebind.rebind_messages(ASPECT, ids());
         assert!(
             matches!(
@@ -516,5 +601,153 @@ mod tests {
             ),
             "{sent:?}"
         );
+    }
+
+    /// A pane of tab `tab_id` showing session `session` of `host`.
+    fn binding(tab_id: &str, pane_id: &str, session: Option<&str>, host: HostKey) -> PaneBinding {
+        PaneBinding {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+            session_id: session.map(str::to_owned),
+            host,
+        }
+    }
+
+    /// The ids of the `BindHostSessions` among `msgs`.
+    fn bound_ids(msgs: &[ClientMessage]) -> Option<Vec<String>> {
+        msgs.iter().find_map(|msg| match msg {
+            ClientMessage::BindHostSessions { session_ids, .. } => Some(session_ids.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn only_unbound_binds_the_active_sessions_no_pane_shows() {
+        let sessions = running(3);
+        let bindings = [binding("t1", "p1", Some("s1"), remote())];
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &bindings);
+        assert!(!rebind.unbound_only(), "off at each opening");
+        assert_eq!(rebind.count_line(), "3 active sessions", "off: unchanged");
+
+        rebind.toggle_unbound_only();
+        let sent = rebind.rebind_messages(ASPECT, ids());
+        assert_eq!(sent.len(), 1, "only the bind is sent, no unbind: {sent:?}");
+        assert!(
+            matches!(
+                sent.first(),
+                Some(ClientMessage::BindHostSessions {
+                    host: Some(host),
+                    request_id: Some(id),
+                    ..
+                }) if host == "box" && id == "r-bind"
+            ),
+            "{sent:?}"
+        );
+        assert_eq!(
+            bound_ids(&sent),
+            Some(vec!["s0".to_owned(), "s2".to_owned()]),
+            "the bound session is left out: {sent:?}"
+        );
+        assert!(rebind.rebind_enabled());
+        assert_eq!(rebind.count_line(), "2 sessions without a pane");
+
+        rebind.toggle_unbound_only();
+        let sent = rebind.rebind_messages(ASPECT, ids());
+        assert!(
+            matches!(sent.first(), Some(ClientMessage::UnbindHostPanes { .. })),
+            "off again: unbind first, as today: {sent:?}"
+        );
+        assert_eq!(
+            bound_ids(&sent),
+            Some((0..3).map(|n| format!("s{n}")).collect())
+        );
+        assert_eq!(rebind.count_line(), "3 active sessions");
+    }
+
+    #[test]
+    fn a_session_bound_on_another_host_is_still_without_a_pane() {
+        let sessions = running(1);
+        let bindings = [binding("t1", "p1", Some("s0"), HostKey::Local)];
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &bindings);
+        rebind.toggle_unbound_only();
+        let sent = rebind.rebind_messages(ASPECT, ids());
+        assert_eq!(
+            bound_ids(&sent),
+            Some(vec!["s0".to_owned()]),
+            "host and id both match: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn only_unbound_with_every_session_bound_sends_nothing() {
+        let sessions = running(2);
+        let bindings = [
+            binding("t1", "p1", Some("s0"), remote()),
+            binding("t2", "p2", Some("s1"), remote()),
+        ];
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &bindings);
+        rebind.toggle_unbound_only();
+        assert!(
+            rebind.rebind_messages(ASPECT, ids()).is_empty(),
+            "nothing to bind, and nothing is unbound"
+        );
+        assert!(!rebind.rebind_enabled(), "Rebind has nothing to send");
+        assert_eq!(rebind.count_line(), "No session without a pane");
+    }
+
+    #[test]
+    fn the_unbound_count_follows_the_panes_as_they_stand() {
+        let sessions = running(3);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
+        rebind.toggle_unbound_only();
+        assert_eq!(rebind.count_line(), "3 sessions without a pane");
+        rebind.set_bindings(&[binding("t1", "p1", Some("s0"), remote())]);
+        assert_eq!(rebind.count_line(), "2 sessions without a pane");
+        rebind.set_bindings(&[
+            binding("t1", "p1", Some("s0"), remote()),
+            binding("t1", "p2", Some("s1"), remote()),
+        ]);
+        assert_eq!(rebind.count_line(), "1 session without a pane");
+        rebind.set_bindings(&[
+            binding("t1", "p1", Some("s0"), remote()),
+            binding("t1", "p2", Some("s1"), remote()),
+            binding("t2", "p3", Some("s2"), remote()),
+        ]);
+        assert_eq!(rebind.count_line(), "No session without a pane");
+        assert!(!rebind.rebind_enabled());
+    }
+
+    #[test]
+    fn only_unbound_follows_the_chosen_layout_for_the_unbound_only() {
+        let sessions = running(3);
+        let bindings = [binding("t1", "p1", Some("s0"), remote())];
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &bindings);
+        rebind.set_layouts(Some("box".to_owned()), vec![layout("c1", Some("box"))]);
+        rebind.choose_follow("c1".to_owned());
+        rebind.toggle_unbound_only();
+        let sent = rebind.rebind_messages(ASPECT, ids());
+        assert_eq!(
+            bound_ids(&sent),
+            Some(vec!["s1".to_owned(), "s2".to_owned()]),
+            "{sent:?}"
+        );
+        assert_eq!(
+            bound_arrangement(&sent),
+            Some(&HostArrangement::Follow {
+                tabs: vec![tab("c1-tab")],
+            }),
+            "the followed layout keeps its tabs: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_takes_the_panes_showing_the_sessions() {
+        let sessions = running(2);
+        let mut rebind = HostRebind::new(remote(), None, &sessions, &[]);
+        rebind.toggle_unbound_only();
+        assert_eq!(rebind.target_ids(), ["s0", "s1"]);
+        rebind.refresh(&sessions, &[binding("t1", "p1", Some("s0"), remote())]);
+        assert_eq!(rebind.target_ids(), ["s1"]);
+        assert!(rebind.rebind_enabled(), "one session still has no pane");
     }
 }

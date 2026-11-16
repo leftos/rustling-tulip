@@ -18,12 +18,15 @@ use crate::layout_chooser_view::{
 use crate::layout_picker::Mode;
 use crate::notice_view::modal_panel;
 use crate::session_menu::backdrop;
+use crate::spawn_view::checkbox_row;
 use crate::tabs::{BindTarget, SessionRef};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 
 /// The choice row that lays the sessions out with the picker.
 const AUTO_LABEL: &str = "Auto layout";
+/// The checkbox that binds only the sessions no pane shows.
+const UNBOUND_LABEL: &str = "Only sessions without a pane";
 const CONFIRM_LABEL: &str = "Rebind";
 const CANCEL_LABEL: &str = "Cancel";
 
@@ -39,6 +42,8 @@ pub(crate) enum RebindControl {
     MaxUp,
     /// Follows the layout of the client with this id.
     Follow(String),
+    /// Binds only the sessions no pane of this client's layout shows.
+    UnboundOnly,
     Confirm,
     Cancel,
 }
@@ -55,6 +60,7 @@ impl RebindControl {
             Self::MaxDown => "host-rebind-max-down".to_owned(),
             Self::MaxUp => "host-rebind-max-up".to_owned(),
             Self::Follow(client_id) => format!("host-rebind-follow-{client_id}"),
+            Self::UnboundOnly => "host-rebind-unbound-only".to_owned(),
             Self::Confirm => "host-rebind-confirm".to_owned(),
             Self::Cancel => "host-rebind-cancel".to_owned(),
         }
@@ -72,7 +78,8 @@ pub(crate) struct HostRebindDialog {
 
 impl HostRebindDialog {
     /// Every control shown, in the order Tab walks them: Auto, the picker's
-    /// while Auto is the choice, each layout to follow, then the buttons.
+    /// while Auto is the choice, each layout to follow, the only-unbound
+    /// checkbox, then the buttons.
     fn controls(&self) -> Vec<RebindControl> {
         let mut out = vec![RebindControl::Auto];
         if *self.model.choice() == RebindChoice::Auto {
@@ -94,6 +101,7 @@ impl HostRebindDialog {
                 .into_iter()
                 .map(|(client_id, _)| RebindControl::Follow(client_id)),
         );
+        out.push(RebindControl::UnboundOnly);
         out.extend([RebindControl::Confirm, RebindControl::Cancel]);
         out
     }
@@ -145,6 +153,7 @@ impl HostRebindDialog {
             RebindControl::MaxDown => self.model.picker_mut().max_down(),
             RebindControl::MaxUp => self.model.picker_mut().max_up(),
             RebindControl::Follow(client_id) => self.model.choose_follow(client_id.clone()),
+            RebindControl::UnboundOnly => self.model.toggle_unbound_only(),
             RebindControl::Confirm | RebindControl::Cancel => {}
         }
     }
@@ -158,6 +167,7 @@ impl HostRebindDialog {
             RebindControl::Follow(client_id) => {
                 matches!(self.model.choice(), RebindChoice::Follow(chosen) if chosen == client_id)
             }
+            RebindControl::UnboundOnly => self.model.unbound_only(),
             RebindControl::Mode(mode) => picker.mode() == *mode,
             RebindControl::Shape(cols) => picker.cols() == *cols,
             _ => false,
@@ -180,6 +190,7 @@ impl HostRebindDialog {
                 .into_iter()
                 .find(|(listed, _)| listed == client_id)
                 .map_or_else(String::new, |(_, label)| format!("Follow {label}'s layout")),
+            RebindControl::UnboundOnly => UNBOUND_LABEL.to_owned(),
             RebindControl::Confirm => CONFIRM_LABEL.to_owned(),
             RebindControl::Cancel => CANCEL_LABEL.to_owned(),
         }
@@ -192,13 +203,14 @@ impl HostRebindDialog {
         )
     }
 
-    /// The line under the title: how many active sessions are rebound.
+    /// The line under the title: how many sessions the confirm binds.
     fn count_line(&self) -> String {
-        match self.model.session_ids().len() {
-            0 => "No active sessions".to_owned(),
-            1 => "1 active session".to_owned(),
-            count => format!("{count} active sessions"),
-        }
+        self.model.count_line()
+    }
+
+    /// Whether `control` acts: Rebind only while it has a session to bind.
+    fn is_enabled(&self, control: &RebindControl) -> bool {
+        *control != RebindControl::Confirm || self.model.rebind_enabled()
     }
 }
 
@@ -242,6 +254,15 @@ impl RootView {
             .map(|dialog| (dialog.title(), dialog.count_line()))
     }
 
+    /// Whether the open dialog's Rebind has a session to bind: false while
+    /// only the unbound are chosen and every session has a pane.
+    #[must_use]
+    pub fn host_rebind_rebind_enabled(&self) -> bool {
+        self.host_rebind
+            .as_ref()
+            .is_some_and(|dialog| dialog.model.rebind_enabled())
+    }
+
     /// Whether `host`'s sessions can be unbound and rebound: This PC
     /// always, a remote host while its connection is open.
     pub(crate) fn rebind_host_online(&self, host: &HostKey) -> bool {
@@ -259,7 +280,8 @@ impl RootView {
             return;
         }
         tracing::info!(?host, "unbinding the host's sessions");
-        let msg = HostRebind::new(host.clone(), None, &[]).unbind_message(crate::new_request_id());
+        let msg =
+            HostRebind::new(host.clone(), None, &[], &[]).unbind_message(crate::new_request_id());
         self.send_to(&HostKey::Local, msg);
     }
 
@@ -282,8 +304,14 @@ impl RootView {
         self.close_container_menu(window, cx);
         let model = {
             let by_host = self.sidebar.sessions_by_host();
+            let bindings = self.tabs.bindings();
             let name = self.host_name(host);
-            HostRebind::new(host.clone(), Some(name), sessions_of(&by_host, host))
+            HostRebind::new(
+                host.clone(),
+                Some(name),
+                sessions_of(&by_host, host),
+                &bindings,
+            )
         };
         let layouts_request = self
             .conn_of(host)
@@ -431,7 +459,8 @@ impl RootView {
             return;
         };
         let by_host = self.sidebar.sessions_by_host();
-        dialog.model.refresh(sessions_of(&by_host, host));
+        let bindings = self.tabs.bindings();
+        dialog.model.refresh(sessions_of(&by_host, host), &bindings);
         cx.notify();
     }
 
@@ -483,11 +512,12 @@ impl RootView {
     }
 
     /// Rebind: This PC unbinds the host's sessions, then binds its active
-    /// ones again as chosen, each claiming its size in its new pane. The
+    /// ones again as chosen, each claiming its size in its new pane; with
+    /// only the unbound chosen it binds just those, and unbinds nothing. The
     /// new tabs take no focus.
     fn confirm_host_rebind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let aspect = self.pane_area_aspect();
-        let Some(dialog) = self.host_rebind.take() else {
+        let Some(mut dialog) = self.host_rebind.take() else {
             return;
         };
         if !self.rebind_host_online(dialog.model.host()) {
@@ -498,16 +528,24 @@ impl RootView {
             cx.notify();
             return;
         }
+        dialog.model.set_bindings(&self.tabs.bindings());
+        if !dialog.model.rebind_enabled() {
+            tracing::info!(host = ?dialog.model.host(), "host rebind: no session without a pane; nothing sent");
+            self.host_rebind = Some(dialog);
+            cx.notify();
+            return;
+        }
         let ids = (crate::new_request_id(), crate::new_request_id());
         tracing::info!(
             host = ?dialog.model.host(),
-            sessions = dialog.model.session_ids().len(),
-            "host rebind: unbinding and binding again"
+            sessions = dialog.model.target_ids().len(),
+            unbound_only = dialog.model.unbound_only(),
+            "host rebind: confirming"
         );
         // The bind the user made claims each rebound session's size, as any
         // bind this client makes does; the unbind's id carries none.
         let bind_id = ids.1.clone();
-        for id in dialog.model.session_ids() {
+        for id in dialog.model.target_ids() {
             self.tabs.arm_bind(
                 &SessionRef::new(dialog.model.host().clone(), id.clone()),
                 BindTarget::Request(bind_id.clone()),
@@ -560,6 +598,7 @@ impl RootView {
                     .child(dialog.count_line()),
             )
             .child(div().flex().flex_col().gap(px(6.0)).children(options))
+            .child(unbound_checkbox(dialog, &focused, cx))
             .child(buttons);
         Some(backdrop("host-rebind", panel, &t))
     }
@@ -589,6 +628,29 @@ fn choice_row(
         this.press_host_rebind_control(&pressed, window, cx);
     }))
     .into_any_element()
+}
+
+/// The checkbox that binds only the sessions no pane shows, ticked while
+/// chosen and ringed while focused.
+fn unbound_checkbox(
+    dialog: &HostRebindDialog,
+    focused: &RebindControl,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let control = RebindControl::UnboundOnly;
+    let pressed = control.clone();
+    checkbox_row(
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        &control.selector(),
+        dialog.is_selected(&control),
+        control == *focused,
+        UNBOUND_LABEL,
+        &theme(cx),
+    )
+    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.press_host_rebind_control(&pressed, window, cx);
+    }))
 }
 
 /// A small button of the picker: filled when chosen, ringed when focused.
@@ -657,6 +719,7 @@ fn action_button(
         ButtonKind::Outlined
     };
     let size = ButtonSize::Regular;
+    let enabled = dialog.is_enabled(control);
     let pressed = control.clone();
     button(
         &control.selector(),
@@ -665,7 +728,7 @@ fn action_button(
             crate::fonts::ui_weight_shift(cx),
             kind,
             size,
-            true,
+            enabled,
             Layer::Floating,
             &t,
         ),
@@ -675,7 +738,9 @@ fn action_button(
         button.child(focus_ring(size.radius(), &t))
     })
     .child(dialog.label(control))
-    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_host_rebind_control(&pressed, window, cx);
-    }))
+    .when(enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_host_rebind_control(&pressed, window, cx);
+        }))
+    })
 }

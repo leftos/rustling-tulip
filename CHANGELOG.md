@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- The Rebind dialog can bind only a host's sessions that have no pane yet, leaving the tabs you arranged as they are.
+
 ## v0.15.0-alpha
 
 ### Highlights

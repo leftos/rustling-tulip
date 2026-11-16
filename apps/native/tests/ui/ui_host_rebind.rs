@@ -116,6 +116,11 @@ fn heading(h: &mut Harness<'_>) -> Option<(String, String)> {
     h.root(|root, _| root.host_rebind_heading())
 }
 
+/// The line under the open dialog's title.
+fn count(h: &mut Harness<'_>) -> Option<String> {
+    heading(h).map(|(_, count)| count)
+}
+
 fn controls(h: &mut Harness<'_>) -> Vec<(String, String)> {
     h.root(|root, _| root.host_rebind_controls())
 }
@@ -625,6 +630,174 @@ fn a_rebind_before_a_reconnect_does_not_claim(cx: &mut TestAppContext) {
     let sent = h.sent();
     assert_sized_unclaimed(&sent, "a1", "a reconnect drops the rebind's claim");
     assert_sized_unclaimed(&sent, "a2", "a reconnect drops the rebind's claim");
+}
+
+#[gpui::test]
+fn only_unbound_sends_one_bind_and_no_unbind(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    open_rebind(&mut h, REMOTE);
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("host-rebind-unbound-only");
+    assert_eq!(
+        count(&mut h).as_deref(),
+        Some("2 sessions without a pane"),
+        "no pane shows either active session"
+    );
+    h.click_on("host-rebind-confirm");
+
+    assert!(!dialog_open(&mut h), "the confirm closes the dialog");
+    let sent = h.sent();
+    assert_eq!(sent.len(), 1, "no unbind is sent: {sent:?}");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::BindHostSessions {
+                host: Some(host),
+                session_ids,
+                arrangement: HostArrangement::Auto { max_per_tab: Some(4), .. },
+                request_id: Some(_),
+            }] if host == REMOTE && *session_ids == ["b2", "b1"]
+        ),
+        "the active sessions, oldest first: {sent:?}"
+    );
+    let remote = h.host(&saved_remote()).sent();
+    assert!(remote.is_empty(), "the remote is sent nothing: {remote:?}");
+}
+
+#[gpui::test]
+fn only_unbound_leaves_out_the_sessions_a_pane_shows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &remote_pane("p9", "b2")),
+    });
+    open_rebind(&mut h, REMOTE);
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("host-rebind-unbound-only");
+    assert_eq!(count(&mut h).as_deref(), Some("1 session without a pane"));
+    h.click_on("host-rebind-confirm");
+
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::BindHostSessions { host: Some(host), session_ids, .. }]
+                if host == REMOTE && *session_ids == ["b1"]
+        ),
+        "only b1, which no pane shows: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn the_count_follows_the_only_unbound_checkbox(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &remote_pane("p9", "b2")),
+    });
+    open_rebind(&mut h, REMOTE);
+
+    assert_eq!(
+        count(&mut h).as_deref(),
+        Some("2 active sessions"),
+        "off at each opening"
+    );
+    h.click_on("host-rebind-unbound-only");
+    assert_eq!(count(&mut h).as_deref(), Some("1 session without a pane"));
+    h.click_on("host-rebind-unbound-only");
+    assert_eq!(
+        count(&mut h).as_deref(),
+        Some("2 active sessions"),
+        "off again is today's line"
+    );
+}
+
+#[gpui::test]
+fn every_session_with_a_pane_disables_rebind(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(cx, &dir, remote_sessions(), &[]);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t9",
+            &split(
+                SplitDirection::Horizontal,
+                remote_pane("p9", "b2"),
+                remote_pane("p10", "b1"),
+            ),
+        ),
+    });
+    open_rebind(&mut h, REMOTE);
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    assert!(
+        h.root(|root, _| root.host_rebind_rebind_enabled()),
+        "off: Rebind acts as today"
+    );
+    h.click_on("host-rebind-unbound-only");
+
+    assert_eq!(count(&mut h).as_deref(), Some("No session without a pane"));
+    assert!(!h.root(|root, _| root.host_rebind_rebind_enabled()));
+    h.click_on("host-rebind-confirm");
+    assert!(
+        dialog_open(&mut h),
+        "the disabled Rebind leaves the dialog open"
+    );
+    assert!(h.sent().is_empty(), "nothing is sent");
+}
+
+#[gpui::test]
+fn follow_with_only_unbound_binds_the_unbound_into_the_followed_tabs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_listing(
+        cx,
+        &dir,
+        remote_sessions(),
+        &[protocol::FEATURE_HOST_LAYOUTS],
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &remote_pane("p9", "b2")),
+    });
+    open_rebind(&mut h, REMOTE);
+    let id = layouts_request(&h.host(&saved_remote()).sent()).expect("the host is asked");
+    let own_tabs = vec![tab("own", &pane("o1", Some("b1")))];
+    h.host(&saved_remote()).send(DaemonMessage::HostLayouts {
+        host_name: Some("box-host".to_owned()),
+        layouts: vec![HostLayout {
+            client_id: "c2".to_owned(),
+            name: Some("box-host".to_owned()),
+            tabs: own_tabs.clone(),
+        }],
+        request_id: Some(id),
+    });
+    h.click_on("host-rebind-follow-c2");
+    h.click_on("host-rebind-unbound-only");
+    h.sent();
+    h.click_on("host-rebind-confirm");
+
+    let sent = h.sent();
+    assert_eq!(sent.len(), 1, "no unbind is sent: {sent:?}");
+    let bound = sent.first().and_then(|msg| match msg {
+        ClientMessage::BindHostSessions {
+            session_ids,
+            arrangement,
+            ..
+        } => Some((session_ids.clone(), arrangement.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        bound,
+        Some((
+            vec!["b1".to_owned()],
+            HostArrangement::Follow { tabs: own_tabs }
+        )),
+        "the followed layout keeps its tabs and binds only b1: {sent:?}"
+    );
 }
 
 #[gpui::test]
