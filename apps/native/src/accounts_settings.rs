@@ -19,12 +19,13 @@ use gpui::{
 };
 use protocol::{
     AccountSnapshot, AutoSwitchState, AutoSwitchStrategy, ClientMessage, ConnectionOrigin,
-    FEATURE_ACCOUNTS,
+    FEATURE_ACCOUNT_SPEND_CREDITS, FEATURE_ACCOUNTS,
 };
 
 use crate::accounts::{
     self, AliasChange, Level, Removal, Row, RowActions, SWITCH_FIRST, Tag, WriteAction,
 };
+use crate::accounts_view::text_line_view;
 use crate::buttons::{Layer, field_frame};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
@@ -52,6 +53,11 @@ const CANCEL_LOGIN_LABEL: &str = "Cancel login";
 const UP_LABEL: &str = "Up";
 const DOWN_LABEL: &str = "Down";
 const REMOVE_LABEL: &str = "Remove";
+/// A row's checkbox allowing the auto-switch to spend its prepaid credits,
+/// and its tooltip while it is live.
+const SPEND_CREDITS_LABEL: &str = "May spend credits";
+const SPEND_CREDITS_TIP: &str =
+    "Let auto-switch use this account's prepaid credits once every account is used up";
 /// What the Remove confirm says removing a saved login does.
 const REMOVE_CONFIRM_BODY: &str =
     "Its saved login is deleted from this computer. You can add it again by logging in.";
@@ -73,6 +79,8 @@ pub(crate) enum AccountsControl {
     Up(u32),
     Down(u32),
     Remove(u32),
+    /// A row's May spend credits checkbox.
+    SpendCredits(u32),
     AddLogin,
     LogIn,
     CancelLogin,
@@ -98,6 +106,7 @@ impl AccountsControl {
             Self::Up(n) => format!("up-{n}"),
             Self::Down(n) => format!("down-{n}"),
             Self::Remove(n) => format!("remove-{n}"),
+            Self::SpendCredits(n) => format!("spend-credits-{n}"),
             Self::AddLogin => "add-login".to_owned(),
             Self::LogIn => "login".to_owned(),
             Self::CancelLogin => "cancel-login".to_owned(),
@@ -132,6 +141,7 @@ impl AccountsControl {
                 | Self::Up(_)
                 | Self::Down(_)
                 | Self::Remove(_)
+                | Self::SpendCredits(_)
                 | Self::AddLogin
                 | Self::LogIn
                 | Self::CancelLogin
@@ -279,6 +289,9 @@ struct Page {
     /// The admin controls are locked: the host is not this machine, or its
     /// daemon calls this connection remote.
     locked: bool,
+    /// The host lists the spend-credits feature, so each signed-in row
+    /// offers its May spend credits checkbox.
+    spend: bool,
     focused: Option<SettingsControl>,
 }
 
@@ -298,6 +311,13 @@ impl RootView {
     pub(crate) fn accounts_tab_offered(&self) -> bool {
         self.conn_of(&self.settings_host)
             .is_some_and(|conn| conn.supports(FEATURE_ACCOUNTS))
+    }
+
+    /// Whether the rows offer May spend credits: while the connection to
+    /// the host Settings shows lists the spend-credits feature.
+    fn accounts_spend_offered(&self) -> bool {
+        self.conn_of(&self.settings_host)
+            .is_some_and(|conn| conn.supports(FEATURE_ACCOUNT_SPEND_CREDITS))
     }
 
     /// Whether the admin controls are disabled: on any host but this
@@ -677,6 +697,7 @@ impl RootView {
         let list = self.shown_accounts(&host);
         let now = Utc::now();
         let admin = !writing && !locked;
+        let spend = self.accounts_spend_offered();
         let mut controls: Vec<(AccountsControl, bool)> = Vec::new();
         for (index, account) in list.iter().enumerate() {
             let row = accounts::row(account, switching, writing, now, &Utc);
@@ -694,6 +715,9 @@ impl RootView {
             }
             if actions.removal == Removal::Remove {
                 controls.push((AccountsControl::Remove(n), admin));
+            }
+            if spend && row.spend_credits.is_some() {
+                controls.push((AccountsControl::SpendCredits(n), admin));
             }
         }
         controls.push((AccountsControl::AddLogin, admin));
@@ -766,6 +790,7 @@ impl RootView {
                 self.hold_moved_order(number, up, cx);
             }
             AccountsControl::Remove(number) => self.open_remove_confirm(number, cx),
+            AccountsControl::SpendCredits(number) => self.press_spend_credits(number, cx),
             AccountsControl::AddLogin => {
                 self.send_account_write(
                     &host,
@@ -802,6 +827,32 @@ impl RootView {
             | AccountsControl::Strategy(_)
             | AccountsControl::Window(_) => self.press_auto_control(control, cx),
         }
+    }
+
+    /// A press of account `number`'s May spend credits checkbox: the
+    /// opposite of its listed opt-in, sent at once unless a write is
+    /// pending; nothing for an account no longer listed.
+    fn press_spend_credits(&mut self, number: u32, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        let Some(current) = self
+            .accounts
+            .accounts(&host)
+            .iter()
+            .find(|account| account.number == number)
+            .map(|account| account.may_spend_credits)
+        else {
+            return;
+        };
+        self.send_account_write(
+            &host,
+            WriteAction::SpendCredits,
+            |request_id| ClientMessage::SetAccountMaySpendCredits {
+                number,
+                enabled: !current,
+                request_id,
+            },
+            cx,
+        );
     }
 
     /// The Remove confirm, while Settings shows the Accounts page and the
@@ -1033,6 +1084,7 @@ impl RootView {
         let page = Page {
             writing,
             locked: self.accounts_admin_locked(),
+            spend: self.accounts_spend_offered(),
             focused,
         };
         let mut content = Vec::new();
@@ -1157,6 +1209,13 @@ impl RootView {
             .iter()
             .map(|line| window_line(line, n, &t, cx))
             .collect::<Vec<_>>();
+        let spend = [("extra", &row.extra), ("prepaid", &row.prepaid)]
+            .into_iter()
+            .filter_map(|(id, line)| {
+                line.clone()
+                    .map(|line| text_line_view(line, format!("settings-accounts-{id}-{n}"), &t, cx))
+            })
+            .collect::<Vec<_>>();
         let info = div()
             .flex_1()
             .min_w_0()
@@ -1165,7 +1224,8 @@ impl RootView {
             .gap(px(2.0))
             .child(name_line)
             .children(reason)
-            .children(windows);
+            .children(windows)
+            .children(spend);
         let controls = self.row_controls(row, actions, page, cx);
         div()
             .driver_id(move || format!("settings-accounts-row-{n}"))
@@ -1250,16 +1310,58 @@ impl RootView {
                 ))
                 .into_any_element(),
         };
-        div()
+        let buttons = div()
             .flex()
-            .flex_none()
             .items_center()
             .gap(px(6.0))
             .child(alias)
             .children(switch)
             .children(up)
             .children(down)
-            .child(removal)
+            .child(removal);
+        // The checkbox sits under the buttons, so the row keeps the width
+        // its info column needs.
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .items_end()
+            .gap(px(4.0))
+            .child(buttons)
+            .children(Self::spend_toggle(row, page, cx))
+    }
+
+    /// A row's May spend credits checkbox, while the host lists the feature
+    /// and the row's sign-in was not refused: an admin control, its
+    /// tooltip saying why while locked and what it allows otherwise.
+    fn spend_toggle(row: &Row, page: Page, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let checked = row.spend_credits.filter(|_| page.spend)?;
+        let control = AccountsControl::SpendCredits(row.number).control();
+        let state = ToggleState {
+            checked,
+            enabled: !page.writing && !page.locked,
+        };
+        let tip = if page.locked {
+            REMOTE_ORIGIN_TIP
+        } else {
+            SPEND_CREDITS_TIP
+        };
+        Some(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "{}-tip",
+                    control.selector()
+                )))
+                .child(toggle(
+                    control,
+                    state,
+                    SPEND_CREDITS_LABEL,
+                    page.focused,
+                    cx,
+                ))
+                .tooltip(tooltip(tip))
+                .into_any_element(),
+        )
     }
 
     /// Account `number`'s alias field; while locked (any host but this
@@ -1515,6 +1617,7 @@ fn auto_hold(
         | AccountsControl::Up(_)
         | AccountsControl::Down(_)
         | AccountsControl::Remove(_)
+        | AccountsControl::SpendCredits(_)
         | AccountsControl::AddLogin
         | AccountsControl::LogIn
         | AccountsControl::CancelLogin => None,

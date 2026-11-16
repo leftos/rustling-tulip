@@ -7,7 +7,9 @@ use chrono::Utc;
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, div, prelude::*, px, relative};
 use protocol::{AutoSwitchState, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
 
-use crate::accounts::{self, Bar, Chip, ChipCandidate, Level, Row, Tag, WindowLine, WriteAction};
+use crate::accounts::{
+    self, Bar, Chip, ChipCandidate, Level, Row, Tag, TextLine, Tone, WindowLine, WriteAction,
+};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
@@ -586,6 +588,12 @@ impl RootView {
             .into_iter()
             .map(|line| window_view(line, n, t, cx))
             .collect::<Vec<_>>();
+        let spend = [("extra", row.extra), ("prepaid", row.prepaid)]
+            .into_iter()
+            .filter_map(|(id, line)| {
+                line.map(|line| text_line_view(line, format!("accounts-{id}-{n}"), t, cx))
+            })
+            .collect::<Vec<_>>();
         let switch = row.switch.map(|button| {
             let enabled = button.enabled;
             outlined_button(
@@ -634,7 +642,8 @@ impl RootView {
                     .gap(px(2.0))
                     .child(name_line)
                     .children(reason)
-                    .children(windows),
+                    .children(windows)
+                    .children(spend),
             )
             .child(
                 div()
@@ -702,6 +711,48 @@ fn tag_view(tag: Tag, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
         .text_size(ui_px(cx, 10.5))
         .font_weight(ui_weight(cx, FontWeight::BOLD))
         .child(tagged_text(format!("accounts-tag-{n}"), tag.text()))
+}
+
+/// The text colour of a text line of `tone`.
+const fn tone_color(tone: Tone, t: &UiTheme) -> u32 {
+    match tone {
+        Tone::Normal => t.text_2,
+        Tone::Muted => t.subtle,
+        Tone::Danger => t.danger_text,
+    }
+}
+
+/// A row's text line (Extra or Prepaid): its label in the window label
+/// column, then its text, tagged `selector`. The Settings page draws its
+/// rows' lines with it too.
+pub(crate) fn text_line_view(
+    line: TextLine,
+    selector: String,
+    t: &UiTheme,
+    cx: &mut Context<RootView>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_h(px(19.0))
+        .child(
+            div()
+                .w(ui_px(cx, accounts::WINDOW_LABEL_WIDTH))
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(ui_px(cx, 11.0))
+                .text_color(gpui::rgb(t.subtle))
+                .child(line.label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(gpui::rgb(tone_color(line.tone, t)))
+                .child(tagged_text(selector, line.text)),
+        )
 }
 
 /// A row's window line: its label, bar, percentage and reset text.

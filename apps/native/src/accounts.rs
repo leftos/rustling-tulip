@@ -18,8 +18,9 @@ use std::fmt::Display;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use protocol::{
-    AccountEventKind, AccountLoginState, AccountModelLimit, AccountSnapshot, AccountUsageStatus,
-    AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
+    AccountEventKind, AccountExtraUsage, AccountLoginState, AccountModelLimit, AccountPrepaid,
+    AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy,
+    DaemonMessage,
 };
 
 use crate::target::HostKey;
@@ -98,6 +99,7 @@ pub(crate) enum WriteAction {
     CancelLogin,
     Remove(u32),
     AutoSwitch,
+    SpendCredits,
 }
 
 /// A daemon-driven login on one host, until the next `LogIn` press or the
@@ -731,8 +733,37 @@ pub(crate) struct Row {
     pub(crate) tag: Option<Tag>,
     pub(crate) reason: Option<&'static str>,
     pub(crate) windows: Vec<WindowLine>,
+    /// The monthly extra-usage spend line, after the window lines.
+    pub(crate) extra: Option<TextLine>,
+    /// The prepaid balance line, after the extra-usage line.
+    pub(crate) prepaid: Option<TextLine>,
+    /// Whether the auto-switch may spend this account's prepaid credits;
+    /// `None` on a row whose sign-in was refused, which offers no toggle.
+    pub(crate) spend_credits: Option<bool>,
     pub(crate) switch: Option<SwitchButton>,
 }
+
+/// How a row's text line is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tone {
+    Normal,
+    Muted,
+    Danger,
+}
+
+/// A row's labelled text line with no bar: `Extra` or `Prepaid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextLine {
+    pub(crate) label: &'static str,
+    pub(crate) text: String,
+    pub(crate) tone: Tone,
+}
+
+/// The labels of a row's spend lines.
+const EXTRA_LABEL: &str = "Extra";
+const PREPAID_LABEL: &str = "Prepaid";
+/// The Extra line while extra usage is off.
+const EXTRA_OFF: &str = "off";
 
 /// `account`'s row at `now` in time zone `tz`, while the switch to
 /// `switching` is pending (none pending: `None`) and `writing` says an
@@ -791,11 +822,12 @@ where
         },
         enabled: switching.is_none() && !writing,
     });
-    let age = account
-        .fetched_at
-        .map(|at| now - at)
-        .filter(|elapsed| *elapsed > TimeDelta::minutes(STALE_AFTER_MINUTES))
-        .map(age_text);
+    let age = stale_age(account.fetched_at, now);
+    let (extra, prepaid) = if relogin {
+        (None, None)
+    } else {
+        spend_lines(account, now, tz)
+    };
     let alias = alias(account);
     let detail = match (alias, age) {
         (Some(_), Some(age)) => Some(format!("{} · {age}", account.email)),
@@ -812,7 +844,159 @@ where
         tag,
         reason,
         windows,
+        extra,
+        prepaid,
+        spend_credits: (!relogin).then_some(account.may_spend_credits),
         switch,
+    }
+}
+
+/// How long ago `fetched_at` was, once it is older than
+/// [`STALE_AFTER_MINUTES`]; `None` while fresh or never fetched.
+fn stale_age(fetched_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String> {
+    fetched_at
+        .map(|at| now - at)
+        .filter(|elapsed| *elapsed > TimeDelta::minutes(STALE_AFTER_MINUTES))
+        .map(age_text)
+}
+
+/// `account`'s Extra and Prepaid lines at `now` in time zone `tz`, each
+/// `None` when the daemon sent nothing for it.
+fn spend_lines<Tz: TimeZone>(
+    account: &AccountSnapshot,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> (Option<TextLine>, Option<TextLine>)
+where
+    Tz::Offset: Display,
+{
+    let extra = account
+        .extra_usage
+        .as_ref()
+        .map(|extra| extra_line(extra, tz));
+    let prepaid = account
+        .prepaid
+        .as_ref()
+        .map(|prepaid| prepaid_line(prepaid, now));
+    (extra, prepaid)
+}
+
+/// The Extra line: `off` while extra usage is off, else this month's
+/// spend against its limit (or `no limit`), the reset's local date and
+/// whether the limit is reached.
+fn extra_line<Tz: TimeZone>(extra: &AccountExtraUsage, tz: &Tz) -> TextLine
+where
+    Tz::Offset: Display,
+{
+    if !extra.enabled || extra.user_disabled {
+        return TextLine {
+            label: EXTRA_LABEL,
+            text: EXTRA_OFF.to_owned(),
+            tone: Tone::Muted,
+        };
+    }
+    let currency = extra.currency.as_deref();
+    let used = money(extra.used.unwrap_or(0.0), currency);
+    let mut parts = vec![match extra.limit {
+        Some(limit) => format!("{used} of {}", money(limit, currency)),
+        None => format!("{used} used · no limit"),
+    }];
+    if let Some(at) = extra.resets_at {
+        parts.push(format!("resets {}", at.with_timezone(tz).format("%b %-d")));
+    }
+    if extra.spend_limit_reached {
+        parts.push("limit reached".to_owned());
+    }
+    TextLine {
+        label: EXTRA_LABEL,
+        text: parts.join(" · "),
+        tone: if extra.spend_limit_reached {
+            Tone::Danger
+        } else {
+            Tone::Normal
+        },
+    }
+}
+
+/// The Prepaid line: the balance, whether it reloads on its own, and its
+/// age once stale; a zero balance is muted.
+fn prepaid_line(prepaid: &AccountPrepaid, now: DateTime<Utc>) -> TextLine {
+    let mut text = minor_money(
+        prepaid.amount_minor,
+        prepaid.exponent,
+        prepaid.currency.as_deref(),
+    );
+    if prepaid.auto_reload == Some(true) {
+        text.push_str(" · auto-reload");
+    }
+    if let Some(age) = stale_age(prepaid.fetched_at, now) {
+        text.push_str(" · ");
+        text.push_str(&age);
+    }
+    TextLine {
+        label: PREPAID_LABEL,
+        text,
+        tone: if prepaid.amount_minor == 0 {
+            Tone::Muted
+        } else {
+            Tone::Normal
+        },
+    }
+}
+
+/// `amount` major units of `currency` with two decimals and thousands
+/// separators, rounded half away from zero: `$`, `€` or `£` before the
+/// amount for USD, EUR and GBP, any other code after it, none bare.
+pub(crate) fn money(amount: f64, currency: Option<&str>) -> String {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a spend in cents fits an i64; `as` saturates past it"
+    )]
+    let cents = (amount * 100.0).round() as i64;
+    cents_money(cents, currency)
+}
+
+/// `amount_minor / 10^exponent` units of `currency` as [`money`] writes
+/// it, rounded to two decimals from the integer, half away from zero.
+pub(crate) fn minor_money(amount_minor: i64, exponent: u32, currency: Option<&str>) -> String {
+    let cents = if exponent <= 2 {
+        amount_minor.saturating_mul(10_i64.pow(2 - exponent))
+    } else {
+        match 10_i64.checked_pow(exponent - 2) {
+            Some(divisor) => {
+                let whole = amount_minor / divisor;
+                let rest = (amount_minor % divisor).unsigned_abs();
+                if rest.saturating_mul(2) >= divisor.unsigned_abs() {
+                    whole + amount_minor.signum()
+                } else {
+                    whole
+                }
+            }
+            None => 0,
+        }
+    };
+    cents_money(cents, currency)
+}
+
+/// `cents` hundredths of `currency`, as [`money`] writes them.
+fn cents_money(cents: i64, currency: Option<&str>) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    let digits = (abs / 100).to_string();
+    let mut whole = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            whole.push(',');
+        }
+        whole.push(digit);
+    }
+    let amount = format!("{whole}.{:02}", abs % 100);
+    match currency {
+        Some("USD") => format!("{sign}${amount}"),
+        Some("EUR") => format!("{sign}€{amount}"),
+        Some("GBP") => format!("{sign}£{amount}"),
+        Some(code) => format!("{sign}{amount} {code}"),
+        None => format!("{sign}{amount}"),
     }
 }
 
@@ -1210,19 +1394,19 @@ pub(crate) fn age_text(elapsed: TimeDelta) -> String {
     reason = "a test fails with the message of the precondition it lost"
 )]
 mod tests {
-    use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+    use chrono::{DateTime, FixedOffset, TimeDelta, TimeZone, Utc};
     use protocol::{
-        AccountEventKind, AccountKind, AccountLoginState, AccountModelLimit, AccountSnapshot,
-        AccountUsageStatus, AccountUsageWindow, AutoSwitchState, AutoSwitchStrategy, DaemonMessage,
-        FleetVerdict, FleetWindow,
+        AccountEventKind, AccountExtraUsage, AccountKind, AccountLoginState, AccountModelLimit,
+        AccountPrepaid, AccountSnapshot, AccountUsageStatus, AccountUsageWindow, AutoSwitchState,
+        AutoSwitchStrategy, DaemonMessage, FleetVerdict, FleetWindow,
     };
 
     use super::{
         AccountsState, AliasChange, ChipCandidate, Level, RELOGIN_LINE, Removal, RowActions,
-        STORE_READ_ONLY, Segment, Tag, WriteAction, account_toast, add_login_note, age_text,
+        STORE_READ_ONLY, Segment, Tag, Tone, WriteAction, account_toast, add_login_note, age_text,
         alias_change, bar, checked_line, chip, chip_host, cooldown_segments, forecast, header,
-        hysteresis_step, label_slug, login_status, moved_order, paused_line, row, row_actions,
-        strategy_segments, threshold_step, window_segments,
+        hysteresis_step, label_slug, login_status, minor_money, money, moved_order, paused_line,
+        row, row_actions, strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
 
@@ -1858,6 +2042,297 @@ mod tests {
         assert_eq!(
             row(&account(3, "lab"), None, false, now(), &Utc).reason,
             None
+        );
+    }
+
+    #[test]
+    fn money_reads_usd_eur_and_gbp_with_their_symbols() {
+        assert_eq!(money(1020.03, Some("USD")), "$1,020.03");
+        assert_eq!(money(1020.03, Some("EUR")), "€1,020.03");
+        assert_eq!(money(1020.03, Some("GBP")), "£1,020.03");
+    }
+
+    #[test]
+    fn money_puts_another_code_after_the_amount() {
+        assert_eq!(money(1020.03, Some("CAD")), "1,020.03 CAD");
+    }
+
+    #[test]
+    fn money_without_a_currency_is_the_bare_amount() {
+        assert_eq!(money(1020.03, None), "1,020.03");
+    }
+
+    #[test]
+    fn money_groups_thousands_and_pads_two_decimals() {
+        assert_eq!(money(1_234_567.0, Some("USD")), "$1,234,567.00");
+        assert_eq!(money(999.5, Some("USD")), "$999.50");
+        assert_eq!(money(0.0, Some("USD")), "$0.00");
+        assert_eq!(money(-5.5, Some("USD")), "-$5.50", "a negative amount");
+    }
+
+    #[test]
+    fn money_rounds_half_away_from_zero() {
+        assert_eq!(money(1234.565, Some("USD")), "$1,234.57");
+        assert_eq!(money(2.004, Some("USD")), "$2.00");
+    }
+
+    #[test]
+    fn minor_money_reads_cents() {
+        assert_eq!(minor_money(102_003, 2, Some("USD")), "$1,020.03");
+    }
+
+    #[test]
+    fn minor_money_with_exponent_zero() {
+        assert_eq!(minor_money(1500, 0, Some("JPY")), "1,500.00 JPY");
+    }
+
+    #[test]
+    fn minor_money_with_exponent_three_rounds_to_two_decimals() {
+        assert_eq!(minor_money(1_020_035, 3, Some("USD")), "$1,020.04");
+        assert_eq!(minor_money(1_020_034, 3, Some("USD")), "$1,020.03");
+    }
+
+    /// Extra usage on, `used` spent of `limit` dollars, resetting on 1 December.
+    fn extra(used: Option<f64>, limit: Option<f64>) -> AccountExtraUsage {
+        AccountExtraUsage {
+            enabled: true,
+            user_disabled: false,
+            spend_limit_reached: false,
+            limit,
+            used,
+            currency: Some("USD".to_owned()),
+            resets_at: Utc.with_ymd_and_hms(2026, 12, 1, 2, 0, 0).single(),
+        }
+    }
+
+    /// Account 2 with `extra` as its extra usage.
+    fn with_extra(extra: AccountExtraUsage) -> AccountSnapshot {
+        AccountSnapshot {
+            extra_usage: Some(extra),
+            ..account(2, "ops")
+        }
+    }
+
+    fn extra_line_of(account: &AccountSnapshot) -> Option<(String, Tone)> {
+        row(account, None, false, now(), &Utc)
+            .extra
+            .map(|line| (line.text, line.tone))
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "it is compared with a row's optional line"
+    )]
+    fn line(text: &str, tone: Tone) -> Option<(String, Tone)> {
+        Some((text.to_owned(), tone))
+    }
+
+    #[test]
+    fn extra_usage_off_reads_off_muted() {
+        let off = AccountExtraUsage {
+            enabled: false,
+            ..extra(Some(3.0), Some(50.0))
+        };
+        let shown = row(&with_extra(off), None, false, now(), &Utc).extra;
+        let shown = shown.expect("an Extra line");
+        assert_eq!(
+            (shown.label, shown.text.as_str(), shown.tone),
+            ("Extra", "off", Tone::Muted)
+        );
+    }
+
+    #[test]
+    fn extra_usage_the_user_turned_off_reads_off() {
+        let off = AccountExtraUsage {
+            user_disabled: true,
+            ..extra(Some(3.0), Some(50.0))
+        };
+        assert_eq!(extra_line_of(&with_extra(off)), line("off", Tone::Muted));
+    }
+
+    #[test]
+    fn capped_extra_usage_reads_used_of_limit() {
+        assert_eq!(
+            extra_line_of(&with_extra(extra(Some(12.5), Some(50.0)))),
+            line("$12.50 of $50.00 · resets Dec 1", Tone::Normal)
+        );
+    }
+
+    #[test]
+    fn uncapped_extra_usage_reads_used_and_no_limit() {
+        assert_eq!(
+            extra_line_of(&with_extra(extra(Some(1020.03), None))),
+            line("$1,020.03 used · no limit · resets Dec 1", Tone::Normal)
+        );
+    }
+
+    #[test]
+    fn extra_usage_with_no_spend_reads_zero() {
+        assert_eq!(
+            extra_line_of(&with_extra(extra(None, Some(50.0)))),
+            line("$0.00 of $50.00 · resets Dec 1", Tone::Normal)
+        );
+    }
+
+    #[test]
+    fn extra_usage_at_its_limit_says_so_in_danger() {
+        let reached = AccountExtraUsage {
+            spend_limit_reached: true,
+            ..extra(Some(50.0), Some(50.0))
+        };
+        assert_eq!(
+            extra_line_of(&with_extra(reached)),
+            line(
+                "$50.00 of $50.00 · resets Dec 1 · limit reached",
+                Tone::Danger
+            )
+        );
+    }
+
+    #[test]
+    fn extra_usage_with_no_reset_leaves_the_reset_out() {
+        let open = AccountExtraUsage {
+            resets_at: None,
+            ..extra(Some(12.5), Some(50.0))
+        };
+        assert_eq!(
+            extra_line_of(&with_extra(open)),
+            line("$12.50 of $50.00", Tone::Normal)
+        );
+    }
+
+    #[test]
+    fn the_extra_reset_date_is_the_callers_local_date() {
+        let west = FixedOffset::west_opt(5 * 3600).expect("a valid offset");
+        let shown = row(
+            &with_extra(extra(Some(12.5), Some(50.0))),
+            None,
+            false,
+            now(),
+            &west,
+        );
+        assert_eq!(
+            shown.extra.map(|line| line.text).as_deref(),
+            Some("$12.50 of $50.00 · resets Nov 30")
+        );
+    }
+
+    #[test]
+    fn no_extra_line_without_extra_usage() {
+        assert_eq!(
+            row(&account(2, "ops"), None, false, now(), &Utc).extra,
+            None
+        );
+    }
+
+    /// A prepaid balance of `amount_minor` cents, read at `fetched_at`.
+    fn prepaid(
+        amount_minor: i64,
+        auto_reload: Option<bool>,
+        fetched_at: DateTime<Utc>,
+    ) -> AccountPrepaid {
+        AccountPrepaid {
+            amount_minor,
+            exponent: 2,
+            currency: Some("USD".to_owned()),
+            auto_reload,
+            fetched_at: Some(fetched_at),
+        }
+    }
+
+    fn prepaid_line_of(prepaid: AccountPrepaid) -> Option<(String, Tone)> {
+        let ops = AccountSnapshot {
+            prepaid: Some(prepaid),
+            ..account(2, "ops")
+        };
+        row(&ops, None, false, now(), &Utc)
+            .prepaid
+            .map(|line| (line.text, line.tone))
+    }
+
+    #[test]
+    fn a_prepaid_balance_names_its_auto_reload() {
+        let ops = AccountSnapshot {
+            prepaid: Some(prepaid(102_003, Some(true), now())),
+            ..account(2, "ops")
+        };
+        let shown = row(&ops, None, false, now(), &Utc).prepaid;
+        let shown = shown.expect("a Prepaid line");
+        assert_eq!(
+            (shown.label, shown.text.as_str(), shown.tone),
+            ("Prepaid", "$1,020.03 · auto-reload", Tone::Normal)
+        );
+        assert_eq!(
+            prepaid_line_of(prepaid(102_003, Some(false), now())),
+            line("$1,020.03", Tone::Normal),
+            "auto-reload off"
+        );
+        assert_eq!(
+            prepaid_line_of(prepaid(102_003, None, now())),
+            line("$1,020.03", Tone::Normal),
+            "auto-reload not known"
+        );
+    }
+
+    #[test]
+    fn a_stale_prepaid_balance_shows_its_age() {
+        let stale = now() - TimeDelta::minutes(30);
+        assert_eq!(
+            prepaid_line_of(prepaid(102_003, Some(true), stale)),
+            line("$1,020.03 · auto-reload · 30m ago", Tone::Normal)
+        );
+        let fresh = now() - TimeDelta::minutes(5);
+        assert_eq!(
+            prepaid_line_of(prepaid(102_003, None, fresh)),
+            line("$1,020.03", Tone::Normal),
+            "fresh enough"
+        );
+    }
+
+    #[test]
+    fn a_zero_prepaid_balance_is_muted() {
+        assert_eq!(
+            prepaid_line_of(prepaid(0, None, now())),
+            line("$0.00", Tone::Muted)
+        );
+    }
+
+    #[test]
+    fn no_prepaid_line_without_a_prepaid_balance() {
+        assert_eq!(
+            row(&account(2, "ops"), None, false, now(), &Utc).prepaid,
+            None
+        );
+    }
+
+    #[test]
+    fn a_refused_sign_in_row_has_no_spend_lines_and_no_credits_toggle() {
+        let refused = AccountSnapshot {
+            status: AccountUsageStatus::ReloginRequired,
+            extra_usage: Some(extra(Some(12.5), Some(50.0))),
+            prepaid: Some(prepaid(102_003, Some(true), now())),
+            may_spend_credits: true,
+            ..account(5, "client")
+        };
+        let shown = row(&refused, None, false, now(), &Utc);
+        assert_eq!(shown.extra, None);
+        assert_eq!(shown.prepaid, None);
+        assert_eq!(shown.spend_credits, None);
+    }
+
+    #[test]
+    fn a_row_carries_its_spend_credits_opt_in() {
+        let allowed = AccountSnapshot {
+            may_spend_credits: true,
+            ..account(2, "ops")
+        };
+        assert_eq!(
+            row(&allowed, None, false, now(), &Utc).spend_credits,
+            Some(true)
+        );
+        assert_eq!(
+            row(&account(2, "ops"), None, false, now(), &Utc).spend_credits,
+            Some(false)
         );
     }
 

@@ -107,6 +107,46 @@ fn chip_text(h: &mut Harness<'_>) -> Option<String> {
 }
 
 #[gpui::test]
+fn the_popover_shows_an_accounts_extra_spend_and_prepaid_balance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    let now = chrono::Utc::now();
+    let resets = now + chrono::Duration::days(10);
+    let main = account(1, "main")
+        .active()
+        .extra_usage(protocol::AccountExtraUsage {
+            enabled: true,
+            user_disabled: false,
+            spend_limit_reached: false,
+            limit: Some(50.0),
+            used: Some(12.5),
+            currency: Some("USD".to_owned()),
+            resets_at: Some(resets),
+        })
+        .prepaid(protocol::AccountPrepaid {
+            amount_minor: 102_003,
+            exponent: 2,
+            currency: Some("USD".to_owned()),
+            auto_reload: Some(true),
+            fetched_at: Some(now),
+        })
+        .build();
+    popover(&mut h, vec![main, account(2, "ops").build()]);
+    let date = resets.with_timezone(&chrono::Local).format("%b %-d");
+    assert!(
+        drawn(
+            &mut h,
+            &format!("accounts-extra-1=$12.50 of $50.00 · resets {date}")
+        ),
+        "the Extra line"
+    );
+    assert!(
+        drawn(&mut h, "accounts-prepaid-1=$1,020.03 · auto-reload"),
+        "the Prepaid line"
+    );
+}
+
+#[gpui::test]
 fn the_chip_shows_the_active_account_and_its_bars(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::open(cx, &dir);

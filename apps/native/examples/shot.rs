@@ -3198,6 +3198,7 @@ impl FakeDaemon {
             protocol::FEATURE_DEFAULT_SHELL.to_owned(),
             protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
             protocol::FEATURE_ACCOUNTS.to_owned(),
+            protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned(),
         ];
         // Only the gates shot lists the gate feature, so the other views keep
         // no Gates item or footer pill.
@@ -3555,11 +3556,29 @@ fn shot_host_layouts(request_id: Option<&str>) -> Result<DaemonMessage> {
 
 /// The fake daemon's accounts at `now`, the mock's five: main in use, ops
 /// and lab ready (lab's five-hour window near its limit), spare out of
-/// rotation and fetched long ago, client signed out.
+/// rotation and fetched long ago, client signed out. Extra usage: main's
+/// capped, ops' uncapped, lab's at its limit, spare's off; main and lab
+/// hold prepaid credits, main reloading them and allowed to spend them.
 fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessage {
     let window = |pct: f64, resets_in_minutes: Option<i64>| protocol::AccountUsageWindow {
         pct,
         resets_at: resets_in_minutes.map(|minutes| now + chrono::Duration::minutes(minutes)),
+    };
+    let extra = |used: f64, limit: Option<f64>| protocol::AccountExtraUsage {
+        enabled: true,
+        user_disabled: false,
+        spend_limit_reached: false,
+        limit,
+        used: Some(used),
+        currency: Some("USD".to_owned()),
+        resets_at: Some(now + chrono::Duration::days(15)),
+    };
+    let prepaid = |amount_minor: i64, auto_reload: bool| protocol::AccountPrepaid {
+        amount_minor,
+        exponent: 2,
+        currency: Some("USD".to_owned()),
+        auto_reload: Some(auto_reload),
+        fetched_at: Some(now - chrono::Duration::seconds(12)),
     };
     let account = |number: u32, alias: &str, five: f64, seven: f64| protocol::AccountSnapshot {
         number,
@@ -3586,16 +3605,32 @@ fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessag
             pct: 37.0,
             resets_at: Some(now + chrono::Duration::minutes(60 * 45)),
         }],
+        extra_usage: Some(extra(12.4, Some(50.0))),
+        prepaid: Some(prepaid(102_003, true)),
+        may_spend_credits: true,
         ..account(1, "main", 34.0, 41.0)
+    };
+    let ops = protocol::AccountSnapshot {
+        extra_usage: Some(extra(1_284.5, None)),
+        ..account(2, "ops", 12.0, 28.0)
     };
     let lab = protocol::AccountSnapshot {
         five_hour: Some(window(86.0, Some(55))),
+        extra_usage: Some(protocol::AccountExtraUsage {
+            spend_limit_reached: true,
+            ..extra(20.0, Some(20.0))
+        }),
+        prepaid: Some(prepaid(0, false)),
         ..account(3, "lab", 86.0, 63.0)
     };
     let spare = protocol::AccountSnapshot {
         disabled: true,
         five_hour: Some(window(3.0, None)),
         fetched_at: Some(now - chrono::Duration::minutes(42)),
+        extra_usage: Some(protocol::AccountExtraUsage {
+            enabled: false,
+            ..extra(0.0, None)
+        }),
         ..account(4, "spare", 3.0, 9.0)
     };
     let client = protocol::AccountSnapshot {
@@ -3603,7 +3638,7 @@ fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessag
         ..account(5, "client", 0.0, 0.0)
     };
     DaemonMessage::Accounts {
-        accounts: vec![main, account(2, "ops", 12.0, 28.0), lab, spare, client],
+        accounts: vec![main, ops, lab, spare, client],
         auto: Some(shot_auto(now)),
         request_id,
     }

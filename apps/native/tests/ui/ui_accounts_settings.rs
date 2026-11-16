@@ -123,6 +123,7 @@ fn writes(h: &mut Harness<'_>) -> Vec<ClientMessage> {
                     | ClientMessage::SetAccountOrder { .. }
                     | ClientMessage::SetAutoSwitch { .. }
                     | ClientMessage::SetAutoSwitchRules { .. }
+                    | ClientMessage::SetAccountMaySpendCredits { .. }
                     | ClientMessage::StartAccountLogin { .. }
                     | ClientMessage::CancelAccountLogin { .. }
             )
@@ -148,6 +149,7 @@ fn request_id(msg: &ClientMessage) -> String {
         | ClientMessage::SetAccountOrder { request_id, .. }
         | ClientMessage::SetAutoSwitch { request_id, .. }
         | ClientMessage::SetAutoSwitchRules { request_id, .. }
+        | ClientMessage::SetAccountMaySpendCredits { request_id, .. }
         | ClientMessage::StartAccountLogin { request_id }
         | ClientMessage::CancelAccountLogin { request_id } => request_id.clone(),
         _ => None,
@@ -401,6 +403,145 @@ fn switch_on_the_page_sends_switch_account(cx: &mut TestAppContext) {
         "{sent:?}"
     );
     assert_eq!(h.root(|root, _| root.accounts_switching()), Some(2));
+}
+
+/// [`page`] on a daemon that also lists the spend-credits feature.
+fn spend_page(h: &mut Harness<'_>, accounts: Vec<AccountSnapshot>) {
+    h.reconnect_with_features(&[
+        protocol::FEATURE_ACCOUNTS,
+        protocol::FEATURE_ACCOUNT_SPEND_CREDITS,
+    ]);
+    let id = listed(h);
+    h.send(accounts_reply(accounts.clone(), None, &id));
+    on_page(h, accounts, None);
+}
+
+/// main in use and allowed to spend its credits, ops beside it, not.
+fn spenders() -> Vec<AccountSnapshot> {
+    vec![
+        account(1, "main").active().may_spend_credits(true).build(),
+        account(2, "ops").build(),
+    ]
+}
+
+#[gpui::test]
+fn the_page_shows_an_accounts_extra_spend_and_prepaid_balance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let ops = account(2, "ops")
+        .extra_usage(protocol::AccountExtraUsage {
+            enabled: true,
+            user_disabled: false,
+            spend_limit_reached: false,
+            limit: None,
+            used: Some(1020.03),
+            currency: Some("EUR".to_owned()),
+            resets_at: None,
+        })
+        .prepaid(protocol::AccountPrepaid {
+            amount_minor: 0,
+            exponent: 2,
+            currency: Some("EUR".to_owned()),
+            auto_reload: None,
+            fetched_at: Some(chrono::Utc::now()),
+        })
+        .build();
+    page(&mut h, vec![account(1, "main").active().build(), ops], None);
+    assert!(drawn(
+        &mut h,
+        "settings-accounts-extra-2=€1,020.03 used · no limit"
+    ));
+    assert!(drawn(&mut h, "settings-accounts-prepaid-2=€0.00"));
+}
+
+#[gpui::test]
+fn the_spend_credits_checkbox_shows_the_opt_in(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    spend_page(&mut h, spenders());
+    assert!(
+        drawn(&mut h, "settings-accounts-spend-credits-1-tick"),
+        "main is allowed"
+    );
+    assert!(
+        drawn(&mut h, "settings-accounts-spend-credits-2-empty"),
+        "ops is not"
+    );
+}
+
+#[gpui::test]
+fn pressing_spend_credits_sends_the_opt_in_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    spend_page(&mut h, spenders());
+    press(&mut h, "settings-accounts-spend-credits-2");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(
+            sent,
+            ClientMessage::SetAccountMaySpendCredits {
+                number: 2,
+                enabled: true,
+                request_id: Some(_),
+            }
+        ),
+        "{sent:?}"
+    );
+    press(&mut h, "settings-accounts-spend-credits-1");
+    assert!(
+        writes(&mut h).is_empty(),
+        "inert while the first write is pending"
+    );
+}
+
+#[gpui::test]
+fn no_spend_credits_checkbox_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    page(&mut h, spenders(), None);
+    assert!(
+        drawn(&mut h, "settings-accounts-switch-2"),
+        "the row is drawn"
+    );
+    assert!(!drawn(&mut h, "settings-accounts-spend-credits-2"));
+    assert!(!drawn(&mut h, "settings-accounts-spend-credits-1"));
+}
+
+#[gpui::test]
+fn no_spend_credits_checkbox_on_a_refused_sign_in_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut list = spenders();
+    list.push(
+        account(3, "client")
+            .status(protocol::AccountUsageStatus::ReloginRequired)
+            .may_spend_credits(true)
+            .build(),
+    );
+    spend_page(&mut h, list);
+    assert!(drawn(&mut h, "settings-accounts-spend-credits-2"));
+    assert!(!drawn(&mut h, "settings-accounts-spend-credits-3"));
+}
+
+#[gpui::test]
+fn spend_credits_is_locked_for_a_remote_origin(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_ACCOUNTS.to_owned());
+    features.push(protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned());
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, features, Some(ConnectionOrigin::Remote));
+    h.event(NetEvent::State(conn));
+    h.send_welcome(PROTOCOL);
+    let id = listed(&mut h);
+    h.send(accounts_reply(spenders(), None, &id));
+    on_page(&mut h, spenders(), None);
+    assert!(drawn(&mut h, "settings-accounts-spend-credits-2"), "shown");
+    press(&mut h, "settings-accounts-spend-credits-2");
+    assert!(writes(&mut h).is_empty(), "but locked");
 }
 
 /// The Remove confirm's title and the selector of its focused button, while

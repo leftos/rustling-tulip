@@ -1022,6 +1022,24 @@ impl AccountBuilder {
         self
     }
 
+    /// With `extra` as its extra (paid) usage.
+    pub fn extra_usage(mut self, extra: protocol::AccountExtraUsage) -> Self {
+        self.0.extra_usage = Some(extra);
+        self
+    }
+
+    /// With `prepaid` as its prepaid credit balance.
+    pub fn prepaid(mut self, prepaid: protocol::AccountPrepaid) -> Self {
+        self.0.prepaid = Some(prepaid);
+        self
+    }
+
+    /// Allowing, or not, the auto-switch to spend its prepaid credits.
+    pub fn may_spend_credits(mut self, allowed: bool) -> Self {
+        self.0.may_spend_credits = allowed;
+        self
+    }
+
     /// With its usage fetched `minutes` ago.
     pub fn fetched_minutes_ago(mut self, minutes: i64) -> Self {
         self.0.fetched_at = Some(Utc::now() - chrono::Duration::minutes(minutes));
