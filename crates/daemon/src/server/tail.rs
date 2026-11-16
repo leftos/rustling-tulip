@@ -404,28 +404,51 @@ mod tests {
         conn.tail(&hub, "link/secret.log").await;
         assert!(conn.out_rx.try_recv().is_err(), "the link is not refused");
         assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, true));
+        let missing = OpenHold::new("not-yet.log");
         conn.tail(&hub, "link/not-yet.log").await;
+        tokio::time::timeout(HANG_GUARD, missing.entered())
+            .await
+            .expect("hung: the follow never opened its file");
         assert!(
             conn.out_rx.try_recv().is_err(),
             "a missing file under the link is waited for"
         );
+        let appearing = OpenHold::new("not-yet.log");
+        drop(missing);
+        tokio::time::timeout(HANG_GUARD, appearing.entered())
+            .await
+            .expect("hung: the follow never opened its file again");
         std::fs::write(scratch.path().join("outside").join("not-yet.log"), "late")
             .expect("write log");
+        drop(appearing);
         assert_eq!(conn.next_tail().await, (b"late".to_vec(), 0, true));
     }
 
     #[tokio::test]
     async fn a_missing_file_is_followed_once_it_appears() {
         let (hub, _scratch, folder) = hub_with_folder("tail-missing");
+        let missing = OpenHold::new("new.log");
         let mut conn = Conn::new();
         conn.tail(&hub, "later/new.log").await;
+        tokio::time::timeout(HANG_GUARD, missing.entered())
+            .await
+            .expect("hung: the follow never opened its file");
         assert!(
             conn.out_rx.try_recv().is_err(),
             "a missing file is not refused"
         );
 
+        // The first open is held until it is seen, then let go to find the
+        // file missing; the second open, taken only once that step was
+        // applied, is held while the folder and file appear.
+        let appearing = OpenHold::new("new.log");
+        drop(missing);
+        tokio::time::timeout(HANG_GUARD, appearing.entered())
+            .await
+            .expect("hung: the follow never opened its file again");
         std::fs::create_dir_all(folder.join("later")).expect("create folder");
         std::fs::write(folder.join("later").join("new.log"), "hi").expect("write log");
+        drop(appearing);
         assert_eq!(conn.next_tail().await, (b"hi".to_vec(), 0, true));
     }
 
