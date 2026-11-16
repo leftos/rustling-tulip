@@ -3,24 +3,31 @@
 //! state of a run that has gone. The model is plain Rust, so every rule is
 //! unit-tested; `RootView` keeps the state and draws it.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
+use alacritty_terminal::selection::SelectionType;
 use gpui::{
-    AnyElement, Context, Div, ElementId, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful,
-    StyledText, div, prelude::*, px,
+    AnyElement, Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollEvent, ScrollHandle, SharedString, Stateful, StyledText, div, prelude::*,
+    px,
 };
 use protocol::{ClientMessage, DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, PaneFollow};
 
+use crate::chat_select::{self, Selection, TextPos, UnitSource, Units, transcript_keys};
 use crate::dashboard_rows::{format_cost, format_tokens};
 use crate::dispatch_menu::stop_tip;
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, ui_px_at, ui_text_size};
 use crate::grid_view::{TipAt, header_tipped};
+use crate::mouse::{self, CopyOnSelect};
 use crate::session_menu::{disabled_header_text_button, header_text_button, on_press};
 use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
-use crate::transcript_view::{LineKind, Transcript, TranscriptKey, transcript_lines};
+use crate::text_select::{SelectDraw, TextRegistry, painted_mark, select_text};
+use crate::transcript_view::{LineKind, TranscriptKey, TranscriptLine, transcript_lines};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE, tabs};
 
@@ -246,6 +253,9 @@ pub(crate) struct RunScroll {
     key: (HostKey, TranscriptKey),
     following: bool,
     handle: ScrollHandle,
+    /// The pane's text selection in the transcript; a pane that follows
+    /// another transcript gets a fresh scroll, and no selection with it.
+    select: RefCell<TranscriptSelect>,
 }
 
 impl RunScroll {
@@ -255,8 +265,99 @@ impl RunScroll {
             key,
             following: true,
             handle: ScrollHandle::new(),
+            select: RefCell::new(TranscriptSelect::default()),
         }
     }
+}
+
+/// A followed pane's selection of its transcript's text, as a terminal's:
+/// its ends, the word or line a double or triple click picked, the press
+/// under way, and the texts the latest frame drew, for the hit test.
+#[derive(Clone, Default)]
+pub(crate) struct TranscriptSelect {
+    selection: Option<Selection>,
+    /// The (start, end) a double or triple click picked, which a drag with
+    /// the button held widens from.
+    picked: Option<(TextPos, TextPos)>,
+    press: Option<Press>,
+    /// The tool call the last click's release toggled, and its line; the
+    /// next press forgets it, undoing the toggle when that press is the
+    /// double or triple click the click began.
+    toggled: Option<Toggled>,
+    registry: Rc<RefCell<TextRegistry>>,
+}
+
+/// A tool call a click toggled, by its id and the (entry key, index) of
+/// the line clicked.
+#[derive(Debug, Clone)]
+struct Toggled {
+    call: String,
+    line: (String, u32),
+}
+
+impl std::fmt::Debug for TranscriptSelect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptSelect")
+            .field("selection", &self.selection)
+            .field("picked", &self.picked)
+            .field("press", &self.press)
+            .field("toggled", &self.toggled)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A left press on a transcript: where it went down, and whether its
+/// release there is still a click (a single press, no Shift, not moved).
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    at: Point<Pixels>,
+    click: bool,
+}
+
+/// The whole line `pos` lies on, as its (start, end); `None` when no unit
+/// has it.
+fn line_around(units: &Units, pos: &TextPos) -> Option<(TextPos, TextPos)> {
+    let end = units.clamp(&TextPos {
+        byte: usize::MAX,
+        ..pos.clone()
+    })?;
+    let start = TextPos {
+        byte: 0,
+        ..end.clone()
+    };
+    Some((start, end))
+}
+
+/// The selection a press at `pos` with `click_count` starts in `units`: a
+/// character, the word around it, or its whole line, with what it picked.
+fn pressed_selection(
+    units: &Units,
+    pos: TextPos,
+    click_count: usize,
+) -> (Selection, Option<(TextPos, TextPos)>) {
+    let picked = match mouse::selection_type(click_count) {
+        SelectionType::Semantic => units.word_around(&pos),
+        SelectionType::Lines => line_around(units, &pos),
+        _ => None,
+    };
+    let selection = match &picked {
+        Some((start, end)) => Selection {
+            anchor: start.clone(),
+            focus: end.clone(),
+        },
+        None => Selection {
+            anchor: pos.clone(),
+            focus: pos,
+        },
+    };
+    (selection, picked)
+}
+
+/// Whether `keystroke` is the copy key a follow pane takes: Ctrl+C (Cmd+C
+/// on a Mac), Shift allowed.
+pub(crate) fn is_copy_key(keystroke: &gpui::Keystroke) -> bool {
+    let mods = keystroke.modifiers;
+    keystroke.key.eq_ignore_ascii_case("c") && (mods.control || mods.platform) && !mods.alt
 }
 
 /// A pane that follows a dispatch run, with the run's host and id.
@@ -729,7 +830,9 @@ impl RootView {
         let rows: Vec<AnyElement> = match self.transcripts.get(&key) {
             Some(transcript) => {
                 let line_ids = format!("dispatch-line-{pane_id}");
-                Self::transcript_rows(&line_ids, &key, transcript, cx)
+                let lines = transcript_lines(transcript);
+                let select = self.transcript_select_draw(pane_id, &lines, cx);
+                Self::transcript_rows(&line_ids, lines, select.as_ref(), cx)
             }
             None => run
                 .recent_actions
@@ -777,6 +880,8 @@ impl RootView {
         if scroll.following {
             scroll.handle.scroll_to_bottom();
         }
+        let registry = scroll.select.borrow().registry.clone();
+        let column = Self::selecting(column.child(painted_mark(registry)), pane_id, cx);
         let (pane, handle) = (pane_id.to_owned(), scroll.handle.clone());
         column.track_scroll(&scroll.handle).on_scroll(cx.listener(
             move |_, _: &ScrollEvent, _, cx| {
@@ -802,40 +907,305 @@ impl RootView {
         ))
     }
 
-    /// The rows of `transcript`, held for `key`, each tagged
-    /// `{line_ids}-{n}`; a row of a tool call expands or collapses the
-    /// call's output on a press.
+    /// The rows of a transcript's `lines`, each tagged `{line_ids}-{n}`
+    /// and drawn through `select`, which registers each line's text and
+    /// paints its selected bytes; a click on a row of a tool call expands
+    /// or collapses the call's output ([`Self::transcript_release`]).
     pub(crate) fn transcript_rows(
         line_ids: &str,
-        key: &(HostKey, TranscriptKey),
-        transcript: &Transcript,
+        lines: Vec<TranscriptLine>,
+        select: Option<&SelectDraw>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
+        let keys = transcript_keys(&lines);
         let mut rows = Vec::new();
-        for (at, line) in transcript_lines(transcript).into_iter().enumerate() {
+        for (at, (line, (entry, index))) in lines.into_iter().zip(keys).enumerate() {
             let colour = match line.kind {
                 LineKind::Answer | LineKind::Tool => t.text,
                 LineKind::Output | LineKind::Muted => t.muted,
                 LineKind::Error => t.danger,
             };
             let name = format!("{line_ids}-{at}");
+            let source = UnitSource::TranscriptLine { line: index };
+            let text = select_text(select, &entry, source, line.text, Vec::new());
             let row = div()
                 .id(ElementId::Name(SharedString::from(name.clone())))
                 .driver_id(|| name)
                 .text_color(gpui::rgb(colour))
-                .child(line.text);
-            let Some(entry) = line.entry else {
-                rows.push(row.into_any_element());
-                continue;
+                .child(text);
+            let row = if line.entry.is_some() {
+                row.cursor_pointer()
+            } else {
+                row
             };
-            let key = key.clone();
-            let row = on_press(row.cursor_pointer(), cx, move |this, _, _| {
-                this.toggle_transcript_entry(&key, &entry);
-            });
             rows.push(row.into_any_element());
         }
         rows
+    }
+
+    /// What pane `pane_id` draws its transcript's `lines` with: their
+    /// units, its selection on them in the terminal's selection colour,
+    /// and its registry, emptied first for this frame's texts. A selection
+    /// whose ends no longer name a line is cleared.
+    pub(crate) fn transcript_select_draw(
+        &self,
+        pane_id: &str,
+        lines: &[TranscriptLine],
+        cx: &Context<Self>,
+    ) -> Option<SelectDraw> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        let mut select = scroll.select.borrow_mut();
+        select.registry.borrow_mut().forget();
+        let units = Units::from_transcript(lines);
+        let ends = select
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.ordered(&units));
+        if ends.is_none() {
+            select.selection = None;
+            select.picked = None;
+        }
+        let selected = ends.as_ref().and_then(|ordered| units.resolve(ordered));
+        let palette = &theme(cx).terminal;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an alpha is a fraction gpui holds as an f32"
+        )]
+        let alpha = palette.selection_alpha as f32;
+        let tint = gpui::rgb(crate::appearance::packed(palette.selection));
+        let background = gpui::Hsla::from(tint).opacity(alpha);
+        Some(SelectDraw {
+            units: Rc::new(units),
+            selected,
+            ends,
+            background,
+            registry: select.registry.clone(),
+        })
+    }
+
+    /// `column`, pane `pane_id`'s log, taking the presses, drags and
+    /// releases that select its transcript's text.
+    fn selecting(column: Stateful<Div>, pane_id: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let (down, up, out) = (pane_id.to_owned(), pane_id.to_owned(), pane_id.to_owned());
+        column
+            .child(Self::drag_follower(pane_id, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.transcript_press(&down, event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                    this.transcript_release(&up, (event.position, true), cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                    this.transcript_release(&out, (event.position, false), cx);
+                }),
+            )
+    }
+
+    /// A mark that, once painted, follows every move of the held left
+    /// button in the window, so a selection of pane `pane_id`'s transcript
+    /// keeps following the pointer once it leaves the log.
+    fn drag_follower(pane_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let root = cx.entity().downgrade();
+        let pane = pane_id.to_owned();
+        gpui::canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    let held = event.pressed_button == Some(MouseButton::Left);
+                    if phase == gpui::DispatchPhase::Bubble && held {
+                        // Fails only when the root view has gone.
+                        root.update(cx, |this, cx| {
+                            this.transcript_drag(&pane, event.position, cx);
+                        })
+                        .ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The units of the transcript pane `pane_id` follows, when one is held.
+    fn pane_transcript_lines(&self, pane_id: &str) -> Option<Vec<TranscriptLine>> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        Some(transcript_lines(self.transcripts.get(&scroll.key)?))
+    }
+
+    /// The position in pane `pane_id`'s transcript text at window point
+    /// `at`: the line under it inside the log, else the nearest line.
+    fn transcript_pos(&self, pane_id: &str, at: Point<Pixels>) -> Option<TextPos> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        let viewport = Some(scroll.handle.bounds());
+        let select = scroll.select.borrow();
+        let (entry, unit, byte) = select.registry.borrow().hit(at, viewport)?;
+        Some(TextPos { entry, unit, byte })
+    }
+
+    /// A left press on pane `pane_id`'s log: Shift extends the selection to
+    /// the press; otherwise the press starts one, of characters, the word
+    /// or the line by its click count.
+    fn transcript_press(&mut self, pane_id: &str, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if let Some((key, call)) = self.toggle_to_undo(pane_id, event) {
+            self.toggle_transcript_entry(&key, &call);
+        }
+        let Some(lines) = self.pane_transcript_lines(pane_id) else {
+            return;
+        };
+        let Some(pos) = self.transcript_pos(pane_id, event.position) else {
+            return;
+        };
+        let Some(scroll) = self.run_scrolls.get_mut(pane_id) else {
+            return;
+        };
+        let select = scroll.select.get_mut();
+        let single = event.click_count <= 1;
+        let extend = event.modifiers.shift && single && select.selection.is_some();
+        select.press = Some(Press {
+            at: event.position,
+            click: single && !extend,
+        });
+        if extend {
+            if let Some(selection) = select.selection.as_mut() {
+                selection.focus = pos;
+            }
+        } else {
+            let units = Units::from_transcript(&lines);
+            let (selection, picked) = pressed_selection(&units, pos, event.click_count);
+            select.selection = Some(selection);
+            select.picked = picked;
+        }
+        cx.notify();
+    }
+
+    /// Forgets the toggle pane `pane_id`'s last click made, and gives it
+    /// back as (transcript, call) when `event` is the double or triple
+    /// click that click began, on the same line: that toggle is undone, so
+    /// a double or triple click leaves the call as it was.
+    fn toggle_to_undo(
+        &mut self,
+        pane_id: &str,
+        event: &MouseDownEvent,
+    ) -> Option<((HostKey, TranscriptKey), String)> {
+        let under = self.tool_line_at(pane_id, event.position);
+        let scroll = self.run_scrolls.get_mut(pane_id)?;
+        let toggled = scroll.select.get_mut().toggled.take()?;
+        let same = under.is_some_and(|(_, line)| line == toggled.line);
+        (event.click_count >= 2 && same).then(|| (scroll.key.clone(), toggled.call))
+    }
+
+    /// The held left button moved to window point `at` over pane
+    /// `pane_id`'s log: the selection runs to the text there, from the word
+    /// or line a double or triple click picked ([`chat_select::widen`]).
+    fn transcript_drag(&mut self, pane_id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let pressed = self
+            .run_scrolls
+            .get(pane_id)
+            .and_then(|scroll| scroll.select.borrow().press);
+        let Some(press) = pressed.filter(|press| press.at != at) else {
+            return;
+        };
+        let (Some(lines), Some(pos)) = (
+            self.pane_transcript_lines(pane_id),
+            self.transcript_pos(pane_id, at),
+        ) else {
+            return;
+        };
+        let Some(scroll) = self.run_scrolls.get_mut(pane_id) else {
+            return;
+        };
+        let select = scroll.select.get_mut();
+        select.press = Some(Press {
+            click: false,
+            ..press
+        });
+        let widened = match &select.picked {
+            Some(picked) => chat_select::widen(&Units::from_transcript(&lines), picked, pos),
+            None => select.selection.clone().map(|selection| Selection {
+                focus: pos,
+                ..selection
+            }),
+        };
+        if widened.is_some() && widened != select.selection {
+            select.selection = widened;
+            cx.notify();
+        }
+    }
+
+    /// The left button came up at window point `at`, over pane `pane_id`'s
+    /// log when `inside`, ending the press there: a click (inside, where it
+    /// went down) clears the selection and expands or collapses the tool
+    /// call under it, which a double click undoes; any other release copies
+    /// the selection while the terminal's copy-on-select setting is on.
+    fn transcript_release(
+        &mut self,
+        pane_id: &str,
+        (at, inside): (Point<Pixels>, bool),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.run_scrolls.get_mut(pane_id) else {
+            return;
+        };
+        let select = scroll.select.get_mut();
+        let Some(press) = select.press.take() else {
+            return;
+        };
+        if !(inside && press.click && press.at == at) {
+            let text = self.transcript_selected_text(pane_id);
+            if let Some(text) = mouse::copy_on_select(CopyOnSelect::get(cx), Some(text)) {
+                self.copy_to_clipboard(&text, cx);
+            }
+            return;
+        }
+        select.selection = None;
+        select.picked = None;
+        let key = scroll.key.clone();
+        if let Some((call, line)) = self.tool_line_at(pane_id, at) {
+            self.toggle_transcript_entry(&key, &call);
+            if let Some(scroll) = self.run_scrolls.get_mut(pane_id) {
+                scroll.select.get_mut().toggled = Some(Toggled { call, line });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The tool call whose line pane `pane_id` drew under window point
+    /// `at`, with that line's (entry key, index), if any.
+    fn tool_line_at(&self, pane_id: &str, at: Point<Pixels>) -> Option<(String, (String, u32))> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        let lines = self.pane_transcript_lines(pane_id)?;
+        let select = scroll.select.borrow();
+        let registry = select.registry.borrow();
+        let drawn = registry.inside(at, Some(scroll.handle.bounds()))?;
+        let line = (drawn.entry.clone(), drawn.unit);
+        let at = transcript_keys(&lines)
+            .iter()
+            .position(|key| *key == line)?;
+        Some((lines.into_iter().nth(at)?.entry?, line))
+    }
+
+    /// Ctrl+C in pane `pane_id` while its transcript holds a selection:
+    /// copies the selection; whether it did.
+    pub(crate) fn copy_transcript_selection(
+        &mut self,
+        pane_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = self.transcript_selected_text(pane_id);
+        if text.is_empty() {
+            return false;
+        }
+        self.copy_to_clipboard(&text, cx);
+        true
     }
 
     /// Expands the output of tool call `id` in `key`'s transcript, or
@@ -844,6 +1214,38 @@ impl RootView {
         if let Some(transcript) = self.transcripts.get_mut(key) {
             transcript.toggle(id);
         }
+    }
+
+    /// The (entry key, unit index, byte) of the transcript text pane
+    /// `pane_id` drew at window point `at`, as a press there selects from.
+    #[must_use]
+    pub fn transcript_hit(
+        &self,
+        pane_id: &str,
+        at: gpui::Point<Pixels>,
+    ) -> Option<(String, u32, usize)> {
+        self.transcript_pos(pane_id, at)
+            .map(|pos| (pos.entry, pos.unit, pos.byte))
+    }
+
+    /// The text pane `pane_id`'s transcript selection copies: the selected
+    /// part of each line, prefixes included, joined by newlines; empty with
+    /// none.
+    #[must_use]
+    pub fn transcript_selected_text(&self, pane_id: &str) -> String {
+        let (Some(scroll), Some(lines)) = (
+            self.run_scrolls.get(pane_id),
+            self.pane_transcript_lines(pane_id),
+        ) else {
+            return String::new();
+        };
+        let units = Units::from_transcript(&lines);
+        let select = scroll.select.borrow();
+        select
+            .selection
+            .as_ref()
+            .map(|selection| chat_select::selected_text(&units, selection))
+            .unwrap_or_default()
     }
 
     /// The stats line pane `pane_id` draws for the run it follows.

@@ -149,13 +149,19 @@ pub(crate) enum LineKind {
     Muted,
 }
 
+/// The key the hidden-entries note line is drawn under, in place of an
+/// entry id.
+pub(crate) const HIDDEN_NOTE_KEY: &str = "note:hidden";
+
 /// One drawn line of a transcript; `entry` names the tool call a click on
-/// it expands or collapses.
+/// it expands or collapses, and `drawn_by` the entry that drew it (the
+/// hidden-entries note's [`HIDDEN_NOTE_KEY`]), which a selection keys on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptLine {
     pub text: String,
     pub kind: LineKind,
     pub entry: Option<String>,
+    pub drawn_by: String,
 }
 
 /// The lines `transcript` draws, in entry order.
@@ -163,11 +169,11 @@ pub(crate) fn transcript_lines(transcript: &Transcript) -> Vec<TranscriptLine> {
     let mut lines = Vec::new();
     if transcript.hidden > 0 {
         let note = format!("… {} earlier entries not shown", transcript.hidden);
-        lines.push(plain(note, LineKind::Muted));
+        lines.push(plain(note, LineKind::Muted, HIDDEN_NOTE_KEY));
     }
     for entry in &transcript.entries {
         match entry {
-            ChatEntry::Answer { text, .. } => answer_lines(text, &mut lines),
+            ChatEntry::Answer { id, text, .. } => answer_lines(id, text, &mut lines),
             ChatEntry::Tool {
                 id,
                 name,
@@ -184,28 +190,31 @@ pub(crate) fn transcript_lines(transcript: &Transcript) -> Vec<TranscriptLine> {
                 };
                 tool_lines(&call, &mut lines);
             }
-            ChatEntry::System { text, .. } => lines.push(plain(text.clone(), LineKind::Muted)),
+            ChatEntry::System { id, text } => {
+                lines.push(plain(text.clone(), LineKind::Muted, id));
+            }
             _ => {}
         }
     }
     lines
 }
 
-/// A line no click acts on.
-fn plain(text: String, kind: LineKind) -> TranscriptLine {
+/// A line no click acts on, drawn by `drawn_by`.
+fn plain(text: String, kind: LineKind, drawn_by: &str) -> TranscriptLine {
     TranscriptLine {
         text,
         kind,
         entry: None,
+        drawn_by: drawn_by.to_owned(),
     }
 }
 
-/// An answer's lines: the first after `●`, the rest indented under it.
-fn answer_lines(text: &str, lines: &mut Vec<TranscriptLine>) {
+/// Answer `id`'s lines: the first after `●`, the rest indented under it.
+fn answer_lines(id: &str, text: &str, lines: &mut Vec<TranscriptLine>) {
     let mut rows = text.lines();
     let first = rows.next().unwrap_or_default();
-    lines.push(plain(format!("● {first}"), LineKind::Answer));
-    lines.extend(rows.map(|row| plain(format!("  {row}"), LineKind::Answer)));
+    lines.push(plain(format!("● {first}"), LineKind::Answer, id));
+    lines.extend(rows.map(|row| plain(format!("  {row}"), LineKind::Answer, id)));
 }
 
 /// A tool call as its lines draw it.
@@ -224,6 +233,7 @@ fn tool_lines(call: &ToolCall<'_>, lines: &mut Vec<TranscriptLine>) {
         text,
         kind,
         entry: Some(call.id.to_owned()),
+        drawn_by: call.id.to_owned(),
     };
     let head = if call.summary.is_empty() {
         format!("● {}", call.name)
@@ -299,11 +309,12 @@ mod tests {
             .collect()
     }
 
-    fn line(text: &str, kind: LineKind, entry: Option<&str>) -> TranscriptLine {
+    fn line(text: &str, kind: LineKind, entry: Option<&str>, drawn_by: &str) -> TranscriptLine {
         TranscriptLine {
             text: text.to_owned(),
             kind,
             entry: entry.map(str::to_owned),
+            drawn_by: drawn_by.to_owned(),
         }
     }
 
@@ -371,8 +382,8 @@ mod tests {
         assert_eq!(
             transcript_lines(&transcript),
             vec![
-                line("● first", LineKind::Answer, None),
-                line("  second", LineKind::Answer, None),
+                line("● first", LineKind::Answer, None, "a1"),
+                line("  second", LineKind::Answer, None, "a1"),
             ]
         );
     }
@@ -383,8 +394,8 @@ mod tests {
         assert_eq!(
             transcript_lines(&transcript),
             vec![
-                line("● Bash(cargo test)", LineKind::Tool, Some("t1")),
-                line("  ⎿  Running…", LineKind::Muted, Some("t1")),
+                line("● Bash(cargo test)", LineKind::Tool, Some("t1"), "t1"),
+                line("  ⎿  Running…", LineKind::Muted, Some("t1"), "t1"),
             ]
         );
     }
@@ -395,13 +406,13 @@ mod tests {
         assert_eq!(
             transcript_lines(&transcript),
             vec![
-                line("● Bash(ls)", LineKind::Tool, Some("t1")),
-                line("  ⎿  l1", LineKind::Output, Some("t1")),
-                line("     l2", LineKind::Output, Some("t1")),
-                line("     l3", LineKind::Output, Some("t1")),
-                line("     l4", LineKind::Output, Some("t1")),
-                line("     l5", LineKind::Output, Some("t1")),
-                line("     … +2 lines", LineKind::Muted, Some("t1")),
+                line("● Bash(ls)", LineKind::Tool, Some("t1"), "t1"),
+                line("  ⎿  l1", LineKind::Output, Some("t1"), "t1"),
+                line("     l2", LineKind::Output, Some("t1"), "t1"),
+                line("     l3", LineKind::Output, Some("t1"), "t1"),
+                line("     l4", LineKind::Output, Some("t1"), "t1"),
+                line("     l5", LineKind::Output, Some("t1"), "t1"),
+                line("     … +2 lines", LineKind::Muted, Some("t1"), "t1"),
             ]
         );
     }
@@ -433,9 +444,9 @@ mod tests {
         assert_eq!(
             transcript_lines(&transcript),
             vec![
-                line("● Bash(ls)", LineKind::Tool, Some("t1")),
-                line("  ⎿  no", LineKind::Error, Some("t1")),
-                line("     such", LineKind::Error, Some("t1")),
+                line("● Bash(ls)", LineKind::Tool, Some("t1"), "t1"),
+                line("  ⎿  no", LineKind::Error, Some("t1"), "t1"),
+                line("     such", LineKind::Error, Some("t1"), "t1"),
             ]
         );
     }
@@ -458,7 +469,7 @@ mod tests {
         ]);
         assert_eq!(
             transcript_lines(&transcript),
-            vec![line("cleared", LineKind::Muted, None)],
+            vec![line("cleared", LineKind::Muted, None, "s1")],
             "only the system row draws"
         );
     }
@@ -470,8 +481,13 @@ mod tests {
         assert_eq!(
             transcript_lines(&transcript),
             vec![
-                line("… 12 earlier entries not shown", LineKind::Muted, None),
-                line("● hi", LineKind::Answer, None),
+                line(
+                    "… 12 earlier entries not shown",
+                    LineKind::Muted,
+                    None,
+                    HIDDEN_NOTE_KEY
+                ),
+                line("● hi", LineKind::Answer, None, "a1"),
             ]
         );
     }

@@ -392,7 +392,9 @@ The pane follows the run's transcript (`RootView::follow_transcripts` sends `Fol
 
 `… {n} earlier entries not shown` leads when entries were dropped; thinking and turn-end records draw nothing.
 
-A click on any line of a tool call expands or collapses its output (the expanded set survives a fresh transcript). The client and the daemon each keep the last 500 entries of a run's transcript, an append upserting by entry id.
+A plain click on any line of a tool call expands or collapses its output, on release rather than press (the expanded set survives a fresh transcript); a double or triple click never toggles. The client and the daemon each keep the last 500 entries of a run's transcript, an append upserting by entry id.
+
+The transcript's text selects like a terminal's, in the terminal's selection colour (`text_select.rs` holds the text hit-test registry and selection painting the phone Chat shares): a drag selects across lines, a double-click a word, a triple-click a whole line, and Shift+click extends an existing selection; a plain click clears it. Ctrl+C (Cmd+C on a Mac, Shift allowed) in the focused pane copies the selection with its `●` and `⎿` prefixes, lines joined by a newline, and the Copied chip shows as for the terminal; with the terminal's copy-on-selection setting on (the default), releasing a selection drag copies it. The selection survives a transcript update that keeps its lines, and clears when its lines go or the pane follows another target. Specs read it through `RootView::transcript_hit` and `transcript_selected_text`.
 
 The snapshot's recent actions (the last 200 the daemon keeps) show until the host answers the follow, on a host that refuses it with anything but `not_found` (an older host's `unsupported_message`), and on a host that does not list `dispatch_runs`; a `not_found` refusal keeps the transcript held. The run folder the sidebar menu copies holds the full stream. A follow kind this client does not know draws a muted note, "This pane needs a newer app.".
 

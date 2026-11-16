@@ -10,6 +10,7 @@ use protocol::ChatEntry;
 
 use crate::chat::{self, DisplayRow, RunItem, ScriptRow};
 use crate::shell_lines;
+use crate::transcript_view::TranscriptLine;
 use crate::viewer_md_view::MdDoc;
 
 /// A position in the chat's selectable text: the entry it belongs to, the
@@ -39,6 +40,9 @@ pub(crate) enum UnitSource {
     ToolInput,
     /// An open tool card's result.
     ToolResult,
+    /// A followed run's or subagent's transcript line, by its index within
+    /// its entry ([`transcript_keys`]).
+    TranscriptLine { line: u32 },
 }
 
 /// One selectable text of a chat.
@@ -113,6 +117,27 @@ impl Units {
                 }
             }
         }
+        Units::indexed(units)
+    }
+
+    /// The selectable texts of a transcript's `lines`, one unit per line in
+    /// drawing order, each keyed as [`transcript_keys`] gives it.
+    pub(crate) fn from_transcript(lines: &[TranscriptLine]) -> Units {
+        let units = transcript_keys(lines)
+            .into_iter()
+            .zip(lines)
+            .map(|((entry, index), line)| Unit {
+                entry,
+                index,
+                source: UnitSource::TranscriptLine { line: index },
+                text: line.text.clone(),
+            })
+            .collect();
+        Units::indexed(units)
+    }
+
+    /// `units` with the lookup by entry and source built over them.
+    fn indexed(units: Vec<Unit>) -> Units {
         let mut by_source: HashMap<String, HashMap<UnitSource, usize>> = HashMap::new();
         for (at, unit) in units.iter().enumerate() {
             by_source
@@ -246,6 +271,22 @@ impl Units {
             byte: last.text.len(),
         })
     }
+}
+
+/// The (entry key, index within that entry) of each of a transcript's
+/// `lines`, in drawing order: the id of the entry that drew the line (the
+/// hidden-entries note's fixed key), and the line's index among that
+/// entry's lines, so a line keeps its key while lines come or go above it.
+pub(crate) fn transcript_keys(lines: &[TranscriptLine]) -> Vec<(String, u32)> {
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut keys = Vec::with_capacity(lines.len());
+    for line in lines {
+        let entry = line.drawn_by.clone();
+        let count = counts.entry(entry.clone()).or_default();
+        keys.push((entry, *count));
+        *count = count.saturating_add(1);
+    }
+    keys
 }
 
 /// Pushes the units of the cards a script draws under its line, in drawing
@@ -486,7 +527,8 @@ pub(crate) fn char_floor(text: &str, byte: usize) -> usize {
 
 /// The text `selection` covers in `units`: each selected unit's part from
 /// its start byte to its end byte, units of one entry joined with a
-/// newline and entries by a blank line; nothing for an empty or
+/// newline and entries by a blank line, a transcript's lines each by a
+/// newline whatever their entries; nothing for an empty or
 /// unresolvable selection.
 pub(crate) fn selected_text(units: &Units, selection: &Selection) -> String {
     let Some((start, end)) = selection.ordered(units) else {
@@ -509,8 +551,9 @@ pub(crate) fn selected_text(units: &Units, selection: &Selection) -> String {
         } else {
             unit.text.len()
         };
+        let line = matches!(unit.source, UnitSource::TranscriptLine { .. });
         match entry {
-            Some(id) if id == unit.entry.as_str() => text.push('\n'),
+            Some(id) if line || id == unit.entry.as_str() => text.push('\n'),
             Some(_) => text.push_str("\n\n"),
             None => {}
         }
@@ -1152,6 +1195,116 @@ mod tests {
         );
         let copied = selection.map(|selection| selected_text(&units, &selection));
         assert_eq!(copied.as_deref(), Some("pha bravo"));
+    }
+
+    fn line(text: &str, entry: Option<&str>, drawn_by: &str) -> TranscriptLine {
+        TranscriptLine {
+            text: text.to_owned(),
+            kind: crate::transcript_view::LineKind::Answer,
+            entry: entry.map(str::to_owned),
+            drawn_by: drawn_by.to_owned(),
+        }
+    }
+
+    /// A note, a two-line answer, a tool call with two output lines and a
+    /// system line, as a transcript draws them.
+    fn transcript() -> Vec<TranscriptLine> {
+        vec![
+            line(
+                "… 3 earlier entries not shown",
+                None,
+                crate::transcript_view::HIDDEN_NOTE_KEY,
+            ),
+            line("● alpha bravo", None, "a1"),
+            line("  charlie delta", None, "a1"),
+            line("● Bash(ls)", Some("t1"), "t1"),
+            line("  ⎿  a.rs", Some("t1"), "t1"),
+            line("     b.rs", Some("t1"), "t1"),
+            line("cleared", None, "s1"),
+        ]
+    }
+
+    fn transcript_line(line: u32) -> UnitSource {
+        UnitSource::TranscriptLine { line }
+    }
+
+    #[test]
+    fn transcript_units_key_entry_lines_by_id_and_the_rest_by_count() {
+        let units = Units::from_transcript(&transcript());
+        let expected = vec![
+            (
+                crate::transcript_view::HIDDEN_NOTE_KEY.to_owned(),
+                0,
+                transcript_line(0),
+                "… 3 earlier entries not shown".to_owned(),
+            ),
+            (
+                "a1".to_owned(),
+                0,
+                transcript_line(0),
+                "● alpha bravo".to_owned(),
+            ),
+            (
+                "a1".to_owned(),
+                1,
+                transcript_line(1),
+                "  charlie delta".to_owned(),
+            ),
+            (
+                "t1".to_owned(),
+                0,
+                transcript_line(0),
+                "● Bash(ls)".to_owned(),
+            ),
+            (
+                "t1".to_owned(),
+                1,
+                transcript_line(1),
+                "  ⎿  a.rs".to_owned(),
+            ),
+            (
+                "t1".to_owned(),
+                2,
+                transcript_line(2),
+                "     b.rs".to_owned(),
+            ),
+            ("s1".to_owned(), 0, transcript_line(0), "cleared".to_owned()),
+        ];
+        assert_eq!(shape(&units), expected);
+        assert_eq!(units.locate("t1", transcript_line(2)), Some((5, 2)));
+    }
+
+    #[test]
+    fn selected_transcript_text_joins_lines_with_a_newline() {
+        let units = Units::from_transcript(&transcript());
+        let across = Selection {
+            anchor: pos("a1", 1, 10),
+            focus: pos("t1", 1, 7),
+        };
+        assert_eq!(
+            selected_text(&units, &across),
+            "delta\n● Bash(ls)\n  ⎿  ",
+            "prefixes included, one newline between lines of any entries"
+        );
+    }
+
+    #[test]
+    fn a_transcript_word_and_a_whole_line_select_their_text() {
+        let units = Units::from_transcript(&transcript());
+        let word = units
+            .word_around(&pos("a1", 0, 12))
+            .map(|(anchor, focus)| Selection { anchor, focus });
+        assert_eq!(
+            word.map(|word| selected_text(&units, &word)).as_deref(),
+            Some("bravo")
+        );
+        let whole = Selection {
+            anchor: pos("t1", 2, 0),
+            focus: units
+                .clamp(&pos("t1", 2, usize::MAX))
+                .unwrap_or_else(|| pos("t1", 2, 0)),
+        };
+        assert_eq!(selected_text(&units, &whole), "     b.rs");
     }
 
     #[test]

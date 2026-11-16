@@ -377,7 +377,9 @@ impl RootView {
         let rows = match self.transcripts.get(&held) {
             Some(transcript) => {
                 let line_ids = format!("subagent-line-{pane_id}");
-                Self::transcript_rows(&line_ids, &held, transcript, cx)
+                let lines = transcript_lines(transcript);
+                let select = self.transcript_select_draw(pane_id, &lines, cx);
+                Self::transcript_rows(&line_ids, lines, select.as_ref(), cx)
             }
             None => Vec::new(),
         };

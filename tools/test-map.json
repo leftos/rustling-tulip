@@ -1913,7 +1913,13 @@
       "paths": [
         "apps/native/src/chat_select.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native) & test(/^chat_select::/)"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^chat_select::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_transcript::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/text_select.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^chat_view::/) | test(/^text_select::/))) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_session::/) | test(/^ui_transcript::/) | test(/^ui_dispatch::/) | test(/^ui_subagents::/) | test(/^ui_viewer_md::/)))"
     },
     {
       "paths": [

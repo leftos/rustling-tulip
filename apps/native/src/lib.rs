@@ -201,6 +201,7 @@ mod term;
 mod term_input;
 mod term_view;
 mod text_input;
+mod text_select;
 mod theme;
 pub mod theme_store;
 pub mod theme_tokens;

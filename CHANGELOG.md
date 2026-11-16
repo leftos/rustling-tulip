@@ -10,6 +10,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Each Claude account in the accounts panel and Settings › Accounts shows its extra-usage spend and its prepaid credit balance.
 - Settings › Accounts can let an account spend its prepaid credits once every account's usage is used up.
 
+### Added
+
+- Select text in a subagent or dispatch run pane by dragging or double- or triple-clicking, and copy it with Ctrl+C.
+
 ### Fixed
 
 - Fetching a file from a remote host no longer hangs on a stalled network drive, a pipe, or a file that keeps growing.

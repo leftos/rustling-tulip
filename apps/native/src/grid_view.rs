@@ -2086,10 +2086,17 @@ impl RootView {
             return match self.panes.get(pane_id) {
                 Some(slot) => {
                     let handle = slot.view.read(cx).focus_handle();
+                    let pane = pane_id.to_owned();
                     note.track_focus(&handle)
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             handle.focus(window, cx);
                         })
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            let copy = crate::dispatch_view::is_copy_key(&event.keystroke);
+                            if copy && this.copy_transcript_selection(&pane, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
                         .into_any_element()
                 }
                 None => note.into_any_element(),
