@@ -163,9 +163,10 @@ const PHONE_HOME_ROWS: usize = 4;
 /// The working session whose sheet the `phone-sheet` shot opens, and
 /// whose page the `phone-session` shot shows.
 const PHONE_SHEET_SESSION: &str = "b-pwa";
-/// How many rows the `phone-session` shot's chat draws: each of its six
-/// entries, its three reads being too few to fold.
-const PHONE_SESSION_ROWS: usize = 6;
+/// How many rows the `phone-session` shot's chat draws: each of its seven
+/// top-level entries, its three reads being too few to fold, and its script
+/// one row (the calls it ran are not rows).
+const PHONE_SESSION_ROWS: usize = 7;
 /// The prompt the `phone-session-sheet` shot's sheet raises: the `chat`
 /// view's question.
 const PHONE_SHEET_PROMPT: &str = "ask-1";
@@ -4157,9 +4158,21 @@ fn footer_run() -> Vec<ChatEntry> {
     ]
 }
 
+/// The `phone-session` shot's done Code Mode script, which ran two reads.
+fn phone_script() -> ChatEntry {
+    let facts = ScriptFacts {
+        description: "Check the pill gap in the footer spec".to_owned(),
+        eval: Some(7),
+        ms: Some(1800),
+        error: None,
+    };
+    chat_script("x1", facts, false)
+}
+
 /// The `phone-session` shot's conversation: a message, three read calls (too
-/// few to fold on the phone), an answer with a little Markdown and a Bash
-/// call, the agent working on.
+/// few to fold on the phone), an answer with a little Markdown, a Bash call
+/// and a done script that ran two reads (drawn as its one line), the agent
+/// working on.
 fn phone_chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
     let tool = chat_tool;
     let answer = "The install step now **checks the hash** before it unpacks:\n\n\
@@ -4203,6 +4216,27 @@ fn phone_chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessa
             ToolKind::Run,
             "pnpm -C apps/pwa test",
             Some("Tests  42 passed (42)"),
+        ),
+        phone_script(),
+        ran_by(
+            tool(
+                "x1r1",
+                "Read",
+                ToolKind::Read,
+                "apps/native/src/footer.rs",
+                Some("212 lines"),
+            ),
+            "x1",
+        ),
+        ran_by(
+            tool(
+                "x1r2",
+                "Read",
+                ToolKind::Read,
+                "apps/native/tests/ui/ui_footer.rs",
+                Some("214 lines"),
+            ),
+            "x1",
         ),
     ];
     DaemonMessage::Chat {

@@ -16,8 +16,8 @@ use gpui::{
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, SessionSnapshot, ToolKind,
-    ToolOutcome, WorkShell,
+    ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, ScriptFacts,
+    SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
@@ -2634,4 +2634,130 @@ fn the_chat_registry_is_forgotten_off_the_chat_page(cx: &mut TestAppContext) {
         None,
         "no text is hit once the chat is not drawn"
     );
+}
+
+/// Call `entry` with its `parent_id` set to `parent`, and, when `facts` is
+/// given, made a Code Mode script call carrying them.
+fn scripted(entry: ChatEntry, facts: Option<ScriptFacts>, parent: Option<&str>) -> ChatEntry {
+    let ChatEntry::Tool {
+        id,
+        name,
+        summary,
+        input,
+        result,
+        tail_paths,
+        kind,
+        ..
+    } = entry
+    else {
+        return entry;
+    };
+    ChatEntry::Tool {
+        id,
+        name,
+        summary,
+        input,
+        result,
+        parent_id: parent.map(str::to_owned),
+        tail_paths,
+        kind: if facts.is_some() {
+            ToolKind::Script
+        } else {
+            kind
+        },
+        script: facts,
+    }
+}
+
+/// A user row, a done script `s1` with a long description and four inner
+/// calls of four tools (so four chips), and a failed script `s2` with a
+/// long error.
+fn wide_scripts() -> Vec<ChatEntry> {
+    let description = "Read the footer, its spec and the pill gap rule, then grep every \
+                       caller of pill_gap and fetch the design note it cites";
+    let error = "TypeError: undefined is not an object (evaluating 'footer.pills[3].width') \
+                 at sumPillWidths (repl:4:21) while measuring the footer's pill row widths";
+    let mut failed = scripted(
+        call("s2", "REPL", ToolKind::Script),
+        Some(ScriptFacts {
+            description: "Sum the pill widths".to_owned(),
+            eval: Some(4),
+            ms: Some(300),
+            error: Some(error.to_owned()),
+        }),
+        None,
+    );
+    if let ChatEntry::Tool {
+        result: Some(outcome),
+        ..
+    } = &mut failed
+    {
+        outcome.is_error = true;
+    }
+    vec![
+        user("u1"),
+        scripted(
+            call("s1", "REPL", ToolKind::Script),
+            Some(ScriptFacts {
+                description: description.to_owned(),
+                eval: Some(3),
+                ms: Some(1200),
+                error: None,
+            }),
+            None,
+        ),
+        scripted(call("i1", "Read", ToolKind::Read), None, Some("s1")),
+        scripted(call("i2", "Grep", ToolKind::Search), None, Some("s1")),
+        scripted(call("i3", "Bash", ToolKind::Run), None, Some("s1")),
+        scripted(call("i4", "WebFetch", ToolKind::Other), None, Some("s1")),
+        failed,
+    ]
+}
+
+#[gpui::test]
+fn a_script_draws_as_one_wrapping_line_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, wide_scripts());
+    // A phone's screen.
+    h.cx.simulate_resize(gpui::size(px(390.0), px(874.0)));
+
+    let scripts: Vec<String> = phone_rows(&mut h, "a")
+        .into_iter()
+        .filter_map(|row| match row {
+            RowShape::Script { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scripts, ["s1", "s2"], "each script is one row");
+    assert!(drawn(&mut h, "chat-script-phone-s1"), "s1's line");
+    assert!(drawn(&mut h, "chat-script-phone-s2"), "s2's line");
+    let right = h.bounds("phone-chat").right() + px(1.0);
+    let mut parts: Vec<String> = (0..4)
+        .map(|n| format!("chat-script-chip-phone-s1-{n}"))
+        .collect();
+    parts.push("chat-script-meta-phone-s1".to_owned());
+    for part in &parts {
+        assert!(drawn(&mut h, part), "{part} is drawn");
+        assert!(
+            h.bounds(part).right() <= right,
+            "{part} stays within the phone's chat"
+        );
+    }
+    let (first, last) = (
+        h.bounds("chat-script-chip-phone-s1-0"),
+        h.bounds("chat-script-chip-phone-s1-3"),
+    );
+    assert!(
+        last.top() > first.top(),
+        "the chips wrap onto another line at the phone's width: line {:?}, meta {:?}, \
+         first chip {first:?}, last chip {last:?}",
+        h.bounds("chat-script-phone-s1"),
+        h.bounds("chat-script-meta-phone-s1"),
+    );
+    let error = h.bounds("chat-script-error-phone-s2");
+    assert!(
+        error.size.height > h.bounds("chat-script-phone-s2").size.height,
+        "the error wraps over more than one line"
+    );
+    assert!(error.right() <= right, "the error stays within the chat");
 }

@@ -930,7 +930,7 @@ A pane showing an interactive agent session that offers a chat has three views: 
 
   A script whose inner call names files to tail never folds. A lone script, or one in a group too short to fold (as on the phone), stands as its own row, so no minimum run hides a script. A script that runs in the background keeps its run marked `running` after its turn ends.
 
-  In both modes a script is one row holding its inner calls, drawn as one line (`script_line`, `script_row`): a `λ` in lilac, a mark (`…` working, `✓` waiting, `✕` danger), the description, meta such as `#12 · 3.2s`, then chips on the chip background (`2 read`, `1 ran`, `1 failed`, `1 WebFetch`). A failed script with an error shows the error text under the line, indented, in danger.
+  In both modes a script is one row holding its inner calls, drawn as one line (`script_line`, `script_row`): a `λ` in lilac, a mark (`…` working, `✓` waiting, `✕` danger), the description, meta such as `#12 · 3.2s`, then chips on the chip background (`2 read`, `1 ran`, `1 failed`, `1 WebFetch`). A failed script with an error shows the error text under the line, indented, in danger. When the row is too narrow, as on the phone, the meta and each chip move whole to the next line.
 
   A click on the line opens or closes the script call's card and its inner cards. A closed script keeps under its line the cards of its inner calls that tail files (their Tail button and box); opening it shows all its cards. A closed Compact run shows each of its scripts' lines under the run's line, and opening the run draws every item in place, scripts still as their lines.
 

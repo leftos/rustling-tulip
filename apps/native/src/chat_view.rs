@@ -3462,8 +3462,9 @@ fn script_row(
 
 /// A script's line: the λ mark, its state mark (tagged
 /// `chat-script-<running|done|failed>-<pane>-<id>`), its description, its
-/// number and time (tagged `chat-script-meta-<pane>-<id>`) and its chips;
-/// a click toggles the script call's card open.
+/// number and time (tagged `chat-script-meta-<pane>-<id>`) and its chips,
+/// wrapping onto further lines (the meta and each chip whole) when the row
+/// is too narrow; a click toggles the script call's card open.
 fn script_line_row(
     look: &RowLook<'_>,
     id: &str,
@@ -3495,8 +3496,10 @@ fn script_line_row(
         .id(ElementId::Name(SharedString::from(name.clone())))
         .driver_id(|| name)
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(8.0))
+        .gap_x(px(8.0))
+        .gap_y(px(2.0))
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
         .hover(move |style| style.text_color(gpui::rgb(hover_text)))
