@@ -1760,7 +1760,7 @@ impl RootView {
                 TabContent::Viewer { .. } => self
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
-                TabContent::Follow { source, .. } => Self::follow_tab_element(&tab.id, source, cx),
+                TabContent::Follow { source, .. } => self.follow_tab_element(&tab.id, source, cx),
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
                 TabContent::Dashboard => self.dashboard_tab_element(cx),
                 TabContent::Unknown => muted_note(

@@ -1417,6 +1417,8 @@ pub struct RootView {
     viewer_opens: viewer_tab::ViewerOpens,
     /// The follow tab opens out, and the tab one waits to activate.
     follow_opens: follow_tab_view::FollowOpens,
+    /// Each follow tab's scroll, by tab id, while the tab is in the layout.
+    follow_scrolls: HashMap<String, gpui::ScrollHandle>,
     /// The keyboard of the viewer tab shown.
     viewer_focus: FocusHandle,
     /// The Dashboard opens out, and the tab one waits to activate.
@@ -1953,6 +1955,7 @@ impl RootView {
             viewer_tabs: HashMap::new(),
             viewer_opens: viewer_tab::ViewerOpens::default(),
             follow_opens: follow_tab_view::FollowOpens::default(),
+            follow_scrolls: HashMap::new(),
             viewer_focus: cx.focus_handle(),
             dashboard_opens: dashboard_tab::DashboardOpens::default(),
             dashboard_answers: dashboard_tab::DashboardAnswers::default(),

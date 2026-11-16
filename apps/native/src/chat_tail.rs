@@ -1,15 +1,17 @@
-//! The Tail boxes under a chat's tool cards: each followed file of a
-//! session, keyed by session and path, with the host and request its
+//! The followed files that the Tail boxes under a chat's tool cards and the
+//! follow tabs read: each followed file of a session, keyed by session and
+//! path and held once for all its readers, with the host and request its
 //! `TailFile` went out on, whether it still waits for the follow's first
 //! (`reset`) chunk, its decoder (ANSI escape sequences stripped, `\r`
 //! dropped, UTF-8 decoded lossily across chunk edges), its newest
-//! [`MAX_LINES`] lines, whether it follows its bottom and the refusal it
-//! shows.
+//! [`MAX_LINES`] lines and the refusal it shows; and its readers, each with
+//! whether it follows its bottom. The first reader sends the `TailFile`,
+//! the last to go the `UntailFile`.
 //!
 //! It is plain data: the view sends the messages it returns and draws what
 //! it holds.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -177,38 +179,64 @@ impl Lines {
     }
 }
 
-/// One open Tail box.
+/// One follow of a file, held once for every reader of it: the Chat box
+/// under a tool card and the follow tabs of the same session and path all
+/// read the same lines, each keeping its own following flag.
 #[derive(Debug)]
 pub struct Tail {
     host: HostKey,
-    card: TailCard,
     request_id: String,
     /// Chunks are dropped until the follow's first, which carries `reset`.
     waiting: bool,
-    /// Its follow ran on a connection since replaced; asked again once its
-    /// chat loads there.
+    /// Its follow ran on a connection since replaced, or its session
+    /// ended; asked again once a reader is ready for it.
     stale: bool,
     decoder: Decoder,
     lines: Lines,
-    following: bool,
     error: Option<String>,
+    /// The Chat box reading it: the tool card it opened under and whether
+    /// it follows its bottom.
+    card: Option<(TailCard, bool)>,
+    /// The follow tabs reading it, by tab id, each with whether it follows
+    /// its bottom.
+    tabs: BTreeMap<String, bool>,
 }
 
 impl Tail {
-    /// The tool card the tail was opened from.
-    #[must_use]
-    pub fn card(&self) -> &TailCard {
-        &self.card
+    fn new(host: HostKey, request_id: String) -> Self {
+        Self {
+            host,
+            request_id,
+            waiting: true,
+            stale: false,
+            decoder: Decoder::default(),
+            lines: Lines::default(),
+            error: None,
+            card: None,
+            tabs: BTreeMap::new(),
+        }
     }
 
-    /// Whether the box follows its bottom: it does until scrolled up, and
-    /// again once scrolled back down.
+    /// The tool card the Chat box reading it was opened from.
+    #[must_use]
+    pub fn card(&self) -> Option<&TailCard> {
+        self.card.as_ref().map(|(card, _)| card)
+    }
+
+    /// Whether the Chat box follows its bottom: it does until scrolled up,
+    /// and again once scrolled back down.
     #[must_use]
     pub fn following(&self) -> bool {
-        self.following
+        self.card.as_ref().is_some_and(|(_, following)| *following)
     }
 
-    /// What the box draws.
+    /// Whether follow tab `tab_id` follows its bottom, by the same rule.
+    #[must_use]
+    pub fn tab_following(&self, tab_id: &str) -> bool {
+        self.tabs.get(tab_id).copied().unwrap_or(false)
+    }
+
+    /// What its readers draw.
     #[must_use]
     pub fn shows(&self) -> TailShows<'_> {
         if let Some(error) = &self.error {
@@ -226,9 +254,20 @@ impl Tail {
     fn followed(&self) -> bool {
         !self.stale && self.error.is_none()
     }
+
+    /// Whether nothing reads it any more.
+    fn unread(&self) -> bool {
+        self.card.is_none() && self.tabs.is_empty()
+    }
 }
 
-/// Every open Tail box, by session id and path.
+/// Who reads a follow: a Chat box from its tool card, or a follow tab.
+enum Reader<'a> {
+    Card(TailCard),
+    Tab(&'a str),
+}
+
+/// Every followed file, by session id and path.
 #[derive(Debug, Default)]
 pub struct ChatTails {
     tails: HashMap<(String, String), Tail>,
@@ -242,22 +281,51 @@ fn untail((session_id, path): (String, String)) -> ClientMessage {
     ClientMessage::UntailFile { session_id, path }
 }
 
+/// Whether `scrolled` of `max_scroll` pixels is at the bottom.
+fn at_bottom(scrolled: f32, max_scroll: f32) -> bool {
+    scrolled >= max_scroll - BOTTOM_SLACK
+}
+
 impl ChatTails {
-    /// The tail of `path` in session `session_id`, while its box is open.
+    /// The tail of `path` in session `session_id`, while its Chat box is
+    /// open.
     #[must_use]
     pub fn get(&self, session_id: &str, path: &str) -> Option<&Tail> {
-        self.tails.get(&key(session_id, path))
+        self.tails
+            .get(&key(session_id, path))
+            .filter(|tail| tail.card.is_some())
     }
 
-    /// Whether `path` in session `session_id` has its box open.
+    /// Whether `path` in session `session_id` has its Chat box open.
     #[must_use]
     pub fn is_open(&self, session_id: &str, path: &str) -> bool {
         self.get(session_id, path).is_some()
     }
 
-    /// Opens the box of `path` in session `session_id` on `host`, from
-    /// `card`, showing nothing yet: returns the `TailFile` to send under
-    /// `request_id`.
+    /// The follow that follow tab `tab_id` reads, while it reads one.
+    #[must_use]
+    pub fn tab(&self, tab_id: &str) -> Option<&Tail> {
+        self.tails
+            .values()
+            .find(|tail| tail.tabs.contains_key(tab_id))
+    }
+
+    /// The ids of every follow tab reading a follow, sorted.
+    #[must_use]
+    pub fn tab_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .tails
+            .values()
+            .flat_map(|tail| tail.tabs.keys().cloned())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Opens the Chat box of `path` in session `session_id` on `host`, from
+    /// `card`: the `TailFile` to send under `request_id` when no reader
+    /// follows the file yet or its follow was refused (the refusal clears
+    /// for every reader); else the box reads the follow as it stands.
     pub fn open(
         &mut self,
         host: HostKey,
@@ -265,75 +333,146 @@ impl ChatTails {
         path: &str,
         card: TailCard,
         request_id: String,
-    ) -> ClientMessage {
-        let tail = Tail {
-            host,
-            card,
-            request_id: request_id.clone(),
-            waiting: true,
-            stale: false,
-            decoder: Decoder::default(),
-            lines: Lines::default(),
-            following: true,
-            error: None,
-        };
-        self.tails.insert(key(session_id, path), tail);
-        ClientMessage::TailFile {
-            session_id: session_id.to_owned(),
-            path: path.to_owned(),
-            request_id: Some(request_id),
-        }
+    ) -> Option<ClientMessage> {
+        self.read(host, (session_id, path), Reader::Card(card), request_id)
     }
 
-    /// Closes the box of `path` in session `session_id`: the `UntailFile`
-    /// to send, with its host, while the daemon follows the file.
+    /// Follow tab `tab_id` reads `path` in session `session_id` on `host`:
+    /// the `TailFile` to send under `request_id` when no reader follows the
+    /// file yet or its follow was refused, as [`Self::open`]; else the tab
+    /// reads the follow as it stands.
+    pub fn open_tab(
+        &mut self,
+        host: HostKey,
+        session_id: &str,
+        path: &str,
+        tab_id: &str,
+        request_id: String,
+    ) -> Option<ClientMessage> {
+        self.read(host, (session_id, path), Reader::Tab(tab_id), request_id)
+    }
+
+    fn read(
+        &mut self,
+        host: HostKey,
+        (session_id, path): (&str, &str),
+        reader: Reader<'_>,
+        request_id: String,
+    ) -> Option<ClientMessage> {
+        let tail = self
+            .tails
+            .entry(key(session_id, path))
+            .or_insert_with(|| Tail::new(host, request_id.clone()));
+        // A new follow asks; so does a refused one, whose refusal clears
+        // for every reader until the daemon answers again.
+        let fresh = tail.card.is_none() && tail.tabs.is_empty();
+        let ask = (fresh || tail.error.is_some()).then(|| {
+            tail.error = None;
+            tail.stale = false;
+            tail.waiting = true;
+            tail.request_id.clone_from(&request_id);
+            ClientMessage::TailFile {
+                session_id: session_id.to_owned(),
+                path: path.to_owned(),
+                request_id: Some(request_id),
+            }
+        });
+        match reader {
+            Reader::Card(card) => tail.card = Some((card, true)),
+            Reader::Tab(tab_id) => {
+                tail.tabs.insert(tab_id.to_owned(), true);
+            }
+        }
+        ask
+    }
+
+    /// Closes the Chat box of `path` in session `session_id`: the
+    /// `UntailFile` to send, with its host, when it was the follow's last
+    /// reader and the daemon follows the file.
     pub fn close(&mut self, session_id: &str, path: &str) -> Option<(HostKey, ClientMessage)> {
         let key = key(session_id, path);
+        self.tails.get_mut(&key)?.card = None;
+        self.retire(key)
+    }
+
+    /// Follow tab `tab_id` stops reading its follow: the `UntailFile` to
+    /// send, with its host, when it was the last reader and the daemon
+    /// follows the file.
+    pub fn close_tab(&mut self, tab_id: &str) -> Option<(HostKey, ClientMessage)> {
+        let (key, tail) = self
+            .tails
+            .iter_mut()
+            .find(|(_, tail)| tail.tabs.contains_key(tab_id))?;
+        tail.tabs.remove(tab_id);
+        let key = key.clone();
+        self.retire(key)
+    }
+
+    /// The follow of `key`, once nothing reads it, goes: its `UntailFile`
+    /// while the daemon follows the file.
+    fn retire(&mut self, key: (String, String)) -> Option<(HostKey, ClientMessage)> {
+        if !self.tails.get(&key)?.unread() {
+            return None;
+        }
         let tail = self.tails.remove(&key)?;
         tail.followed().then(|| (tail.host, untail(key)))
     }
 
-    /// Closes every box of session `session_id`: the `UntailFile`s to
-    /// send, with their hosts.
+    /// Closes every Chat box of session `session_id`: the `UntailFile`s to
+    /// send, with their hosts, for the follows no tab reads.
     pub fn close_session(&mut self, session_id: &str) -> Vec<(HostKey, ClientMessage)> {
-        self.close_where(|(session, _), _| session == session_id)
+        self.close_cards_where(|(session, _), _| session == session_id)
     }
 
-    /// Closes every box of session `session_id` whose tool card `has_card`
-    /// does not find in its chat: the `UntailFile`s to send.
+    /// Closes every Chat box of session `session_id` whose tool card
+    /// `has_card` does not find in its chat: the `UntailFile`s to send.
     pub fn close_missing_cards(
         &mut self,
         session_id: &str,
         has_card: impl Fn(&str) -> bool,
     ) -> Vec<(HostKey, ClientMessage)> {
-        self.close_where(|(session, _), tail| {
-            session == session_id && !has_card(&tail.card.tool_id)
+        self.close_cards_where(|(session, _), card| {
+            session == session_id && !has_card(&card.tool_id)
         })
     }
 
-    fn close_where(
+    fn close_cards_where(
         &mut self,
-        closes: impl Fn(&(String, String), &Tail) -> bool,
+        closes: impl Fn(&(String, String), &TailCard) -> bool,
     ) -> Vec<(HostKey, ClientMessage)> {
         let mut keys: Vec<(String, String)> = self
             .tails
             .iter()
-            .filter(|(key, tail)| closes(key, tail))
+            .filter(|(key, tail)| tail.card().is_some_and(|card| closes(key, card)))
             .map(|(key, _)| key.clone())
             .collect();
         keys.sort();
         keys.into_iter()
             .filter_map(|key| {
-                let tail = self.tails.remove(&key)?;
-                tail.followed().then(|| (tail.host, untail(key)))
+                if let Some(tail) = self.tails.get_mut(&key) {
+                    tail.card = None;
+                }
+                self.retire(key)
             })
             .collect()
     }
 
-    /// A `FileTail` from `host` for `path` in session `session_id`: a box
-    /// waiting for its follow's first chunk drops it unless it carries
-    /// `reset`; `reset` clears the box, then the data is appended. Returns
-    /// whether a box took it.
+    /// Session `session_id` ended: the daemon stopped its follows, so the
+    /// ones a tab still reads are no longer followed and keep what they
+    /// hold.
+    pub fn session_ended(&mut self, session_id: &str) {
+        for ((session, _), tail) in &mut self.tails {
+            if session == session_id && tail.error.is_none() {
+                tail.stale = true;
+                tail.waiting = true;
+            }
+        }
+    }
+
+    /// A `FileTail` from `host` for `path` in session `session_id`: a
+    /// follow waiting for its first chunk drops it unless it carries
+    /// `reset`; `reset` clears the follow, then the data is appended, for
+    /// every reader. Returns whether a follow took it.
     pub fn on_file_tail(
         &mut self,
         host: &HostKey,
@@ -365,9 +504,10 @@ impl ChatTails {
         true
     }
 
-    /// A refusal from `host` answering `request_id`: the box whose
-    /// `TailFile` it answers shows `message` until closed, and is never
-    /// asked for again. Returns whether it answered a box.
+    /// A refusal from `host` answering `request_id`: the follow whose
+    /// `TailFile` it answers shows `message` to every reader until it is
+    /// asked for again: by a reader opening on it, or by [`Self::resend`]
+    /// after a reconnect. Returns whether it answered a follow.
     pub fn on_refused(&mut self, host: &HostKey, request_id: &str, message: &str) -> bool {
         let refused = self
             .tails
@@ -380,30 +520,38 @@ impl ChatTails {
         true
     }
 
-    /// `host`'s connection was replaced: its followed boxes drop what
-    /// arrives until they are asked again ([`Self::resend`]).
+    /// `host`'s connection was replaced: its followed files, refused ones
+    /// included, drop what arrives until they are asked again
+    /// ([`Self::resend`]).
     pub fn reset_host(&mut self, host: &HostKey) {
         for tail in self.tails.values_mut() {
-            if tail.host == *host && tail.error.is_none() {
+            if tail.host == *host {
                 tail.stale = true;
                 tail.waiting = true;
             }
         }
     }
 
-    /// The `TailFile`s that ask again for each box a replaced connection
-    /// followed, once `loaded` says its session's chat is loaded again,
-    /// each under a fresh request id from `new_id`; each such box waits for
-    /// its follow's first chunk again.
+    /// The `TailFile`s that ask again for each follow a replaced connection
+    /// ran, once one of its readers is ready: its Chat box when
+    /// `card_ready` says its session's chat is loaded again, a follow tab
+    /// when `tab_ready` says its host lists its session. Each goes under a
+    /// fresh request id from `new_id`, once per follow, and each such
+    /// follow waits for its first chunk again.
     pub fn resend(
         &mut self,
-        loaded: impl Fn(&str) -> bool,
+        card_ready: impl Fn(&str) -> bool,
+        tab_ready: impl Fn(&HostKey, &str) -> bool,
         mut new_id: impl FnMut() -> String,
     ) -> Vec<(HostKey, ClientMessage)> {
+        let ready = |(session_id, _): &(String, String), tail: &Tail| {
+            (tail.card.is_some() && card_ready(session_id))
+                || (!tail.tabs.is_empty() && tab_ready(&tail.host, session_id))
+        };
         let mut keys: Vec<(String, String)> = self
             .tails
             .iter()
-            .filter(|((session_id, _), tail)| tail.stale && loaded(session_id))
+            .filter(|(key, tail)| tail.stale && ready(key, tail))
             .map(|(key, _)| key.clone())
             .collect();
         keys.sort();
@@ -415,6 +563,7 @@ impl ChatTails {
             let request_id = new_id();
             tail.stale = false;
             tail.waiting = true;
+            tail.error = None;
             tail.request_id.clone_from(&request_id);
             let msg = ClientMessage::TailFile {
                 session_id,
@@ -426,12 +575,28 @@ impl ChatTails {
         sends
     }
 
-    /// The box of `path` in session `session_id` was scrolled to
+    /// The Chat box of `path` in session `session_id` was scrolled to
     /// `scrolled` of `max_scroll` pixels: it follows its bottom only while
     /// at it.
     pub fn on_scrolled(&mut self, session_id: &str, path: &str, scrolled: f32, max_scroll: f32) {
-        if let Some(tail) = self.tails.get_mut(&key(session_id, path)) {
-            tail.following = scrolled >= max_scroll - BOTTOM_SLACK;
+        let card = self
+            .tails
+            .get_mut(&key(session_id, path))
+            .and_then(|tail| tail.card.as_mut());
+        if let Some((_, following)) = card {
+            *following = at_bottom(scrolled, max_scroll);
+        }
+    }
+
+    /// Follow tab `tab_id` was scrolled, by the same rule as
+    /// [`Self::on_scrolled`].
+    pub fn on_tab_scrolled(&mut self, tab_id: &str, scrolled: f32, max_scroll: f32) {
+        let following = self
+            .tails
+            .values_mut()
+            .find_map(|tail| tail.tabs.get_mut(tab_id));
+        if let Some(following) = following {
+            *following = at_bottom(scrolled, max_scroll);
         }
     }
 }
@@ -503,7 +668,10 @@ mod tests {
     fn opening_asks_for_the_file_and_shows_nothing_yet() {
         let mut tails = ChatTails::default();
         let msg = tails.open(HostKey::Local, S, P, card("t1"), "r1".to_owned());
-        assert!(is_tail_file(&msg, "r1"), "{msg:?}");
+        assert!(
+            msg.as_ref().is_some_and(|msg| is_tail_file(msg, "r1")),
+            "{msg:?}"
+        );
         assert_eq!(shown(&tails), ["<nothing>"]);
         assert!(tails.get(S, P).is_some_and(Tail::following));
     }
@@ -588,7 +756,7 @@ mod tests {
         tails.reset_host(&HostKey::Local);
         assert!(!chunk(&mut tails, b"late\n", false), "the old connection's");
         let mut ids = ["r2".to_owned()].into_iter();
-        let again = tails.resend(|_| true, || ids.next().unwrap_or_default());
+        let again = tails.resend(|_| true, |_, _| false, || ids.next().unwrap_or_default());
         assert_eq!(again.len(), 1, "{again:?}");
         assert!(
             again
@@ -633,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_shows_its_message_and_is_never_asked_again() {
+    fn a_refusal_shows_its_message_until_asked_again() {
         let mut tails = asked();
         assert!(!tails.on_refused(&HostKey::Local, "other", "no"));
         assert!(tails.on_refused(&HostKey::Local, "r1", "refusing to follow"));
@@ -642,10 +810,58 @@ mod tests {
             !chunk(&mut tails, b"x\n", true),
             "a refused box takes no data"
         );
-        tails.reset_host(&HostKey::Local);
-        assert!(tails.resend(|_| true, || "r2".to_owned()).is_empty());
+        assert!(
+            tails
+                .resend(|_| true, |_, _| true, || "r2".to_owned())
+                .is_empty(),
+            "nothing asks again on its own"
+        );
         assert!(tails.close(S, P).is_none(), "nothing to untail");
         assert!(!tails.is_open(S, P));
+    }
+
+    #[test]
+    fn a_reader_joining_a_refused_follow_asks_again_for_every_reader() {
+        let mut tails = ChatTails::default();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r1".to_owned());
+        assert!(tails.on_refused(&HostKey::Local, "r1", "limit reached"));
+        let ask = tails.open(HostKey::Local, S, P, card("t1"), "r2".to_owned());
+        assert!(
+            ask.as_ref().is_some_and(|msg| is_tail_file(msg, "r2")),
+            "{ask:?}"
+        );
+        assert_eq!(shown(&tails), ["<nothing>"], "the refusal is cleared");
+        assert_eq!(tab_shown(&tails, "f1"), ["<nothing>"], "for the tab too");
+        assert!(chunk(&mut tails, b"x\n", true));
+        assert_eq!(tab_shown(&tails, "f1"), ["x"]);
+        assert!(
+            !tails.on_refused(&HostKey::Local, "r1", "old"),
+            "the old ask"
+        );
+        assert!(tails.on_refused(&HostKey::Local, "r2", "again"));
+        assert_eq!(shown(&tails), ["<error> again"], "a refusal shows again");
+        assert_eq!(tab_shown(&tails, "f1"), ["<error> again"]);
+    }
+
+    #[test]
+    fn a_reconnect_asks_a_refused_follow_again() {
+        let mut tails = asked();
+        assert!(tails.on_refused(&HostKey::Local, "r1", "limit reached"));
+        tails.reset_host(&HostKey::Local);
+        assert!(
+            tails
+                .resend(|_| false, |_, _| false, || "r2".to_owned())
+                .is_empty(),
+            "not until a reader is ready"
+        );
+        let again = tails.resend(|_| true, |_, _| false, || "r2".to_owned());
+        assert!(
+            again.len() == 1 && again.iter().all(|(_, msg)| is_tail_file(msg, "r2")),
+            "{again:?}"
+        );
+        assert_eq!(shown(&tails), ["<nothing>"], "the refusal is cleared");
+        assert!(chunk(&mut tails, b"back\n", true));
+        assert_eq!(shown(&tails), ["back"]);
     }
 
     #[test]
@@ -692,5 +908,179 @@ mod tests {
         assert!(!tails.on_file_tail(&remote, S, P, &B64.encode(b"x\n"), true));
         assert!(!tails.on_refused(&remote, "r1", "no"));
         assert_eq!(shown(&tails), ["<nothing>"]);
+    }
+
+    /// What follow tab `tab_id` draws, as [`shown`] says it for the box.
+    fn tab_shown(tails: &ChatTails, tab_id: &str) -> Vec<String> {
+        match tails.tab(tab_id).map(Tail::shows) {
+            Some(TailShows::Lines(lines)) => lines.into_iter().map(str::to_owned).collect(),
+            Some(TailShows::Nothing) => vec!["<nothing>".to_owned()],
+            Some(TailShows::Error(message)) => vec![format!("<error> {message}")],
+            None => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_second_reader_sends_no_tail_file_and_sees_the_lines_so_far() {
+        let mut tails = opened();
+        chunk(&mut tails, b"one\ntwo\n", false);
+        let ask = tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        assert!(ask.is_none(), "the follow is reused: {ask:?}");
+        assert_eq!(tab_shown(&tails, "f1"), ["one", "two"]);
+        assert_eq!(shown(&tails), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_box_opened_beside_a_tab_sends_no_tail_file() {
+        let mut tails = ChatTails::default();
+        let first = tails.open_tab(HostKey::Local, S, P, "f1", "r1".to_owned());
+        assert!(
+            first.as_ref().is_some_and(|msg| is_tail_file(msg, "r1")),
+            "{first:?}"
+        );
+        assert!(tails.tab("f1").is_some());
+        assert!(!tails.is_open(S, P), "no box yet");
+        let second = tails.open(HostKey::Local, S, P, card("t1"), "r2".to_owned());
+        assert!(second.is_none(), "{second:?}");
+        assert!(tails.is_open(S, P));
+        assert_eq!(tails.tab_ids(), ["f1"]);
+    }
+
+    #[test]
+    fn only_the_last_reader_to_close_untails() {
+        let mut tails = opened();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        tails.open_tab(HostKey::Local, S, P, "f2", "r3".to_owned());
+        assert!(tails.close(S, P).is_none(), "the tabs still read it");
+        assert!(!tails.is_open(S, P), "the box is closed");
+        assert!(tails.close_tab("f1").is_none(), "f2 still reads it");
+        let last = tails.close_tab("f2");
+        assert!(
+            last.is_some_and(|(host, msg)| host == HostKey::Local && is_untail(&msg)),
+            "the last reader stops the follow"
+        );
+        assert_eq!(tails.tab_ids(), Vec::<String>::new());
+        assert!(tails.close_tab("f2").is_none(), "nothing left to close");
+    }
+
+    #[test]
+    fn closing_a_session_s_boxes_keeps_a_tab_s_follow() {
+        let mut tails = opened();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        assert!(tails.close_session(S).is_empty(), "the tab still reads it");
+        assert!(tails.close_missing_cards(S, |_| false).is_empty());
+        assert!(!tails.is_open(S, P));
+        assert!(chunk(&mut tails, b"still\n", false), "the follow runs on");
+        assert_eq!(tab_shown(&tails, "f1"), ["still"]);
+    }
+
+    #[test]
+    fn a_file_tail_feeds_every_reader() {
+        let mut tails = asked();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        tails.open_tab(HostKey::Local, S, P, "f2", "r3".to_owned());
+        assert!(chunk(&mut tails, b"a\nb\n", true));
+        assert!(chunk(&mut tails, b"c\n", false));
+        assert_eq!(shown(&tails), ["a", "b", "c"]);
+        assert_eq!(tab_shown(&tails, "f1"), ["a", "b", "c"]);
+        assert_eq!(tab_shown(&tails, "f2"), ["a", "b", "c"]);
+        assert!(chunk(&mut tails, b"d\n", true));
+        assert_eq!(
+            tab_shown(&tails, "f1"),
+            ["d"],
+            "a reset replaces them for all"
+        );
+    }
+
+    #[test]
+    fn a_refusal_reaches_every_reader() {
+        let mut tails = asked();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        assert!(
+            !tails.on_refused(&HostKey::Local, "r2", "no"),
+            "only r1 went out"
+        );
+        assert!(tails.on_refused(&HostKey::Local, "r1", "limit reached"));
+        assert_eq!(shown(&tails), ["<error> limit reached"]);
+        assert_eq!(tab_shown(&tails, "f1"), ["<error> limit reached"]);
+        assert!(tails.close(S, P).is_none());
+        assert!(
+            tails.close_tab("f1").is_none(),
+            "a refused follow has nothing to untail"
+        );
+    }
+
+    #[test]
+    fn each_reader_follows_on_its_own() {
+        let mut tails = opened();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r2".to_owned());
+        tails.open_tab(HostKey::Local, S, P, "f2", "r3".to_owned());
+        tails.on_tab_scrolled("f1", 10.0, 300.0);
+        let tail = tails.tab("f1");
+        assert!(
+            tail.is_some_and(|tail| !tail.tab_following("f1")),
+            "f1 stopped"
+        );
+        assert!(
+            tail.is_some_and(|tail| tail.tab_following("f2")),
+            "f2 follows"
+        );
+        assert!(
+            tails.get(S, P).is_some_and(Tail::following),
+            "the box follows"
+        );
+        tails.on_scrolled(S, P, 0.0, 300.0);
+        tails.on_tab_scrolled("f1", 300.0, 300.0);
+        let tail = tails.tab("f1");
+        assert!(
+            tail.is_some_and(|tail| tail.tab_following("f1")),
+            "f1 is back"
+        );
+        assert!(
+            !tails.get(S, P).is_some_and(Tail::following),
+            "the box stopped"
+        );
+    }
+
+    #[test]
+    fn a_tab_s_follow_is_asked_again_once_its_session_is_listed() {
+        let mut tails = ChatTails::default();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r1".to_owned());
+        tails.reset_host(&HostKey::Local);
+        assert!(
+            tails
+                .resend(|_| true, |_, _| false, || "r2".to_owned())
+                .is_empty(),
+            "not listed yet"
+        );
+        let again = tails.resend(
+            |_| false,
+            |host, id| *host == HostKey::Local && id == S,
+            || "r2".to_owned(),
+        );
+        assert!(
+            again.len() == 1 && again.iter().all(|(_, msg)| is_tail_file(msg, "r2")),
+            "{again:?}"
+        );
+        assert!(
+            tails
+                .resend(|_| true, |_, _| true, || "r3".to_owned())
+                .is_empty(),
+            "once"
+        );
+    }
+
+    #[test]
+    fn an_ended_session_s_follow_is_closed_without_an_untail() {
+        let mut tails = ChatTails::default();
+        tails.open_tab(HostKey::Local, S, P, "f1", "r1".to_owned());
+        assert!(chunk(&mut tails, b"last\n", true));
+        tails.session_ended(S);
+        assert!(
+            !chunk(&mut tails, b"late\n", true),
+            "the follow has stopped"
+        );
+        assert_eq!(tab_shown(&tails, "f1"), ["last"]);
+        assert!(tails.close_tab("f1").is_none());
     }
 }

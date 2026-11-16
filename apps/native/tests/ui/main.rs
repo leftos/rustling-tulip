@@ -38,6 +38,7 @@ mod ui_fetch_dialog;
 mod ui_file_fetch;
 mod ui_finished_badge;
 mod ui_folder_fetch;
+mod ui_follow_tab;
 mod ui_font_size;
 mod ui_gates;
 mod ui_history;

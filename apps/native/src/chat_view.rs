@@ -447,9 +447,9 @@ pub(crate) struct ChatPanes {
     /// The host of each session with a chat or summary loaded, so its
     /// requests reach that host even once its list has dropped the session.
     hosts: HashMap<String, HostKey>,
-    /// The open Tail boxes under the chats' tool cards, and each one's
-    /// scroll by session id and path.
-    tails: ChatTails,
+    /// The followed files the Tail boxes under the chats' tool cards and
+    /// the follow tabs read, and each box's scroll by session id and path.
+    pub(crate) tails: ChatTails,
     tail_scrolls: HashMap<(String, String), ScrollHandle>,
     wall: WallClock,
     /// Repaints the running-work strips while one shows, so their ages and
@@ -1419,11 +1419,14 @@ impl RootView {
                 },
             );
         }
+        self.sync_follow_tabs();
+        let listed = self.follow_tab_sessions_ready();
         let ChatPanes {
             tails, sessions, ..
         } = &mut self.chat;
         let asks = tails.resend(
             |session_id| sessions.contains_key(session_id),
+            |host, session_id| listed.contains(&(host.clone(), session_id.to_owned())),
             new_request_id,
         );
         for (host, msg) in asks {
@@ -1642,7 +1645,7 @@ impl RootView {
 
     /// Sends each of `untails` to its host while that host's connection is
     /// open, and forgets the scroll of every closed Tail box.
-    fn send_untails(&mut self, untails: Vec<(HostKey, ClientMessage)>) {
+    pub(crate) fn send_untails(&mut self, untails: Vec<(HostKey, ClientMessage)>) {
         for (host, msg) in untails {
             if self.conn_of(&host).is_some_and(Connection::is_open) {
                 self.send_to(&host, msg);
@@ -1659,7 +1662,9 @@ impl RootView {
     /// A press on a tool card's Tail button for `path`, the `index`th file
     /// of tool call `tool_id` in session `session_id`'s chat: opens its box
     /// under the card and asks the session's host to follow the file, or
-    /// closes the open box and stops the follow.
+    /// closes the open box and stops the follow. A follow tab reading the
+    /// same file shares its follow: the box then asks for nothing and reads
+    /// the lines so far, and its close leaves the tab's follow running.
     pub fn toggle_chat_tail(
         &mut self,
         session_id: &str,
@@ -1685,13 +1690,15 @@ impl RootView {
                 (session_id.to_owned(), path.to_owned()),
                 ScrollHandle::new(),
             );
-            self.send_to(&host, ask);
+            if let Some(ask) = ask {
+                self.send_to(&host, ask);
+            }
         }
         cx.notify();
     }
 
-    /// A `FileTail` from `host`: the open box of its file takes it, else it
-    /// is dropped.
+    /// A `FileTail` from `host`: the follow of its file takes it for every
+    /// reader, its Chat box and its follow tabs, else it is dropped.
     fn on_file_tail(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
         let DaemonMessage::FileTail {
             session_id,
@@ -1710,7 +1717,7 @@ impl RootView {
         {
             cx.notify();
         } else {
-            tracing::debug!(%session_id, path, reset, "FileTail for a closed box, or queued before its follow's reset: dropped");
+            tracing::debug!(%session_id, path, reset, "FileTail for a file nothing reads, or queued before its follow's reset: dropped");
         }
     }
 
@@ -1779,6 +1786,7 @@ impl RootView {
             DaemonMessage::SessionRemoved { session_id } => {
                 let untails = self.chat.tails.close_session(&session_id);
                 self.send_untails(untails);
+                self.chat.tails.session_ended(&session_id);
                 self.fold_agents(host, DaemonMessage::SessionRemoved { session_id }, cx);
             }
             other => self.fold_agents(host, other, cx),
@@ -3724,7 +3732,7 @@ fn tool_card(
         .enumerate()
         .filter_map(|(index, path)| {
             let tail = look.tails.get(look.session_id, path)?;
-            let card = tail.card();
+            let card = tail.card()?;
             (card.tool_id == tool.id && card.index == index).then(|| {
                 tail_box(
                     look,
@@ -3791,7 +3799,7 @@ fn tool_header(look: &RowLook<'_>, tool: &ToolRow<'_>) -> Div {
 }
 
 /// The last component of `path`, which a Tail button names.
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\'])
         .next()
         .filter(|name| !name.is_empty())

@@ -353,7 +353,8 @@ fn a_follow_tab_shows_its_file_name_on_the_pill_and_what_it_follows(cx: &mut Tes
     assert!(drawn(&mut h, "follow-tab-f1"), "the body is drawn");
     assert_eq!(
         h.root(|root, _| root.follow_tab_note("f1")).as_deref(),
-        Some("Following /work/logs/build.log")
+        Some("Waiting for build.log\u{2026}"),
+        "the host is not connected yet"
     );
 }
 
