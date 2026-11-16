@@ -176,6 +176,7 @@
 - [ ] RT-1822 Make the tail tests for a file that appears later see it missing first · release vNext
 - [ ] RT-1830 Let a driven run reach a second isolated daemon as an SSH host, to smoke remote features · release vNext
 - [ ] RT-1832 Keep a driven run's Gates pill off the machine's real gate state · release vNext
+- [ ] RT-1853 Map the follow tab and tab close files in the test map
 
 ## Elevated daemon and security
 
@@ -190,6 +191,7 @@
 - [ ] RT-869 Decide what an elevated daemon trusts from the account's agent and shell config
 - [ ] RT-870 Pin an elevated client's daemon template when it starts, not at its first copy
 - [ ] RT-871 Let an elevated bridge's logon-task route find a dev daemon build
+- [ ] RT-1841 Decide whether an elevated daemon may run the tailnet listener, and document it
 
 ## Chat mirror
 
@@ -367,7 +369,6 @@
 - [ ] RT-1229 Resend the device list when a loopback connection's state events lag
 - [ ] RT-1649 Claim the size of sessions the first-connect chooser extracts into new tabs when each tab is first shown
 - [ ] RT-1801 Don't dial tailnet hosts without their token when the credential store cannot be opened
-- [ ] RT-1833 Offer to rebind only a host's unbound sessions, leaving bound panes where they are · release vNext
 
 ## Claude accounts
 
@@ -403,13 +404,14 @@
 - [ ] RT-1113 List used-up accounts by soonest return in the accounts popover
 - [ ] RT-1114 Rest an account without removing it, with an enable and disable switch
 - [ ] RT-1115 Show recent auto-switch events in Settings › Accounts
-- [ ] RT-1116 Show extra-usage spend and prepaid balance per account, with a May spend credits toggle · release vNext
 - [ ] RT-1117 Keep the accounts usage history across daemon restarts
 - [ ] RT-1130 Hide the account login session's scratch folder subline and Open in items
 - [ ] RT-1223 Wake a parked accounts driver when a client connects as another leaves
 - [ ] RT-1335 Line up a per-model limit's bar with the 5h and 7d bars
 - [ ] RT-1454 Fetch a new account's usage as soon as its login adds it
 - [ ] RT-1478 Say "1 account", not "1 accounts", in the accounts forecast line
+- [ ] RT-1835 Show when the login is on the paid fallback, and send its entered and left events
+- [ ] RT-1851 Keep Settings › Accounts usage lines readable beside a row's alias and buttons
 
 ## Attention: toasts and Needs you
 
@@ -439,7 +441,6 @@
 ## Files, fetch and viewers
 
 - [ ] RT-100 Open an unchanged fetched file from the local cache
-- [ ] RT-115 Host-approved extra roots for file fetch
 - [ ] RT-119 Browse the host's folders for Add repo in remote mode
 - [ ] RT-122 Send an edited fetched file back to the host
 - [ ] RT-123 Open remote paths in VS Code Remote instead of copying
@@ -460,7 +461,6 @@
 - [ ] RT-889 Refuse the worktrees root itself as a worktree_path for FetchFile and snapshots
 - [ ] RT-891 Resolve a FetchFile path off the connection's dispatch so a hung share cannot stall it
 - [ ] RT-892 Refuse a duplicate fetch id without ending the client's live fetch of that id
-- [ ] RT-893 Stop FetchFile's refusal from revealing whether an outside path exists and where a link points
 - [ ] RT-895 Bound StatPath work per connection and resolve a fetch's canonical root once
 - [ ] RT-896 Name the skipped folders in a fetched folder's done toast
 - [ ] RT-903 Stop a root folder fetch from deleting other worktrees' fetched copies
@@ -478,8 +478,9 @@
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
 - [ ] RT-1366 Rename, delete and make folders on a host from the file manager
 - [ ] RT-1367 Upload files from this machine to a host folder in the file manager
-- [ ] RT-1823 Fetch or stat any file or folder the host can read from a Ctrl+click, not only session folders and worktrees · release vNext
-- [ ] RT-1826 Split file_fetch_view's after_write under the complexity limit · release vNext
+- [ ] RT-1847 Show a plain Windows path, not the \?\ form, in TailFile and FetchFile refusal messages
+- [ ] RT-1854 Fetch an HTML page's media when the page is fetched by host path
+- [ ] RT-1855 Keep host-path copies apart from a repo named C, unc or root in the remote-files folder
 
 ## Phone app
 
@@ -641,7 +642,11 @@
   - [ ] RT-1578 Name a tab that follows a dispatch run after its repo or run, not Tab N
   - [ ] RT-1579 Show a nested dispatch run's cost in its Dashboard row
 - [ ] RT-1587 Keep a wrapped transcript line's indent in a followed run's pane
-- [ ] RT-1834 Make the subagent row density cover every subagent and dispatch row: All Comfortable, Finished Compact, All Compact · release vNext
+- [ ] RT-1836 Let subagent and dispatch panes select text, open path links and use the terminal's font size · release vNext
+  - [/] RT-1845 Open path and URL links from subagent and dispatch transcripts with Ctrl+click and Ctrl+Shift+click · release vNext
+- [ ] RT-1849 Fall back for an uninstalled terminal font in subagent and dispatch transcripts as the terminal does
+- [ ] RT-1856 Update a transcript link's underline when Ctrl goes down or up without a pointer move
+- [ ] RT-1857 Find why a terminal pane answering its scrollback stops a transcript hit in the same tab
 
 ## macOS and Unix
 
@@ -672,7 +677,6 @@
 ## Docs
 
 - [ ] RT-40 Add Integration Footguns and Test locations sections to architecture.md
-- [ ] RT-1816 Groom the plan: 22 commits since the hygiene stamp
 - [ ] RT-62 Write down the ops-tower relationship in the docs and on RT-28, RT-55 and RT-56
 - [ ] RT-86 Add a Task Index row for the channels the daemon can observe or control
 - [ ] RT-194 Record that a removed repo's session keeps streaming in docs/ux-audit.md
@@ -702,6 +706,7 @@
 - [ ] RT-1428 Note the session-driving verbs' quirks in the daemon CLI doc
 - [ ] RT-1571 Fix the missing reboot-resume design link in RT-277 and RT-725
 - [ ] RT-1767 Define the phone's key bar, composer, Quick dock and Keys tray in the glossary, and index the phone screens
+- [ ] RT-1839 Make the TailFile docs say a link to a network or device path is followed, not refused
 
 ## Backlog
 
@@ -770,10 +775,13 @@
 - [ ] RT-1802 Keep a pulled draft when Chat unloads the session mid-pull
 - [ ] RT-1806 Give the main window's dialogs one order for drawing and keys
 - [ ] RT-1813 Move follow tabs to the kept host key when two host keys reach one daemon
+- [ ] RT-1848 Split client_session_until under the 100-line function limit
+- [ ] RT-1850 Split grid_view's pane_body under the complexity limit
+- [ ] RT-1852 Split the accounts row builder under the complexity limit
 
 ## Design files
 
-- [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1116, RT-1117
+- [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1117
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
@@ -782,7 +790,7 @@
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1541, RT-1542, RT-1552, RT-1558
-- [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869
+- [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-787, RT-867, RT-868, RT-869, RT-1841
 - [finished-toast.md](finished-toast.md) — RT-755, RT-757
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
@@ -790,7 +798,7 @@
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [push-relay.md](push-relay.md) — RT-1519
