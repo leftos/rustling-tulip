@@ -4,6 +4,8 @@ A deterministic stand-in for the `ssh` client the native client runs for an SSH 
 
 `FakeSsh` (`apps/native/tests/support/live.rs`) writes its state for a test daemon, and `apps/native/tests/e2e_ssh.rs` and `apps/native/tests/e2e_multi_host.rs` point the client at it through `RUSTLING_TULIP_SSH`. The state names one daemon, so every host string the client passes reaches that one, and a spec has one fake ssh per process.
 
+A driven run uses it too: the `rt-driver` MCP server's `launch` with `remote_host: true` (`tools/rt-driver-mcp/src/launch.rs`) writes the state for its second isolated daemon under the session's `.tmp\driver` folder and sets both variables on the driven client only; `stop` sets `fail` before that daemon goes ([docs/native-client.md](../../../docs/native-client.md) "Driver MCP server").
+
 It reads a JSON state file named by `RUSTLING_TULIP_FAKE_SSH_STATE` on every run:
 
 - `bridge`: the absolute path of the `rustling-tulipd` binary to run as the remote command.

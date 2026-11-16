@@ -67,13 +67,14 @@ pub fn list() -> Value {
     json!([
         tool(
             "launch",
-            "Launch an isolated daemon and a cloaked, driven native client from a shadow copy of a driver build, under <repo_root>/.tmp/driver/. Returns {session, pid, pipe, scratch, scratch_repo}: scratch_repo is an empty folder outside the checkout, <parent of repo_root>/.tmp/rt-driver/<session>-<server pid>/repo, removed at stop, for action add_repo (a path inside the checkout is refused). An env that sets RUSTLING_TULIP_CLAUDE logs the real CLI in with the driver token the server holds.",
+            "Launch an isolated daemon and a cloaked, driven native client from a shadow copy of a driver build, under <repo_root>/.tmp/driver/. Returns {session, pid, pipe, scratch, scratch_repo}: scratch_repo is an empty folder outside the checkout, <parent of repo_root>/.tmp/rt-driver/<session>-<server pid>/repo, removed at stop, for action add_repo (a path inside the checkout is refused). An env that sets RUSTLING_TULIP_CLAUDE logs the real CLI in with the driver token the server holds. remote_host true also starts a second isolated daemon under <scratch>/remote, which the client reaches as the saved SSH host devbox through the checkout's fake ssh (needs node on PATH), and adds remote: {host, scratch, config_dir} to the reply.",
             &json!({
                 "session": {"type": "string", "description": "A new session name: letters, digits, '-' and '_'."},
                 "build_dir": {"type": "string", "description": "The folder holding the driver build; default <repo_root>/target/test-release."},
                 "repo_root": {"type": "string", "description": "The checkout to run from; default the server's --repo-root."},
                 "shell": {"type": "string", "enum": ["cmd", "default"], "description": "The isolated daemon's shell: cmd (default) for a fixed prompt and echo, or default to leave it to the Default shell setting with shell integration on."},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Variables set on the isolated daemon and the client after the isolation ones, for a run against a real Claude or the phone app; only RUSTLING_TULIP_CLAUDE, RUSTLING_TULIP_TAILSCALE, RUSTLING_TULIP_PWA_DIR and RUSTLING_TULIP_TAILNET_DIR are accepted. The config, binaries and worktrees folders and each agent's home stay isolated under .tmp whatever is set."},
+                "remote_host": {"type": "boolean", "description": "Default false. True starts a second isolated daemon (fake agents only, no env rows) that the client reaches as the saved SSH host devbox through tools/e2e/fake-ssh; the client alone gets RUSTLING_TULIP_SSH and RUSTLING_TULIP_FAKE_SSH_STATE."},
             }),
             &["session"],
             [false, false, false],
@@ -196,9 +197,17 @@ impl Tools {
     fn launch(&mut self, args: &Map<String, Value>) -> Result<ToolResult, String> {
         check_args(
             args,
-            &["session", "build_dir", "repo_root", "shell", "env"],
+            &[
+                "session",
+                "build_dir",
+                "repo_root",
+                "shell",
+                "env",
+                "remote_host",
+            ],
             &["session"],
         )?;
+        let remote_host = optional_bool(args, "remote_host")?.unwrap_or(false);
         let shell = match optional_string(args, "shell")? {
             None | Some("cmd") => TestShell::Cmd,
             Some("default") => TestShell::Default,
@@ -238,6 +247,7 @@ impl Tools {
             shell,
             env,
             daemon_only_env,
+            remote_host,
         })?;
         let summary = launched.summary();
         tracing::info!(%summary, "launched");
@@ -362,6 +372,14 @@ fn optional_string<'a>(args: &'a Map<String, Value>, key: &str) -> Result<Option
         None => Ok(None),
         Some(Value::String(text)) => Ok(Some(text)),
         Some(other) => Err(format!("{key} takes a string, not {other}")),
+    }
+}
+
+fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(other) => Err(format!("{key} takes a boolean, not {other}")),
     }
 }
 
@@ -531,7 +549,9 @@ mod tests {
 
     use serde_json::{Map, Value, json};
 
-    use super::{Step, Tools, launch_env, list, refuse_add_repo_in_checkout, run_batch};
+    use super::{
+        Step, Tools, launch_env, list, optional_bool, refuse_add_repo_in_checkout, run_batch,
+    };
     use crate::pipe::{CallError, Transport};
     use crate::token::MemoryStore;
 
@@ -847,5 +867,76 @@ mod tests {
             json!({"type": "string"}),
             "{launch}"
         );
+    }
+
+    #[test]
+    fn the_launch_schema_lists_remote_host() {
+        let launch = launch_tool();
+        let remote = &launch["inputSchema"]["properties"]["remote_host"];
+        assert_eq!(remote["type"], json!("boolean"), "{launch}");
+    }
+
+    #[test]
+    fn remote_host_reads_true_false_and_absent() {
+        let args = |value: Value| {
+            let mut args = Map::new();
+            args.insert("remote_host".to_owned(), value);
+            args
+        };
+        assert_eq!(
+            optional_bool(&args(json!(true)), "remote_host"),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            optional_bool(&args(json!(false)), "remote_host"),
+            Ok(Some(false))
+        );
+        assert_eq!(optional_bool(&Map::new(), "remote_host"), Ok(None));
+    }
+
+    #[test]
+    fn launch_refuses_a_remote_host_that_is_not_a_boolean() {
+        let mut tools = Tools::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let args = json!({"session": "a", "remote_host": "yes"});
+        let refused = tools
+            .call("launch", args.as_object().expect("an object of arguments"))
+            .expect("the launch tool exists")
+            .into_value();
+        assert_eq!(refused["isError"], json!(true), "{refused}");
+        assert_eq!(
+            refused["content"][0]["text"],
+            json!("remote_host takes a boolean, not \"yes\""),
+            "{refused}"
+        );
+    }
+
+    /// The server sets the fake ssh's variables itself: a caller's `env`
+    /// never names them, with a remote host or without.
+    #[test]
+    fn env_naming_the_ssh_variables_is_refused_with_a_remote_host() {
+        for name in ["RUSTLING_TULIP_SSH", "RUSTLING_TULIP_FAKE_SSH_STATE"] {
+            for remote_host in [true, false] {
+                let mut tools = Tools::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+                let args = json!({
+                    "session": "a",
+                    "remote_host": remote_host,
+                    "env": {name: "C:\\tmp\\ssh.exe"},
+                });
+                let refused = tools
+                    .call("launch", args.as_object().expect("an object of arguments"))
+                    .expect("the launch tool exists")
+                    .into_value();
+                assert_eq!(refused["isError"], json!(true), "{refused}");
+                let text = refused["content"][0]["text"].as_str().expect("a text item");
+                assert_eq!(
+                    text,
+                    format!(
+                        "env may only set RUSTLING_TULIP_CLAUDE, RUSTLING_TULIP_TAILSCALE, \
+                         RUSTLING_TULIP_PWA_DIR or RUSTLING_TULIP_TAILNET_DIR, not {name:?}"
+                    ),
+                    "remote_host {remote_host}"
+                );
+            }
+        }
     }
 }

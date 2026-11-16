@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::pipe::{PipeClient, Transport as _};
-use crate::session::{ScratchRepo, Session, log_tail, native_log};
+use crate::session::{RemoteHost, ScratchRepo, Session, log_tail, native_log};
 use crate::token;
 
 /// What a missing driver build is told to run.
@@ -38,6 +38,21 @@ const DRIVER_ENV: &str = "RUSTLING_TULIP_DRIVER";
 /// Set, the client's window opens cloaked and never activates.
 const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 
+/// The `ssh` binary the client runs for an SSH host; set only on a remote
+/// host's client, to the checkout's fake.
+const SSH_ENV: &str = "RUSTLING_TULIP_SSH";
+
+/// The fake ssh's state file; set only on a remote host's client.
+const FAKE_SSH_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_SSH_STATE";
+
+/// The SSH host name the client's saved host carries; the fake ssh ignores
+/// it and reaches the one remote daemon.
+pub const REMOTE_HOST: &str = "devbox";
+
+/// The client's layout file, which a remote host's run seeds with the saved
+/// host.
+const UI_FILE: &str = "native-ui.json";
+
 /// The file a real Claude's home is seeded with, so its first start skips
 /// onboarding.
 pub const SEED_FILE: &str = ".claude.json";
@@ -45,7 +60,9 @@ pub const SEED_FILE: &str = ".claude.json";
 /// What to launch: `scratch` is the session's own folder under the repo's
 /// `.tmp/driver/`; `env` is set on the isolated daemon after its isolation
 /// variables, so a row can point an agent or the tailnet at a real CLI;
-/// `daemon_only_env` is set on the daemon alone, never on the client.
+/// `daemon_only_env` is set on the daemon alone, never on the client;
+/// `remote_host` also starts a second isolated daemon the client reaches as
+/// the saved SSH host [`REMOTE_HOST`] through the fake ssh.
 pub struct LaunchSpec {
     pub session: String,
     pub repo_root: PathBuf,
@@ -54,6 +71,25 @@ pub struct LaunchSpec {
     pub shell: TestShell,
     pub env: Vec<(&'static str, OsString)>,
     pub daemon_only_env: Vec<(&'static str, OsString)>,
+    pub remote_host: bool,
+}
+
+/// The client's two fake ssh variables: the checkout's shim and the state
+/// file naming the remote daemon.
+struct ClientSsh {
+    shim: PathBuf,
+    state: PathBuf,
+}
+
+/// What the client's command is built from: `envs` is the home daemon's
+/// [`IsolatedDaemon::envs`], `removed` the variables it must not inherit,
+/// and `ssh` the fake ssh's rows for a remote host's run.
+struct ClientSpec<'a> {
+    envs: &'a [(&'static str, OsString)],
+    bin: &'a Path,
+    scratch: &'a Path,
+    removed: &'a [&'static str],
+    ssh: Option<&'a ClientSsh>,
 }
 
 /// A driven client's discovery file, as the endpoint writes it.
@@ -69,6 +105,11 @@ pub struct Discovery {
 /// started, and carries the client's `native.log` tail when there is one.
 pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
     check_build(&spec.build_dir)?;
+    let shim = if spec.remote_host {
+        Some(fake_ssh_shim(&spec.repo_root)?)
+    } else {
+        None
+    };
     // Dropped on any failure below, which removes it again.
     let scratch_repo = ScratchRepo::create(&spec.repo_root, &spec.session)?;
     let bin = spec.scratch.join("bin");
@@ -80,6 +121,12 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
     if token::uses_real_agent(&spec.env) {
         seed_real_agent_home(&daemon)?;
     }
+    // Dropped before the home daemon on any failure below: locals drop in
+    // reverse order.
+    let remote = match shim {
+        Some(shim) => Some(start_remote(spec, &bin, shim, &daemon.config_dir())?),
+        None => None,
+    };
     let log = native_log(&daemon.config_dir());
     let fail = |step: &str, err: &str| {
         format!(
@@ -88,20 +135,30 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
             log_tail(&log)
         )
     };
-    let mut client = spawn_client(&daemon, &bin, &spec.scratch, removed)
-        .map_err(|err| fail("starting the client", &err))?;
+    let client_spec = ClientSpec {
+        envs: daemon.envs(),
+        bin: &bin,
+        scratch: &spec.scratch,
+        removed,
+        ssh: remote.as_ref().map(|(_, ssh)| ssh),
+    };
+    let mut client = spawn_client(&client_spec).map_err(|err| fail("starting the client", &err))?;
+    let remote = remote.map(|(remote, _)| remote);
     let pipe = match wait_discovery(&mut client, &spec.scratch) {
         Ok(discovery) => format!(r"\\.\pipe\{}", discovery.pipe),
         Err(err) => {
             let message = fail("waiting for the driver endpoint", &err);
-            drop(Session::new(
-                spec.session.clone(),
-                client,
-                PipeClient::new(String::new()),
-                daemon,
-                spec.repo_root.clone(),
-                scratch_repo,
-            ));
+            drop(
+                Session::new(
+                    spec.session.clone(),
+                    client,
+                    PipeClient::new(String::new()),
+                    daemon,
+                    spec.repo_root.clone(),
+                    scratch_repo,
+                )
+                .with_remote(remote),
+            );
             return Err(message);
         }
     };
@@ -112,7 +169,8 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
         daemon,
         spec.repo_root.clone(),
         scratch_repo,
-    );
+    )
+    .with_remote(remote);
     if let Err(err) = session.pipe().call("ping", json!({})) {
         let message = fail("pinging the driver endpoint", &err.to_string());
         drop(session);
@@ -132,6 +190,106 @@ fn daemon_spec(spec: &LaunchSpec, bin: &Path) -> DaemonSpec {
         daemon_only_env: spec.daemon_only_env.clone(),
         shell: spec.shell,
     }
+}
+
+/// The remote host's daemon: the home one's checkout, copies and shell,
+/// under `<scratch>/remote` with its own name, and none of the spec's rows,
+/// so it runs the fake agents and never holds the driver token.
+fn remote_daemon_spec(spec: &LaunchSpec, bin: &Path) -> DaemonSpec {
+    DaemonSpec {
+        name: format!("{}-remote", spec.session),
+        scratch_root: spec.scratch.join("remote"),
+        repo_root: spec.repo_root.clone(),
+        bin_dir: bin.to_path_buf(),
+        extra_env: Vec::new(),
+        daemon_only_env: Vec::new(),
+        shell: spec.shell,
+    }
+}
+
+/// Starts the remote host's daemon, writes the fake ssh's state naming it
+/// under `<scratch>/fake-ssh`, and seeds the client's layout in `ui_dir`
+/// with the saved host; returns the remote host and the client's rows.
+fn start_remote(
+    spec: &LaunchSpec,
+    bin: &Path,
+    shim: PathBuf,
+    ui_dir: &Path,
+) -> Result<(RemoteHost, ClientSsh), String> {
+    let daemon = IsolatedDaemon::start(remote_daemon_spec(spec, bin))
+        .map_err(|err| format!("starting the remote host's isolated daemon: {err}"))?;
+    let state = write_fake_ssh(
+        &spec.scratch.join("fake-ssh"),
+        daemon.daemon_exe(),
+        daemon.envs(),
+    )?;
+    let remote = RemoteHost::new(daemon, state.clone());
+    seed_saved_host(ui_dir)?;
+    Ok((remote, ClientSsh { shim, state }))
+}
+
+/// The checkout's fake ssh shim, refusing a checkout without it and a
+/// machine without `node` on `PATH`, which the shim runs under.
+fn fake_ssh_shim(repo_root: &Path) -> Result<PathBuf, String> {
+    let name = if cfg!(windows) {
+        "fake-ssh.cmd"
+    } else {
+        "fake-ssh.sh"
+    };
+    let shim = repo_root
+        .join("tools")
+        .join("e2e")
+        .join("fake-ssh")
+        .join(name);
+    if !shim.is_file() {
+        return Err(format!(
+            "remote_host needs the fake ssh, and {} is missing",
+            shim.display()
+        ));
+    }
+    let node = exe("node");
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(&node).is_file()));
+    if !on_path {
+        return Err(format!(
+            "remote_host needs node on PATH to run the fake ssh {}",
+            shim.display()
+        ));
+    }
+    Ok(shim)
+}
+
+/// Writes the fake ssh's `state.json` in `dir`: `bridge` runs as the remote
+/// command with `envs` over its own environment, no login is refused, and
+/// each run is logged to `argv.jsonl` beside it. Returns the state file.
+fn write_fake_ssh(
+    dir: &Path,
+    bridge: &Path,
+    envs: &[(&'static str, OsString)],
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("making {}: {err}", dir.display()))?;
+    let env: serde_json::Map<String, serde_json::Value> = envs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), json!(value.to_string_lossy())))
+        .collect();
+    let state = json!({
+        "bridge": bridge,
+        "env": env,
+        "fail": null,
+        "log": dir.join("argv.jsonl"),
+    });
+    let path = dir.join("state.json");
+    std::fs::write(&path, state.to_string())
+        .map_err(|err| format!("writing {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+/// Writes `<ui_dir>/native-ui.json` holding only the saved SSH host
+/// [`REMOTE_HOST`], which the client connects at start; a file already
+/// there is left as it is.
+fn seed_saved_host(ui_dir: &Path) -> Result<(), String> {
+    let seed = json!({"saved_hosts": [{"kind": "ssh", "name": REMOTE_HOST}]});
+    write_new(&ui_dir.join(UI_FILE), &seed)
 }
 
 /// Seeds the home of the agent [`token::REAL_AGENT_ENV`] points at a real
@@ -159,17 +317,22 @@ fn seed_real_agent_home(daemon: &IsolatedDaemon) -> Result<(), String> {
 /// `theme`, so the first start skips onboarding; a file already there is
 /// left as it is.
 fn seed_onboarding(home: &Path) -> Result<(), String> {
-    let path = home.join(SEED_FILE);
+    let seed = json!({"hasCompletedOnboarding": true, "theme": "dark"});
+    write_new(&home.join(SEED_FILE), &seed)
+}
+
+/// Writes `seed` to `path` unless a file is already there, which is left
+/// as it is.
+fn write_new(path: &Path, seed: &serde_json::Value) -> Result<(), String> {
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path);
+        .open(path);
     let mut file = match file {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
         Err(err) => return Err(format!("seeding {}: {err}", path.display())),
     };
-    let seed = json!({"hasCompletedOnboarding": true, "theme": "dark"});
     file.write_all(seed.to_string().as_bytes())
         .map_err(|err| format!("seeding {}: {err}", path.display()))
 }
@@ -208,40 +371,37 @@ fn shadow_copy(build_dir: &Path, bin: &Path) -> std::io::Result<()> {
 
 /// Starts the copied client with the daemon's isolation and the driver
 /// switched on, its stderr in `<scratch>/client-stderr.log`.
-fn spawn_client(
-    daemon: &IsolatedDaemon,
-    bin: &Path,
-    scratch: &Path,
-    removed: &[&'static str],
-) -> Result<Child, String> {
-    let stderr_path = scratch.join("client-stderr.log");
+fn spawn_client(client: &ClientSpec<'_>) -> Result<Child, String> {
+    let stderr_path = client.scratch.join("client-stderr.log");
     let stderr = File::create(&stderr_path)
         .map_err(|err| format!("creating {}: {err}", stderr_path.display()))?;
-    client_command(daemon.envs(), bin, scratch, removed, Stdio::from(stderr))
+    client_command(client, Stdio::from(stderr))
         .spawn()
         .map_err(|err| format!("spawning the client: {err}"))
 }
 
 /// The copied client's command: `envs` (the daemon's [`IsolatedDaemon::envs`],
 /// never its daemon-only rows) and the driver switched on, run in `scratch`.
-fn client_command(
-    envs: &[(&'static str, OsString)],
-    bin: &Path,
-    scratch: &Path,
-    removed: &[&'static str],
-    stderr: Stdio,
-) -> Command {
-    let mut command = Command::new(bin.join(exe("rustling-tulip-native")));
+/// The fake ssh's rows are set from `ssh`, and removed without one, so a
+/// value the server inherited never reaches the client.
+fn client_command(client: &ClientSpec<'_>, stderr: Stdio) -> Command {
+    let mut command = Command::new(client.bin.join(exe("rustling-tulip-native")));
     // The client hands its environment on to any daemon it starts itself.
-    for name in removed {
+    for name in client.removed {
         command.env_remove(*name);
     }
+    command.envs(client.envs.iter().map(|(key, value)| (*key, value)));
+    match client.ssh {
+        Some(ssh) => command
+            .env(SSH_ENV, &ssh.shim)
+            .env(FAKE_SSH_STATE_ENV, &ssh.state),
+        None => command.env_remove(SSH_ENV).env_remove(FAKE_SSH_STATE_ENV),
+    };
     command
-        .envs(envs.iter().map(|(key, value)| (*key, value)))
         .env(DRIVER_ENV, "1")
         .env(OFFSCREEN_ENV, "1")
-        .env(REMOTE_FILES_DIR_VAR, scratch.join("remote-files"))
-        .current_dir(scratch)
+        .env(REMOTE_FILES_DIR_VAR, client.scratch.join("remote-files"))
+        .current_dir(client.scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
@@ -333,10 +493,192 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BUILD_HINT, Discovery, LaunchSpec, SEED_FILE, TestShell, client_command, daemon_spec,
-        find_discovery, launch, seed_onboarding,
+        BUILD_HINT, ClientSpec, ClientSsh, Discovery, FAKE_SSH_STATE_ENV, LaunchSpec, SEED_FILE,
+        SSH_ENV, TestShell, UI_FILE, client_command, daemon_spec, find_discovery, launch,
+        remote_daemon_spec, seed_onboarding, seed_saved_host, write_fake_ssh,
     };
     use crate::token::TOKEN_ENV;
+
+    /// A spec for session `unit` under a scratch named `tag`, built from the
+    /// checkout and never started.
+    fn unit_spec(tag: &str, remote_host: bool) -> LaunchSpec {
+        let root = repo_root();
+        LaunchSpec {
+            session: "unit".to_owned(),
+            repo_root: root.clone(),
+            build_dir: root.join("no-such-build"),
+            scratch: root
+                .join(".tmp")
+                .join("driver")
+                .join(format!("unit-{tag}-{}", std::process::id())),
+            shell: TestShell::Cmd,
+            env: Vec::new(),
+            daemon_only_env: Vec::new(),
+            remote_host,
+        }
+    }
+
+    /// Whether `rows` name either of the fake ssh's variables.
+    fn names_ssh(rows: &[(&'static str, OsString)]) -> bool {
+        rows.iter()
+            .any(|(name, _)| *name == SSH_ENV || *name == FAKE_SSH_STATE_ENV)
+    }
+
+    /// The SSH rows go on the client's command alone: neither daemon's
+    /// environment carries them, the remote daemon gets none of the home
+    /// spec's rows, and without a remote host the client's command removes
+    /// both, so a value the server inherited never reaches it.
+    #[test]
+    fn the_ssh_rows_reach_the_client_only() {
+        const SENTINEL: &str = "sentinel-driver-token-7a1c";
+        let mut spec = unit_spec("ssh", true);
+        spec.daemon_only_env = vec![(TOKEN_ENV, OsString::from(SENTINEL))];
+        spec.env = vec![("RUSTLING_TULIP_PWA_DIR", OsString::from("C:\\tmp\\pwa"))];
+        let bin = spec.scratch.join("bin");
+        let home = dev_daemon::spawn_envs(&daemon_spec(&spec, &bin)).expect("the home env builds");
+        let remote_spec = remote_daemon_spec(&spec, &bin);
+        assert_eq!(remote_spec.name, "unit-remote");
+        assert_eq!(remote_spec.scratch_root, spec.scratch.join("remote"));
+        assert_eq!(remote_spec.bin_dir, bin);
+        assert!(remote_spec.extra_env.is_empty() && remote_spec.daemon_only_env.is_empty());
+        let remote = dev_daemon::spawn_envs(&remote_spec).expect("the remote env builds");
+        for rows in [&home.shared, &home.daemon, &remote.shared, &remote.daemon] {
+            assert!(!names_ssh(rows), "a daemon's environment names an SSH row");
+        }
+        assert!(
+            !remote
+                .daemon
+                .iter()
+                .any(|(name, value)| *name == "RUSTLING_TULIP_PWA_DIR"
+                    || value.to_str() == Some(SENTINEL)),
+            "the remote daemon got the home spec's rows"
+        );
+
+        let ssh = ClientSsh {
+            shim: spec
+                .repo_root
+                .join("tools")
+                .join("e2e")
+                .join("fake-ssh")
+                .join("fake-ssh.cmd"),
+            state: spec.scratch.join("fake-ssh").join("state.json"),
+        };
+        let client = |ssh: Option<&ClientSsh>| {
+            let spec = ClientSpec {
+                envs: &home.shared,
+                bin: &bin,
+                scratch: &spec.scratch,
+                removed: &[],
+                ssh,
+            };
+            let command = client_command(&spec, Stdio::null());
+            command
+                .get_envs()
+                .filter(|(name, _)| {
+                    *name == OsStr::new(SSH_ENV) || *name == OsStr::new(FAKE_SSH_STATE_ENV)
+                })
+                .map(|(name, value)| (name.to_owned(), value.map(OsStr::to_owned)))
+                .collect::<Vec<_>>()
+        };
+        let mut set = client(Some(&ssh));
+        set.sort();
+        assert_eq!(
+            set,
+            vec![
+                (
+                    OsString::from(FAKE_SSH_STATE_ENV),
+                    Some(ssh.state.clone().into_os_string())
+                ),
+                (
+                    OsString::from(SSH_ENV),
+                    Some(ssh.shim.clone().into_os_string())
+                ),
+            ]
+        );
+        let mut removed = client(None);
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![
+                (OsString::from(FAKE_SSH_STATE_ENV), None),
+                (OsString::from(SSH_ENV), None)
+            ],
+            "without a remote host the client's command removes both"
+        );
+        assert!(
+            !spec.scratch.exists(),
+            "building the environments made {}",
+            spec.scratch.display()
+        );
+    }
+
+    /// The fake ssh's state names the remote daemon's exe as the bridge and
+    /// its environment, logs under the session's folder, and refuses nothing.
+    #[test]
+    fn the_fake_ssh_state_names_the_remote_daemon() {
+        let spec = unit_spec("state", true);
+        let bin = spec.scratch.join("bin");
+        let remote = dev_daemon::spawn_envs(&remote_daemon_spec(&spec, &bin))
+            .expect("the remote env builds");
+        let dir = fixture("fake-ssh-state");
+        let bridge = bin.join("rustling-tulipd.exe");
+
+        let written = write_fake_ssh(&dir.join("fake-ssh"), &bridge, &remote.shared);
+        let text = std::fs::read_to_string(dir.join("fake-ssh").join("state.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let state_path = written.expect("the state is written");
+        assert_eq!(state_path, dir.join("fake-ssh").join("state.json"));
+        let state: serde_json::Value =
+            serde_json::from_str(&text.expect("the state file is there"))
+                .expect("the state is JSON");
+        let env: serde_json::Map<String, serde_json::Value> = remote
+            .shared
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), json!(value.to_string_lossy())))
+            .collect();
+        assert_eq!(
+            state,
+            json!({
+                "bridge": bridge,
+                "env": env,
+                "fail": null,
+                "log": dir.join("fake-ssh").join("argv.jsonl"),
+            })
+        );
+        let config = remote
+            .shared
+            .iter()
+            .find(|(name, _)| *name == "RUSTLING_TULIP_CONFIG_DIR")
+            .map(|(_, value)| PathBuf::from(value));
+        assert_eq!(config, Some(spec.scratch.join("remote").join("config")));
+    }
+
+    #[test]
+    fn the_saved_host_seed_names_only_devbox_and_never_overwrites() {
+        let fresh = fixture("ui-fresh");
+        let existing = fixture("ui-existing");
+        let mine = r#"{"sidebar_collapsed":true}"#;
+        std::fs::write(existing.join(UI_FILE), mine).expect("writes the existing file");
+
+        let seeded = seed_saved_host(&fresh);
+        let kept = seed_saved_host(&existing);
+        let written = std::fs::read(fresh.join(UI_FILE));
+        let after = std::fs::read_to_string(existing.join(UI_FILE));
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&existing);
+
+        seeded.expect("a fresh folder is seeded");
+        kept.expect("an existing file is left alone, not an error");
+        let written: serde_json::Value =
+            serde_json::from_slice(&written.expect("the seed wrote its file"))
+                .expect("the seed is JSON");
+        assert_eq!(
+            written,
+            json!({"saved_hosts": [{"kind": "ssh", "name": "devbox"}]})
+        );
+        assert_eq!(after.expect("the existing file is still there"), mine);
+    }
 
     /// The workspace root, two levels above this package.
     fn repo_root() -> PathBuf {
@@ -366,6 +708,7 @@ mod tests {
             shell: TestShell::Cmd,
             env: Vec::new(),
             daemon_only_env: vec![(TOKEN_ENV, OsString::from(SENTINEL))],
+            remote_host: false,
         };
         let bin = scratch.join("bin");
         let envs = dev_daemon::spawn_envs(&daemon_spec(&spec, &bin))
@@ -383,7 +726,14 @@ mod tests {
             "the environment IsolatedDaemon::envs returns carries the token"
         );
 
-        let command = client_command(&envs.shared, &bin, &scratch, &[], Stdio::null());
+        let client = ClientSpec {
+            envs: &envs.shared,
+            bin: &bin,
+            scratch: &scratch,
+            removed: &[],
+            ssh: None,
+        };
+        let command = client_command(&client, Stdio::null());
         let leaked = command.get_envs().any(|(name, value)| {
             name == OsStr::new(TOKEN_ENV) || value == Some(OsStr::new(SENTINEL))
         });
@@ -467,6 +817,7 @@ mod tests {
             shell: TestShell::Cmd,
             env: Vec::new(),
             daemon_only_env: Vec::new(),
+            remote_host: false,
         };
         std::fs::create_dir_all(&spec.build_dir).expect("makes the empty build folder");
 

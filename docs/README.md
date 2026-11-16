@@ -47,7 +47,7 @@ apps/
   ios-notify/   - the phone app's notification service extension (package `rustling-tulip-ios-notify`; embedded in the app by `tools/ios/build.ps1`)
   pwa/          - the iPhone PWA shell (Vite + TypeScript, pnpm) that the daemon's tailnet listener serves; see its README.md
 tools/
-  e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
+  e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs and a driven run's `remote_host`
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
   ios/          - `build.ps1` (the phone app's `.app`, on a Mac) `sim-run.ps1` (the gated simulator run from this PC) and `sim-notify.ps1` (the same for the notification extension)

@@ -350,3 +350,61 @@ fn driver_mcp_launch_ping_screenshot_stop() {
         scratch.display()
     );
 }
+
+/// Calls the endpoint's `wait_for` with `until` and its longest timeout,
+/// failing unless the predicate is met.
+fn wait_until(server: &mut Server, id: u64, session: &str, until: &Value) {
+    let params = json!({"until": until, "timeout_ms": 60_000});
+    let waited = tool(
+        server,
+        id,
+        "call",
+        &json!({"session": session, "method": "wait_for", "params": params}),
+    );
+    let waited: Value = serde_json::from_str(first_text(&waited)).expect("wait_for says JSON");
+    assert_eq!(waited["met"], json!(true), "{until}: {waited}");
+}
+
+#[test]
+#[ignore = "live: run via the gate with a driver build"]
+fn driver_mcp_remote_host_connects_and_stops() {
+    let mut server = Server::spawn(&repo_root());
+    server.request(1, "initialize", &initialize()["params"]);
+    let session = format!("remote-{}", std::process::id());
+    let launched = tool(
+        &mut server,
+        2,
+        "launch",
+        &json!({"session": session, "remote_host": true}),
+    );
+    let info: Value = serde_json::from_str(first_text(&launched)).expect("launch says JSON");
+    let scratch = PathBuf::from(info["scratch"].as_str().expect("a scratch folder"));
+    let remote = &info["remote"];
+    assert_eq!(remote["host"], json!("devbox"), "{info}");
+    let remote_scratch = PathBuf::from(remote["scratch"].as_str().expect("a remote scratch"));
+    assert_eq!(remote_scratch, scratch.join("remote"), "{info}");
+
+    // The saved host's header shows, then loses its state text once online.
+    wait_until(
+        &mut server,
+        3,
+        &session,
+        &json!({"element": "host-name-ssh:devbox", "visible": true}),
+    );
+    wait_until(
+        &mut server,
+        4,
+        &session,
+        &json!({"element": "host-status-ssh:devbox", "visible": false}),
+    );
+    let argv = std::fs::read_to_string(scratch.join("fake-ssh").join("argv.jsonl"))
+        .expect("the fake ssh logged its runs");
+    assert!(argv.lines().count() >= 1, "no fake ssh run logged");
+
+    tool(&mut server, 5, "stop", &json!({"session": session}));
+    let status = server.close();
+    assert!(status.success(), "the server exits cleanly: {status}");
+    for root in [&remote_scratch, &scratch] {
+        assert!(!root.exists(), "stop left {}", root.display());
+    }
+}

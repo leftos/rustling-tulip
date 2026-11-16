@@ -29,7 +29,7 @@ services/push-relay/    the push relay, a Cloudflare Worker (TypeScript, pnpm, v
 crates/agents/claude/accounts/ package claude-accounts: the Claude account store, locks, refresh and switch transactions, poll cadence, pace and auto-switch engine; see its README.md and docs/architecture.md "Claude accounts"
 crates/agents/claude/fake/ fake-claude CLI shim the Claude plugin hands the native e2e tier through fake_cli
 tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
-tools/e2e/fake-ssh/     fake `ssh` shim (checks the client's argv, then runs `rustling-tulipd bridge` locally) used by the live tier's SSH specs
+tools/e2e/fake-ssh/     fake `ssh` shim (checks the client's argv, then runs `rustling-tulipd bridge` locally) used by the live tier's SSH specs and by a driven run's `remote_host`
 tools/folder-bench/     package folder-bench (publish = false, never in the installer): the dev-only harness that generates deterministic folder fixtures and times folder-transfer candidates from this PC to the builder, against an isolated daemon there; see its README.md
 tools/protocol-ts/      package protocol-ts (publish = false, never in the installer): the generator, run with `cargo run -p protocol-ts`, that writes the wire types as TypeScript to apps/pwa/src/protocol.ts, and the test that fails when that file is stale
 tools/rt-driver-mcp/    package rt-driver-mcp (never in the installer): the stdio MCP server `rt-driver` (registered in .mcp.json) that launches an isolated driven native client and calls its driver endpoint; see docs/native-client.md "Driver MCP server"

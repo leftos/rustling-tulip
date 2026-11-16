@@ -1,7 +1,8 @@
-//! A named session: a driven client, the isolated daemon it talks to, and
-//! the pipe to its driver endpoint. Dropping a session kills the client's
-//! tree, then the daemon, which removes the scratch folder, then removes the
-//! scratch repo's folder.
+//! A named session: a driven client, the isolated daemon it talks to, an
+//! optional remote host's daemon, and the pipe to its driver endpoint.
+//! Dropping a session kills the client's tree, makes the fake ssh refuse
+//! logins and drops the remote daemon, then the home daemon, which removes
+//! the scratch folder, then removes the scratch repo's folder.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,60 @@ impl Drop for ScratchRepo {
     }
 }
 
+/// The stderr every fake ssh run refuses with once its remote host is
+/// dropped.
+const FAKE_SSH_ENDED: &str = "fake-ssh: the driven run has ended";
+
+/// A session's remote host: the second isolated daemon the client reaches
+/// over the fake ssh, and the fake's state file. Dropping it first makes
+/// the fake refuse every later login, so a client still reconnecting never
+/// has a bridge start a daemon nothing stops, then drops the daemon.
+pub struct RemoteHost {
+    daemon: IsolatedDaemon,
+    state: PathBuf,
+}
+
+impl RemoteHost {
+    #[must_use]
+    pub fn new(daemon: IsolatedDaemon, state: PathBuf) -> Self {
+        Self { daemon, state }
+    }
+
+    /// The `remote` object of `launch`'s reply.
+    fn summary(&self) -> Value {
+        json!({
+            "host": crate::launch::REMOTE_HOST,
+            "scratch": self.daemon.dir().display().to_string(),
+            "config_dir": self.daemon.config_dir().display().to_string(),
+        })
+    }
+
+    /// Rewrites the state so every later run refuses the login, keeping
+    /// the rest of the file.
+    fn refuse_logins(&self) -> Result<(), String> {
+        let text = std::fs::read_to_string(&self.state).map_err(|err| err.to_string())?;
+        let mut state: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+        state["fail"] = json!({"code": 255, "stderr": FAKE_SSH_ENDED});
+        // Written beside it and renamed over, so a shim run mid-write never
+        // reads a truncated file.
+        let staged = self.state.with_extension("json.tmp");
+        std::fs::write(&staged, state.to_string()).map_err(|err| err.to_string())?;
+        std::fs::rename(&staged, &self.state).map_err(|err| err.to_string())
+    }
+}
+
+impl Drop for RemoteHost {
+    /// Refuses later logins; the daemon drops after this, as a field.
+    fn drop(&mut self) {
+        if let Err(err) = self.refuse_logins() {
+            tracing::warn!(
+                "could not make the fake ssh at {} refuse logins: {err}",
+                self.state.display()
+            );
+        }
+    }
+}
+
 /// One launched client and what it runs against.
 pub struct Session {
     name: String,
@@ -90,6 +145,9 @@ pub struct Session {
     scratch: PathBuf,
     native_log: PathBuf,
     repo_root: PathBuf,
+    /// Dropped in `Drop::drop` once the client is killed, before the home
+    /// daemon.
+    remote: Option<RemoteHost>,
     /// Dropped after the client is killed (fields drop after `Drop::drop`).
     _daemon: IsolatedDaemon,
     /// Dropped last, after the daemon and the client are gone.
@@ -113,9 +171,17 @@ impl Session {
             scratch: daemon.dir().to_path_buf(),
             native_log: native_log(&daemon.config_dir()),
             repo_root,
+            remote: None,
             _daemon: daemon,
             scratch_repo,
         }
+    }
+
+    /// The session with `remote` as its remote host.
+    #[must_use]
+    pub fn with_remote(mut self, remote: Option<RemoteHost>) -> Self {
+        self.remote = remote;
+        self
     }
 
     pub fn pipe(&mut self) -> &mut PipeClient {
@@ -128,16 +194,21 @@ impl Session {
         &self.repo_root
     }
 
-    /// What `launch` returns: `{session, pid, pipe, scratch, scratch_repo}`.
+    /// What `launch` returns: `{session, pid, pipe, scratch, scratch_repo}`,
+    /// and `remote: {host, scratch, config_dir}` with a remote host.
     #[must_use]
     pub fn summary(&self) -> Value {
-        json!({
+        let mut summary = json!({
             "session": self.name,
             "pid": self.client.id(),
             "pipe": self.pipe.path(),
             "scratch": self.scratch.display().to_string(),
             "scratch_repo": self.scratch_repo.repo().display().to_string(),
-        })
+        });
+        if let Some(remote) = &self.remote {
+            summary["remote"] = remote.summary();
+        }
+        summary
     }
 
     /// `text` with the client's `native.log` tail after it.
@@ -157,6 +228,9 @@ impl Drop for Session {
         if let Err(err) = self.client.wait() {
             tracing::warn!(session = %self.name, "waiting for the client to exit: {err}");
         }
+        // The fake refuses logins, then the remote daemon goes, before the
+        // home daemon and the scratch repo drop as fields.
+        drop(self.remote.take());
     }
 }
 
