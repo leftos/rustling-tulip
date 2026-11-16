@@ -1,14 +1,20 @@
-//! Following a file inside a session's folders for `TailFile`: which paths a
-//! session may follow, and the follow itself, which sends the file's last
-//! [`TAIL_CHUNK`] bytes, then each new stretch as it arrives, read on a
-//! `notify` wake or a [`POLL`] tick.
+//! Following a file for `TailFile`: which paths a follow takes, and the
+//! follow itself, which sends the file's last [`TAIL_CHUNK`] bytes, then
+//! each new stretch as it arrives, read on a `notify` wake or a [`POLL`]
+//! tick. Any regular file the daemon's user can read may be followed; a
+//! relative path is taken from the session's working folder.
 //!
 //! A requested path is judged twice. [`check`] reads only its text and
-//! refuses network and device paths, over-long or over-deep paths and
-//! anything outside the session's folders before the disk is touched; the
-//! disk work after it ([`prepare`], each follow's read) runs on a blocking
-//! thread, bounded by [`STEP_BOUND`] and stopped early by the follow's
-//! cancel token, and checks where the opened handle really is.
+//! refuses empty, network and device paths, over-long or over-deep paths,
+//! drive- or root-relative paths and paths climbing above their root before
+//! the disk is touched; the disk work after it ([`prepare`], each follow's
+//! read) runs on a blocking thread, bounded by [`STEP_BOUND`] and stopped
+//! early by the follow's cancel token, follows links to the file they name
+//! (a share a link or a mapped drive reaches included), and reads only a
+//! regular file. Network and device paths are refused by their text alone.
+//!
+//! [`open_inside`] and [`Folders`] are a folder fetch's: the same open,
+//! confined to the fetched folder by where the opened handle really is.
 
 use crate::file_fetch::{CanonicalRoot, send_unless_cancelled};
 use crate::session::SessionRecord;
@@ -28,8 +34,6 @@ use tracing::{debug, warn};
 /// file's end the first one sends, and the largest gap a follow reads
 /// through rather than jumping to the file's end.
 pub const TAIL_CHUNK: usize = 64 * 1024;
-/// The most files one connection follows at once.
-pub const MAX_FOLLOWS: usize = 4;
 /// How often a follow looks at its file when no watcher event woke it, for
 /// file systems and folders a watcher does not cover.
 const POLL: Duration = Duration::from_secs(1);
@@ -44,8 +48,9 @@ pub const STEP_BOUND: Duration = Duration::from_secs(5);
 /// tell a file rewritten in place.
 const CHECK_BYTES: usize = 64;
 
-/// The folders a session's follows may read: its working folder first, then
-/// its other members' folders, its worktrees and its `--add-dir` folders.
+/// A session's folders: its working folder first, then its other members'
+/// folders, its worktrees and its `--add-dir` folders. A follow takes a
+/// relative path from the first.
 #[must_use]
 pub fn session_folders(record: &SessionRecord) -> Vec<PathBuf> {
     let members = record
@@ -70,34 +75,25 @@ pub fn session_folders(record: &SessionRecord) -> Vec<PathBuf> {
 }
 
 /// The path `path` names, absolute and with `.` and `..` applied, judged
-/// from its text alone: a relative `path` is taken from the first of
-/// `listed`, and the result must sit inside one of `listed` (compared
-/// without case on Windows). Touches no disk.
+/// from its text alone: a relative `path` is taken from `working`, the
+/// session's working folder. Touches no disk.
 ///
 /// # Errors
 /// Why the path is refused: empty, longer than [`MAX_PATH_CHARS`], deeper
 /// than [`MAX_PATH_DEPTH`], a network or device path, drive- or
-/// root-relative, climbing above its root, or outside every folder.
-pub fn check(listed: &[PathBuf], path: &str) -> Result<PathBuf, String> {
+/// root-relative, climbing above its root, or relative with no `working`.
+pub fn check(working: Option<&Path>, path: &str) -> Result<PathBuf, String> {
     check_shape(path)?;
     let named = Path::new(path);
     let joined = if named.is_absolute() {
         named.to_path_buf()
     } else {
-        let Some(working) = listed.first() else {
+        let Some(working) = working else {
             return Err("the session has no folder".to_owned());
         };
         working.join(named)
     };
-    let normal = normalize(&joined).ok_or_else(|| format!("{path:?} climbs above its root"))?;
-    if listed
-        .iter()
-        .any(|folder| lexically_inside(&normal, folder))
-    {
-        Ok(normal)
-    } else {
-        Err(format!("{path:?} is outside the session's folders"))
-    }
+    normalize(&joined).ok_or_else(|| format!("{path:?} climbs above its root"))
 }
 
 /// Refuse a path by its shape: empty, too long, too deep, naming a network
@@ -144,27 +140,6 @@ fn is_network_or_device(path: &str) -> bool {
     two_separators || odd_prefix
 }
 
-/// Whether `path` starts with every component of `folder`, by text.
-fn lexically_inside(path: &Path, folder: &Path) -> bool {
-    let folder = normalize(folder).unwrap_or_else(|| folder.to_path_buf());
-    let mut parts = path.components();
-    folder.components().all(|part| {
-        parts
-            .next()
-            .is_some_and(|other| same_component(part, other))
-    })
-}
-
-/// Two path components alike, without case on Windows.
-fn same_component(one: Component<'_>, other: Component<'_>) -> bool {
-    if cfg!(windows) {
-        one.as_os_str().to_string_lossy().to_lowercase()
-            == other.as_os_str().to_string_lossy().to_lowercase()
-    } else {
-        one == other
-    }
-}
-
 /// `path` with `.` dropped and each `..` taking off the component before it;
 /// `None` when a `..` would climb above the root.
 fn normalize(path: &Path) -> Option<PathBuf> {
@@ -184,32 +159,13 @@ fn normalize(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// A session's folders as recorded, and their canonical forms, taken once
-/// when a follow starts.
+/// The canonical folders a folder fetch's opens must land inside.
 #[derive(Clone, Debug)]
 pub struct Folders {
     canonical: Vec<PathBuf>,
 }
 
 impl Folders {
-    /// Canonicalize `listed`. Disk work: run it on a blocking thread. A
-    /// folder that does not resolve is left out, so nothing under it is
-    /// followed.
-    #[must_use]
-    pub fn canonicalize(listed: &[PathBuf]) -> Self {
-        let canonical = listed
-            .iter()
-            .filter_map(|folder| {
-                std::fs::canonicalize(folder)
-                    .inspect_err(|err| {
-                        debug!(folder = %folder.display(), error = %err, "file_tail: a session folder does not resolve");
-                    })
-                    .ok()
-            })
-            .collect();
-        Self { canonical }
-    }
-
     /// The one folder `root`, already canonical: what a folder fetch checks
     /// each opened file against.
     pub(crate) fn of_root(root: &CanonicalRoot) -> Self {
@@ -226,18 +182,15 @@ impl Folders {
     }
 }
 
-/// Canonicalize `listed` and [`locate`] `normal` on a blocking thread, giving
-/// up after [`STEP_BOUND`]: the folders a follow of `normal` checks against.
+/// [`locate`] `normal` on a blocking thread, giving up after
+/// [`STEP_BOUND`], so a path that cannot be followed is refused at the start.
 ///
 /// # Errors
 /// Why the path is refused, or that resolving it did not return in time.
-pub async fn prepare(listed: Vec<PathBuf>, normal: PathBuf) -> Result<Folders, String> {
+pub async fn prepare(normal: PathBuf) -> Result<(), String> {
     let cancel = CancellationToken::new();
     let step_cancel = cancel.clone();
-    let step = tokio::task::spawn_blocking(move || {
-        let folders = Folders::canonicalize(&listed);
-        locate(&folders, &normal, &step_cancel).map(|_| folders)
-    });
+    let step = tokio::task::spawn_blocking(move || locate(&normal, &step_cancel).map(|_| ()));
     match tokio::time::timeout(STEP_BOUND, step).await {
         Ok(Ok(found)) => found,
         Ok(Err(err)) => Err(format!("resolving the path failed: {err}")),
@@ -251,28 +204,17 @@ pub async fn prepare(listed: Vec<PathBuf>, normal: PathBuf) -> Result<Folders, S
     }
 }
 
-/// The file `normal` names with every link followed, when it sits inside
-/// `folders`. A path whose end does not exist yet is placed under its
-/// nearest existing ancestor; a link whose target is missing, or a part that
-/// fails to resolve for any reason but absence, is refused. Disk work: run
-/// it on a blocking thread.
+/// The file `normal` names with every link followed, wherever it leads: a
+/// share a link or a mapped drive reaches included, as any readable file
+/// is. A path whose end does not exist yet is placed under its nearest
+/// existing ancestor; a link whose target is missing, or a part that fails
+/// to resolve for any reason but absence, is refused. Disk work: run it on
+/// a blocking thread.
 ///
 /// # Errors
 /// Why the path is refused.
-pub fn locate(
-    folders: &Folders,
-    normal: &Path,
-    cancel: &CancellationToken,
-) -> Result<PathBuf, String> {
-    let resolved = canonical_allowing_missing(normal, cancel)?;
-    if folders.holds(&resolved) {
-        Ok(resolved)
-    } else {
-        Err(format!(
-            "it resolves outside the session's folders (to {})",
-            resolved.display()
-        ))
-    }
+pub fn locate(normal: &Path, cancel: &CancellationToken) -> Result<PathBuf, String> {
+    canonical_allowing_missing(normal, cancel)
 }
 
 /// The canonical form of `path`'s nearest existing ancestor, with the rest
@@ -326,20 +268,42 @@ pub(crate) enum StepError {
     Failed(String),
 }
 
-/// Open `resolved` and check where the opened handle really is, which also
-/// catches a link swapped in after [`locate`].
+/// Open `resolved` as [`open_regular`] does and check where the opened
+/// handle really is: inside `folders`, which also catches a link swapped in
+/// after the path was resolved. A folder fetch's open.
 ///
-/// On Unix the open itself refuses a link as the path's last component
-/// (`O_NOFOLLOW`), cannot make a terminal device the daemon's controlling
-/// terminal (`O_NOCTTY`) and does not block on a FIFO swapped in after
-/// [`locate`] (`O_NONBLOCK`); the handle's own type is checked before
-/// anything is read, `O_NONBLOCK` is then cleared so a read that can report
-/// `EAGAIN` waits instead, and the handle's own path is read from the handle
-/// before anything is sent. Linux and macOS are the supported Unix targets;
-/// on any other Unix the handle's path cannot be read and every open is
-/// refused.
-#[cfg(unix)]
+/// The handle's own path is read from the handle before anything is sent.
+/// Linux and macOS are the supported Unix targets; on any other Unix the
+/// handle's path cannot be read and every open is refused.
 pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
+    let file = open_regular(resolved)?;
+    let opened = final_path(&file, resolved).map_err(|err| {
+        StepError::Failed(format!(
+            "cannot tell where {} opened: {err}",
+            resolved.display()
+        ))
+    })?;
+    if folders.holds(&opened) {
+        Ok(file)
+    } else {
+        Err(StepError::Failed(format!(
+            "{} opened outside the session's folders (at {})",
+            resolved.display(),
+            opened.display()
+        )))
+    }
+}
+
+/// Open `resolved`, the path [`locate`] made, for reading: a follow's open.
+///
+/// On Unix the open itself refuses a link as the path's last component,
+/// which only a link swapped in after [`locate`] can be (`O_NOFOLLOW`),
+/// cannot make a terminal device the daemon's controlling terminal
+/// (`O_NOCTTY`) and does not block on a FIFO (`O_NONBLOCK`); the handle's
+/// own type is checked before anything is read, and `O_NONBLOCK` is then
+/// cleared so a read that can report `EAGAIN` waits instead.
+#[cfg(unix)]
+pub(crate) fn open_regular(resolved: &Path) -> Result<File, StepError> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -367,21 +331,7 @@ pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, St
             resolved.display()
         ))
     })?;
-    let opened = final_path(&file, resolved).map_err(|err| {
-        StepError::Failed(format!(
-            "cannot tell where {} opened: {err}",
-            resolved.display()
-        ))
-    })?;
-    if folders.holds(&opened) {
-        Ok(file)
-    } else {
-        Err(StepError::Failed(format!(
-            "{} opened outside the session's folders (at {})",
-            resolved.display(),
-            opened.display()
-        )))
-    }
+    Ok(file)
 }
 
 /// Clear `O_NONBLOCK` from an opened regular file's descriptor, so a read
@@ -406,32 +356,17 @@ fn clear_nonblock(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Open `resolved` and check where the opened handle really is, which also
-/// catches a link swapped in after [`locate`].
+/// Open `resolved`, the path [`locate`] made, for reading: a follow's open.
+/// Whether it is a regular file is checked on the handle by its caller.
 #[cfg(not(unix))]
-pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
-    let file = File::open(resolved).map_err(|err| {
+pub(crate) fn open_regular(resolved: &Path) -> Result<File, StepError> {
+    File::open(resolved).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             StepError::Missing
         } else {
             StepError::Failed(format!("opening {}: {err}", resolved.display()))
         }
-    })?;
-    let opened = final_path(&file, resolved).map_err(|err| {
-        StepError::Failed(format!(
-            "cannot tell where {} opened: {err}",
-            resolved.display()
-        ))
-    })?;
-    if folders.holds(&opened) {
-        Ok(file)
-    } else {
-        Err(StepError::Failed(format!(
-            "{} opened outside the session's folders (at {})",
-            resolved.display(),
-            opened.display()
-        )))
-    }
+    })
 }
 
 /// The path the open handle `file` refers to, in the form
@@ -532,16 +467,14 @@ pub struct Follow {
     pub path: String,
     /// The path [`check`] made of it.
     pub normal: PathBuf,
-    /// The session's folders when the follow began.
-    pub folders: Folders,
     /// Whether this follow replaces an earlier one of the same file, so its
     /// first message carries `reset`.
     pub restart: bool,
 }
 
 /// Follow `spec`'s file until `cancel` fires or `tx` closes. The path is
-/// resolved again before every read, so a link planted later is refused
-/// like one there at the start. A missing file is waited for. Each read
+/// resolved again before every read, so each read takes the file a link
+/// names at that moment. A missing file is waited for. Each read
 /// runs on a blocking thread, one at a time: a read that has not returned
 /// within [`STEP_BOUND`] is left running and waited for again on the next
 /// poll, and `cancel` ends the follow without waiting for it.
@@ -618,12 +551,11 @@ fn start_step(
     wake: Option<mpsc::UnboundedSender<()>>,
     cancel: &CancellationToken,
 ) -> JoinHandle<Step> {
-    let folders = spec.folders.clone();
     let normal = spec.normal.clone();
     let cursor = cursor.clone();
     let cancel = cancel.clone();
     tokio::task::spawn_blocking(move || {
-        let resolved = match locate(&folders, &normal, &cancel) {
+        let resolved = match locate(&normal, &cancel) {
             Ok(resolved) => resolved,
             Err(why) => {
                 return Step {
@@ -634,7 +566,7 @@ fn start_step(
         };
         let watcher = wake.and_then(|wake| start_watcher(&resolved, wake));
         Step {
-            read: read_at(&folders, &resolved, &cursor, &cancel),
+            read: read_at(&resolved, &cursor, &cancel),
             watcher,
         }
     })
@@ -643,7 +575,6 @@ fn start_step(
 /// Read what `cursor` has not sent of the file at `resolved`: at most
 /// [`TAIL_CHUNK`] bytes.
 fn read_at(
-    folders: &Folders,
     resolved: &Path,
     cursor: &Cursor,
     cancel: &CancellationToken,
@@ -655,7 +586,7 @@ fn read_at(
     }
     let failed =
         |err: std::io::Error| StepError::Failed(format!("reading {}: {err}", resolved.display()));
-    let mut file = open_inside(folders, resolved)?;
+    let mut file = open_regular(resolved)?;
     let meta = file.metadata().map_err(failed)?;
     if !meta.is_file() {
         return Err(StepError::Failed("the path is not a file".to_owned()));
@@ -959,14 +890,17 @@ mod tests {
         (base, folder)
     }
 
-    /// [`check`], then [`locate`] against the folders canonicalized.
+    /// [`check`] against the first of `folders`, then [`locate`].
     fn resolve(folders: &[PathBuf], path: &str) -> Result<PathBuf, String> {
-        let normal = check(folders, path)?;
-        locate(
-            &Folders::canonicalize(folders),
-            &normal,
-            &CancellationToken::new(),
-        )
+        let normal = check(folders.first().map(PathBuf::as_path), path)?;
+        locate(&normal, &CancellationToken::new())
+    }
+
+    /// The one folder `folder`, canonicalized, as a folder fetch holds it.
+    fn folders_of(folder: &Path) -> Folders {
+        Folders {
+            canonical: vec![std::fs::canonicalize(folder).expect("canonical folder")],
+        }
     }
 
     #[test]
@@ -980,19 +914,46 @@ mod tests {
     }
 
     #[test]
-    fn dot_dot_stays_inside_or_is_refused() {
-        let (_base, folder) = folder_with_sibling("dotdot");
+    fn a_path_outside_the_folders_resolves_and_shapes_are_still_refused() {
+        let (base, folder) = folder_with_sibling("dotdot");
         let folders = [folder.clone()];
         assert!(resolve(&folders, "logs/../b.log").is_ok());
-        let err = resolve(&folders, "../outside.log").expect_err("outside");
-        assert!(err.contains("outside the session's folders"), "{err}");
+        let outside = std::fs::canonicalize(base.path().join("outside.log")).expect("canonical");
+        assert_eq!(resolve(&folders, "../outside.log"), Ok(outside.clone()));
         let deep = format!("{}/logs/../../outside.log", folder.display());
-        assert!(resolve(&folders, &deep).is_err());
-        assert!(resolve(&folders, "").is_err());
-        assert!(
-            resolve(&[], "a.log").is_err(),
+        assert_eq!(resolve(&folders, &deep), Ok(outside.clone()));
+        let absolute = base.path().join("outside.log").display().to_string();
+        assert_eq!(resolve(&folders, &absolute), Ok(outside));
+        assert_eq!(resolve(&folders, ""), Err("the path is empty".to_owned()));
+        assert_eq!(
+            resolve(&[], "a.log"),
+            Err("the session has no folder".to_owned()),
             "no folder, no relative path"
         );
+        let climb = if cfg!(windows) {
+            r"C:\..\x.log"
+        } else {
+            "/../x.log"
+        };
+        let err = resolve(&folders, climb).expect_err("climbs");
+        assert!(err.contains("climbs above its root"), "{err}");
+    }
+
+    #[test]
+    fn a_link_out_of_the_folder_resolves_to_its_target() {
+        let (base, folder) = folder_with_sibling("link-out");
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("create folder");
+        std::fs::write(elsewhere.join("secret.log"), "secret").expect("write secret");
+        // No link without developer mode, elevation or `cmd`: nothing to test.
+        if !hooks::make_dir_link(&folder.join("link"), &elsewhere) {
+            return;
+        }
+        let target = std::fs::canonicalize(elsewhere.join("secret.log")).expect("canonical");
+        let folders = [folder.clone()];
+        assert_eq!(resolve(&folders, "link/secret.log"), Ok(target.clone()));
+        let opened = open_regular(&target).expect("the target opens");
+        drop(opened);
     }
 
     #[cfg(windows)]
@@ -1008,11 +969,38 @@ mod tests {
         assert!(resolve(&folders, r"\a.log").is_err());
     }
 
+    /// A session on a mapped network drive or a UNC folder follows its own
+    /// files: a path that resolves to `\\?\UNC\` is located like any other.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_resolves_to_a_share_is_located() {
+        let (base, _folder) = folder_with_sibling("unc");
+        let local = std::fs::canonicalize(base.path().join("outside.log")).expect("canonical");
+        let text = local.display().to_string();
+        let Some(rest) = text.strip_prefix(r"\\?\") else {
+            return;
+        };
+        let mut chars = rest.chars();
+        let (Some(drive), Some(':')) = (chars.next(), chars.next()) else {
+            return;
+        };
+        let share = PathBuf::from(format!(r"\\localhost\{drive}${}", chars.as_str()));
+        // The admin share needs an administrator and the Server service;
+        // without them there is no share to test.
+        let Ok(canonical) = std::fs::canonicalize(&share) else {
+            return;
+        };
+        if !canonical.display().to_string().starts_with(r"\\?\UNC\") {
+            return;
+        }
+        assert_eq!(locate(&share, &CancellationToken::new()), Ok(canonical));
+    }
+
     #[test]
     fn the_opened_handle_is_checked_against_the_folders() {
         let (base, folder) = folder_with_sibling("handle");
         std::fs::write(folder.join("logs").join("in.log"), "in").expect("write log");
-        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
+        let folders = folders_of(&folder);
         assert!(open_inside(&folders, &folder.join("logs").join("in.log")).is_ok());
         // Opened past every path check, as a link swapped in after them is.
         let outside = base.path().join("outside.log");
@@ -1039,15 +1027,14 @@ mod tests {
     #[cfg(unix)]
     const OPEN_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// [`open_inside`] on a thread of its own, failing the test as hung when
+    /// [`open_regular`] on a thread of its own, failing the test as hung when
     /// it has not returned within [`OPEN_GUARD`].
     #[cfg(unix)]
-    fn open_guarded(folders: &Folders, path: &Path) -> Result<File, StepError> {
-        let folders = folders.clone();
+    fn open_guarded(path: &Path) -> Result<File, StepError> {
         let path = path.to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(open_inside(&folders, &path));
+            let _ = tx.send(open_regular(&path));
         });
         rx.recv_timeout(OPEN_GUARD)
             .expect("hung: the open never returned")
@@ -1055,12 +1042,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_inside_refuses_a_fifo() {
+    fn open_regular_refuses_a_fifo() {
         let (_base, folder) = folder_with_sibling("fifo");
         let fifo = folder.join("pipe");
         assert!(hooks::make_fifo(&fifo), "a FIFO could not be made");
-        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
-        let err = open_guarded(&folders, &fifo).expect_err("a FIFO is not opened");
+        let err = open_guarded(&fifo).expect_err("a FIFO is not opened");
         assert!(
             matches!(&err, StepError::Failed(why) if why.contains("not a regular file")),
             "{err:?}"
@@ -1069,18 +1055,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_inside_refuses_a_symlink_to_an_inside_file() {
+    fn open_regular_refuses_a_symlink_as_its_last_part() {
         let (_base, folder) = folder_with_sibling("open-link");
         let target = folder.join("logs").join("in.log");
         std::fs::write(&target, "in").expect("write log");
         let link = folder.join("link.log");
         std::os::unix::fs::symlink(&target, &link).expect("make the link");
-        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
-        assert!(
-            open_inside(&folders, &target).is_ok(),
-            "the real file opens"
-        );
-        let err = open_inside(&folders, &link).expect_err("a link is not opened");
+        assert!(open_regular(&target).is_ok(), "the real file opens");
+        let err = open_regular(&link).expect_err("a link is not opened");
         assert!(
             matches!(&err, StepError::Failed(why) if why.contains("opening")),
             "{err:?}"
@@ -1089,13 +1071,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_inside_returns_a_blocking_handle() {
+    fn open_regular_returns_a_blocking_handle() {
         use std::os::fd::AsRawFd as _;
         let (_base, folder) = folder_with_sibling("blocking");
         let path = folder.join("logs").join("in.log");
         std::fs::write(&path, "in").expect("write log");
-        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
-        let file = open_inside(&folders, &path).expect("a regular file opens");
+        let file = open_regular(&path).expect("a regular file opens");
         // SAFETY: `file` stays open, and `F_GETFL` only reads the
         // descriptor's flags.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };

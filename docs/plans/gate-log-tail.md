@@ -13,7 +13,7 @@ Clicking a gate opens its log inside rustling-tulip, following it as the gate wr
 
 ## Security boundary
 
-The existing `ClientMessage::TailFile` follows only files inside a session's own folders, so a client, possibly on another machine, cannot read an arbitrary path. A gate log can be anywhere the gate's `--log` named. The gate follow therefore names a gate, not a path: the client sends the gate's run id, and the daemon resolves the log path from its own gate state (the claim's `log`, `apps/native/src/gates.rs` reads it from the same source), refusing a run it does not know. A client never supplies the path. Its reads, its bytes-first-then-new-lines stream and its cap on concurrent follows match `TailFile`'s.
+The existing `ClientMessage::TailFile` follows a path a session names, read on that session's host, so it needs a session; a gate run belongs to no session. The gate follow therefore names a gate, not a path: the client sends the gate's run id, and the daemon resolves the log path from its own gate state (the claim's `log`, `apps/native/src/gates.rs` reads it from the same source), refusing a run it does not know. Its reads and its bytes-first-then-new-lines stream match `TailFile`'s.
 
 ## Steps
 

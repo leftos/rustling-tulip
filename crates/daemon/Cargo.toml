@@ -149,7 +149,8 @@ tokio = { workspace = true, features = ["test-util"] }
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` and `O_NONBLOCK` for the folder fetch's and the file tail's
 # open of a listed file, and `F_GETPATH` for the real path of the opened
-# handle on macOS (`file_tail::open_inside` and `file_tail::final_path`).
+# handle on macOS (`file_tail::open_regular`, the tail's open,
+# `file_tail::open_inside`, the folder fetch's, and `file_tail::final_path`).
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

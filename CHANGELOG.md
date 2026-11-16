@@ -39,6 +39,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
+- Chat's Tail boxes follow any file the computer can read, such as a log in a Temp folder, and as many files at once as you open.
 - Compact Chat folds Code Mode scripts into their tool group, counted as scripts, with each script's own tool calls kept under it.
 - The desktop app now draws with the same updated toolkit the coming iPhone app uses, so text and row spacing look slightly different.
 

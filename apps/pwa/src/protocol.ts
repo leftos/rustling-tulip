@@ -39,8 +39,8 @@ export const FEATURE_DEVICE_BLOCK = "device_block";
 export const FEATURE_DAEMON_ID = "daemon_id";
 
 /**
- * `Welcome.features` entry: the daemon follows a file inside a session's
- * folders ([`ClientMessage::TailFile`], [`DaemonMessage::FileTail`],
+ * `Welcome.features` entry: the daemon follows a file it can read for a
+ * session ([`ClientMessage::TailFile`], [`DaemonMessage::FileTail`],
  * [`ClientMessage::UntailFile`]). A client offers a tail only when the
  * connected daemon lists it.
  */
@@ -4239,14 +4239,17 @@ export type ClientMessage =
    * Follow the file at `path` (absolute, or relative to the session's
    * working folder): the daemon sends [`DaemonMessage::FileTail`]s, the
    * last 64 KiB first, then new bytes as they arrive. A missing file is
-   * followed once it appears. A path that does not resolve, symlinks
-   * followed, inside one of the session's own folders, a network or
-   * device path (`\\server\share`, `\\?\`, `\\.\`), a path over 1024
-   * characters or 64 components, an unknown session and a fifth running
-   * follow on one connection are refused with an `Error` carrying
-   * `request_id`. A repeat for the same session and path restarts that
-   * follow, whose first `FileTail` carries `reset`. Advertised by the
-   * `file_tail` feature.
+   * followed once it appears. Any file the daemon's user can read may be
+   * followed, symlinks followed to their target, and a connection may
+   * follow any number of files. An empty path, a path naming a network or
+   * device path by its text (`\\server\share`, `\\?\`, `\\.\`), a drive-
+   * or root-relative path, a path climbing above its root,
+   * a path over 1024 characters or 64 components, a link whose target
+   * does not resolve, a relative path for a session with no folder and an
+   * unknown session are refused with an `Error` carrying `request_id`. A
+   * repeat for the same session and path restarts that follow, whose
+   * first `FileTail` carries `reset`. Advertised by the `file_tail`
+   * feature.
    */
   | { type: "tail_file"; session_id: string; path: string; request_id?: string | null }
   /**
@@ -6465,8 +6468,8 @@ export const ErrorCode = {
   /** The terminal's state does not take a chat message now. */
   CHAT_REFUSED: "chat_refused",
   /**
-   * A per-connection limit was reached, such as a fifth file follow
-   * ([`crate::ClientMessage::TailFile`]) on one connection; stop one first.
+   * A per-connection limit was reached; stop something on that connection
+   * first.
    */
   LIMIT_REACHED: "limit_reached",
   /** An account write met a lock that stayed held; retry in a few seconds. */

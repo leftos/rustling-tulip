@@ -1,10 +1,11 @@
-//! The file follows: `TailFile` starts following a file inside the session's
-//! folders ([`crate::file_tail`]) on a task of its own, whose
-//! `FileTail` messages ride the connection's file queue; `UntailFile`, the
-//! session's removal and the connection's end stop it. A connection runs at
-//! most [`file_tail::MAX_FOLLOWS`] follows. `UntailFile` and a restart wait
-//! for the stopped follow's task to end, so nothing it sends comes after
-//! what follows; the follow does not wait for a read still blocked.
+//! The file follows: `TailFile` starts following any file the daemon's user
+//! can read, a relative path taken from the session's working folder
+//! ([`crate::file_tail`]), on a task of its own, whose `FileTail` messages
+//! ride the connection's file queue; `UntailFile`, the session's removal and
+//! the connection's end stop it. A connection runs as many follows as it
+//! asks for. `UntailFile` and a restart wait for the stopped follow's task
+//! to end, so nothing it sends comes after what follows; the follow does not
+//! wait for a read still blocked.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +15,7 @@ use super::connection::{ConnCtx, TailRegistry};
 use crate::file_tail::{self, Follow};
 use crate::session::{SessionEvent, SessionRegistry};
 use crate::sync::lock;
-use protocol::error_codes::{INVALID_REQUEST, LIMIT_REACHED, NOT_FOUND};
+use protocol::error_codes::{INVALID_REQUEST, NOT_FOUND};
 use protocol::{ClientMessage, DaemonMessage};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -91,36 +92,19 @@ async fn start(
     let Some(record) = hub.sessions.get(&session_id) else {
         return Err((NOT_FOUND, format!("unknown session: {session_id}")));
     };
-    let listed = file_tail::session_folders(&lock(&record));
+    let working = file_tail::session_folders(&lock(&record))
+        .into_iter()
+        .next();
     let refuse = |why: String| {
         (
             INVALID_REQUEST,
             format!("refusing to follow {path:?}: {why}"),
         )
     };
-    let normal = file_tail::check(&listed, &path).map_err(refuse)?;
-    let folders = file_tail::prepare(listed, normal.clone())
-        .await
-        .map_err(refuse)?;
+    let normal = file_tail::check(working.as_deref(), &path).map_err(refuse)?;
+    file_tail::prepare(normal.clone()).await.map_err(refuse)?;
     let key = (session_id.clone(), path.clone());
-    let old = {
-        let mut tails = ctx.tails.lock().await;
-        let old = tails.remove(&key);
-        let running = tails
-            .values()
-            .filter(|entry| !entry.task.is_finished())
-            .count();
-        if old.is_none() && running >= file_tail::MAX_FOLLOWS {
-            return Err((
-                LIMIT_REACHED,
-                format!(
-                    "a connection follows at most {} files; stop one before following {path:?}",
-                    file_tail::MAX_FOLLOWS
-                ),
-            ));
-        }
-        old
-    };
+    let old = ctx.tails.lock().await.remove(&key);
     let restart = old.is_some();
     if let Some(old) = old {
         old.stop().await;
@@ -129,7 +113,6 @@ async fn start(
         session_id,
         path,
         normal,
-        folders,
         restart,
     };
     let id = NEXT_FOLLOW.fetch_add(1, Ordering::Relaxed);
@@ -382,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_path_outside_the_sessions_folders_is_refused() {
+    async fn a_path_outside_the_sessions_folders_is_followed() {
         let (hub, scratch, _folder) = hub_with_folder("tail-outside");
         let mut conn = Conn::new();
         let absolute = scratch.path().join("outside").join("secret.log");
@@ -391,10 +374,8 @@ mod tests {
             "../outside/secret.log".to_owned(),
         ] {
             conn.tail(&hub, &path).await;
-            assert_eq!(
-                conn.refusal(),
-                ("invalid_request".to_owned(), Some("req".to_owned()))
-            );
+            assert!(conn.out_rx.try_recv().is_err(), "{path:?} is not refused");
+            assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, false));
         }
         conn.send(
             &hub,
@@ -406,11 +387,11 @@ mod tests {
         )
         .await;
         assert_eq!(conn.refusal(), ("not_found".to_owned(), None));
-        assert_eq!(conn.tails.lock().await.len(), 0);
+        assert_eq!(conn.tails.lock().await.len(), 2);
     }
 
     #[tokio::test]
-    async fn a_symlink_out_of_the_folder_is_refused() {
+    async fn a_symlink_out_of_the_folder_is_followed_to_its_target() {
         let (hub, scratch, folder) = hub_with_folder("tail-link");
         // A symlink needs developer mode or elevation on Windows and a
         // junction needs `cmd`; with neither there is no link to test.
@@ -419,16 +400,16 @@ mod tests {
         }
         let mut conn = Conn::new();
         conn.tail(&hub, "link/secret.log").await;
-        assert_eq!(
-            conn.refusal(),
-            ("invalid_request".to_owned(), Some("req".to_owned()))
-        );
+        assert!(conn.out_rx.try_recv().is_err(), "the link is not refused");
+        assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, false));
         conn.tail(&hub, "link/not-yet.log").await;
-        assert_eq!(
-            conn.refusal().0,
-            "invalid_request",
-            "a missing file under the link is refused too"
+        assert!(
+            conn.out_rx.try_recv().is_err(),
+            "a missing file under the link is waited for"
         );
+        std::fs::write(scratch.path().join("outside").join("not-yet.log"), "late")
+            .expect("write log");
+        assert_eq!(conn.next_tail().await, (b"late".to_vec(), 0, false));
     }
 
     #[tokio::test]
@@ -504,25 +485,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fifth_follow_is_refused() {
-        let (hub, _scratch, folder) = hub_with_folder("tail-fifth");
+    async fn ten_follows_on_one_connection_all_start() {
+        let (hub, _scratch, folder) = hub_with_folder("tail-many");
         let mut conn = Conn::new();
-        for name in ["1.log", "2.log", "3.log", "4.log", "5.log"] {
+        let names: Vec<String> = (1..=10).map(|n| format!("{n}.log")).collect();
+        for name in &names {
             std::fs::write(folder.join(name), name).expect("write log");
-        }
-        for name in ["1.log", "2.log", "3.log", "4.log", "1.log"] {
             conn.tail(&hub, name).await;
+            assert!(conn.out_rx.try_recv().is_err(), "{name} is not refused");
         }
-        assert!(
-            conn.out_rx.try_recv().is_err(),
-            "four follows and a repeat are taken"
-        );
-        conn.tail(&hub, "5.log").await;
+        assert_eq!(conn.tails.lock().await.len(), 10);
+        let mut first = Vec::new();
+        for _ in 0..10 {
+            first.push(String::from_utf8(conn.next_tail().await.0).expect("utf-8"));
+        }
+        first.sort();
+        let mut expected = names.clone();
+        expected.sort();
         assert_eq!(
-            conn.refusal(),
-            ("limit_reached".to_owned(), Some("req".to_owned()))
+            first, expected,
+            "the fifth, sixth and tenth follows send too"
         );
-        assert_eq!(conn.tails.lock().await.len(), 4);
+        conn.tail(&hub, "1.log").await;
+        assert!(conn.out_rx.try_recv().is_err(), "a repeat is taken");
+        assert_eq!(conn.next_tail().await, (b"1.log".to_vec(), 0, true));
+        assert_eq!(conn.tails.lock().await.len(), 10);
     }
 
     /// Refuse `path` and return why, asserting the code is `invalid_request`.
@@ -610,7 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hung_open_does_not_hold_a_follow_slot() {
+    async fn stopping_a_hung_open_does_not_wait_for_it() {
         let (hub, _scratch, folder) = hub_with_folder("tail-hung");
         for name in ["hung.log", "1.log", "2.log", "3.log", "4.log"] {
             std::fs::write(folder.join(name), name).expect("write log");
@@ -634,7 +621,7 @@ mod tests {
         conn.tail(&hub, "4.log").await;
         assert!(
             conn.out_rx.try_recv().is_err(),
-            "the stopped follow's slot is free"
+            "a follow after the stopped one starts"
         );
         let mut first = Vec::new();
         for _ in 0..4 {

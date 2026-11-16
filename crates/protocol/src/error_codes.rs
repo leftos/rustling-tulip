@@ -52,8 +52,8 @@ pub const PRESETS_FAILED: &str = "presets_failed";
 pub const BUSY: &str = "busy";
 /// The terminal's state does not take a chat message now.
 pub const CHAT_REFUSED: &str = "chat_refused";
-/// A per-connection limit was reached, such as a fifth file follow
-/// ([`crate::ClientMessage::TailFile`]) on one connection; stop one first.
+/// A per-connection limit was reached; stop something on that connection
+/// first.
 pub const LIMIT_REACHED: &str = "limit_reached";
 /// An account write met a lock that stayed held; retry in a few seconds.
 pub const ACCOUNT_BUSY: &str = "account_busy";
