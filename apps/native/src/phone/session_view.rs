@@ -14,6 +14,7 @@ use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
 use super::long_press::{long_press_drag_area, touch_drag_area};
+use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
@@ -679,10 +680,11 @@ impl PhoneRoot {
             .flex()
             .flex_col()
             .gap(px(COMPOSER_GAP));
-        for group in composer::quick_groups(self.shown_has_agent(cx)) {
+        let set = ReplySet::of(self.shown_has_agent(cx));
+        for group in quick_replies::groups(None, set) {
             let mut row = div().flex().flex_wrap().gap(px(COMPOSER_GAP));
-            for (index, text) in group.items.iter().enumerate() {
-                let bytes = composer::quick_bytes(text);
+            for (index, text) in group.replies.iter().enumerate() {
+                let bytes = quick_replies::quick_bytes(text);
                 row = row.child(
                     phone_button(
                         &format!("{}-{}-{index}", target.reply_prefix(), group.title),
@@ -690,7 +692,7 @@ impl PhoneRoot {
                         cx,
                     )
                     .min_h(px(TOUCH_TARGET))
-                    .child(*text)
+                    .child(text.clone())
                     .on_click(cx.listener({
                         let id = id.clone();
                         move |this, _: &ClickEvent, _, cx| {

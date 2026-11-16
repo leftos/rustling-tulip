@@ -301,9 +301,10 @@ impl PhoneRoot {
     /// groups for a session with an agent, the shell pair otherwise.
     #[must_use]
     pub fn quick_reply_items(&self, cx: &App) -> Vec<String> {
-        super::composer::quick_groups(self.shown_has_agent(cx))
-            .iter()
-            .flat_map(|group| group.items.iter().map(|item| (*item).to_owned()))
+        let set = super::quick_replies::ReplySet::of(self.shown_has_agent(cx));
+        super::quick_replies::groups(None, set)
+            .into_iter()
+            .flat_map(|group| group.replies)
             .collect()
     }
 

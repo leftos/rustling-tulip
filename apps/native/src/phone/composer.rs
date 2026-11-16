@@ -1,59 +1,6 @@
-//! The phone's composer as plain Rust: the Quick dock's one-tap replies,
-//! the Keys tray's bytes, and which dock the composer shows above its row.
-//! `session_view` draws it.
-
-/// One section of the Quick dock: its label and the replies it offers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct QuickGroup {
-    /// The section label drawn above the replies.
-    pub(crate) title: &'static str,
-    /// The texts sent, each typed into the session and submitted.
-    pub(crate) items: &'static [&'static str],
-}
-
-/// The replies an agent session offers. Every harness reads "yes" and
-/// "continue" the same way.
-const AGENT_GROUPS: &[QuickGroup] = &[
-    QuickGroup {
-        title: "confirm",
-        items: &["yes", "no"],
-    },
-    QuickGroup {
-        title: "common",
-        items: &[
-            "continue",
-            "commit and push",
-            "retry",
-            "skip",
-            "drastically simplify",
-        ],
-    },
-];
-
-/// The replies a session with no agent offers: a bare shell has no turn to
-/// continue or skip, only the classic y/n pair.
-const SHELL_GROUPS: &[QuickGroup] = &[QuickGroup {
-    title: "confirm",
-    items: &["y", "n"],
-}];
-
-/// The Quick dock's groups for a session with an agent or without one.
-#[must_use]
-pub(crate) fn quick_groups(has_agent: bool) -> &'static [QuickGroup] {
-    if has_agent {
-        AGENT_GROUPS
-    } else {
-        SHELL_GROUPS
-    }
-}
-
-/// The bytes a quick reply types: its text, then `\r`, which submits it.
-#[must_use]
-pub(crate) fn quick_bytes(text: &str) -> Vec<u8> {
-    let mut bytes = text.as_bytes().to_vec();
-    bytes.push(b'\r');
-    bytes
-}
+//! The phone's composer as plain Rust: the Keys tray's bytes and which dock
+//! the composer shows above its row. `session_view` draws it; the Quick
+//! dock's replies are [`super::quick_replies`].
 
 /// One button of the Keys tray: the name on it and what a tap types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,38 +128,6 @@ impl Dock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_agent_session_gets_the_agent_quick_groups() {
-        let groups = quick_groups(true);
-        let titles: Vec<&str> = groups.iter().map(|group| group.title).collect();
-        assert_eq!(titles, ["confirm", "common"]);
-        assert_eq!(groups[0].items, ["yes", "no"]);
-        assert_eq!(
-            groups[1].items,
-            [
-                "continue",
-                "commit and push",
-                "retry",
-                "skip",
-                "drastically simplify"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_shell_session_gets_only_y_and_n() {
-        let groups = quick_groups(false);
-        assert_eq!(groups.len(), 1, "a bare shell has no common group");
-        assert_eq!(groups[0].title, "confirm");
-        assert_eq!(groups[0].items, ["y", "n"]);
-    }
-
-    #[test]
-    fn a_quick_reply_types_its_text_then_return() {
-        assert_eq!(quick_bytes("continue"), b"continue\r");
-        assert_eq!(quick_bytes("yes"), b"yes\r");
-    }
 
     #[test]
     fn the_key_tray_bytes_are_the_pwas() {

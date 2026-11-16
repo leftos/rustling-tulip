@@ -14,6 +14,7 @@ mod prompt_sheet;
 pub mod push;
 #[cfg(target_os = "ios")]
 mod push_ios;
+pub mod quick_replies;
 mod root_view;
 mod session;
 mod session_view;
