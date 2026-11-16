@@ -4,45 +4,44 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.15.0-alpha
+
+### Highlights
+
+- Follow in tab opens a tab that tails a file live, on any host, from a terminal's file path or a Chat file link.
+- Chat can pull a draft from the terminal's prompt box to edit or send it as is, and offers Claude's suggested next prompt.
+- Closing a tab with running sessions asks whether to keep them running or stop them.
+- Chat draws each Code Mode script as one line with its description, time and the calls it ran.
+
 ### Added
 
-- Ctrl+Shift+click on a file path in a terminal offers Follow in tab, which opens a tab that follows the file live, like tail -f, on any host.
-- The iPhone's Chat can pull a draft from the terminal's prompt box or send it as it stands, and shows Claude's suggested next prompt to send or edit.
+- Ctrl+Shift+click a file path in a terminal or Chat file link for Follow in tab, a tab that tails the file live on any host.
+- A file link in a Chat answer now opens the file when clicked.
+- Chat can pull a draft left in the terminal's prompt box in to edit, or send it as it stands.
+- Chat shows Claude's suggested next prompt above the message box, to send with one click or pull in to edit.
 - Closing a tab, or closing the other tabs, that show running sessions now asks whether to keep those sessions running or stop them.
-- The iPhone app has a Settings screen, opened from Home: the Notifications switch, and your hosts with the Add a host form and the phone's SSH key, now live there, and Appearance chooses the phone's theme and text size.
-- On the iPhone, put the keyboard away by tapping the chat or the terminal, or with the new Hide keyboard and Hide keys.
 - On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.
-- The iPhone's Needs you card on Home shows each answer with its description, every question of a longer prompt, and Open on every card.
 - Choose in Settings whether finished subagents stay in the sidebar, how many and for how long, and whether their rows draw compact.
 - Choose where the app's toasts appear: any of eight spots around the screen's edge, in Settings › Notifications.
 - Settings › Remote access tells you when Tailscale is slow to answer, while remote access keeps serving.
-- `rustling-tulipd push-fallback` sends each paired iPhone a push it cannot open, to check that its fallback alert shows.
 - A button beside the sidebar's Sessions title collapses or expands every session's subagent and dispatch-run rows at once.
-- On the iPhone, a host shown as Offline has a Retry button that tries it again at once, instead of waiting for it to redial.
-- A draft left in the terminal's prompt box can be pulled into Chat's message box for editing, or sent as it stands, from desktop Chat.
-- Desktop Chat shows Claude's suggested next prompt above the message box, to send with one click or pull in to edit.
-- On the iPhone, holding a finger on Chat text selects the word under it, and dragging while still holding widens the selection; handles at its ends move either end, dragging near the chat's edge scrolls it, and Copy puts it on the clipboard.
-- Chat, on the desktop and the iPhone, draws each Code Mode script as one line: its description, number, time and the calls it ran, with a failed script's error under it.
-- A file link in a Chat answer now opens the file, and Ctrl+Shift+click on it offers the link menu, Follow in tab included.
+- Chat draws each Code Mode script as one line with its description, time and the calls it ran, and a failed script's error under it.
 
 ### Fixed
 
 - Ctrl+click on a web address written without `https://`, such as a `claude.ai/…` link, now opens it in the browser instead of looking for a file.
-- A Needs you notification on the iPhone now leaves the notification list once the prompt is answered in any client, usually without opening the app, and the app badge shows what still waits.
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.
 - Connecting or pairing from another device no longer waits while the host sends phone alerts and tidies their subscriptions.
 - A window you switch to now fits the sessions it shows to its own panes, even when another computer sized them last.
 - Answering a question from a toast, the Dashboard or the phone works again when Claude draws the question's box indented.
-- A session in a tab or split you haven't looked at yet now fills its pane to the bottom when first shown, instead of leaving blank rows.
+- A session in a tab or split you haven't opened yet fills its pane to the bottom when first shown, instead of leaving blank rows.
 - Another computer on your tailnet stays connected while the host PC is busy, and gets straight back in when it reconnects then.
 - A selected choice in a question card with several answers keeps its description readable, instead of fading into the filled button.
-- On the iPhone, one tap on a short summary in Chat opens its full text, and a single tap follows a link in Chat.
 - Chat sends your message when Claude's prompt box shows only its suggested next prompt, instead of calling it a draft.
-- On the iPhone, opening the app from a notification no longer shows your PC as not paired after a push woke the app while the phone was locked.
 
 ### Changed
 
-- Chat's Tail boxes follow any file the computer can read, such as a log in a Temp folder, and as many files at once as you open.
+- Chat's Tail boxes follow any file the computer can read, such as a log in a Temp folder, and any number of files at once.
 - Compact Chat folds Code Mode scripts into their tool group, counted as scripts, with each script's own tool calls kept under it.
 - The desktop app now draws with the same updated toolkit the coming iPhone app uses, so text and row spacing look slightly different.
 
