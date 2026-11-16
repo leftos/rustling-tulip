@@ -2517,9 +2517,34 @@ impl RootView {
     /// The note session `session_id`'s composer shows, if any.
     #[must_use]
     pub fn chat_composer_note(&self, session_id: &str) -> Option<String> {
+        self.chat_composer_line(session_id).map(|line| line.text())
+    }
+
+    /// The note row session `session_id`'s composer draws, with the
+    /// draft's Pull and Send where the host offers them; none without a
+    /// note.
+    #[must_use]
+    pub(crate) fn chat_composer_line(&self, session_id: &str) -> Option<ComposerLine> {
         let chat = self.chat.sessions.get(session_id)?;
         self.composer_line_of(session_id, chat)
-            .map(|line| line.text())
+    }
+
+    /// The suggestion chip session `session_id`'s composer draws above its
+    /// field, if any.
+    #[must_use]
+    pub(crate) fn chat_suggestion_chip(&self, session_id: &str) -> Option<SuggestionChip<'_>> {
+        let chat = self.chat.sessions.get(session_id)?;
+        self.suggestion_chip_of(chat)
+    }
+
+    /// The suggestion chip `chat`'s composer draws: one for the agent's
+    /// suggested next prompt, while no card is up and no send is in flight.
+    fn suggestion_chip_of<'a>(&self, chat: &'a SessionChat) -> Option<SuggestionChip<'a>> {
+        chat::suggestion_chip(
+            chat.composer_state.as_ref(),
+            chat.stack.current().is_some(),
+            chat.sends.in_flight((self.now)()),
+        )
     }
 
     /// The daemon's reason for refusing session `session_id`'s last send.
@@ -3035,14 +3060,11 @@ impl RootView {
         let composer = chat.composer.as_ref()?;
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let line = self.composer_line_of(session_id, chat);
-        let disabled = matches!(&line, Some(ComposerLine::Note(note)) if note.disables());
+        let disabled = composer_line_disables(line.as_ref());
         let note = line.map(|line| Self::composer_note_row(session_id, &line, cx));
-        let chip = chat::suggestion_chip(
-            chat.composer_state.as_ref(),
-            chat.stack.current().is_some(),
-            chat.sends.in_flight((self.now)()),
-        )
-        .map(|chip| Self::suggestion_chip_row(session_id, &chip, !disabled, cx));
+        let chip = self
+            .suggestion_chip_of(chat)
+            .map(|chip| Self::suggestion_chip_row(session_id, &chip, !disabled, cx));
         let text = composer.input.read(cx).text().to_owned();
         let field = field_frame(false, Layer::Base, &t)
             .driver_id(|| "chat-composer".to_owned())
@@ -3206,6 +3228,12 @@ impl RootView {
 
 /// How a disabled composer is dimmed.
 const DISABLED_OPACITY: f32 = 0.5;
+
+/// Whether the composer's note row `line` disables the composer, and with
+/// it the suggestion chip's Send and Pull.
+pub(crate) fn composer_line_disables(line: Option<&ComposerLine>) -> bool {
+    matches!(line, Some(ComposerLine::Note(note)) if note.disables())
+}
 
 /// The soft keyboard the phone's composer asks for: Send as its action key,
 /// with autocorrect and sentence autocapitalization on.

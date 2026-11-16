@@ -16,8 +16,8 @@ use gpui::{
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, FEATURE_FILE_TAIL, SessionSnapshot, ToolKind, ToolOutcome,
-    WorkShell,
+    ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, SessionSnapshot, ToolKind,
+    ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
@@ -89,6 +89,12 @@ fn listed() -> Vec<SessionSnapshot> {
 
 /// A phone with the saved [`REMOTE`] open, listing [`listed`].
 fn open_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    open_phone_on(cx, dir, &[])
+}
+
+/// [`open_phone`] with [`REMOTE`]'s daemon listing `features` beside the
+/// current daemon's.
+fn open_phone_on<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
     seed_ui(
         dir,
         &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
@@ -96,7 +102,8 @@ fn open_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = Harness::phone(cx, dir);
     h.tokens().set(REMOTE, "t1").expect("seed a token");
     let mut host = h.host(&saved_remote());
-    host.connect();
+    host.connect_with_features(features);
+    host.sent();
     host.send(DaemonMessage::Repos {
         repos: vec![repo("r1", "C:/r1")],
     });
@@ -1140,6 +1147,12 @@ fn the_page_closes_when_its_session_is_gone(cx: &mut TestAppContext) {
 /// Session `a`'s page with its chat loaded, `text` typed into its composer.
 fn typed_composer<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
     let mut h = chat_loaded(cx, dir, vec![user("u1")]);
+    type_into_composer(&mut h, text);
+    h
+}
+
+/// Taps session `a`'s composer field and types `text` into it.
+fn type_into_composer(h: &mut Harness<'_>, text: &str) {
     h.click_on("phone-composer-field");
     let keys: Vec<String> = text
         .chars()
@@ -1152,7 +1165,6 @@ fn typed_composer<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> 
         })
         .collect();
     h.keys(&keys.join(" "));
-    h
 }
 
 /// The text in session `a`'s composer.
@@ -1409,6 +1421,249 @@ fn the_composer_buttons_are_44_px_tall(cx: &mut TestAppContext) {
             bounds.size.height
         );
     }
+}
+
+// ── The prompt box's draft and the suggested next prompt ───────────────────
+
+/// Session `a`'s page with its chat loaded, on a host that lists
+/// `features`.
+fn chat_loaded_on<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
+    let mut h = open_phone_on(cx, dir, features);
+    h.click_on(&row("a"));
+    assert_eq!(shown(&mut h).as_deref(), Some("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, vec![user("u1")]));
+    h
+}
+
+/// Session `a`'s terminal now shows its prompt box in `state`.
+fn composer_shows(h: &mut Harness<'_>, state: ComposerState) {
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen {
+                composer: state,
+                prompt: None,
+            },
+        });
+}
+
+/// Session `a`'s page on a host that can pull or send the prompt box's
+/// draft, the box holding one.
+fn on_a_draft<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = chat_loaded_on(cx, dir, &[FEATURE_CHAT_DRAFT]);
+    composer_shows(&mut h, ComposerState::Draft);
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// Session `a`'s page with the agent suggesting `text` as the next prompt.
+fn on_a_suggestion<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
+    let mut h = chat_loaded(cx, dir, vec![user("u1")]);
+    composer_shows(
+        &mut h,
+        ComposerState::Suggestion {
+            text: text.to_owned(),
+        },
+    );
+    h.host(&saved_remote()).sent();
+    h
+}
+
+#[gpui::test]
+fn a_phone_draft_offers_pull_and_send(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_draft(cx, &dir);
+
+    assert_eq!(
+        composer_note(&mut h).as_deref(),
+        Some("The prompt box has a draft.")
+    );
+    assert!(drawn(&mut h, "phone-composer-note"));
+    for selector in ["phone-draft-pull", "phone-draft-send"] {
+        assert!(drawn(&mut h, selector), "{selector} shows");
+        let height = h.bounds(selector).size.height;
+        assert!(height >= touch_target(), "{selector} is {height} tall");
+    }
+}
+
+#[gpui::test]
+fn tapping_pull_sends_a_pull_and_the_draft_lands_in_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_draft(cx, &dir);
+    type_into_composer(&mut h, "and test");
+    h.host(&saved_remote()).sent();
+
+    h.tap_on("phone-draft-pull");
+
+    let pulls: Vec<Option<String>> = h
+        .host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatPullDraft {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pulls.len(), 1, "one pull goes out: {pulls:?}");
+    assert!(pulls[0].is_some(), "under a request id");
+    assert_eq!(
+        composer_note(&mut h).as_deref(),
+        Some("Pulling the draft\u{2026}")
+    );
+    assert!(
+        !drawn(&mut h, "phone-draft-pull"),
+        "no buttons while pulling"
+    );
+    assert!(!drawn(&mut h, "phone-draft-send"));
+
+    h.host(&saved_remote()).send(DaemonMessage::ChatDraft {
+        session_id: "a".to_owned(),
+        request_id: pulls[0].clone(),
+        text: "fix the bug".to_owned(),
+        cleared: true,
+    });
+
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("fix the bug\nand test"),
+        "the draft lands ahead of the typed text"
+    );
+    assert_eq!(h.root(|root, _| root.chat_composer_error("a")), None);
+    assert!(drawn(&mut h, "phone-draft-pull"), "the buttons are back");
+}
+
+#[gpui::test]
+fn tapping_send_sends_the_draft_as_it_stands(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_draft(cx, &dir);
+
+    h.tap_on("phone-draft-send");
+
+    let sent: Vec<Option<String>> = h
+        .host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSendDraft {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1, "one send-draft goes out: {sent:?}");
+    assert!(sent[0].is_some(), "under a request id");
+    assert_eq!(composer_note(&mut h).as_deref(), Some("Sending\u{2026}"));
+}
+
+#[gpui::test]
+fn a_host_without_chat_draft_shows_no_draft_buttons(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+
+    composer_shows(&mut h, ComposerState::Draft);
+
+    assert_eq!(
+        composer_note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Send or clear it in the terminal first.")
+    );
+    assert!(drawn(&mut h, "phone-composer-note"));
+    assert!(!drawn(&mut h, "phone-draft-pull"));
+    assert!(!drawn(&mut h, "phone-draft-send"));
+}
+
+#[gpui::test]
+fn a_phone_suggestion_chip_sends_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed_composer(cx, &dir, "mine");
+    composer_shows(
+        &mut h,
+        ComposerState::Suggestion {
+            text: "write todo.py".to_owned(),
+        },
+    );
+    h.host(&saved_remote()).sent();
+
+    assert!(drawn(&mut h, "phone-suggestion"));
+    assert_eq!(composer_note(&mut h), None);
+    for selector in ["phone-suggestion-send", "phone-suggestion-pull"] {
+        let height = h.bounds(selector).size.height;
+        assert!(height >= touch_target(), "{selector} is {height} tall");
+    }
+    h.tap_on("phone-suggestion-send");
+
+    let sends = chat_sends(&mut h);
+    assert_eq!(sends.len(), 1, "one send: {sends:?}");
+    assert_eq!(sends[0].0, "write todo.py");
+    assert!(sends[0].1.is_some(), "under a request id");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("mine"),
+        "the composer keeps its own text"
+    );
+}
+
+#[gpui::test]
+fn a_phone_suggestion_chip_pulls_it_into_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_suggestion(cx, &dir, "write todo.py");
+
+    h.tap_on("phone-suggestion-pull");
+
+    assert_eq!(composer_text(&mut h).as_deref(), Some("write todo.py"));
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ChatSend { .. }
+                | ClientMessage::ChatPullDraft { .. }
+                | ClientMessage::ChatSendDraft { .. }
+        )),
+        "nothing is sent: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn the_suggestion_chips_buttons_split_its_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_suggestion(cx, &dir, "write todo.py");
+
+    // A field's frame: 11 px of padding inside a 1 px border on each side.
+    let inset = 12.0;
+    let chip = h.bounds("phone-suggestion");
+    let send = h.bounds("phone-suggestion-send");
+    let pull = h.bounds("phone-suggestion-pull");
+    let left = f32::from(send.left() - chip.left());
+    let right = f32::from(chip.right() - pull.right());
+    assert!(
+        (left - inset).abs() <= 1.0 && (right - inset).abs() <= 1.0,
+        "Send and Pull span the chip's inner width: {left} px in from the left, {right} px from the right"
+    );
+    for (selector, bounds) in [
+        ("phone-suggestion-send", send),
+        ("phone-suggestion-pull", pull),
+    ] {
+        let height = bounds.size.height;
+        assert!(height >= touch_target(), "{selector} is {height} tall");
+    }
+}
+
+#[gpui::test]
+fn a_cut_phone_suggestion_has_no_buttons(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_suggestion(cx, &dir, "write a long sugg\u{2026}");
+
+    assert!(drawn(&mut h, "phone-suggestion"));
+    assert!(!drawn(&mut h, "phone-suggestion-send"));
+    assert!(!drawn(&mut h, "phone-suggestion-pull"));
 }
 
 // ── The keyboard ───────────────────────────────────────────────────────────

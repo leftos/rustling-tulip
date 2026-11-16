@@ -4,8 +4,8 @@
 //! takes the back gesture. It only renders and forwards taps.
 
 use gpui::{
-    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Window, div,
-    prelude::*, px,
+    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Stateful, Window,
+    div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -16,7 +16,8 @@ use super::hosts_view::phone_button;
 use super::long_press::long_press_drag_area;
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
-use crate::chat_view::chat_available;
+use crate::chat::ComposerLine;
+use crate::chat_view::{chat_available, composer_line_disables};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
@@ -306,15 +307,21 @@ impl PhoneRoot {
     /// while one is open, the note saying why it cannot send, the field with
     /// Send, and the buttons under them. None before the chat has loaded.
     fn composer(&self, session_id: &str, keyboard_up: bool, cx: &mut Context<Self>) -> Option<Div> {
-        let (input, note, enabled, error) = {
+        let (input, line, chip, enabled, error) = {
             let root = self.root.read(cx);
             (
                 root.phone_composer_input(session_id)?,
-                root.chat_composer_note(session_id),
+                root.chat_composer_line(session_id),
+                root.chat_suggestion_chip(session_id)
+                    .map(|chip| (chip.text.to_owned(), chip.actions)),
                 root.phone_composer_send_enabled(session_id, cx),
                 root.chat_composer_error(session_id),
             )
         };
+        let chip_live = !composer_line_disables(line.as_ref());
+        let note = line.map(|line| Self::composer_note_row(session_id, &line, cx));
+        let chip = chip
+            .map(|(text, actions)| Self::suggestion_chip(session_id, text, actions, chip_live, cx));
         let dock = if self.dock_drawn(session_id, Page::Chat, cx) {
             self.dock(session_id, cx)
         } else {
@@ -363,13 +370,8 @@ impl PhoneRoot {
                 .border_t_1()
                 .border_color(gpui::rgb(t.line))
                 .children(dock)
-                .children(note.map(|note| {
-                    div()
-                        .driver_id(|| "phone-composer-note".to_owned())
-                        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
-                        .text_color(gpui::rgb(t.muted))
-                        .child(note)
-                }))
+                .children(note)
+                .children(chip)
                 .child(
                     div()
                         .flex()
@@ -387,6 +389,122 @@ impl PhoneRoot {
                 }))
                 .child(Self::composer_buttons(keyboard_up, cx)),
         )
+    }
+
+    /// The composer's note row (`phone-composer-note`): `line`'s text, and
+    /// for a draft the host can pull or send, Pull (`phone-draft-pull`) and
+    /// Send (`phone-draft-send`) after it.
+    fn composer_note_row(session_id: &str, line: &ComposerLine, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let note = div()
+            .driver_id(|| "phone-composer-note".to_owned())
+            .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+            .text_color(gpui::rgb(t.muted))
+            .child(line.text());
+        if !line.has_draft_actions() {
+            return note;
+        }
+        let (pull_id, send_id) = (session_id.to_owned(), session_id.to_owned());
+        let pull = Self::composer_action("phone-draft-pull", "Pull", true, cx).on_click(
+            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.root
+                    .update(cx, |root, cx| root.pull_draft(&pull_id, cx));
+            }),
+        );
+        let send = Self::composer_action("phone-draft-send", "Send", true, cx).on_click(
+            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.root
+                    .update(cx, |root, cx| root.send_draft(&send_id, cx));
+            }),
+        );
+        div()
+            .flex()
+            .items_center()
+            .gap(px(COMPOSER_GAP))
+            .child(note.flex_1().min_w(px(0.0)))
+            .child(pull)
+            .child(send)
+    }
+
+    /// The agent's suggested next prompt above the composer's field
+    /// (`phone-suggestion`): `text`, wrapping at the phone's width, and
+    /// with its `actions`, Send (`phone-suggestion-send`) and Pull
+    /// (`phone-suggestion-pull`) under it, live while `live`.
+    fn suggestion_chip(
+        session_id: &str,
+        text: String,
+        actions: bool,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let chip = field_frame(false, Layer::Base, &t)
+            .driver_id(|| "phone-suggestion".to_owned())
+            .flex()
+            .flex_col()
+            .gap(px(COMPOSER_GAP))
+            .py(px(6.0))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                    .text_color(gpui::rgb(t.muted))
+                    .child(text.clone()),
+            );
+        if !actions {
+            return chip;
+        }
+        let (send_id, pull_id) = (session_id.to_owned(), session_id.to_owned());
+        let (send_text, pull_text) = (text.clone(), text);
+        let send =
+            Self::composer_action("phone-suggestion-send", "Send", live, cx).when(live, |send| {
+                send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.root.update(cx, |root, cx| {
+                        root.send_suggestion(&send_id, &send_text, cx);
+                    });
+                }))
+            });
+        let pull =
+            Self::composer_action("phone-suggestion-pull", "Pull", live, cx).when(live, |pull| {
+                pull.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.root.update(cx, |root, cx| {
+                        root.pull_suggestion(&pull_id, &pull_text, cx);
+                    });
+                }))
+            });
+        chip.child(
+            div()
+                .w_full()
+                .flex()
+                .gap(px(COMPOSER_GAP))
+                .child(send.flex_1())
+                .child(pull.flex_1()),
+        )
+    }
+
+    /// An outlined composer action tagged `selector` reading `label`, a
+    /// touch target tall, drawn dimmed unless `enabled`.
+    fn composer_action(
+        selector: &str,
+        label: &'static str,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        button(
+            selector,
+            button_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                ButtonKind::Outlined,
+                ButtonSize::Large,
+                enabled,
+                Layer::Base,
+                &theme(cx),
+            ),
+        )
+        .min_h(px(TOUCH_TARGET))
+        .flex_none()
+        .child(label)
     }
 
     /// Whether the composer's dock draws now: one is open, the shown page is
