@@ -278,10 +278,20 @@ fn slice_columns(row: &TerminalRow, start: usize, end: usize, cols: usize) -> Ve
     columns
 }
 
+/// What the tip over a hovered link of `kind` says, in a terminal or a
+/// transcript: a path opens or offers its menu, a URL only opens.
+#[must_use]
+pub fn tip_text(kind: LinkKind) -> &'static str {
+    match kind {
+        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click for options",
+        LinkKind::Url => "Ctrl+click to open",
+    }
+}
+
 /// Every link in one line of text: a single row, or the logical line a group
-/// of rows assembles into. Only the tests read a bare line; the terminal
-/// reads rows through [`detect_window_links`].
-#[cfg(test)]
+/// of rows assembles into. A followed run's or subagent's transcript reads
+/// each of its lines through it; the terminal reads rows through
+/// [`detect_window_links`].
 #[must_use]
 pub fn detect_links(text: &str) -> Vec<TerminalLink> {
     let chars = chars_len(text);

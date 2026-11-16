@@ -2,21 +2,26 @@
 //! terminal shows Claude Code: it follows the run's transcript, draws the
 //! reply in place of the recent actions, folds appends by id, ignores a stale
 //! reply, unfollows once no pane shows the run, and follows again after a
-//! reconnect.
+//! reconnect. A path or URL in a transcript line opens as in a terminal:
+//! Ctrl+hover names its gestures, Ctrl+click opens it, Ctrl+Shift+click on
+//! a path opens the link menu.
 
 use crate::support;
+
+use std::path::{Path, PathBuf};
 
 use gpui::{
     FontWeight, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
     TestAppContext, point, px,
 };
 use protocol::{
-    AppearanceOverrides, ChatEntry, ClientMessage, DaemonMessage, SplitDirection, ToolKind,
-    ToolOutcome, TranscriptSource,
+    AppearanceOverrides, ChatEntry, ClientMessage, DaemonMessage, GridNode, PaneFollow,
+    SessionSnapshot, SplitDirection, ToolKind, ToolOutcome, TranscriptSource,
 };
+use rustling_tulip_native::target::Target;
 use support::{
-    DispatchRunBuilder, Fixture, Harness, TestDir, dispatch_run, follow_pane, pane, repo, session,
-    split, tab,
+    DispatchRunBuilder, Fixture, Harness, Opened, REMOTE, TestDir, dispatch_run, follow_pane,
+    follow_subagent_pane, pane, repo, session, split, subagent, tab,
 };
 
 /// Repo `r1`; tab `t1`: session `s1` in `p1` and a pane `f2` following run
@@ -455,11 +460,22 @@ fn with_tool<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 fn on_line(
     h: &mut Harness<'_>,
     n: usize,
+    unit: (&str, u32),
+    bytes: std::ops::Range<usize>,
+) -> (Point<Pixels>, usize) {
+    on_text(h, &format!("dispatch-line-f2-{n}"), unit, bytes)
+}
+
+/// [`on_line`] for the line tagged `line` in pane `f2`, a run's or a
+/// subagent's.
+fn on_text(
+    h: &mut Harness<'_>,
+    line: &str,
     (entry, unit): (&str, u32),
     bytes: std::ops::Range<usize>,
 ) -> (Point<Pixels>, usize) {
     h.cx.run_until_parked();
-    let bounds = h.bounds(&format!("dispatch-line-f2-{n}"));
+    let bounds = h.bounds(line);
     let y = bounds.top() + bounds.size.height / 2.0;
     let mut x = bounds.left();
     let mut found = None;
@@ -729,4 +745,633 @@ fn a_drag_released_outside_the_log_copies_and_ends_the_press(cx: &mut TestAppCon
     );
     h.cx.simulate_mouse_move(elsewhere, MouseButton::Left, Modifiers::none());
     assert_eq!(selected(&mut h), copied, "no press is left to move it");
+}
+
+// ── Opening links ──────────────────────────────────────────────────────────
+
+const URL: &str = "https://example.com/docs";
+const NOTES: &str = "docs/notes.md";
+const BOTH_GESTURES: &str = "pane-link-tip-f2=Ctrl+click to open · Ctrl+Shift+click for options";
+
+fn ctrl() -> Modifiers {
+    support::secondary_key()
+}
+
+fn ctrl_shift() -> Modifiers {
+    Modifiers {
+        shift: true,
+        ..support::secondary_key()
+    }
+}
+
+/// Writes `rel` under `root`; returns the path a link to it resolves to.
+fn write_file(root: &Path, rel: &str) -> PathBuf {
+    let path = root.join(rel);
+    let parent = path.parent().expect("a file has a parent folder");
+    std::fs::create_dir_all(parent).expect("create the file's folder");
+    std::fs::write(&path, "x\n").expect("write the file");
+    let resolved = std::fs::canonicalize(&path).expect("canonicalize the file");
+    let text = resolved.to_string_lossy();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+/// Whether an element tagged `selector` was painted.
+fn drawn(h: &mut Harness<'_>, selector: &'static str) -> bool {
+    h.cx.run_until_parked();
+    h.cx.debug_bounds(selector).is_some()
+}
+
+/// [`fixture`] on a connection with dispatch runs, `r1` listed working in
+/// `worktree` with main checkout `main` and no dispatching session, and its
+/// transcript holding `entries`.
+fn run_in<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    (worktree, main): (&Path, &Path),
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &fixture());
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    let run = r1()
+        .worktree(&worktree.to_string_lossy())
+        .main_checkout(&main.to_string_lossy());
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![run.build()],
+    });
+    let id = follow_id(&mut h);
+    h.send(reply(entries, Some(id)));
+    h
+}
+
+/// [`run_in`] with `docs/notes.md` written in both the worktree and the
+/// main checkout under `dir`; also returns the worktree's file.
+fn run_with_notes<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> (Harness<'a>, PathBuf) {
+    let (worktree, main) = (dir.path().join("wt"), dir.path().join("main"));
+    let file = write_file(&worktree, NOTES);
+    write_file(&main, NOTES);
+    (run_in(cx, dir, (&worktree, &main), entries), file)
+}
+
+/// The answer line `● wrote docs/notes.md`, whose path takes bytes 10 to 23.
+fn wrote_notes() -> ChatEntry {
+    answer("a1", "wrote docs/notes.md")
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_path_in_a_subagent_transcript_opens_it_as_the_terminal_does(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), NOTES);
+    let s1 = session("s1")
+        .shell(&dir.path().to_string_lossy())
+        .subagents(vec![subagent("a1")])
+        .build();
+    let fixture = Fixture {
+        sessions: vec![s1],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_subagent_pane("f2", "s1", "a1"),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.reconnect_with_features(&[]);
+    let of = TranscriptSource::Subagent {
+        session_id: "s1".to_owned(),
+        agent_id: "a1".to_owned(),
+    };
+    let id = h.sent().into_iter().find_map(|msg| match msg {
+        ClientMessage::FollowTranscript { source, request_id } if source == of => request_id,
+        _ => None,
+    });
+    h.send(DaemonMessage::Transcript {
+        source: of,
+        entries: vec![wrote_notes()],
+        hidden: 0,
+        request_id: id,
+    });
+    let (at, _) = on_text(&mut h, "subagent-line-f2-0", ("a1", 0), 12..14);
+    h.click(at, ctrl());
+
+    // A terminal's Ctrl+click on this path in `s1` opens the same
+    // (`ui_links::ctrl_click_on_a_text_path_opens_the_default_app`).
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(file)],
+        "the path resolved against s1's folder, in its default app"
+    );
+}
+
+#[gpui::test]
+fn ctrl_shift_click_on_a_path_in_a_transcript_opens_the_link_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+
+    h.click(at, ctrl_shift());
+
+    assert!(
+        h.root(|root, _| root.link_menu_open()),
+        "the link menu opens"
+    );
+    assert_eq!(h.opened(), [], "and nothing opens yet");
+    assert_eq!(selected(&mut h), "", "nor is anything selected");
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_url_in_a_transcript_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let entries = vec![answer("a1", &format!("see {URL} here"))];
+    let (mut h, _) = run_with_notes(cx, &dir, entries);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..20);
+
+    h.click(at, ctrl());
+
+    assert!(
+        !h.root(|root, _| root.link_menu_open()),
+        "a URL opens no menu"
+    );
+    assert_eq!(h.opened(), [Opened::Url(URL.to_owned())]);
+}
+
+#[gpui::test]
+fn a_runs_relative_path_resolves_against_its_worktree(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+
+    h.click(at, ctrl());
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(file)],
+        "the worktree's file, not the main checkout's"
+    );
+}
+
+#[gpui::test]
+fn a_ctrl_drag_off_any_link_selects_as_a_plain_drag_does(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = selectable(cx, &dir);
+    let (from, start) = on_line(&mut h, 0, ("a1", 0), 10..12);
+    let (to, end) = on_line(&mut h, 2, ("a1", 2), 8..10);
+
+    h.drag(from, to, [ctrl(); 2]);
+
+    let lines = lines(&mut h);
+    assert_eq!(
+        selected(&mut h),
+        format!("{}\n{}\n{}", &lines[0][start..], lines[1], &lines[2][..end])
+    );
+    assert_eq!(h.opened(), [], "nothing opens");
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_link_in_a_tool_line_opens_it_and_neither_selects_nor_toggles(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let output = Some("l1\nl2\nl3\nl4\nl5\nl6\nl7");
+    let entries = vec![tool("t1", "cat docs/notes.md", output)];
+    let (mut h, file) = run_with_notes(cx, &dir, entries);
+    assert_eq!(lines(&mut h)[0], "● Bash(cat docs/notes.md)");
+    let (at, _) = on_line(&mut h, 0, ("t1", 0), 15..18);
+
+    h.click(at, ctrl());
+
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert_eq!(lines(&mut h).len(), 7, "still five lines and a count");
+    assert_eq!(selected(&mut h), "");
+}
+
+#[gpui::test]
+fn ctrl_hover_over_a_link_in_a_transcript_shows_the_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+
+    h.hover(at, Modifiers::none());
+    assert!(!drawn(&mut h, BOTH_GESTURES), "no tip without Ctrl");
+
+    h.hover(at, ctrl());
+    assert!(
+        drawn(&mut h, BOTH_GESTURES),
+        "the terminal's tip for a path"
+    );
+}
+
+/// The paths of the `OpenViewerTab`s sent since the last look.
+fn viewer_opens(h: &mut Harness<'_>) -> Vec<PathBuf> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenViewerTab { path, .. } => Some(PathBuf::from(path)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn down_then_enter_in_a_transcripts_link_menu_picks_the_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+    h.click(at, ctrl_shift());
+    h.sent();
+
+    h.keys("down");
+    h.keys("enter");
+
+    assert_eq!(viewer_opens(&mut h), [file], "the menu kept the keyboard");
+    assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn releasing_ctrl_removes_a_transcript_links_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    // Modifier changes reach the window through its focus, so a click off
+    // the link focuses the pane first, as `ui_links::attached` does.
+    let (off_link, _) = on_line(&mut h, 0, ("a1", 0), 4..8);
+    clicks(&mut h, off_link, 1);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+    h.hover(at, ctrl());
+    assert!(drawn(&mut h, BOTH_GESTURES), "Ctrl+hover shows the tip");
+
+    h.set_modifiers(Modifiers::none());
+    assert!(
+        !drawn(&mut h, BOTH_GESTURES),
+        "releasing Ctrl hides it with no pointer move"
+    );
+
+    h.set_modifiers(ctrl());
+    assert!(
+        drawn(&mut h, BOTH_GESTURES),
+        "pressing Ctrl again over a still mouse brings it back"
+    );
+}
+
+#[gpui::test]
+fn collapsing_a_tool_call_under_a_ctrl_hovered_link_draws(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = format!("docs/{}.md", "a".repeat(24));
+    let output = format!("l1\nl2\nl3\nl4\nl5\n{long}\nl7");
+    let (mut h, _) = run_with_notes(cx, &dir, vec![tool("t1", "ls", Some(&output))]);
+    h.click_on("dispatch-line-f2-0");
+    assert_eq!(lines(&mut h)[6], format!("     {long}"), "expanded");
+    let (on_link, _) = on_line(&mut h, 6, ("t1", 6), 10..14);
+    h.hover(on_link, ctrl());
+    assert!(drawn(&mut h, BOTH_GESTURES), "the long path is hovered");
+
+    // Ctrl stays down and the pointer does not move, so the hover still
+    // names line 6, which collapsing makes the shorter count line.
+    let (head, _) = on_line(&mut h, 0, ("t1", 0), 0..3);
+    h.click(head, ctrl());
+
+    assert_eq!(lines(&mut h).len(), 7, "collapsed: five lines and a count");
+    assert_eq!(lines(&mut h)[6], "     … +2 lines");
+    assert!(drawn(&mut h, "dispatch-line-f2-6"), "the count line draws");
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_links_last_character_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    // `●` takes three bytes, so the path's last character is byte 22 but
+    // character 20.
+    let (at, byte) = on_line(&mut h, 0, ("a1", 0), 22..23);
+    assert_eq!(byte, 22);
+
+    h.click(at, ctrl());
+
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+/// Where run `r1` works on [`REMOTE`] in the remote-run specs.
+const RUN_WORKTREE: &str = "/home/dev/wt/run";
+/// Its main checkout there.
+const RUN_MAIN: &str = "/home/dev/main";
+
+/// The features of a host that sends folders, lists a session's folders
+/// and serves any absolute path.
+const SERVING: [&str; 4] = [
+    protocol::FEATURE_DISPATCH_RUNS,
+    protocol::FEATURE_FOLDER_FETCH,
+    protocol::FEATURE_SESSION_FOLDERS,
+    protocol::FEATURE_HOST_PATHS,
+];
+/// The features of an older host, which follows runs but serves no host
+/// path and sends no folder.
+const OLDER: [&str; 1] = [protocol::FEATURE_DISPATCH_RUNS];
+
+/// [`REMOTE`] as the remote-run specs dial it.
+fn remote_target() -> Target {
+    Target::tailnet(REMOTE, None)
+}
+
+/// Pane `f2` following `follow` on [`REMOTE`] beside This PC's `s1`, that
+/// host's daemon listing `features` beside the fake daemon's and the repo
+/// `rp` at `/home/dev/repo`. What the client sent on `Welcome`, the follow
+/// among it, is left to read.
+fn remote_pane_following<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    follow: PaneFollow,
+    features: &[&str],
+) -> Harness<'a> {
+    let pane_node = GridNode::Pane {
+        pane_id: "f2".to_owned(),
+        session_id: None,
+        host: Some(REMOTE.to_owned()),
+        follow: Some(follow),
+    };
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        sessions: vec![session("s1").in_repo("r1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane_node,
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut listed = support::daemon_features();
+    listed.extend(features.iter().map(|feature| (*feature).to_owned()));
+    h.host(&remote_target()).connect_keeping_sent_with(listed);
+    h.host(&remote_target()).send(DaemonMessage::Repos {
+        repos: vec![repo("rp", "/home/dev/repo")],
+    });
+    h
+}
+
+/// Answers [`REMOTE`]'s last follow of `of` with `entries`, and drains
+/// what This PC was sent.
+fn answer_remote_follow(h: &mut Harness<'_>, of: &TranscriptSource, entries: Vec<ChatEntry>) {
+    let id = h
+        .host(&remote_target())
+        .sent()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::FollowTranscript { source, request_id } if source == *of => request_id,
+            _ => None,
+        })
+        .expect("the pane follows on its host");
+    h.host(&remote_target()).send(DaemonMessage::Transcript {
+        source: of.clone(),
+        entries,
+        hidden: 0,
+        request_id: Some(id),
+    });
+    h.sent();
+}
+
+/// Pane `f2` following `run` (as run `r1`) on [`REMOTE`] with `features`,
+/// that host listing `sessions`, and its transcript holding
+/// `● wrote docs/notes.md`.
+fn remote_run_on<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    (run, sessions): (DispatchRunBuilder, Vec<SessionSnapshot>),
+    features: &[&str],
+) -> Harness<'a> {
+    let follow = PaneFollow::DispatchRun {
+        run_id: "r1".to_owned(),
+    };
+    let mut h = remote_pane_following(cx, dir, follow, features);
+    h.host(&remote_target())
+        .send(DaemonMessage::Sessions { sessions });
+    h.host(&remote_target()).send(DaemonMessage::DispatchRuns {
+        runs: vec![run.build()],
+    });
+    answer_remote_follow(&mut h, &source(), vec![wrote_notes()]);
+    h
+}
+
+/// [`remote_run_on`] a host serving host paths, `run` working in
+/// [`RUN_WORKTREE`] with main checkout [`RUN_MAIN`].
+fn remote_run<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    run: DispatchRunBuilder,
+    sessions: Vec<SessionSnapshot>,
+) -> Harness<'a> {
+    let run = run.worktree(RUN_WORKTREE).main_checkout(RUN_MAIN);
+    remote_run_on(cx, dir, (run, sessions), &SERVING)
+}
+
+/// Ctrl+clicks `docs/notes.md` in [`remote_run`]'s transcript; returns the
+/// host paths sent to [`REMOTE`] to stat, and whether it was asked for a
+/// session's folders.
+fn ctrl_click_remote_notes(h: &mut Harness<'_>) -> (Vec<String>, bool) {
+    let (at, _) = on_line(h, 0, ("a1", 0), 12..14);
+    h.click(at, ctrl());
+    let sent = h.host(&Target::tailnet(REMOTE, None)).sent();
+    let stats = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatHostPath { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let asked = sent
+        .iter()
+        .any(|msg| matches!(msg, ClientMessage::ListSessionFolders { .. }));
+    (stats, asked)
+}
+
+#[gpui::test]
+fn a_remote_runs_relative_path_with_no_session_is_fetched_from_its_worktree(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = remote_run(cx, &dir, r1(), Vec::new());
+
+    let (stats, asked) = ctrl_click_remote_notes(&mut h);
+
+    assert_eq!(stats, ["/home/dev/wt/run/docs/notes.md"]);
+    assert!(!asked, "a run asks for no session's folders");
+}
+
+#[gpui::test]
+fn a_remote_runs_relative_path_is_fetched_from_its_worktree_not_its_sessions_folder(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let s9 = session("s9").shell("/home/dev/other").build();
+    let mut h = remote_run(cx, &dir, r1().session_id("s9"), vec![s9]);
+
+    let (stats, asked) = ctrl_click_remote_notes(&mut h);
+
+    assert_eq!(stats, ["/home/dev/wt/run/docs/notes.md"]);
+    assert!(!asked, "a run asks for no session's folders");
+}
+
+/// The `FetchFile`s sent to [`REMOTE`] since the last look, as `(repo,
+/// worktree, path)`.
+fn remote_file_fetches(h: &mut Harness<'_>) -> Vec<(String, Option<String>, String)> {
+    h.host(&remote_target())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile {
+                repo_id,
+                worktree_path,
+                path,
+                ..
+            } => Some((repo_id, worktree_path, path)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`remote_run_on`] an older host, run `r1` working in `worktree` with
+/// main checkout `/home/dev/repo`, the repo `rp` that host registers;
+/// Ctrl+clicks `docs/notes.md` and returns the files fetched.
+fn older_host_fetches(
+    cx: &mut TestAppContext,
+    worktree: &str,
+) -> Vec<(String, Option<String>, String)> {
+    let dir = TestDir::new();
+    let run = r1().worktree(worktree).main_checkout("/home/dev/repo");
+    let mut h = remote_run_on(cx, &dir, (run, Vec::new()), &OLDER);
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+    h.click(at, ctrl());
+    remote_file_fetches(&mut h)
+}
+
+#[gpui::test]
+fn on_an_older_host_a_runs_path_is_fetched_from_its_worktree_beside_the_repo(
+    cx: &mut TestAppContext,
+) {
+    let fetches = older_host_fetches(cx, "/home/dev/repo.wt/feat");
+
+    assert_eq!(
+        fetches,
+        [(
+            "rp".to_owned(),
+            Some("/home/dev/repo.wt/feat".to_owned()),
+            "docs/notes.md".to_owned()
+        )],
+        "the worktree of the repo registered at the main checkout"
+    );
+}
+
+#[gpui::test]
+fn on_an_older_host_a_run_with_no_worktree_fetches_from_its_main_checkout(cx: &mut TestAppContext) {
+    let fetches = older_host_fetches(cx, "");
+
+    assert_eq!(
+        fetches,
+        [(
+            "rp".to_owned(),
+            Some("/home/dev/repo".to_owned()),
+            "docs/notes.md".to_owned()
+        )]
+    );
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_transcript_link_drops_an_armed_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = run_with_notes(cx, &dir, vec![wrote_notes()]);
+    h.click_on("dispatch-stop-f2");
+    assert!(
+        h.root(|root, _| root.dispatch_stop_armed("f2")),
+        "Stop is armed"
+    );
+    let (at, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+
+    h.click(at, ctrl());
+
+    assert!(
+        !h.root(|root, _| root.dispatch_stop_armed("f2")),
+        "the press dropped the armed Stop"
+    );
+}
+
+#[gpui::test]
+fn a_gone_runs_subagent_still_fetches_an_absolute_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let follow = PaneFollow::RunSubagent {
+        run_id: "r1".to_owned(),
+        agent_id: "a9".to_owned(),
+    };
+    let mut h = remote_pane_following(cx, &dir, follow, &SERVING);
+    let of = TranscriptSource::RunSubagent {
+        run_id: "r1".to_owned(),
+        agent_id: "a9".to_owned(),
+    };
+    let entries = vec![answer("a1", "see /home/dev/build.log")];
+    answer_remote_follow(&mut h, &of, entries);
+    let (at, _) = on_text(&mut h, "subagent-line-f2-0", ("a1", 0), 12..16);
+
+    h.click(at, ctrl());
+
+    let sent = h.host(&remote_target()).sent();
+    let stats: Vec<&str> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatHostPath { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stats, ["/home/dev/build.log"], "fetched by its host path");
+}
+
+/// The tip pane `f3` draws over a path.
+const F3_TIP: &str = "pane-link-tip-f3=Ctrl+click to open · Ctrl+Shift+click for options";
+
+#[gpui::test]
+fn ctrl_down_underlines_no_link_in_a_background_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        tabs: vec![
+            tab("t1", &follow_pane("f2", "r1")),
+            tab("t2", &follow_pane("f3", "r1")),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![r1().build()],
+    });
+    let id = follows(&h.sent()).into_iter().flatten().last();
+    h.send(reply(vec![wrote_notes()], id));
+    let (on_link, _) = on_line(&mut h, 0, ("a1", 0), 12..14);
+    let (off_link, _) = on_line(&mut h, 0, ("a1", 0), 4..8);
+    // `f3` draws once, at the same place as `f2`, then its tab goes behind.
+    h.click_on("tab-t2");
+    assert!(
+        drawn(&mut h, "dispatch-line-f3-0"),
+        "f3 drew its transcript"
+    );
+    h.click_on("tab-t1");
+    clicks(&mut h, off_link, 1);
+    h.hover(on_link, Modifiers::none());
+
+    h.set_modifiers(ctrl());
+
+    assert!(drawn(&mut h, BOTH_GESTURES), "the shown pane underlines");
+    assert!(
+        !h.root(|root, _| root.transcript_link_hovered("f3")),
+        "the background tab's pane does not"
+    );
+    assert!(!drawn(&mut h, F3_TIP));
 }

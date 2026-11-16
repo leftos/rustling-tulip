@@ -5,13 +5,14 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use alacritty_terminal::selection::SelectionType;
 use gpui::{
-    AnyElement, Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollEvent, ScrollHandle, SharedString, Stateful, StyledText, div, prelude::*,
-    px,
+    AnyElement, Context, Div, ElementId, HighlightStyle, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, ScrollHandle, SharedString, Stateful,
+    StyledText, UnderlineStyle, Window, WindowId, div, point, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, DispatchRunSnapshot, DispatchRunStatus, PaneFollow};
 
@@ -21,8 +22,10 @@ use crate::dispatch_menu::stop_tip;
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, ui_px_at, ui_text_size};
-use crate::grid_view::{TipAt, header_tipped};
+use crate::grid_view::{LinkClick, LinkPick, PaneSlot, TipAt, header_tipped};
+use crate::links::{self, LinkKind, TerminalLink};
 use crate::mouse::{self, CopyOnSelect};
+use crate::open::{self, LinkAction};
 use crate::session_menu::{disabled_header_text_button, header_text_button, on_press};
 use crate::spawn_view::DISABLED_OPACITY;
 use crate::target::HostKey;
@@ -284,7 +287,83 @@ pub(crate) struct TranscriptSelect {
     /// next press forgets it, undoing the toggle when that press is the
     /// double or triple click the click began.
     toggled: Option<Toggled>,
+    /// The link Ctrl+hover underlines, while Ctrl is held over one.
+    hover: Option<HoveredLink>,
     registry: Rc<RefCell<TextRegistry>>,
+}
+
+/// A link Ctrl+hover underlines in a transcript: the (entry key, index) of
+/// its line, its bytes there, its kind, and where its tip goes.
+#[derive(Debug, Clone, PartialEq)]
+struct HoveredLink {
+    line: (String, u32),
+    bytes: Range<usize>,
+    kind: LinkKind,
+    tip_at: Point<Pixels>,
+}
+
+/// The bytes a transcript underlines, and the (entry key, index) of their
+/// line.
+pub(crate) type Underline = ((String, u32), Range<usize>);
+
+/// The link of a transcript line under a point, and what a Ctrl+hover there
+/// underlines.
+struct LinkHit {
+    link: TerminalLink,
+    hover: HoveredLink,
+}
+
+/// The bytes of `text` its characters `chars` take.
+fn char_bytes(text: &str, chars: Range<usize>) -> Range<usize> {
+    let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(at, _)| at);
+    byte(chars.start)..byte(chars.end)
+}
+
+/// The style of a link Ctrl+hover underlines: a thin line in the text's
+/// own colour.
+fn link_underline() -> HighlightStyle {
+    HighlightStyle {
+        underline: Some(UnderlineStyle {
+            thickness: px(1.0),
+            ..UnderlineStyle::default()
+        }),
+        ..HighlightStyle::default()
+    }
+}
+
+/// The underline `underline` draws on the line (entry key, index) `line`
+/// whose text is `text`: none for another line, nor for bytes that run past
+/// the text or do not fall on its character boundaries, as a hover kept
+/// from before the line changed (a tool call collapsed under it) may.
+fn line_underline(
+    underline: Option<&Underline>,
+    line: (&str, u32),
+    text: &str,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(((entry, index), bytes)) = underline else {
+        return Vec::new();
+    };
+    let here = entry == line.0 && *index == line.1;
+    let fits = bytes.start <= bytes.end
+        && text.is_char_boundary(bytes.start)
+        && text.is_char_boundary(bytes.end);
+    if here && fits {
+        vec![(bytes.clone(), link_underline())]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The folders a run's relative link paths resolve against: its worktree,
+/// then its main checkout, blanks left out and each folder once.
+fn run_dirs(run: &DispatchRunSnapshot) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for dir in std::iter::once(&run.worktree).chain(run.main_checkout.iter()) {
+        if !dir.is_empty() && !dirs.contains(dir) {
+            dirs.push(dir.clone());
+        }
+    }
+    dirs
 }
 
 /// A tool call a click toggled, by its id and the (entry key, index) of
@@ -302,6 +381,7 @@ impl std::fmt::Debug for TranscriptSelect {
             .field("picked", &self.picked)
             .field("press", &self.press)
             .field("toggled", &self.toggled)
+            .field("hover", &self.hover)
             .finish_non_exhaustive()
     }
 }
@@ -832,7 +912,8 @@ impl RootView {
                 let line_ids = format!("dispatch-line-{pane_id}");
                 let lines = transcript_lines(transcript);
                 let select = self.transcript_select_draw(pane_id, &lines, cx);
-                Self::transcript_rows(&line_ids, lines, select.as_ref(), cx)
+                let underline = self.transcript_underline(pane_id);
+                Self::transcript_rows(&line_ids, lines, (select.as_ref(), underline), cx)
             }
             None => run
                 .recent_actions
@@ -880,8 +961,16 @@ impl RootView {
         if scroll.following {
             scroll.handle.scroll_to_bottom();
         }
-        let registry = scroll.select.borrow().registry.clone();
-        let column = Self::selecting(column.child(painted_mark(registry)), pane_id, cx);
+        let (registry, tip) = {
+            let select = scroll.select.borrow();
+            let tip = select
+                .hover
+                .as_ref()
+                .map(|hover| crate::term_view::link_tip_at(pane_id, hover.kind, hover.tip_at, cx));
+            (select.registry.clone(), tip)
+        };
+        let column = column.child(painted_mark(registry)).children(tip);
+        let column = Self::selecting(column, pane_id, cx);
         let (pane, handle) = (pane_id.to_owned(), scroll.handle.clone());
         column.track_scroll(&scroll.handle).on_scroll(cx.listener(
             move |_, _: &ScrollEvent, _, cx| {
@@ -909,12 +998,13 @@ impl RootView {
 
     /// The rows of a transcript's `lines`, each tagged `{line_ids}-{n}`
     /// and drawn through `select`, which registers each line's text and
-    /// paints its selected bytes; a click on a row of a tool call expands
-    /// or collapses the call's output ([`Self::transcript_release`]).
+    /// paints its selected bytes, with `underline`'s bytes underlined on its
+    /// line (the link Ctrl+hover is over); a click on a row of a tool call
+    /// expands or collapses the call's output ([`Self::transcript_release`]).
     pub(crate) fn transcript_rows(
         line_ids: &str,
         lines: Vec<TranscriptLine>,
-        select: Option<&SelectDraw>,
+        (select, underline): (Option<&SelectDraw>, Option<Underline>),
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
@@ -927,8 +1017,10 @@ impl RootView {
                 LineKind::Error => t.danger,
             };
             let name = format!("{line_ids}-{at}");
+            let highlights =
+                line_underline(underline.as_ref(), (entry.as_str(), index), &line.text);
             let source = UnitSource::TranscriptLine { line: index };
-            let text = select_text(select, &entry, source, line.text, Vec::new());
+            let text = select_text(select, &entry, source, line.text, highlights);
             let row = div()
                 .id(ElementId::Name(SharedString::from(name.clone())))
                 .driver_id(|| name)
@@ -992,8 +1084,8 @@ impl RootView {
             .child(Self::drag_follower(pane_id, cx))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.transcript_press(&down, event, cx);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.transcript_press(&down, event, window, cx);
                 }),
             )
             .on_mouse_up(
@@ -1010,9 +1102,10 @@ impl RootView {
             )
     }
 
-    /// A mark that, once painted, follows every move of the held left
-    /// button in the window, so a selection of pane `pane_id`'s transcript
-    /// keeps following the pointer once it leaves the log.
+    /// A mark that, once painted, follows every move in the window: with
+    /// the left button held, so a selection of pane `pane_id`'s transcript
+    /// keeps following the pointer once it leaves the log; else for the
+    /// link Ctrl+hover underlines.
     fn drag_follower(pane_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let root = cx.entity().downgrade();
         let pane = pane_id.to_owned();
@@ -1020,14 +1113,20 @@ impl RootView {
             |_, _, _| (),
             move |_, (), window, _| {
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                    let held = event.pressed_button == Some(MouseButton::Left);
-                    if phase == gpui::DispatchPhase::Bubble && held {
-                        // Fails only when the root view has gone.
-                        root.update(cx, |this, cx| {
-                            this.transcript_drag(&pane, event.position, cx);
-                        })
-                        .ok();
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
                     }
+                    let held = event.pressed_button == Some(MouseButton::Left);
+                    // Fails only when the root view has gone.
+                    root.update(cx, |this, cx| {
+                        if held {
+                            this.transcript_drag(&pane, event.position, cx);
+                        } else {
+                            let ctrl = event.modifiers.secondary(cx);
+                            this.transcript_hover(&pane, event.position, ctrl, cx);
+                        }
+                    })
+                    .ok();
                 });
             },
         )
@@ -1051,10 +1150,22 @@ impl RootView {
         Some(TextPos { entry, unit, byte })
     }
 
-    /// A left press on pane `pane_id`'s log: Shift extends the selection to
-    /// the press; otherwise the press starts one, of characters, the word
-    /// or the line by its click count.
-    fn transcript_press(&mut self, pane_id: &str, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    /// A left press on pane `pane_id`'s log: Ctrl (Cmd on a Mac) on a link
+    /// opens it as a terminal's Ctrl+click does, the menu on Ctrl+Shift on a
+    /// path, and goes no further: no selection, no tool call toggled, and
+    /// only the first press of a multi-click acts. Otherwise Shift extends
+    /// the selection to the press, and any other press starts one, of
+    /// characters, the word or the line by its click count.
+    fn transcript_press(
+        &mut self,
+        pane_id: &str,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.press_on_link(pane_id, event, window, cx) {
+            return;
+        }
         if let Some((key, call)) = self.toggle_to_undo(pane_id, event) {
             self.toggle_transcript_entry(&key, &call);
         }
@@ -1085,6 +1196,213 @@ impl RootView {
             select.picked = picked;
         }
         cx.notify();
+    }
+
+    /// A left press on pane `pane_id`'s log with Ctrl (Cmd on a Mac) held
+    /// on a link: the press goes no further, so the pane's own press handler
+    /// cannot take the keyboard back from a link menu it opens; the pane
+    /// takes the keyboard here instead, and the first press of a click
+    /// opens the link. `false`, doing nothing, for any other press.
+    fn press_on_link(
+        &mut self,
+        pane_id: &str,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !event.modifiers.secondary(cx) {
+            return false;
+        }
+        let Some(hit) = self.transcript_link_at(pane_id, event.position) else {
+            return false;
+        };
+        // The root's own press handler, which drops what a press elsewhere
+        // disarms, runs here since the press stops before reaching it.
+        self.on_any_mouse_down(event, window, cx);
+        cx.stop_propagation();
+        if let Some(slot) = self.panes.get(pane_id) {
+            let handle = slot.view().read(cx).focus_handle();
+            handle.focus(window, cx);
+        }
+        if event.click_count == 1 {
+            self.open_transcript_link(pane_id, hit.link, event, window, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    /// Ctrl (Cmd on a Mac) went down in `window` when `on`, else up: each
+    /// transcript pane `window` draws underlines the link under its pointer
+    /// at once rather than at the next pointer move; going up, every pane
+    /// stops.
+    pub(crate) fn transcript_link_mode(
+        &mut self,
+        on: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let here = window.window_handle().window_id();
+        let panes: Vec<String> = self
+            .run_scrolls
+            .keys()
+            .filter(|pane| !on || self.transcript_drawn_in(pane, here))
+            .cloned()
+            .collect();
+        let at = window.mouse_position();
+        for pane in panes {
+            self.transcript_hover(&pane, at, on, cx);
+        }
+    }
+
+    /// Whether window `here` draws pane `pane_id`: the pop-out showing it,
+    /// else the main window while the pane's tab is the one on screen.
+    fn transcript_drawn_in(&self, pane_id: &str, here: WindowId) -> bool {
+        if let Some(popout) = self.slot_window(pane_id) {
+            return popout == here;
+        }
+        let tab = self.panes.get(pane_id).map(PaneSlot::tab_id);
+        here == self.layouts.main() && tab.is_some() && tab == self.tabs.active_id()
+    }
+
+    /// The link on the transcript line pane `pane_id` drew under window
+    /// point `at`, when the point is on one of the link's own characters.
+    fn transcript_link_at(&self, pane_id: &str, at: Point<Pixels>) -> Option<LinkHit> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        let lines = self.pane_transcript_lines(pane_id)?;
+        let select = scroll.select.borrow();
+        let registry = select.registry.borrow();
+        let viewport = Some(scroll.handle.bounds());
+        let (entry, unit, byte) = registry.hit_inside(at, viewport)?;
+        let line = (entry, unit);
+        let index = transcript_keys(&lines)
+            .iter()
+            .position(|key| *key == line)?;
+        let text = &lines.get(index)?.text;
+        let char_at = text.get(..byte)?.chars().count();
+        let link = links::detect_links(text)
+            .into_iter()
+            .find(|link| link.start_index <= char_at && char_at < link.end_index)?;
+        let bytes = char_bytes(text, link.start_index..link.end_index);
+        // The tip sits under the line, from the link's first character.
+        let layout = &registry.inside(at, viewport)?.layout;
+        let left = layout
+            .position_for_index(bytes.start)
+            .map_or(at.x, |start| start.x);
+        let hover = HoveredLink {
+            line,
+            bytes,
+            kind: link.kind,
+            tip_at: point(left, layout.bounds().bottom()),
+        };
+        Some(LinkHit { link, hover })
+    }
+
+    /// The pointer moved to window point `at`, with Ctrl (Cmd on a Mac)
+    /// held when `ctrl`: pane `pane_id` underlines the link under it and
+    /// shows its tip, or stops when it left the link or Ctrl came up.
+    fn transcript_hover(
+        &mut self,
+        pane_id: &str,
+        at: Point<Pixels>,
+        ctrl: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self
+            .run_scrolls
+            .get(pane_id)
+            .is_some_and(|scroll| scroll.select.borrow().hover.is_some());
+        if !ctrl && !shown {
+            return;
+        }
+        let hover = ctrl
+            .then(|| self.transcript_link_at(pane_id, at))
+            .flatten()
+            .map(|hit| hit.hover);
+        let Some(scroll) = self.run_scrolls.get_mut(pane_id) else {
+            return;
+        };
+        let select = scroll.select.get_mut();
+        if select.hover != hover {
+            select.hover = hover;
+            cx.notify();
+        }
+    }
+
+    /// Whether pane `pane_id` underlines a link in its transcript.
+    #[must_use]
+    pub fn transcript_link_hovered(&self, pane_id: &str) -> bool {
+        self.transcript_underline(pane_id).is_some()
+    }
+
+    /// The line and bytes of the link pane `pane_id` underlines, if any.
+    pub(crate) fn transcript_underline(&self, pane_id: &str) -> Option<Underline> {
+        let scroll = self.run_scrolls.get(pane_id)?;
+        let select = scroll.select.borrow();
+        let hover = select.hover.as_ref()?;
+        Some((hover.line.clone(), hover.bytes.clone()))
+    }
+
+    /// Opens `link`, Ctrl+clicked by `event` in pane `pane_id`'s transcript,
+    /// as a terminal's Ctrl+click does: the link menu at the click for a
+    /// Ctrl+Shift+click on a path, else the link in its default app (VS Code
+    /// at a `:line`) or the browser.
+    fn open_transcript_link(
+        &mut self,
+        pane_id: &str,
+        link: TerminalLink,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((host, key)) = self.run_scrolls.get(pane_id).map(|s| s.key.clone()) else {
+            return;
+        };
+        let (base_dirs, session) = self.transcript_link_base(&host, &key);
+        let pick = if matches!(link.kind, LinkKind::Path) && event.modifiers.shift {
+            LinkPick::Menu(event.position)
+        } else {
+            LinkPick::Open(LinkAction::DefaultApp)
+        };
+        let click = LinkClick {
+            host: Some(host),
+            link,
+            base_dirs,
+            session,
+            run_folders: !matches!(key, TranscriptKey::Subagent { .. }),
+            pick,
+        };
+        self.open_link_click(pane_id, click, window, cx);
+    }
+
+    /// The folders a path in `key`'s transcript on `host` resolves against,
+    /// and the session they are of: a subagent's session's folders; a run's,
+    /// or a run subagent's, worktree then main checkout, with the session
+    /// that dispatched the run when its snapshot names one.
+    fn transcript_link_base(
+        &self,
+        host: &HostKey,
+        key: &TranscriptKey,
+    ) -> (Vec<String>, Option<String>) {
+        match key {
+            TranscriptKey::Subagent { session_id, .. } => {
+                let dirs = self
+                    .sidebar
+                    .sessions_of(host)
+                    .iter()
+                    .find(|s| s.id == *session_id)
+                    .map(open::base_dirs)
+                    .unwrap_or_default();
+                (dirs, Some(session_id.clone()))
+            }
+            TranscriptKey::Run(run_id) | TranscriptKey::RunSubagent { run_id, .. } => {
+                match self.run_shown(host, run_id) {
+                    RunShown::Live(run) | RunShown::Ended(run) => {
+                        (run_dirs(run), run.session_id.clone())
+                    }
+                    RunShown::Gone => (Vec::new(), None),
+                }
+            }
+        }
     }
 
     /// Forgets the toggle pane `pane_id`'s last click made, and gives it

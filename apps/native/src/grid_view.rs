@@ -30,8 +30,10 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, FontSettings};
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::link_menu::LinkMenu;
+use crate::links::TerminalLink;
 use crate::mouse::ClickThrough;
-use crate::open_view::LinkSource;
+use crate::open::LinkAction;
+use crate::open_view::{LinkFolders, LinkSource};
 use crate::pane_header_fit;
 use crate::popouts::{self, PopoutKey};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
@@ -48,6 +50,28 @@ use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{Drag, PANE_GUTTER, RootView, UI_TEXT_SIZE, new_request_id, tip_box, tooltip};
+
+/// A link a Ctrl+click in a pane picked, for [`RootView::open_link_click`]:
+/// the pane's host (`None` once its pane has gone), the link, the folders a
+/// path in it resolves against, the session they are of, whether those
+/// folders are a dispatch run's own (searched on a remote host instead of
+/// the session's), and what the click asked for.
+pub(crate) struct LinkClick {
+    pub(crate) host: Option<HostKey>,
+    pub(crate) link: TerminalLink,
+    pub(crate) base_dirs: Vec<String>,
+    pub(crate) session: Option<String>,
+    pub(crate) run_folders: bool,
+    pub(crate) pick: LinkPick,
+}
+
+/// What a link click asks for: the link opened as the action says, or the
+/// link menu at a window point.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LinkPick {
+    Open(LinkAction),
+    Menu(Point<Pixels>),
+}
 
 /// Why a repo-tied spawn button is disabled.
 pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessions.";
@@ -120,6 +144,11 @@ pub(crate) struct PaneSlot {
 impl PaneSlot {
     pub(crate) fn view(&self) -> &Entity<TerminalPane> {
         &self.view
+    }
+
+    /// The tab holding the pane.
+    pub(crate) fn tab_id(&self) -> &str {
+        &self.tab_id
     }
 
     /// The host of the session the pane shows.
@@ -993,6 +1022,63 @@ impl RootView {
         view.cell_foreground(row, col).map(appearance::packed)
     }
 
+    /// Opens the link a Ctrl+click in pane `pane_id` picked, a terminal's or
+    /// a followed transcript's: the link menu at the click, or the link as
+    /// its action asks, a path resolved against the click's folders on the
+    /// pane's host (fetched from a remote one). A pane whose host has gone
+    /// opens nothing.
+    pub(crate) fn open_link_click(
+        &mut self,
+        pane_id: &str,
+        click: LinkClick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let LinkClick {
+            host,
+            link,
+            base_dirs,
+            session,
+            run_folders,
+            pick,
+        } = click;
+        let Some(host) = host else {
+            tracing::debug!(%pane_id, "a gone pane's link click; not opened");
+            return;
+        };
+        let at = match pick {
+            LinkPick::Open(action) => {
+                let dirs = base_dirs.clone();
+                let source = LinkSource {
+                    host: &host,
+                    session: session.as_deref(),
+                    action,
+                    folders: LinkFolders::of(run_folders, &dirs),
+                };
+                self.open_link(&link, base_dirs, &source, window, cx);
+                return;
+            }
+            LinkPick::Menu(at) => at,
+        };
+        let follow = self.link_menu_follows(&host, session.as_deref());
+        let menu = LinkMenu {
+            link,
+            base_dirs,
+            session,
+            run_folders,
+            host,
+            follow,
+            at,
+            selected: 0,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
+        };
+        // The press focuses the clicked pane, but its focus-in never runs
+        // once the menu takes the keyboard, so the pane the click was in
+        // takes it here and gets it back when the menu closes.
+        self.pane_focused(pane_id, window, cx);
+        self.open_link_menu(menu, window, cx);
+    }
+
     /// Terminal `slot_id`'s scrollback retry, sent once per session and
     /// attempt to the slot's host; its copy, which the root's clipboard
     /// write and chip answer; or its Ctrl+clicked link, which opens.
@@ -1041,16 +1127,15 @@ impl RootView {
                 session,
                 action,
             } => {
-                let Some(host) = host else {
-                    tracing::debug!(%slot_id, "a gone terminal's link click; not opened");
-                    return;
+                let click = LinkClick {
+                    host,
+                    link: link.clone(),
+                    base_dirs: base_dirs.clone(),
+                    session: session.clone(),
+                    run_folders: false,
+                    pick: LinkPick::Open(*action),
                 };
-                let source = LinkSource {
-                    host: &host,
-                    session: session.as_deref(),
-                    action: *action,
-                };
-                self.open_link(link, base_dirs.clone(), &source, window, cx);
+                self.open_link_click(slot_id, click, window, cx);
             }
             PaneEvent::LinkMenu {
                 link,
@@ -1058,26 +1143,15 @@ impl RootView {
                 session,
                 at,
             } => {
-                let Some(host) = host else {
-                    tracing::debug!(%slot_id, "a gone terminal's link click; no menu");
-                    return;
-                };
-                let follow = self.link_menu_follows(&host, session.as_deref());
-                let menu = LinkMenu {
+                let click = LinkClick {
+                    host,
                     link: link.clone(),
                     base_dirs: base_dirs.clone(),
                     session: session.clone(),
-                    host,
-                    follow,
-                    at: *at,
-                    selected: 0,
-                    max_height: window.viewport_size().height * MENU_MAX_SHARE,
+                    run_folders: false,
+                    pick: LinkPick::Menu(*at),
                 };
-                // The press focuses the clicked pane, but its focus-in never
-                // runs once the menu takes the keyboard, so the pane the click
-                // was in takes it here and gets it back when the menu closes.
-                self.pane_focused(slot_id, window, cx);
-                self.open_link_menu(menu, window, cx);
+                self.open_link_click(slot_id, click, window, cx);
             }
             PaneEvent::CheckSpacedLink(check) => {
                 let Some(host) = host else {

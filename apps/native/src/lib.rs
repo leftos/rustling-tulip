@@ -1643,7 +1643,7 @@ impl RootView {
                     root.mark_session_seen(None, &id, cx);
                 }
             } else {
-                root.set_link_mode(false, cx);
+                root.set_link_mode(false, window, cx);
                 // A focus claim the window's panes, or its first tab list,
                 // have not sent yet goes with the focus.
                 root.tabs.clear_focus_claim();
@@ -3356,17 +3356,20 @@ impl RootView {
     fn on_modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_link_mode(event.modifiers.secondary(cx), cx);
+        self.set_link_mode(event.modifiers.secondary(cx), window, cx);
     }
 
-    fn set_link_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// Link mode goes on or off in every pane: each terminal's, and each
+    /// transcript's underline at the pointer, with no pointer move needed.
+    fn set_link_mode(&mut self, on: bool, window: &Window, cx: &mut Context<Self>) {
         for slot in self.panes.values() {
             slot.view()
                 .update(cx, |pane, cx| pane.set_link_mode(on, cx));
         }
+        self.transcript_link_mode(on, window, cx);
     }
 
     /// Writes the layout now; the pop-outs closed before a write that

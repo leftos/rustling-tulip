@@ -379,7 +379,8 @@ impl RootView {
                 let line_ids = format!("subagent-line-{pane_id}");
                 let lines = transcript_lines(transcript);
                 let select = self.transcript_select_draw(pane_id, &lines, cx);
-                Self::transcript_rows(&line_ids, lines, select.as_ref(), cx)
+                let underline = self.transcript_underline(pane_id);
+                Self::transcript_rows(&line_ids, lines, (select.as_ref(), underline), cx)
             }
             None => Vec::new(),
         };

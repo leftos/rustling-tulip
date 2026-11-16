@@ -2627,13 +2627,32 @@ impl Render for TerminalPane {
     }
 }
 
-/// What the tip over a hovered link of `kind` says: a path opens or offers
-/// its menu, a URL only opens.
-fn link_tip_text(kind: LinkKind) -> &'static str {
-    match kind {
-        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click for options",
-        LinkKind::Url => "Ctrl+click to open",
-    }
+/// The tip naming the gestures of a hovered link of `kind` in pane
+/// `pane_id`, at window point `at` and kept inside the window: a
+/// terminal's, or a followed transcript's.
+pub(crate) fn link_tip_at(
+    pane_id: &str,
+    kind: LinkKind,
+    at: Point<Pixels>,
+    cx: &App,
+) -> AnyElement {
+    let text = crate::links::tip_text(kind);
+    let pane = pane_id.to_owned();
+    let t = ui_theme::theme(cx);
+    let tip = div()
+        .px(px(6.0))
+        .py(px(2.0))
+        .font_family(fonts::ui_family(cx))
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .rounded(px(10.0))
+        .text_size(fonts::ui_px(cx, 12.0))
+        .text_color(gpui::rgb(t.text))
+        .driver_id(move || format!("pane-link-tip-{pane}={text}"))
+        .child(text);
+    let tip = anchored().position(at).snap_to_window().child(tip);
+    deferred(tip).with_priority(1).into_any_element()
 }
 
 impl TerminalPane {
@@ -2671,23 +2690,7 @@ impl TerminalPane {
                 px(col as f32 * cell.width),
                 px((row + 1) as f32 * cell.height),
             );
-        let text = link_tip_text(link.kind);
-        let pane = self.pane_id.clone();
-        let t = ui_theme::theme(cx);
-        let tip = div()
-            .px(px(6.0))
-            .py(px(2.0))
-            .font_family(fonts::ui_family(cx))
-            .bg(gpui::rgb(t.popover))
-            .border_1()
-            .border_color(gpui::rgb(t.popover_edge))
-            .rounded(px(10.0))
-            .text_size(fonts::ui_px(cx, 12.0))
-            .text_color(gpui::rgb(t.text))
-            .driver_id(move || format!("pane-link-tip-{pane}={text}"))
-            .child(text);
-        let tip = anchored().position(at).snap_to_window().child(tip);
-        Some(deferred(tip).with_priority(1).into_any_element())
+        Some(link_tip_at(&self.pane_id, link.kind, at, cx))
     }
 }
 

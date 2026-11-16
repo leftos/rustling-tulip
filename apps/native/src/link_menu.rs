@@ -14,6 +14,9 @@ pub(crate) struct LinkMenu {
     pub(crate) link: TerminalLink,
     pub(crate) base_dirs: Vec<String>,
     pub(crate) session: Option<String>,
+    /// Whether `base_dirs` are a dispatch run's own folders, which a
+    /// remote host's path is searched in instead of the session's.
+    pub(crate) run_folders: bool,
     pub(crate) host: HostKey,
     /// Whether the menu offers "Follow in tab": the pane has a session, on
     /// a host whose daemon follows files.

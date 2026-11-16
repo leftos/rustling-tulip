@@ -12,10 +12,11 @@ use gpui::{
 };
 use protocol::FEATURE_FILE_TAIL;
 
+use crate::fetch_link;
 use crate::link_menu::{self, LinkMenu, RowPick};
 use crate::links;
 use crate::open::{self, LinkAction};
-use crate::open_view::LinkSource;
+use crate::open_view::{LinkFolders, LinkSource};
 use crate::overlay_owner::Overlay;
 use crate::remote_mode::Capabilities;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item};
@@ -25,6 +26,19 @@ use crate::{RootView, fonts};
 
 /// The link menu's selector.
 const LINK_MENU: &str = "link-menu";
+
+/// The absolute host path a dispatch run's `link` on `host` names: its
+/// first reading joined to the first of the run's folders `dirs` that gives
+/// one (itself when absolute); `None` when none does.
+fn run_follow_path(host: &HostKey, link: &links::TerminalLink, dirs: &[String]) -> Option<String> {
+    dirs.iter()
+        .find_map(|dir| {
+            fetch_link::host_readings(host, &link.candidates, Some(dir))
+                .into_iter()
+                .next()
+        })
+        .map(|reading| reading.rel_path)
+}
 
 /// A click on a file link in a chat answer: the path the link names (relative
 /// paths resolve against the session's folders), its `#fragment`, and
@@ -76,6 +90,7 @@ impl RootView {
                 link: terminal,
                 base_dirs,
                 session: Some(session_id.to_owned()),
+                run_folders: false,
                 host,
                 follow,
                 at: window.mouse_position(),
@@ -89,6 +104,7 @@ impl RootView {
             host: &host,
             session: Some(session_id),
             action: LinkAction::DefaultApp,
+            folders: LinkFolders::Session,
         };
         self.open_link(&terminal, base_dirs, &source, window, cx);
     }
@@ -168,13 +184,16 @@ impl RootView {
             link,
             base_dirs,
             session,
+            run_folders,
             host,
             ..
         } = menu;
+        let dirs = base_dirs.clone();
         let source = LinkSource {
             host: &host,
             session: session.as_deref(),
             action,
+            folders: LinkFolders::of(run_folders, &dirs),
         };
         self.open_link(&link, base_dirs, &source, window, cx);
     }
@@ -205,12 +224,14 @@ impl RootView {
     /// spelling for the daemon's check; else the
     /// first as it stands (a follow of a missing file waits for it); on a
     /// remote host the first as it stands, which that host's daemon
-    /// resolves from the session's folder.
+    /// resolves from the session's folder, or for a dispatch run's link the
+    /// first reading's absolute path under the run's folders.
     fn follow_link(&mut self, menu: LinkMenu, window: &mut Window, cx: &mut Context<Self>) {
         let LinkMenu {
             link,
             base_dirs,
             session,
+            run_folders,
             host,
             ..
         } = menu;
@@ -223,7 +244,10 @@ impl RootView {
             return;
         };
         if !self.link_is_here(&host) {
-            self.open_follow_tab(&host, &session, &first);
+            let resolved = run_folders
+                .then(|| run_follow_path(&host, &link, &base_dirs))
+                .flatten();
+            self.open_follow_tab(&host, &session, &resolved.unwrap_or(first));
             return;
         }
         let candidates = link.candidates;

@@ -23,7 +23,7 @@ use crate::html_media;
 use crate::links::TerminalLink;
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::open::{LinkAction, OpenAction, OpenJob};
-use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Route, Then};
+use crate::open_view::{COULD_NOT_OPEN, LinkFolders, LinkSource, Opening, Origin, Route, Then};
 use crate::spawn_form::human_size;
 use crate::target::HostKey;
 
@@ -238,20 +238,123 @@ impl RootView {
         self.open_fetched_job(OpenJob::Reveal(path), Then::Nothing, window, cx);
     }
 
-    /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
-    /// the first of the link's readings under the repos and worktrees of
-    /// `session` as that host lists it, trying them one at a time; the copy
-    /// opens as `action` asks. A link that may lie outside those folders is
-    /// first asked of the host, which lists every folder
-    /// `git worktree list` names for them.
+    /// A Ctrl+click on a path link in a pane of the remote host `source`
+    /// names: fetched from the source's folders, its session's
+    /// ([`Self::fetch_session_link`]) or a dispatch run's own
+    /// ([`Self::fetch_run_link`]); the copy opens as the source's action
+    /// asks.
     pub(crate) fn fetch_path_link(
         &mut self,
         link: &TerminalLink,
-        host: &HostKey,
-        session: Option<&str>,
-        action: LinkAction,
+        source: &LinkSource<'_>,
         cx: &mut Context<Self>,
     ) {
+        match source.folders {
+            LinkFolders::Session => self.fetch_session_link(link, source, cx),
+            LinkFolders::Run(dirs) => self.fetch_run_link(link, source, dirs, cx),
+        }
+    }
+
+    /// A path link of a dispatch run on the remote host `source` names:
+    /// fetches the first of its readings under the run's folders `dirs`
+    /// ([`Self::run_link_readings`]), trying them one at a time, and never
+    /// asks the host for a session's folders.
+    fn fetch_run_link(
+        &mut self,
+        link: &TerminalLink,
+        source: &LinkSource<'_>,
+        dirs: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let mut readings = self.run_link_readings(source.host, &link.candidates, dirs);
+        if readings.is_empty() {
+            tracing::warn!(
+                target = %link.target,
+                folders = ?dirs,
+                "no folder of the run holds the transcript path link"
+            );
+            self.push_toast(
+                ToastKind::Warning,
+                &failed_title(file_fetch::file_name(&link.target)),
+                Some(NOT_INSIDE.to_owned()),
+                cx,
+            );
+            return;
+        }
+        for reading in &mut readings {
+            reading.action = source.action;
+        }
+        self.start_link_readings(readings, source.host, cx);
+    }
+
+    /// The readings of a link's `candidates` on `host` under a dispatch
+    /// run's folders `dirs`, its worktree first. On a host that serves any
+    /// absolute path, each candidate as a host path joined to each folder
+    /// in turn, each path once; on an older host, repo-relative
+    /// ([`Self::older_run_readings`]).
+    pub(crate) fn run_link_readings(
+        &self,
+        host: &HostKey,
+        candidates: &[crate::links::TerminalLinkCandidate],
+        dirs: &[String],
+    ) -> Vec<FetchRequest> {
+        if !self.host_serves_paths(host) {
+            return self.older_run_readings(host, candidates, dirs);
+        }
+        let mut found: Vec<FetchRequest> = Vec::new();
+        for dir in dirs {
+            for reading in fetch_link::host_readings(host, candidates, Some(dir)) {
+                if !found.contains(&reading) {
+                    found.push(reading);
+                }
+            }
+        }
+        found
+    }
+
+    /// A run's link readings on `host`, which serves only repo-relative
+    /// paths: `dirs` is the run's worktree then its main checkout, or the
+    /// one of them it has. The last is read as the main checkout, whose
+    /// registered repo (the deepest holding it) gives the roots: the
+    /// worktree as a worktree of that repo, as a session member on it
+    /// would be, then the repo itself; relative paths join the first.
+    fn older_run_readings(
+        &self,
+        host: &HostKey,
+        candidates: &[crate::links::TerminalLinkCandidate],
+        dirs: &[String],
+    ) -> Vec<FetchRequest> {
+        let (Some(first), Some(main)) = (dirs.first(), dirs.last()) else {
+            return Vec::new();
+        };
+        let repos = self.sidebar.repos_of(host);
+        let main_roots = fetch_link::roots(&[], Some(main), repos);
+        let mut roots = Vec::new();
+        if let (Some(repo), [worktree, _]) = (main_roots.first(), dirs) {
+            let member = protocol::SessionMember {
+                repo_id: repo.repo_id.clone(),
+                repo_name: repo.repo_name.clone(),
+                branch: String::new(),
+                worktree_path: worktree.clone(),
+            };
+            roots.extend(fetch_link::roots(&[member], None, repos));
+        }
+        roots.extend(main_roots);
+        fetch_link::readings(host, candidates, Some(first), &roots, &roots)
+    }
+
+    /// A path link of a pane of the remote host `source` names: fetches the
+    /// first of the link's readings under the repos and worktrees of the
+    /// source's session as that host lists it, trying them one at a time.
+    /// A link that may lie outside those folders is first asked of the
+    /// host, which lists every folder `git worktree list` names for them.
+    fn fetch_session_link(
+        &mut self,
+        link: &TerminalLink,
+        source: &LinkSource<'_>,
+        cx: &mut Context<Self>,
+    ) {
+        let (host, session, action) = (source.host, source.session, source.action);
         let found =
             session.and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id));
         let cwd = found.and_then(|session| session.current_cwd.clone());

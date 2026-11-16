@@ -26,11 +26,35 @@ use crate::{RootView, file_fetch};
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
 
 /// The terminal a link was Ctrl+clicked in: the host its slot sends to,
-/// and the session it shows; and what the click asked a path to do.
+/// and the session it shows; what the click asked a path to do; and the
+/// folders a path fetched from a remote host is searched in.
 pub(crate) struct LinkSource<'a> {
     pub(crate) host: &'a HostKey,
     pub(crate) session: Option<&'a str>,
     pub(crate) action: LinkAction,
+    pub(crate) folders: LinkFolders<'a>,
+}
+
+/// The folders a remote host's path link is searched in: its session's
+/// repos and worktrees, or a dispatch run's own folders (its worktree,
+/// then its main checkout), whatever session dispatched the run.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LinkFolders<'a> {
+    Session,
+    Run(&'a [String]),
+}
+
+impl<'a> LinkFolders<'a> {
+    /// `dirs` as a run's folders when `run` and the run has any, else the
+    /// session's: a run that left its host's list has no folders, and
+    /// the session's route still fetches an absolute path by itself.
+    pub(crate) fn of(run: bool, dirs: &'a [String]) -> Self {
+        if run && !dirs.is_empty() {
+            Self::Run(dirs)
+        } else {
+            Self::Session
+        }
+    }
 }
 
 /// How a file opens: by `origin`'s route, and as `action` asks: in the
@@ -138,9 +162,9 @@ impl RootView {
     /// `base_dirs`, the folders of the pane's session, and opens as the
     /// source's action asks: in the external app, in the viewer, or
     /// revealed in its folder. A path in a
-    /// pane of a remote host is fetched from its session's repos instead,
-    /// never opened on This PC, whether or not the window holds that host's
-    /// connection.
+    /// pane of a remote host is fetched from the source's folders instead
+    /// (its session's repos, or a run's own folders), never opened on This
+    /// PC, whether or not the window holds that host's connection.
     pub(crate) fn open_link(
         &mut self,
         link: &TerminalLink,
@@ -149,7 +173,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (host, session) = (source.host.clone(), source.session);
+        let host = source.host.clone();
         let opens_here = self.opens_here(&host);
         match link.kind {
             LinkKind::Url => match open::validate_http_url(&link.target) {
@@ -173,7 +197,7 @@ impl RootView {
             // they go first, unchecked.
             LinkKind::Path if !opens_here => {
                 let link = with_spaced_first(link);
-                self.fetch_path_link(&link, &host, session, source.action, cx);
+                self.fetch_path_link(&link, source, cx);
             }
             LinkKind::Path => {
                 let candidates = link.candidates.clone();
