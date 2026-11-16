@@ -109,6 +109,9 @@ async fn start(
     if let Some(old) = old {
         old.stop().await;
     }
+    if let Some(device) = super::folder::audit_device(ctx.auth) {
+        super::folder::audit_read("tail", &device, &session_id, &normal);
+    }
     let spec = Follow {
         session_id,
         path,

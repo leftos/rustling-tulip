@@ -67,6 +67,12 @@ pub const FEATURE_FOLDER_FETCH: &str = "folder_fetch";
 /// registered repo. A client asks only when the connected daemon lists it.
 pub const FEATURE_SESSION_FOLDERS: &str = "session_folders";
 
+/// `Welcome.features` entry: the host serves
+/// [`ClientMessage::FetchHostFile`], [`ClientMessage::FetchHostFolder`] and
+/// [`ClientMessage::StatHostPath`]: any absolute path its user can read. A
+/// client sends them only when the connected daemon lists it.
+pub const FEATURE_HOST_PATHS: &str = "host_paths";
+
 /// `Welcome.features` entry: the daemon keeps a default shell for plain-shell
 /// sessions and for the shell that hosts an interactive agent
 /// ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -5463,6 +5469,43 @@ pub enum ClientMessage {
         repo_id: String,
         #[serde(default)]
         worktree_path: Option<String>,
+        path: String,
+    },
+    /// Download the file at `path`, an absolute path on the host: any file
+    /// the daemon's user can read, every link in the path followed to its
+    /// target. A relative path, a network or device path by its text, a path
+    /// that does not exist (a dangling link included) and anything that is
+    /// not a regular file are refused. Answered exactly as
+    /// [`ClientMessage::FetchFile`] is, and `id` shares its id space: an id
+    /// still active is refused. Sent only to a daemon listing
+    /// [`FEATURE_HOST_PATHS`].
+    FetchHostFile {
+        /// Client-assigned transfer id, echoed on every response.
+        id: String,
+        path: String,
+    },
+    /// Download the folder at `path`, an absolute path on the host, as one
+    /// zstd-compressed tar archive: links in `path` are followed to the
+    /// folder, which is then walked and packed exactly as
+    /// [`ClientMessage::FetchFolder`] walks its folder (no link followed,
+    /// the same left-out entries and limits). A target that is not a folder
+    /// and a filesystem root (`C:\`, `/`) are refused. Answered exactly as
+    /// `FetchFolder` is, and `id` shares its id space. Sent only to a daemon
+    /// listing [`FEATURE_HOST_PATHS`].
+    FetchHostFolder {
+        /// Client-assigned transfer id, echoed on every response.
+        id: String,
+        path: String,
+    },
+    /// Say what `path`, an absolute path on the host resolved as
+    /// [`ClientMessage::FetchHostFile`] resolves it, names: the daemon
+    /// answers with [`DaemonMessage::PathStat`]. A refused path answers
+    /// [`PathKind::Missing`] exactly as a missing one does, as
+    /// [`ClientMessage::StatPath`] does. Sent only to a daemon listing
+    /// [`FEATURE_HOST_PATHS`].
+    StatHostPath {
+        /// Client-assigned request id, echoed on the answer.
+        id: String,
         path: String,
     },
     /// List the folders this session's link paths may lie in: the daemon
@@ -17493,6 +17536,51 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn host_path_messages_round_trip() {
+        let rows = [
+            (
+                ClientMessage::FetchHostFile {
+                    id: "h1".to_string(),
+                    path: r"C:\Users\me\notes.txt".to_string(),
+                },
+                "fetch_host_file",
+            ),
+            (
+                ClientMessage::FetchHostFolder {
+                    id: "h2".to_string(),
+                    path: "/home/me/logs".to_string(),
+                },
+                "fetch_host_folder",
+            ),
+            (
+                ClientMessage::StatHostPath {
+                    id: "h3".to_string(),
+                    path: "/etc/hosts".to_string(),
+                },
+                "stat_host_path",
+            ),
+        ];
+        for (msg, tag) in rows {
+            let json = serde_json::to_string(&msg).expect("serialize");
+            assert!(json.contains(&format!(r#""type":"{tag}""#)), "{json}");
+            let back = serde_json::from_str::<ClientMessage>(&json).expect("deserialize");
+            let fields = |m: &ClientMessage| match m {
+                ClientMessage::FetchHostFile { id, path }
+                | ClientMessage::FetchHostFolder { id, path }
+                | ClientMessage::StatHostPath { id, path } => (id.clone(), path.clone()),
+                other => panic!("unexpected variant: {other:?}"),
+            };
+            assert_eq!(fields(&back), fields(&msg), "{json}");
+            assert_eq!(
+                std::mem::discriminant(&back),
+                std::mem::discriminant(&msg),
+                "{json}"
+            );
+        }
+        assert_eq!(FEATURE_HOST_PATHS, "host_paths");
     }
 
     #[test]

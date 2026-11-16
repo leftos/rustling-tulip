@@ -1101,6 +1101,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FetchFile { .. }
         | ClientMessage::FetchFolder { .. }
         | ClientMessage::StatPath { .. }
+        | ClientMessage::FetchHostFile { .. }
+        | ClientMessage::FetchHostFolder { .. }
+        | ClientMessage::StatHostPath { .. }
         | ClientMessage::ListSessionFolders { .. }) => {
             folder::handle(hub, m, ctx).await;
         }

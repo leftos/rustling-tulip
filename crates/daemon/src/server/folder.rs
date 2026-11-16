@@ -16,16 +16,27 @@
 //! their narrower rule ([`repo_target_or_err`]). `ListSessionFolders` only
 //! tells a client where to look: it decides nothing.
 //!
+//! `FetchHostFile`, `FetchHostFolder` and `StatHostPath` name an absolute
+//! host path instead: any path the daemon's user can read, judged by its
+//! text ([`host_path::check`]), then resolved with every link followed
+//! ([`resolve_host`]); they share the same ids, permits and bound, and the
+//! same stream, walk and stat once resolved. A filesystem root is never
+//! walked.
+//!
+//! Every fetch and stat served to a tailnet device is logged once
+//! ([`audit_read`], [`audited`]), with the bytes a fetch sent.
+//!
 //! A folder that passes its walk is answered with `FolderFetchStarted`, then
 //! the folder packed ([`folder_pack::pack`]) as `FileChunk` frames, then
 //! `FileFetchDone`, every one of them on the connection's file queue.
 
 use super::Hub;
-use super::connection::{ConnCtx, start_fetch};
+use super::connection::{AuthKind, ConnCtx, start_fetch};
 use super::git::repo_target_or_err;
 use crate::file_fetch::{self, CanonicalRoot};
 use crate::file_tail::{STEP_BOUND, StepWait};
 use crate::folder_pack::{self, Limits};
+use crate::host_path;
 use crate::paths::{normalize_path_key, simplify_path};
 use crate::sync::lock;
 use crate::{git, history};
@@ -190,6 +201,17 @@ async fn listing_for(hub: &Hub, repo_id: &str, worktree_path: Option<&str>) -> L
     }
 }
 
+/// What a fetch's or stat's worker runs with, made on the connection's
+/// reader. The permits are looked up there so they are never made again once
+/// the connection has ended and dropped them.
+fn fetch_work(hub: &Hub, ctx: &ConnCtx<'_>) -> FetchWork {
+    FetchWork {
+        hub: hub.clone(),
+        gate: file_work_gate(ctx.connection),
+        device: audit_device(ctx.auth),
+    }
+}
+
 /// Handle the folder messages `dispatch` routes here.
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
     match msg {
@@ -200,12 +222,8 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             path,
         } => {
             let request = Request::new(repo_id, worktree_path, path);
-            let hub = hub.clone();
-            // Looked up here, on the reader, so it is never made again once
-            // the connection has ended and dropped it.
-            let gate = file_work_gate(ctx.connection);
+            let work = fetch_work(hub, ctx);
             start_fetch(ctx, id, Ok(request), move |id, request, tx, token| {
-                let work = FetchWork { hub, gate };
                 tokio::spawn(folder_worker(work, id, request, tx, token))
             })
             .await;
@@ -217,12 +235,8 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             path,
         } => {
             let request = Request::new(repo_id, worktree_path, path);
-            let hub = hub.clone();
-            // Looked up here, on the reader, so it is never made again once
-            // the connection has ended and dropped it.
-            let gate = file_work_gate(ctx.connection);
+            let work = fetch_work(hub, ctx);
             start_fetch(ctx, id, Ok(request), move |id, request, tx, token| {
-                let work = FetchWork { hub, gate };
                 tokio::spawn(file_worker(work, id, request, tx, token))
             })
             .await;
@@ -243,23 +257,168 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             path,
         } => {
             let request = Request::new(repo_id, worktree_path, path);
-            let hub = hub.clone();
-            let out_tx = ctx.out_tx.clone();
-            // Looked up here, on the reader, so it is never made again once
-            // the connection has ended and dropped it.
-            let gate = file_work_gate(ctx.connection);
-            tokio::spawn(async move {
-                let stat = answer_stat(hub, gate, &id, request).await;
-                // A closed outbox is a connection already ending.
-                let _ = out_tx.send(DaemonMessage::PathStat {
-                    id,
-                    kind: stat.kind,
-                    size: stat.size,
-                });
-            });
+            let FetchWork { hub, gate, device } = fetch_work(hub, ctx);
+            let answer = answer_stat_resolved(hub, gate, id.clone(), request);
+            spawn_stat(ctx, id, device, answer);
         }
+        msg @ (ClientMessage::FetchHostFile { .. }
+        | ClientMessage::FetchHostFolder { .. }
+        | ClientMessage::StatHostPath { .. }) => handle_host(hub, msg, ctx).await,
         other => debug!(?other, "folder: not a folder message"),
     }
+}
+
+/// Handle the messages that name an absolute host path.
+async fn handle_host(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
+    let work = fetch_work(hub, ctx);
+    match msg {
+        ClientMessage::FetchHostFile { id, path } => {
+            start_fetch(ctx, id, Ok(path), move |id, path, tx, token| {
+                tokio::spawn(host_file_worker(work, id, path, tx, token))
+            })
+            .await;
+        }
+        ClientMessage::FetchHostFolder { id, path } => {
+            start_fetch(ctx, id, Ok(path), move |id, path, tx, token| {
+                tokio::spawn(host_folder_worker(work, id, path, tx, token))
+            })
+            .await;
+        }
+        ClientMessage::StatHostPath { id, path } => {
+            let device = work.device.clone();
+            let answer = answer_host_stat(work.gate, id.clone(), path);
+            spawn_stat(ctx, id, device, answer);
+        }
+        other => debug!(?other, "folder: not a host path message"),
+    }
+}
+
+/// Answer the stat `id` with what `answer` finds, from a task of its own,
+/// and log a resolved path served to `device`.
+fn spawn_stat(
+    ctx: &ConnCtx<'_>,
+    id: String,
+    device: Option<String>,
+    answer: impl Future<Output = Stated> + Send + 'static,
+) {
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        let (stat, resolved) = answer.await;
+        if let (Some(device), Some(path)) = (device, resolved) {
+            audit_read("stat", &device, &id, &path);
+        }
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::PathStat {
+            id,
+            kind: stat.kind,
+            size: stat.size,
+        });
+    });
+}
+
+/// The device a connection's served reads are logged for: a tailnet
+/// device's name, or none on a local connection.
+pub(super) fn audit_device(auth: &AuthKind) -> Option<String> {
+    match auth {
+        AuthKind::Tailnet(peer) => Some(peer.name.clone()),
+        AuthKind::Local => None,
+    }
+}
+
+/// Log one read of `path` served to the tailnet `device`: `kind` is
+/// `fetch_file`, `fetch_folder`, `stat` or `tail`.
+pub(super) fn audit_read(kind: &str, device: &str, id: &str, path: &Path) {
+    let path = host_path::shown(path);
+    info!(%kind, %device, %id, %path, "served a host file read to a tailnet device");
+}
+
+/// A fetch served to a tailnet device, logged once its transfer ends.
+struct Audit {
+    kind: &'static str,
+    device: String,
+    id: String,
+    path: PathBuf,
+}
+
+/// What passed through a [`counting`] sender.
+#[derive(Default)]
+struct Counted {
+    /// The transfer's `FileFetchStarted` or `FolderFetchStarted` was sent.
+    started: bool,
+    /// The bytes its chunks carried.
+    bytes: u64,
+}
+
+/// The bytes a `FileChunk` carries, from its base64 length.
+fn chunk_bytes(msg: &DaemonMessage) -> u64 {
+    let DaemonMessage::FileChunk { data_b64, .. } = msg else {
+        return 0;
+    };
+    let padding = data_b64.bytes().rev().take_while(|b| *b == b'=').count();
+    let bytes = (data_b64.len() / 4 * 3).saturating_sub(padding);
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// A sender standing in for `tx`, and the task forwarding what it is sent
+/// to `tx`, counting it, until every sender is gone or `token` fires.
+fn counting(
+    tx: mpsc::Sender<DaemonMessage>,
+    token: CancellationToken,
+) -> (
+    mpsc::Sender<DaemonMessage>,
+    tokio::task::JoinHandle<Counted>,
+) {
+    let (proxy, mut rx) = mpsc::channel(1);
+    let forward = tokio::spawn(async move {
+        let mut counted = Counted::default();
+        while let Some(msg) = rx.recv().await {
+            let started = matches!(
+                msg,
+                DaemonMessage::FileFetchStarted { .. } | DaemonMessage::FolderFetchStarted { .. }
+            );
+            let bytes = chunk_bytes(&msg);
+            if !file_fetch::send_unless_cancelled(&tx, &token, msg).await {
+                break;
+            }
+            counted.started |= started;
+            counted.bytes = counted.bytes.saturating_add(bytes);
+        }
+        counted
+    });
+    (proxy, forward)
+}
+
+/// Run `transfer` on the file queue `tx`. With an `audit`, what it sends is
+/// counted on its way, and once it ends, done, failed or cancelled, one line
+/// logs the read with the bytes sent, unless it was refused before starting.
+async fn audited<F, Fut>(
+    audit: Option<Audit>,
+    tx: mpsc::Sender<DaemonMessage>,
+    token: CancellationToken,
+    transfer: F,
+) -> Option<DaemonMessage>
+where
+    F: FnOnce(mpsc::Sender<DaemonMessage>) -> Fut,
+    Fut: Future<Output = Option<DaemonMessage>>,
+{
+    let Some(audit) = audit else {
+        return transfer(tx).await;
+    };
+    let (proxy, forward) = counting(tx, token);
+    let last = transfer(proxy).await;
+    let counted = forward.await.unwrap_or_default();
+    if counted.started {
+        let Audit {
+            kind,
+            device,
+            id,
+            path,
+        } = audit;
+        let path = host_path::shown(&path);
+        let bytes = counted.bytes;
+        info!(%kind, %device, %id, %path, bytes, "served a host file read to a tailnet device");
+    }
+    last
 }
 
 /// The refusal of a `worktree_path` git does not name, or names but no longer
@@ -352,11 +511,26 @@ fn worker_failed(id: String, err: &tokio::task::JoinError) -> DaemonMessage {
     DaemonMessage::FileFetchError { id, error }
 }
 
-/// What a fetch's worker runs with: the hub, and its connection's permits,
-/// one of which its resolve step takes.
+/// What a fetch's worker runs with: the hub, its connection's permits, one
+/// of which its resolve step takes, and the tailnet device its read is
+/// logged for.
 struct FetchWork {
     hub: Hub,
     gate: Arc<Semaphore>,
+    device: Option<String>,
+}
+
+impl FetchWork {
+    /// The audit of a `kind` read of `path` for transfer `id`, when this
+    /// connection is a tailnet device's.
+    fn audit(&self, kind: &'static str, id: &str, path: &Path) -> Option<Audit> {
+        self.device.clone().map(|device| Audit {
+            kind,
+            device,
+            id: id.to_owned(),
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 /// A `FetchFile`'s worker: decide on the request, then stream the file. Hands
@@ -368,18 +542,22 @@ async fn file_worker(
     tx: mpsc::Sender<DaemonMessage>,
     token: CancellationToken,
 ) -> Option<DaemonMessage> {
-    let FetchWork { hub, gate } = work;
-    let request = request.listed(&hub).await;
+    let request = request.listed(&work.hub).await;
     let repo_id = request.repo_id.clone();
     let worktree_path = request.worktree_path.clone();
     let rel = request.path.clone();
-    let confined = file_work(gate, STEP_BOUND, move || {
+    let hub = work.hub.clone();
+    let confined = file_work(Arc::clone(&work.gate), STEP_BOUND, move || {
         let root = target_root(&hub, &request)?;
         file_fetch::confine_path(&root, &request.path)
     })
     .await;
     let refused = match confined {
-        Ok(Ok(path)) => return file_fetch::stream_file(id, path, tx, token).await,
+        Ok(Ok(path)) => {
+            let audit = work.audit("fetch_file", &id, &path);
+            let stream = |tx| file_fetch::stream_file(id, path, tx, token.clone());
+            return audited(audit, tx, token.clone(), stream).await;
+        }
         Ok(Err(err)) => format!("{err:#}"),
         Err(StepWait::TimedOut) => resolve_timed_out(&rel),
         Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
@@ -405,19 +583,174 @@ async fn folder_worker(
     tx: mpsc::Sender<DaemonMessage>,
     token: CancellationToken,
 ) -> Option<DaemonMessage> {
-    let FetchWork { hub, gate } = work;
-    let request = request.listed(&hub).await;
+    let request = request.listed(&work.hub).await;
     let rel = request.path.clone();
+    let hub = work.hub.clone();
     let step = move || resolve_step(&hub, &request);
-    let resolved = match file_work(gate, STEP_BOUND, step).await {
+    let resolved = match file_work(Arc::clone(&work.gate), STEP_BOUND, step).await {
         Ok(resolved) => resolved,
         Err(StepWait::TimedOut) => Err(anyhow::anyhow!(resolve_timed_out(&rel))),
         Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
     };
+    pack_audited(&work, id, resolved, tx, token).await
+}
+
+/// Walk and pack the folder `resolved` names on a blocking thread
+/// ([`pack_folder`]), audited for `work`'s device.
+async fn pack_audited(
+    work: &FetchWork,
+    id: String,
+    resolved: anyhow::Result<CanonicalRoot>,
+    tx: mpsc::Sender<DaemonMessage>,
+    token: CancellationToken,
+) -> Option<DaemonMessage> {
+    let audit = match &resolved {
+        Ok(dir) => work.audit("fetch_folder", &id, dir.path()),
+        Err(_) => None,
+    };
     let watched = id.clone();
-    tokio::task::spawn_blocking(move || pack_folder(id, resolved, &tx, &token))
-        .await
-        .unwrap_or_else(|err| Some(worker_failed(watched, &err)))
+    let walk_token = token.clone();
+    let walk = move |tx: mpsc::Sender<DaemonMessage>| async move {
+        tokio::task::spawn_blocking(move || pack_folder(id, resolved, &tx, &walk_token))
+            .await
+            .unwrap_or_else(|err| Some(worker_failed(watched, &err)))
+    };
+    audited(audit, tx, token, walk).await
+}
+
+/// The canonical path the absolute `path` names, every link in it followed:
+/// [`host_path::check`] by its text first, then resolved in its verbatim
+/// spelling. Every refusal names `path` as the client sent it. Disk work.
+fn resolve_host(path: &str) -> Result<PathBuf, String> {
+    let normal = host_path::check(None, path).map_err(|why| {
+        if why == host_path::NO_FOLDER {
+            "the path must be absolute".to_owned()
+        } else {
+            why
+        }
+    })?;
+    match std::fs::canonicalize(host_path::verbatim(&normal)) {
+        Ok(canonical) => Ok(canonical),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("{path} does not exist"))
+        }
+        Err(err) => Err(format!("{path} does not resolve: {err}")),
+    }
+}
+
+/// Whether the canonical `path` is a filesystem root: `C:\`, `\\?\C:\`, `/`.
+fn is_fs_root(path: &Path) -> bool {
+    path.parent().is_none()
+}
+
+/// The folder the absolute `path` names ([`resolve_host`]), refusing
+/// anything not a folder and, judged on the very root the walk starts from,
+/// a filesystem root ([`walk_root`]). Disk work.
+fn resolve_host_dir(path: &str) -> anyhow::Result<CanonicalRoot> {
+    let canonical = resolve_host(path).map_err(anyhow::Error::msg)?;
+    let meta =
+        std::fs::metadata(&canonical).with_context(|| format!("reading metadata of {path}"))?;
+    if !meta.is_dir() {
+        anyhow::bail!("{path} is not a folder");
+    }
+    walk_root(file_fetch::confine_dir(&canonical, "")?, path)
+}
+
+/// `dir`, the root a host folder fetch walks, unless it is a filesystem root,
+/// which is refused naming `path`, as the client sent it.
+fn walk_root(dir: CanonicalRoot, path: &str) -> anyhow::Result<CanonicalRoot> {
+    if is_fs_root(dir.path()) {
+        anyhow::bail!("{path} is a drive root; fetch a folder inside it");
+    }
+    Ok(dir)
+}
+
+/// `last`, a host folder fetch's final message, with an error naming the
+/// walked `root` naming `path`, as the client sent it, instead
+/// ([`named_as_sent`]). With no root, nothing was resolved, and every
+/// refusal already names `path`.
+fn folder_named_as_sent(
+    last: Option<DaemonMessage>,
+    root: Option<&CanonicalRoot>,
+    path: &str,
+) -> Option<DaemonMessage> {
+    match root {
+        Some(root) => named_as_sent(last, root.path(), path),
+        None => last,
+    }
+}
+
+/// `last`, a host fetch's final message, with an error naming the resolved
+/// `canonical` path naming `path`, as the client sent it, instead.
+fn named_as_sent(
+    last: Option<DaemonMessage>,
+    canonical: &Path,
+    path: &str,
+) -> Option<DaemonMessage> {
+    match last {
+        Some(DaemonMessage::FileFetchError { id, error }) => {
+            let error = error.replace(&canonical.display().to_string(), path);
+            Some(DaemonMessage::FileFetchError { id, error })
+        }
+        other => other,
+    }
+}
+
+/// A `FetchHostFile`'s worker: resolve `path` ([`resolve_host`], bounded and
+/// under a permit), then stream the file as `FetchFile` does.
+async fn host_file_worker(
+    work: FetchWork,
+    id: String,
+    path: String,
+    tx: mpsc::Sender<DaemonMessage>,
+    token: CancellationToken,
+) -> Option<DaemonMessage> {
+    let asked = path.clone();
+    let resolved = file_work(Arc::clone(&work.gate), STEP_BOUND, move || {
+        resolve_host(&asked)
+    })
+    .await;
+    let canonical = match resolved {
+        Ok(Ok(canonical)) => canonical,
+        Ok(Err(error)) => return Some(host_refused(id, &path, error)),
+        Err(StepWait::TimedOut) => return Some(host_refused(id, &path, resolve_timed_out(&path))),
+        Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
+    };
+    let audit = work.audit("fetch_file", &id, &canonical);
+    let opened = canonical.clone();
+    let stream = |tx| file_fetch::stream_file(id, opened, tx, token.clone());
+    let last = audited(audit, tx, token.clone(), stream).await;
+    named_as_sent(last, &canonical, &path)
+}
+
+/// A host fetch's refusal before anything was sent.
+fn host_refused(id: String, path: &str, error: String) -> DaemonMessage {
+    debug!(%id, %path, %error, "folder: a host path fetch was refused");
+    DaemonMessage::FileFetchError { id, error }
+}
+
+/// A `FetchHostFolder`'s worker: resolve `path` ([`resolve_host_dir`],
+/// bounded and under a permit), then walk and pack it as `FetchFolder` does.
+async fn host_folder_worker(
+    work: FetchWork,
+    id: String,
+    path: String,
+    tx: mpsc::Sender<DaemonMessage>,
+    token: CancellationToken,
+) -> Option<DaemonMessage> {
+    let asked = path.clone();
+    let step = move || resolve_host_dir(&asked);
+    let resolved = match file_work(Arc::clone(&work.gate), STEP_BOUND, step).await {
+        Ok(resolved) => resolved,
+        Err(StepWait::TimedOut) => Err(anyhow::anyhow!(resolve_timed_out(&path))),
+        Err(StepWait::Failed(err)) => return Some(worker_failed(id, &err)),
+    };
+    if let Err(err) = &resolved {
+        debug!(%id, %path, error = %format!("{err:#}"), "folder: a host folder fetch was refused");
+    }
+    let root = resolved.as_ref().ok().cloned();
+    let last = pack_audited(&work, id, resolved, tx, token).await;
+    folder_named_as_sent(last, root.as_ref(), &path)
 }
 
 /// The folders git names for `repo`, leaving out what could never be served
@@ -584,27 +917,86 @@ fn resolve(hub: &Hub, request: &Request) -> anyhow::Result<CanonicalRoot> {
     })
 }
 
+/// What a stat found, and the path it resolved to, when it resolved.
+type Stated = (folder_pack::PathStat, Option<PathBuf>);
+
 /// What a `StatPath` request's path names; anything refused reads as
 /// missing. Disk work.
+#[cfg(test)]
 fn stat_request(hub: &Hub, request: &Request) -> folder_pack::PathStat {
-    target_root(hub, request).map_or(folder_pack::PathStat::MISSING, |root| {
-        folder_pack::stat(&root, &request.path)
-    })
+    stat_resolved(hub, request).0
 }
 
-/// The answer to `StatPath` `id`: git's listing, then [`stat_request`],
-/// bounded and under one of `gate`'s permits, its connection's. A stat that
-/// fails or does not finish in time reads as missing.
+/// What a `StatPath` request's path names, and the path it resolved to:
+/// the stat of `path` under its root ([`folder_pack::stat`]) taken on the
+/// resolved target. Anything refused reads as missing. Disk work.
+fn stat_resolved(hub: &Hub, request: &Request) -> Stated {
+    let Ok(root) = target_root(hub, request) else {
+        return (folder_pack::PathStat::MISSING, None);
+    };
+    match file_fetch::resolve_inside(&root, &request.path) {
+        Ok(target) => (folder_pack::stat(&target, ""), Some(target)),
+        Err(_) => (folder_pack::PathStat::MISSING, None),
+    }
+}
+
+/// What the absolute `path` names ([`resolve_host`]), and the path it
+/// resolved to. Anything refused reads as missing. Disk work.
+fn stat_host(path: &str) -> Stated {
+    match resolve_host(path) {
+        Ok(canonical) => (folder_pack::stat(&canonical, ""), Some(canonical)),
+        Err(why) => {
+            debug!(%path, %why, "folder: a StatHostPath was refused");
+            (folder_pack::PathStat::MISSING, None)
+        }
+    }
+}
+
+/// The answer to `StatPath` `id`: [`answer_stat_resolved`]'s, without the
+/// path.
+#[cfg(test)]
 async fn answer_stat(
     hub: Hub,
     gate: Arc<Semaphore>,
     id: &str,
     request: Request,
 ) -> folder_pack::PathStat {
+    answer_stat_resolved(hub, gate, id.to_owned(), request)
+        .await
+        .0
+}
+
+/// The answer to `StatPath` `id`: git's listing, then [`stat_resolved`],
+/// bounded and under one of `gate`'s permits ([`bounded_stat`]).
+async fn answer_stat_resolved(
+    hub: Hub,
+    gate: Arc<Semaphore>,
+    id: String,
+    request: Request,
+) -> Stated {
     let request = request.listed(&hub).await;
     let path = request.path.clone();
-    match file_work(gate, STEP_BOUND, move || stat_request(&hub, &request)).await {
-        Ok(stat) => stat,
+    bounded_stat(gate, &id, &path, move || stat_resolved(&hub, &request)).await
+}
+
+/// The answer to `StatHostPath` `id`: [`stat_host`], bounded and under one
+/// of `gate`'s permits ([`bounded_stat`]).
+async fn answer_host_stat(gate: Arc<Semaphore>, id: String, path: String) -> Stated {
+    let asked = path.clone();
+    bounded_stat(gate, &id, &path, move || stat_host(&asked)).await
+}
+
+/// Run the stat `step` of `path` for `id` under one of `gate`'s permits, its
+/// connection's, waiting at most [`STEP_BOUND`]. A stat that fails or does
+/// not finish in time reads as missing.
+async fn bounded_stat(
+    gate: Arc<Semaphore>,
+    id: &str,
+    path: &str,
+    step: impl FnOnce() -> Stated + Send + 'static,
+) -> Stated {
+    match file_work(gate, STEP_BOUND, step).await {
+        Ok(stated) => stated,
         Err(StepWait::TimedOut) => {
             warn!(
                 %id,
@@ -612,11 +1004,11 @@ async fn answer_stat(
                 "folder: a StatPath did not finish within {} s; answering missing",
                 STEP_BOUND.as_secs()
             );
-            folder_pack::PathStat::MISSING
+            (folder_pack::PathStat::MISSING, None)
         }
         Err(StepWait::Failed(err)) => {
             warn!(%id, error = %err, "folder: a StatPath failed");
-            folder_pack::PathStat::MISSING
+            (folder_pack::PathStat::MISSING, None)
         }
     }
 }
@@ -1065,6 +1457,436 @@ mod tests {
             features.iter().any(|f| f == protocol::FEATURE_FOLDER_FETCH),
             "{features:?}"
         );
+    }
+
+    fn host_file(id: &str, path: &Path) -> ClientMessage {
+        ClientMessage::FetchHostFile {
+            id: id.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn host_folder(id: &str, path: &Path) -> ClientMessage {
+        ClientMessage::FetchHostFolder {
+            id: id.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// A folder outside every registered repo, holding `notes.txt`
+    /// (`outside`, 7 bytes).
+    fn outside_folder(scratch: &ScratchDir) -> PathBuf {
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("create the outside folder");
+        std::fs::write(outside.join("notes.txt"), "outside").expect("write notes.txt");
+        outside
+    }
+
+    /// The bytes a file fetch's chunks carried.
+    fn fetched_bytes(seen: &[DaemonMessage]) -> Vec<u8> {
+        use base64::Engine as _;
+        seen.iter()
+            .filter_map(|msg| match msg {
+                DaemonMessage::FileChunk { data_b64, .. } => Some(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data_b64)
+                        .expect("a chunk is base64"),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The `FolderFetchStarted` file count of one folder fetch.
+    fn started_files(seen: &[DaemonMessage]) -> u64 {
+        seen.iter()
+            .find_map(|msg| match msg {
+                DaemonMessage::FolderFetchStarted { files, .. } => Some(*files),
+                _ => None,
+            })
+            .expect("the folder fetch started")
+    }
+
+    #[tokio::test]
+    async fn a_host_file_fetch_streams_a_file_outside_every_repo() {
+        let (hub, scratch, _repo) = repo_hub("host-file");
+        let outside = outside_folder(&scratch);
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("h", &outside.join("notes.txt")));
+        let seen = until_end(&mut client, "h").await;
+        assert!(
+            matches!(&seen[0], DaemonMessage::FileFetchStarted { size: 7, .. }),
+            "{seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+        assert_eq!(fetched_bytes(&seen), b"outside");
+    }
+
+    #[tokio::test]
+    async fn a_host_file_fetch_of_a_relative_path_is_refused() {
+        let (hub, _scratch, _repo) = repo_hub("host-relative");
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("h", Path::new("a.txt")));
+        let seen = until_end(&mut client, "h").await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(error_text(&seen[0]), "the path must be absolute");
+    }
+
+    #[tokio::test]
+    async fn a_host_file_fetch_of_a_missing_path_names_it() {
+        let (hub, scratch, _repo) = repo_hub("host-missing");
+        let missing = outside_folder(&scratch).join("nope.txt");
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("h", &missing));
+        let seen = until_end(&mut client, "h").await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            error_text(&seen[0]),
+            format!("{} does not exist", missing.display())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_file_fetch_follows_a_link_to_its_file() {
+        let (hub, scratch, _repo) = repo_hub("host-link");
+        let outside = outside_folder(&scratch);
+        let target = outside.join("notes.txt");
+        let link = outside.join("link.txt");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        // Without the symlink privilege on Windows, a junction to the folder
+        // is the link the path goes through.
+        let fetched = if made {
+            link
+        } else {
+            let via = scratch.path().join("via");
+            assert!(make_dir_link(&via, &outside), "made a folder link");
+            via.join("notes.txt")
+        };
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("h", &fetched));
+        let seen = until_end(&mut client, "h").await;
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+        assert_eq!(fetched_bytes(&seen), b"outside");
+        let target = std::fs::canonicalize(&target).expect("canonical notes.txt");
+        assert!(
+            matches!(
+                &seen[0],
+                DaemonMessage::FileFetchStarted { resolved_path, .. }
+                    if *resolved_path == target.display().to_string()
+            ),
+            "the link's target is what was opened: {seen:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_file_fetch_of_a_fifo_is_refused() {
+        let (hub, scratch, _repo) = repo_hub("host-fifo");
+        let fifo = outside_folder(&scratch).join("pipe");
+        assert!(crate::file_tail::hooks::make_fifo(&fifo), "made a FIFO");
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("h", &fifo));
+        let seen = until_end(&mut client, "h").await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            error_text(&seen[0]).contains("not a regular file"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_folder_fetch_packs_a_folder_outside_every_repo() {
+        let (hub, scratch, _repo) = repo_hub("host-folder");
+        let outside = outside_folder(&scratch);
+        std::fs::write(outside.join("more.txt"), "more").expect("write more.txt");
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_folder("h", &outside));
+        let seen = until_end(&mut client, "h").await;
+        assert_folder_done(&seen);
+        assert_eq!(started_files(&seen), 2, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_host_folder_fetch_of_a_drive_root_is_refused() {
+        let roots: &[&str] = if cfg!(windows) {
+            &[r"C:\", r"\\?\C:\"]
+        } else {
+            &["/"]
+        };
+        let inside: &[&str] = if cfg!(windows) {
+            &[r"C:\Users", r"\\?\UNC\srv\share\dir"]
+        } else {
+            &["/home"]
+        };
+        for root in roots {
+            assert!(is_fs_root(Path::new(root)), "{root}");
+        }
+        for folder in inside {
+            assert!(!is_fs_root(Path::new(folder)), "{folder}");
+        }
+
+        let (hub, scratch, _repo) = repo_hub("host-root");
+        let root = scratch.path().ancestors().last().expect("a root");
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_folder("h", root));
+        let seen = until_end(&mut client, "h").await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            error_text(&seen[0]),
+            format!(
+                "{} is a drive root; fetch a folder inside it",
+                root.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_walk_root_is_judged_on_the_folder_the_walk_uses() {
+        let (_hub, scratch, _repo) = repo_hub("host-walk-root");
+        let root = scratch.path().ancestors().last().expect("a root");
+        let dir = file_fetch::confine_dir(root, "").expect("the root is a folder");
+        let err = walk_root(dir, "R").expect_err("a filesystem root is not walked");
+        assert_eq!(
+            format!("{err:#}"),
+            "R is a drive root; fetch a folder inside it"
+        );
+        let outside = outside_folder(&scratch);
+        let dir = file_fetch::confine_dir(&outside, "").expect("a folder");
+        let walked = walk_root(dir.clone(), "O").expect("a folder inside a root is walked");
+        assert_eq!(walked.path(), dir.path());
+    }
+
+    #[test]
+    fn a_host_folder_error_names_the_path_as_sent() {
+        let (_hub, scratch, _repo) = repo_hub("host-folder-named");
+        let outside = outside_folder(&scratch);
+        let dir = file_fetch::confine_dir(&outside, "").expect("a folder");
+        let sent = outside.display().to_string();
+        let failed = Some(DaemonMessage::FileFetchError {
+            id: "h".to_owned(),
+            error: format!(
+                "reading the folder {}: Access is denied",
+                dir.path().join("sub").display()
+            ),
+        });
+        let expected = format!(
+            "reading the folder {}: Access is denied",
+            Path::new(&sent).join("sub").display()
+        );
+        let named = folder_named_as_sent(failed, Some(&dir), &sent);
+        assert!(
+            matches!(&named, Some(DaemonMessage::FileFetchError { error, .. }) if *error == expected),
+            "{named:?}"
+        );
+        let done = Some(DaemonMessage::FileFetchDone { id: "h".to_owned() });
+        assert!(matches!(
+            folder_named_as_sent(done, Some(&dir), &sent),
+            Some(DaemonMessage::FileFetchDone { .. })
+        ));
+        let refused = Some(DaemonMessage::FileFetchError {
+            id: "h".to_owned(),
+            error: format!("{sent} is not a folder"),
+        });
+        assert!(matches!(
+            folder_named_as_sent(refused, None, &sent),
+            Some(DaemonMessage::FileFetchError { error, .. }) if error == format!("{sent} is not a folder")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_host_folder_fetch_follows_no_link_inside_it() {
+        let (hub, scratch, _repo) = repo_hub("host-folder-link");
+        let outside = outside_folder(&scratch);
+        let secret = scratch.path().join("secret");
+        std::fs::create_dir_all(&secret).expect("create the secret folder");
+        std::fs::write(secret.join("s.txt"), "s").expect("write s.txt");
+        assert!(
+            make_dir_link(&outside.join("linked"), &secret),
+            "made a folder link"
+        );
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_folder("h", &outside));
+        let seen = until_end(&mut client, "h").await;
+        assert_folder_done(&seen);
+        assert_eq!(started_files(&seen), 1, "only notes.txt: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_host_stat_names_a_file_a_folder_and_missing_paths() {
+        let (hub, scratch, _repo) = repo_hub("host-stat");
+        let outside = outside_folder(&scratch);
+        let (mut client, _session, _) = local_session(&hub).await;
+        let rows = [
+            ("s1", outside.join("notes.txt"), PathKind::File, 7),
+            ("s2", outside.clone(), PathKind::Dir, 0),
+            ("s3", outside.join("nope"), PathKind::Missing, 0),
+            ("s4", PathBuf::from("notes.txt"), PathKind::Missing, 0),
+        ];
+        for (id, path, _, _) in &rows {
+            client.send(&ClientMessage::StatHostPath {
+                id: (*id).to_owned(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        let mut stats = Vec::new();
+        while stats.len() < rows.len() {
+            let seen = read_until(&mut client, |msg| {
+                matches!(msg, DaemonMessage::PathStat { .. })
+            })
+            .await;
+            for msg in seen {
+                if let DaemonMessage::PathStat { id, kind, size } = msg {
+                    stats.push((id, kind, size));
+                }
+            }
+        }
+        stats.sort_by(|a, b| a.0.cmp(&b.0));
+        let expected: Vec<(String, PathKind, u64)> = rows
+            .iter()
+            .map(|(id, _, kind, size)| ((*id).to_owned(), *kind, *size))
+            .collect();
+        assert_eq!(stats, expected);
+    }
+
+    #[tokio::test]
+    async fn a_host_file_fetch_reusing_an_active_file_fetch_id_is_refused() {
+        let (hub, scratch, _repo) = repo_hub("host-duplicate");
+        let outside = outside_folder(&scratch);
+        let (mut client, _session, _) = local_session(&hub).await;
+        let mut registry = RegistryWatch::new("x");
+        // A stalled socket keeps the file fetch active.
+        client.stall();
+        client.send(&fetch_file("x", "big.bin"));
+        client.send(&host_file("x", &outside.join("notes.txt")));
+        registry.reached(2).await;
+        client.resume();
+        let x = until_end(&mut client, "x").await;
+        let refusals: Vec<&str> = x
+            .iter()
+            .filter_map(|msg| match msg {
+                DaemonMessage::FileFetchError { error, .. } => Some(error.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refusals, ["duplicate fetch id"], "{x:?}");
+        let rest = until_end(&mut client, "x").await;
+        assert!(
+            matches!(rest.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{rest:?}"
+        );
+        let size = (crate::file_fetch::CHUNK_SIZE * 12) as u64;
+        assert!(
+            x.iter().chain(&rest).all(|msg| !matches!(
+                msg,
+                DaemonMessage::FileFetchStarted { size: started, .. } if *started != size
+            )),
+            "only big.bin was sent: {x:?} {rest:?}"
+        );
+    }
+
+    /// A `MakeWriter` that keeps what a subscriber formats.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            lock(&self.0).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&lock(&self.0)).into_owned()
+        }
+
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .with_writer(self.clone())
+                .finish()
+        }
+    }
+
+    const AUDIT_LINE: &str = "served a host file read to a tailnet device";
+
+    #[tokio::test]
+    async fn a_tailnet_host_file_fetch_is_audited() {
+        let (hub, scratch, _repo) = repo_hub("host-audit");
+        let file = outside_folder(&scratch).join("notes.txt");
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let (_, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let (mut client, _session) = mem_session(&hub, AuthKind::Tailnet(test_peer()));
+        client.send(&hello(&token, None));
+        read_until(&mut client, |msg| {
+            matches!(msg, DaemonMessage::Welcome { .. })
+        })
+        .await;
+        client.send(&host_file("a1", &file));
+        let seen = until_end(&mut client, "a1").await;
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+        let text = capture.text();
+        let line = text
+            .lines()
+            .find(|line| line.contains(AUDIT_LINE))
+            .expect("an audit line was logged");
+        let canonical = std::fs::canonicalize(&file).expect("canonical notes.txt");
+        let shown = crate::host_path::shown(&canonical);
+        for field in [
+            "kind=fetch_file".to_owned(),
+            format!("device={}", test_peer().name),
+            "id=a1".to_owned(),
+            format!("path={shown}"),
+            "bytes=7".to_owned(),
+        ] {
+            assert!(line.contains(&field), "{field} in {line}");
+        }
+        assert!(!line.contains(r"\\?\"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_local_host_file_fetch_is_not_audited() {
+        let (hub, scratch, _repo) = repo_hub("host-no-audit");
+        let file = outside_folder(&scratch).join("notes.txt");
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let (mut client, _session, _) = local_session(&hub).await;
+        client.send(&host_file("a1", &file));
+        let seen = until_end(&mut client, "a1").await;
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+        assert!(!capture.text().contains(AUDIT_LINE), "{}", capture.text());
     }
 
     #[test]

@@ -9,6 +9,8 @@ use std::path::{Component, Path, PathBuf, Prefix};
 const MAX_PATH_CHARS: usize = 1024;
 /// The most components a requested path may have.
 const MAX_PATH_DEPTH: usize = 64;
+/// [`check`]'s refusal of a relative path when there is no working folder.
+pub const NO_FOLDER: &str = "the session has no folder";
 
 /// The path `path` names, absolute and with `.` and `..` applied, judged
 /// from its text alone: a relative `path` is taken from `working`, the
@@ -25,7 +27,7 @@ pub fn check(working: Option<&Path>, path: &str) -> Result<PathBuf, String> {
         named.to_path_buf()
     } else {
         let Some(working) = working else {
-            return Err("the session has no folder".to_owned());
+            return Err(NO_FOLDER.to_owned());
         };
         working.join(named)
     };
@@ -140,6 +142,20 @@ pub fn verbatim(normal: &Path) -> PathBuf {
 #[must_use]
 pub fn verbatim(normal: &Path) -> PathBuf {
     normal.to_path_buf()
+}
+
+/// `path` as a person reads it: a verbatim (`\\?\`) spelling shown in its
+/// plain form, `\\?\C:\x` as `C:\x` and `\\?\UNC\srv\sh` as `\\srv\sh`.
+#[must_use]
+pub fn shown(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_owned(),
+        None => text,
+    }
 }
 
 #[cfg(test)]

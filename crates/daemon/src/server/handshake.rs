@@ -283,6 +283,7 @@ const DAEMON_FEATURES: &[&str] = &[
     FEATURE_SCREEN_DUMP,
     protocol::FEATURE_FILE_TAIL,
     protocol::FEATURE_FOLDER_FETCH,
+    protocol::FEATURE_HOST_PATHS,
     protocol::FEATURE_SESSION_FOLDERS,
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
@@ -828,6 +829,10 @@ mod tests {
         assert!(
             DAEMON_FEATURES.contains(&protocol::FEATURE_REMOTE_UPDATE),
             "every daemon answers a remote update, if only with why it cannot"
+        );
+        assert!(
+            DAEMON_FEATURES.contains(&protocol::FEATURE_HOST_PATHS),
+            "every daemon serves a host path fetch and stat"
         );
     }
 

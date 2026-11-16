@@ -71,6 +71,14 @@ export const FEATURE_FOLDER_FETCH = "folder_fetch";
 export const FEATURE_SESSION_FOLDERS = "session_folders";
 
 /**
+ * `Welcome.features` entry: the host serves
+ * [`ClientMessage::FetchHostFile`], [`ClientMessage::FetchHostFolder`] and
+ * [`ClientMessage::StatHostPath`]: any absolute path its user can read. A
+ * client sends them only when the connected daemon lists it.
+ */
+export const FEATURE_HOST_PATHS = "host_paths";
+
+/**
  * `Welcome.features` entry: the daemon keeps a default shell for plain-shell
  * sessions and for the shell that hosts an interactive agent
  * ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -4255,6 +4263,43 @@ export type ClientMessage =
    * `id`: Client-assigned request id, echoed on the answer.
    */
   | { type: "stat_path"; id: string; repo_id: string; worktree_path?: string | null; path: string }
+  /**
+   * Download the file at `path`, an absolute path on the host: any file
+   * the daemon's user can read, every link in the path followed to its
+   * target. A relative path, a network or device path by its text, a path
+   * that does not exist (a dangling link included) and anything that is
+   * not a regular file are refused. Answered exactly as
+   * [`ClientMessage::FetchFile`] is, and `id` shares its id space: an id
+   * still active is refused. Sent only to a daemon listing
+   * [`FEATURE_HOST_PATHS`].
+   *
+   * `id`: Client-assigned transfer id, echoed on every response.
+   */
+  | { type: "fetch_host_file"; id: string; path: string }
+  /**
+   * Download the folder at `path`, an absolute path on the host, as one
+   * zstd-compressed tar archive: links in `path` are followed to the
+   * folder, which is then walked and packed exactly as
+   * [`ClientMessage::FetchFolder`] walks its folder (no link followed,
+   * the same left-out entries and limits). A target that is not a folder
+   * and a filesystem root (`C:\`, `/`) are refused. Answered exactly as
+   * `FetchFolder` is, and `id` shares its id space. Sent only to a daemon
+   * listing [`FEATURE_HOST_PATHS`].
+   *
+   * `id`: Client-assigned transfer id, echoed on every response.
+   */
+  | { type: "fetch_host_folder"; id: string; path: string }
+  /**
+   * Say what `path`, an absolute path on the host resolved as
+   * [`ClientMessage::FetchHostFile`] resolves it, names: the daemon
+   * answers with [`DaemonMessage::PathStat`]. A refused path answers
+   * [`PathKind::Missing`] exactly as a missing one does, as
+   * [`ClientMessage::StatPath`] does. Sent only to a daemon listing
+   * [`FEATURE_HOST_PATHS`].
+   *
+   * `id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "stat_host_path"; id: string; path: string }
   /**
    * List the folders this session's link paths may lie in: the daemon
    * answers with [`DaemonMessage::SessionFolders`]. A hint for choosing

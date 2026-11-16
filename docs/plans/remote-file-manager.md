@@ -4,7 +4,7 @@ A file manager in the native client that browses each machine's own file system 
 
 ## Owner rulings
 
-- **Reach:** a paired device may always browse a host's registered repos, their worktrees and the host's approved extra folders (RT-115). A host-only setting, off by default, `Let paired devices browse this whole machine`, opens every other path the daemon's account can read. A remote client can never change it.
+- **Reach:** pairing assumes the owner owns both machines, so any path the daemon's user can read is servable to a paired device through the host-path messages (`fetch_host_file`, `fetch_host_folder`, `stat_host_path`; RT-1823). There is no host switch and there are no approved extra roots; the repo-relative messages are unchanged.
 - **Surfaces:** both a tab (a file-manager tab per host and folder, with a location bar, placed and split like any tab and kept across restarts) and a sidebar panel (a file tree docked in the sidebar).
 - **First cut is read-only:** browse; type or paste a path; open a file in its default app, the viewer or VS Code; copy a file or a folder to this machine and open it; reveal the copy; copy the path. Nothing on the host changes.
 - **Later, in Backlog:** rename, delete and new folder on the host; upload from this machine to a host folder.
