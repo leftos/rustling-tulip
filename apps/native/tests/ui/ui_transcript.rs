@@ -6,10 +6,10 @@
 
 use crate::support;
 
-use gpui::TestAppContext;
+use gpui::{FontWeight, TestAppContext, px};
 use protocol::{
-    ChatEntry, ClientMessage, DaemonMessage, SplitDirection, ToolKind, ToolOutcome,
-    TranscriptSource,
+    AppearanceOverrides, ChatEntry, ClientMessage, DaemonMessage, SplitDirection, ToolKind,
+    ToolOutcome, TranscriptSource,
 };
 use support::{
     DispatchRunBuilder, Fixture, Harness, TestDir, dispatch_run, follow_pane, pane, repo, session,
@@ -313,6 +313,83 @@ fn a_not_found_refusal_keeps_the_last_transcript(cx: &mut TestAppContext) {
     h.send(refusal(protocol::error_codes::NOT_FOUND, id));
 
     assert_eq!(lines(&mut h), ["● One."]);
+}
+
+/// [`fixture`] with session `s1`'s own appearance set by `appearance`.
+fn with_appearance(appearance: impl FnOnce(&mut AppearanceOverrides)) -> Fixture {
+    let mut s = session("s1").in_repo("r1").build();
+    appearance(&mut s.appearance);
+    Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        sessions: vec![s],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                follow_pane("f2", "r1"),
+            ),
+        )],
+        ..Fixture::default()
+    }
+}
+
+/// `fixture` on a connection with dispatch runs, `r1` listed as `s1`'s run
+/// and its one answer held.
+fn answered<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.send(DaemonMessage::DispatchRuns {
+        runs: vec![r1().session_id("s1").build()],
+    });
+    let id = follow_id(&mut h);
+    h.send(reply(vec![answer("a1", "Looking.")], Some(id)));
+    h
+}
+
+#[gpui::test]
+fn a_run_transcript_draws_at_the_terminal_font_size_and_line_height(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = with_appearance(|appearance| appearance.terminal_font_size = Some(18));
+    let mut h = answered(cx, &dir, &fixture);
+
+    let (_, _, size, line_height) = h
+        .root(|root, cx| root.transcript_font_of("f2", cx))
+        .expect("the pane follows a run");
+    assert_eq!(size, 18.0, "the terminal's size, not the UI text size");
+    assert_eq!(
+        h.bounds("dispatch-line-f2-0").size.height,
+        px(line_height),
+        "the column draws the line height as well as the size"
+    );
+}
+
+#[gpui::test]
+fn a_run_transcript_draws_in_the_tab_terminals_face(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = with_appearance(|appearance| {
+        appearance.terminal_font_family = Some("Cascadia Code".to_owned());
+        appearance.terminal_font_weight = Some(600);
+    });
+    let mut h = answered(cx, &dir, &fixture);
+
+    let (family, weight, _, _) = h
+        .root(|root, cx| root.transcript_font_of("f2", cx))
+        .expect("the pane follows a run");
+    let terminal = h
+        .root(|root, cx| root.pane_font("p1", cx))
+        .expect("a terminal pane showing s1");
+
+    assert_eq!(
+        Some(family.as_str()),
+        terminal.family.as_deref(),
+        "the family the terminal beside it draws"
+    );
+    assert_eq!(
+        FontWeight(f32::from(terminal.weight)),
+        weight,
+        "and its weight"
+    );
 }
 
 #[gpui::test]

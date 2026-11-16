@@ -275,7 +275,7 @@ pub(crate) struct FollowedTranscript {
 
 /// The transcript a pane `follow` follows; `None` for a follow this build
 /// does not know.
-fn follow_key(follow: &PaneFollow) -> Option<TranscriptKey> {
+pub(crate) fn follow_key(follow: &PaneFollow) -> Option<TranscriptKey> {
     match follow {
         PaneFollow::DispatchRun { run_id } => Some(TranscriptKey::Run(run_id.clone())),
         PaneFollow::Subagent {
@@ -290,6 +290,32 @@ fn follow_key(follow: &PaneFollow) -> Option<TranscriptKey> {
             agent_id: agent_id.clone(),
         }),
         PaneFollow::Unknown => None,
+    }
+}
+
+/// The font, size and line height, in px, a followed pane's transcript
+/// column draws at: a terminal pane's in the same tab.
+#[derive(Clone)]
+pub(crate) struct TranscriptFont {
+    pub font: gpui::Font,
+    pub size: f32,
+    pub line_height: f32,
+}
+
+/// The transcript font `font` at `size` draws at, given that font's `ascent`
+/// and `descent` at the size: its face, its size, and the line height
+/// [`crate::fonts::line_height`] gives those metrics.
+#[must_use]
+pub(crate) fn transcript_font(
+    font: gpui::Font,
+    size: f32,
+    ascent: f32,
+    descent: f32,
+) -> TranscriptFont {
+    TranscriptFont {
+        font,
+        size,
+        line_height: crate::fonts::line_height(ascent, descent, size),
     }
 }
 
@@ -588,6 +614,27 @@ impl RootView {
         )
     }
 
+    /// The session followed run `run_id` of `host` was dispatched from, when
+    /// the run's snapshot names one.
+    pub(crate) fn run_session(&self, host: &HostKey, run_id: &str) -> Option<String> {
+        match self.run_shown(host, run_id) {
+            RunShown::Live(run) | RunShown::Ended(run) => run.session_id.clone(),
+            RunShown::Gone => None,
+        }
+    }
+
+    /// The session `key`'s transcript resolves its font from: a subagent's
+    /// own session, else the dispatching session of its run when the run's
+    /// snapshot names one.
+    pub(crate) fn transcript_session(&self, host: &HostKey, key: &TranscriptKey) -> Option<String> {
+        match key {
+            TranscriptKey::Subagent { session_id, .. } => Some(session_id.clone()),
+            TranscriptKey::Run(run_id) | TranscriptKey::RunSubagent { run_id, .. } => {
+                self.run_session(host, run_id)
+            }
+        }
+    }
+
     /// The host and run pane `pane_id` follows.
     fn pane_run(&self, pane_id: &str) -> Option<(HostKey, String)> {
         self.followed_runs()
@@ -604,12 +651,13 @@ impl RootView {
         pane_id: &str,
         host: &HostKey,
         run_id: &str,
+        font: TranscriptFont,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
         let inner = match self.run_shown(host, run_id) {
-            RunShown::Live(run) => self.run_column(pane_id, host, run, false, cx),
-            RunShown::Ended(run) => self.run_column(pane_id, host, run, true, cx),
+            RunShown::Live(run) => self.run_column(pane_id, host, (run, false), font, cx),
+            RunShown::Ended(run) => self.run_column(pane_id, host, (run, true), font, cx),
             RunShown::Gone => crate::grid_view::muted_note(
                 ui_text_size(cx),
                 format!("This run has ended: {run_id}"),
@@ -627,17 +675,18 @@ impl RootView {
             .child(inner)
     }
 
-    /// A run of `host`: its stats line, its log and, once it has gone, its
-    /// run folder.
+    /// A run of `host` as `shown` with whether it has ended: its stats line,
+    /// its log and, once it has gone, its run folder.
     fn run_column(
         &self,
         pane_id: &str,
         host: &HostKey,
-        run: &DispatchRunSnapshot,
-        ended: bool,
+        shown: (&DispatchRunSnapshot, bool),
+        font: TranscriptFont,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
+        let (run, ended) = shown;
         let size = ui_px_at(ui_text_size(cx), UI_TEXT_SIZE);
         let line = |id: String, text: String| {
             div()
@@ -661,7 +710,7 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .child(stats)
-            .child(self.run_log(pane_id, host, run, cx))
+            .child(self.run_log(pane_id, host, run, font, cx))
             .children(note)
     }
 
@@ -673,6 +722,7 @@ impl RootView {
         pane_id: &str,
         host: &HostKey,
         run: &DispatchRunSnapshot,
+        font: TranscriptFont,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let key = (host.clone(), TranscriptKey::Run(run.run_id.clone()));
@@ -687,22 +737,26 @@ impl RootView {
                 .map(|action| div().child(action.clone()).into_any_element())
                 .collect(),
         };
-        self.log_column(pane_id, format!("dispatch-log-{pane_id}"), rows, cx)
+        self.log_column(pane_id, format!("dispatch-log-{pane_id}"), rows, font, cx)
     }
 
     /// Pane `pane_id`'s log column, tagged `name`, of `rows` in the
-    /// terminal's font, scrolled to the end while the user has not scrolled
-    /// up.
+    /// terminal's font family and weight at `font`'s size and line height,
+    /// scrolled to the end while the user has not scrolled up.
     pub(crate) fn log_column(
         &self,
         pane_id: &str,
         name: String,
         rows: Vec<AnyElement>,
+        font: TranscriptFont,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
-        let family = self.sidebar.ui_state().terminal_font.family.as_deref();
-        let family = SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned());
+        let TranscriptFont {
+            font: face,
+            size,
+            line_height,
+        } = font;
         let column = div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .driver_id(|| name)
@@ -712,9 +766,9 @@ impl RootView {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .px(px(8.0))
-            .font_family(family)
-            .font_weight(crate::fonts::mono_weight())
-            .text_size(ui_px_at(ui_text_size(cx), UI_TEXT_SIZE))
+            .font(face)
+            .text_size(px(size))
+            .line_height(px(line_height))
             .text_color(gpui::rgb(t.text_2))
             .children(rows);
         let Some(scroll) = self.run_scrolls.get(pane_id) else {
@@ -1008,5 +1062,25 @@ mod tests {
     #[test]
     fn shown_is_gone_without_either() {
         assert_eq!(shown(None, None), RunShown::Gone);
+    }
+
+    /// A terminal font face for these tests: Geist Mono at `weight`.
+    fn face(weight: u16) -> gpui::Font {
+        crate::term_view::terminal_font(SharedString::from("Geist Mono"), weight)
+    }
+
+    #[test]
+    fn transcript_font_is_the_face_and_size_at_the_metrics_line_height() {
+        let font = transcript_font(face(600), 18.0, 14.5, 4.2);
+        assert_eq!(font.font.family.as_ref(), "Geist Mono", "the face given");
+        assert_eq!(font.font.weight.0, 600.0, "at the weight given");
+        assert_eq!(font.size, 18.0, "the size given");
+        assert_eq!(font.line_height, 19.0, "18.7 px of metrics, ceiled");
+    }
+
+    #[test]
+    fn transcript_font_falls_back_to_its_own_ratio_without_usable_metrics() {
+        let font = transcript_font(face(400), 18.0, 0.0, 0.0);
+        assert_eq!(font.line_height, 22.0, "18 × 1.2, ceiled");
     }
 }

@@ -379,7 +379,7 @@ A pane can follow a dispatch run instead of holding a session (`Pane.follow`). S
 
 The tab menu's **Close other tabs** asks the same way when any other tab shows a live session: the dialog reads "Close other tabs?", its body "The other tabs show 1 session: {label}." or "The other tabs show {n} sessions.", each session counted once across those tabs (a session the menu's own tab also shows counts too). Keep running closes every other tab with no undo entry, as before; Stop stops those sessions first. With no live session in the other tabs, the row keeps its two-click "Confirm closing N other tabs".
 
-A dispatch-run follow draws the run's view (`dispatch_view.rs`): a stats line `{status} · {cost} · {in} in · {out} out` (status `starting`, `working`, `stopping`, `ended` or `unknown`; cost and tokens through `dashboard_rows::format_cost` and `format_tokens`), then the run's transcript in the terminal font, newest at the bottom, following the bottom until the user wheels up (a scroll per pane, reset when the pane follows another run).
+A dispatch-run follow draws the run's view (`dispatch_view.rs`): a stats line `{status} · {cost} · {in} in · {out} out` (status `starting`, `working`, `stopping`, `ended` or `unknown`; cost and tokens through `dashboard_rows::format_cost` and `format_tokens`), then the run's transcript in the face, size and line height a terminal pane in the same tab draws with (the session's or repo's font override and the tab's size override included, ligatures off), newest at the bottom, following the bottom until the user wheels up (a scroll per pane, reset when the pane follows another run).
 
 The view is read-only: it has no input box.
 

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use gpui::{Context, Div, Pixels, div, prelude::*, px};
 use protocol::{AgentState, DaemonMessage, DispatchRunSnapshot, SessionSnapshot, SubagentSnapshot};
 
+use crate::dispatch_view::TranscriptFont;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px_at, ui_text_size};
 use crate::sidebar::SidebarModel;
@@ -349,12 +350,13 @@ impl RootView {
     }
 
     /// The body of pane `pane_id`, which follows subagent `key` of `host`:
-    /// its header row, a note, then its transcript.
+    /// its header row, a note, then its transcript at `font`.
     pub(crate) fn subagent_body(
         &self,
         pane_id: &str,
         host: &HostKey,
         key: &TranscriptKey,
+        font: TranscriptFont,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
@@ -379,7 +381,7 @@ impl RootView {
             }
             None => Vec::new(),
         };
-        let log = self.log_column(pane_id, format!("subagent-log-{pane_id}"), rows, cx);
+        let log = self.log_column(pane_id, format!("subagent-log-{pane_id}"), rows, font, cx);
         div()
             .driver_id(|| format!("pane-follow-{pane_id}"))
             .flex()

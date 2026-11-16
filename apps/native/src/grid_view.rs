@@ -835,6 +835,56 @@ impl RootView {
         }
     }
 
+    /// The font a followed pane's transcript column draws at, in `tab_id`:
+    /// the terminal size a pane of `session` resolves to, and the terminal
+    /// font's line height at that size.
+    pub(crate) fn pane_transcript_font(
+        &self,
+        tab_id: &str,
+        session: Option<&str>,
+        cx: &App,
+    ) -> crate::dispatch_view::TranscriptFont {
+        let settings = self.pane_appearance(tab_id, session).font();
+        let family = SharedString::from(
+            settings
+                .family
+                .as_deref()
+                .unwrap_or(crate::fonts::DEFAULT_FAMILY)
+                .to_owned(),
+        );
+        let face = crate::term_view::terminal_font(family, settings.weight);
+        let text = cx.text_system();
+        let font_id = text.resolve_font(&face);
+        let size = px(settings.size);
+        let ascent = text.ascent(font_id, size) / px(1.0);
+        let descent = text.descent(font_id, size) / px(1.0);
+        crate::dispatch_view::transcript_font(face, settings.size, ascent, descent)
+    }
+
+    /// The family and weight pane `pane_id`'s transcript column draws at,
+    /// with its size and line height in px; `None` when the pane follows no
+    /// transcript.
+    #[must_use]
+    pub fn transcript_font_of(
+        &self,
+        pane_id: &str,
+        cx: &App,
+    ) -> Option<(String, FontWeight, f32, f32)> {
+        let followed = self
+            .followed_transcripts()
+            .into_iter()
+            .find(|followed| followed.pane_id == pane_id)?;
+        let tab_id = self.panes.get(pane_id)?.tab_id.clone();
+        let session = self.transcript_session(&followed.host, &followed.key);
+        let font = self.pane_transcript_font(&tab_id, session.as_deref(), cx);
+        Some((
+            font.font.family.to_string(),
+            font.font.weight,
+            font.size,
+            font.line_height,
+        ))
+    }
+
     /// The appearance a pane of `tab_id` showing `session` resolves to.
     fn pane_appearance(&self, tab_id: &str, session: Option<&str>) -> Resolved {
         self.sidebar
@@ -2004,29 +2054,32 @@ impl RootView {
     ) -> AnyElement {
         let PaneShown { session, follow } = shown;
         if let (None, Some(follow)) = (session, follow) {
+            let host = self.tabs.pane_host(tab_id, pane_id);
+            let followed = crate::dispatch_view::follow_key(follow);
+            let session = followed
+                .as_ref()
+                .and_then(|key| self.transcript_session(&host, key));
+            let font = self.pane_transcript_font(tab_id, session.as_deref(), cx);
             let note = match follow {
                 PaneFollow::DispatchRun { run_id } => {
-                    let host = self.tabs.pane_host(tab_id, pane_id);
-                    self.dispatch_body(pane_id, &host, run_id, cx)
+                    self.dispatch_body(pane_id, &host, run_id, font, cx)
                 }
                 PaneFollow::Subagent {
                     session_id,
                     agent_id,
                 } => {
-                    let host = self.tabs.pane_host(tab_id, pane_id);
                     let key = crate::transcript_view::TranscriptKey::Subagent {
                         session_id: session_id.clone(),
                         agent_id: agent_id.clone(),
                     };
-                    self.subagent_body(pane_id, &host, &key, cx)
+                    self.subagent_body(pane_id, &host, &key, font, cx)
                 }
                 PaneFollow::RunSubagent { run_id, agent_id } => {
-                    let host = self.tabs.pane_host(tab_id, pane_id);
                     let key = crate::transcript_view::TranscriptKey::RunSubagent {
                         run_id: run_id.clone(),
                         agent_id: agent_id.clone(),
                     };
-                    self.subagent_body(pane_id, &host, &key, cx)
+                    self.subagent_body(pane_id, &host, &key, font, cx)
                 }
                 PaneFollow::Unknown => follow_placeholder(pane_id, cx),
             };

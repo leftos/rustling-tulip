@@ -2774,7 +2774,7 @@ struct Metrics {
 /// feature off. A ligature draws `->` as one substituted glyph, and the
 /// per-cell width lock then shifts every glyph after it one cell left. A
 /// family without a face at `weight` draws its nearest one.
-fn terminal_font(family: SharedString, weight: u16) -> Font {
+pub(crate) fn terminal_font(family: SharedString, weight: u16) -> Font {
     Font {
         weight: FontWeight(f32::from(weight)),
         features: FontFeatures(Arc::new(vec![
