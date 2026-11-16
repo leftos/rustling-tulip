@@ -2800,6 +2800,100 @@ fn no_fold_all_button_without_nested_rows(cx: &mut TestAppContext) {
     );
 }
 
+/// The nested-run fixture before the daemon lists the run: `s2` focused and
+/// `s1` of conversation `c1` beside it in repo `r1`, so the run that names
+/// `c1` nests under `s1` once it arrives.
+fn unlisted_run_harness<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s2").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "C:\\r1")];
+    fixture
+        .sessions
+        .push(session("s1").in_repo("r1").conversation_id("c1").build());
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.reconnect_with_features(&[protocol::FEATURE_DISPATCH_RUNS]);
+    h.answer_scrollback("s2", b"");
+    h
+}
+
+/// How far down the panel the header reaches: only the header sits above
+/// the toolbar, whose first row is the add-session button. The toolbar
+/// draws the same children in both states, so their tops differ exactly
+/// when the header's height does.
+fn above_toolbar(h: &mut Harness<'_>) -> f32 {
+    let panel = h.bounds("sidebar-panel");
+    let toolbar = h.bounds("sidebar-add-session");
+    (toolbar.top() - panel.top()) / px(1.0)
+}
+
+/// The vertical centres of the header's title, fold-all button and
+/// Repos / Tabs toggle.
+fn header_row_centres(h: &mut Harness<'_>) -> Vec<f32> {
+    ["sidebar-title", "sidebar-fold-all", "sidebar-view-tabs"]
+        .into_iter()
+        .map(|selector| h.bounds(selector).center().y / px(1.0))
+        .collect()
+}
+
+#[gpui::test]
+fn the_sessions_header_keeps_its_height_when_the_fold_all_button_appears(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut plain = unlisted_run_harness(cx, &dir);
+    assert!(
+        !drawn(&mut plain, "sidebar-fold-all"),
+        "precondition: with no nested rows the header draws no button"
+    );
+    let plain_default = above_toolbar(&mut plain);
+    drop(plain);
+
+    let mut nested = nested_run_harness(cx, &dir);
+    assert!(
+        drawn(&mut nested, "sidebar-fold-all"),
+        "precondition: the session's run draws the fold-all button"
+    );
+    let nested_default = above_toolbar(&mut nested);
+    assert!(
+        (nested_default - plain_default).abs() < 0.5,
+        "the header is as tall with the button as without it: {nested_default} and {plain_default}"
+    );
+    let centres = header_row_centres(&mut nested);
+    assert!(
+        centres
+            .windows(2)
+            .all(|pair| (pair[0] - pair[1]).abs() <= 1.0),
+        "at the default width the title, the button and Repos / Tabs share one row: \
+         {centres:?} in {:?} {:?} {:?}",
+        nested.bounds("sidebar-title"),
+        nested.bounds("sidebar-fold-all"),
+        nested.bounds("sidebar-view-tabs")
+    );
+
+    // The narrowest the sidebar allows: both states wrap the same way.
+    let from = nested.center("sidebar-divider");
+    nested.drag(from, point(px(50.0), from.y), [Modifiers::none(); 2]);
+    let panel = nested.bounds("sidebar-panel");
+    assert!(
+        (panel.size.width / px(1.0) - 200.0).abs() < 0.5,
+        "the panel is at its minimum width: {panel:?}"
+    );
+    let nested_narrow = above_toolbar(&mut nested);
+    drop(nested);
+
+    let mut plain = unlisted_run_harness(cx, &dir);
+    let from = plain.center("sidebar-divider");
+    plain.drag(from, point(px(50.0), from.y), [Modifiers::none(); 2]);
+    let panel = plain.bounds("sidebar-panel");
+    assert!(
+        (panel.size.width / px(1.0) - 200.0).abs() < 0.5,
+        "the panel is at its minimum width: {panel:?}"
+    );
+    let plain_narrow = above_toolbar(&mut plain);
+    assert!(
+        (plain_narrow - nested_narrow).abs() < 0.5,
+        "at the minimum width the header is as tall with nested rows as without them: \
+         {plain_narrow} and {nested_narrow}"
+    );
+}
+
 #[gpui::test]
 fn dispatch_runs_from_a_daemon_without_the_feature_are_ignored(cx: &mut TestAppContext) {
     let dir = TestDir::new();

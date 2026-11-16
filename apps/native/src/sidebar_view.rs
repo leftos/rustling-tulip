@@ -1439,9 +1439,11 @@ fn fold_all_button(collapse: bool, cx: &mut Context<RootView>) -> Stateful<Div> 
         }))
 }
 
-/// The panel's title, the fold-all button while a session has rows nested
-/// under it, the All / Active row filter the repos view gets and the
-/// Repos / Tabs grouping toggle.
+/// The panel's title, the fold-all button's place (the button while a
+/// session has rows nested under it, an empty slot of the button's size
+/// otherwise), the All / Active row filter the repos view gets and the
+/// Repos / Tabs grouping toggle. The slot always takes the button's room,
+/// so the header's height and wrapping never change when it appears.
 fn header(
     view: SidebarView,
     filter: RepoFilter,
@@ -1477,7 +1479,9 @@ fn header(
                 .driver_id(|| "sidebar-title".to_owned())
                 .flex_basis(px(0.0))
                 .flex_grow(1.0)
-                .min_w(ui_px(cx, 48.0))
+                // Beside the button's slot and the controls, the default
+                // width leaves the title this much; a wider floor wraps them.
+                .min_w(ui_px(cx, 24.0))
                 .text_size(ui_px(cx, 13.0))
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
                 .text_color(gpui::rgb(t.text))
@@ -1487,7 +1491,10 @@ fn header(
                     StyledText::new("Sessions"),
                 )),
         )
-        .children(fold_all.map(|collapse| fold_all_button(collapse, cx)))
+        .child(match fold_all {
+            Some(collapse) => fold_all_button(collapse, cx).into_any_element(),
+            None => div().flex_none().size(ui_px(cx, 22.0)).into_any_element(),
+        })
         .child(
             div()
                 .flex()
