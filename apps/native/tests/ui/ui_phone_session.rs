@@ -22,10 +22,11 @@ use protocol::{
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::phone::quick_replies::{ReplyGroup, ReplySet};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
-use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
 
 /// The least height of a row or a target.
 fn touch_target() -> Pixels {
@@ -95,10 +96,22 @@ fn open_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 /// [`open_phone`] with [`REMOTE`]'s daemon listing `features` beside the
 /// current daemon's.
 fn open_phone_on<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
-    seed_ui(
-        dir,
-        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    open_phone_saved(cx, dir, &json!({}), features)
+}
+
+/// [`open_phone`] with `ui`'s fields saved beside the host.
+fn open_phone_saved<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &serde_json::Value,
+    features: &[&str],
+) -> Harness<'a> {
+    let mut file = ui.as_object().cloned().unwrap_or_default();
+    file.insert(
+        "saved_hosts".to_owned(),
+        json!([{ "name": REMOTE, "port": 8787 }]),
     );
+    seed_ui(dir, &serde_json::Value::Object(file));
     let mut h = Harness::phone(cx, dir);
     h.tokens().set(REMOTE, "t1").expect("seed a token");
     let mut host = h.host(&saved_remote());
@@ -1303,6 +1316,171 @@ fn a_shell_session_offers_only_y_and_n(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir, "n");
 
     assert_eq!(phone(&mut h, PhoneRoot::quick_reply_items), ["y", "n"]);
+}
+
+// ── Quick replies saved in native-ui.json ──────────────────────────────────
+
+/// A saved reply group.
+fn reply_group(title: &str, replies: &[&str]) -> serde_json::Value {
+    json!({ "title": title, "replies": replies })
+}
+
+/// A phone with `ui` saved beside its host, session `id`'s page open and its
+/// chat's load answered with one message.
+fn saved_phone<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &serde_json::Value,
+    id: &str,
+) -> Harness<'a> {
+    let mut h = open_phone_saved(cx, dir, ui, &[]);
+    h.click_on(&row(id));
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, id)
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply(id, request, vec![user("u1")]));
+    h
+}
+
+#[gpui::test]
+fn saved_agent_replies_replace_the_default_groups(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_agent_replies": [reply_group("mine", &["run the tests"])] });
+    let mut h = saved_phone(cx, &dir, &ui, "a");
+
+    h.click_on("phone-composer-quick");
+
+    assert!(drawn(&mut h, "phone-dock-quick"), "the dock opens");
+    assert!(drawn(&mut h, "phone-quick-mine-0"), "the saved reply shows");
+    assert!(
+        !drawn(&mut h, "phone-quick-confirm-0"),
+        "the saved set replaces the defaults"
+    );
+}
+
+#[gpui::test]
+fn saved_shell_replies_show_for_a_shell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_shell_replies": [reply_group("mine", &["ls -la"])] });
+    let mut h = open_phone_saved(cx, &dir, &ui, &[]);
+
+    h.click_on(&row("n"));
+
+    assert_eq!(phone(&mut h, PhoneRoot::quick_reply_items), ["ls -la"]);
+}
+
+#[gpui::test]
+fn saved_reply_types_its_text_then_return(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_agent_replies": [reply_group("mine", &["run the tests"])] });
+    let mut h = saved_phone(cx, &dir, &ui, "a");
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-quick");
+
+    h.click_on("phone-quick-mine-0");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"run the tests\r",
+        "a saved reply types its text and Return"
+    );
+}
+
+#[gpui::test]
+fn saved_empty_set_shows_the_empty_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_agent_replies": [] });
+    let mut h = saved_phone(cx, &dir, &ui, "a");
+
+    h.click_on("phone-composer-quick");
+
+    assert!(drawn(&mut h, "phone-dock-quick"), "the dock opens");
+    assert!(
+        drawn(&mut h, "phone-quick-empty"),
+        "an empty set says where to add replies"
+    );
+    assert!(
+        !drawn(&mut h, "phone-quick-confirm-0"),
+        "an empty set shows no defaults"
+    );
+}
+
+#[gpui::test]
+fn saved_group_with_no_replies_draws_no_section(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "phone_agent_replies": [
+            reply_group("more", &[]),
+            reply_group("common", &["continue"]),
+        ],
+    });
+    let mut h = saved_phone(cx, &dir, &ui, "a");
+
+    h.click_on("phone-composer-quick");
+
+    assert!(
+        !drawn(&mut h, "phone-quick-group-more"),
+        "a group with no replies draws no section"
+    );
+    assert!(
+        drawn(&mut h, "phone-quick-group-common"),
+        "a group with replies draws its section"
+    );
+    assert!(drawn(&mut h, "phone-quick-common-0"), "with its reply");
+    assert!(
+        !drawn(&mut h, "phone-quick-empty"),
+        "a set with a reply says nothing about adding replies"
+    );
+}
+
+#[gpui::test]
+fn saved_set_of_only_empty_groups_shows_the_empty_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_agent_replies": [reply_group("more", &[])] });
+    let mut h = saved_phone(cx, &dir, &ui, "a");
+
+    h.click_on("phone-composer-quick");
+
+    assert!(
+        !drawn(&mut h, "phone-quick-group-more"),
+        "a group with no replies draws no section"
+    );
+    assert!(
+        drawn(&mut h, "phone-quick-empty"),
+        "a set of only empty groups says where replies are added"
+    );
+}
+
+#[gpui::test]
+fn saved_by_set_phone_replies_and_redrawn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_phone(cx, &dir, &json!({}), "a");
+    h.click_on("phone-composer-quick");
+    assert!(drawn(&mut h, "phone-quick-confirm-0"), "the defaults show");
+
+    h.root_update(|root, _, cx| {
+        let groups = vec![ReplyGroup {
+            title: "mine".to_owned(),
+            replies: vec!["run the tests".to_owned()],
+        }];
+        root.set_phone_replies(ReplySet::Agent, Some(groups), cx);
+    });
+
+    assert_eq!(
+        saved_ui(&dir)["phone_agent_replies"],
+        json!([reply_group("mine", &["run the tests"])]),
+        "the set is saved"
+    );
+    assert!(
+        drawn(&mut h, "phone-quick-mine-0"),
+        "the open dock redraws with it"
+    );
+    assert!(
+        !drawn(&mut h, "phone-quick-confirm-0"),
+        "the defaults are gone"
+    );
 }
 
 #[gpui::test]

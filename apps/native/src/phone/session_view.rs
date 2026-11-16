@@ -34,6 +34,10 @@ const SEND_LABEL: &str = "Send";
 const PASTE_LABEL: &str = "Paste";
 /// The Quick dock's button's label.
 const QUICK_LABEL: &str = "Quick";
+/// What the Quick dock says while its set has no groups.
+const QUICK_EMPTY_TEXT: &str = "No quick replies. Add them in Settings › Quick replies.";
+/// The Quick dock's line while its set has no groups.
+const QUICK_EMPTY_ID: &str = "phone-quick-empty";
 /// The Keys tray's button's label.
 const KEYS_LABEL: &str = "Keys";
 /// The Hide keyboard button's label.
@@ -666,7 +670,9 @@ impl PhoneRoot {
     }
 
     /// The Quick dock for `target`: each of the shown session's reply
-    /// groups under its title, every reply a tap that types it and Return.
+    /// groups under its title, every reply a tap that types it and Return. A
+    /// group with no replies draws no section, and a set with no reply at all
+    /// says where replies are added.
     pub(super) fn quick_dock(
         &self,
         session_id: &str,
@@ -681,7 +687,21 @@ impl PhoneRoot {
             .flex_col()
             .gap(px(COMPOSER_GAP));
         let set = ReplySet::of(self.shown_has_agent(cx));
-        for group in quick_replies::groups(None, set) {
+        let saved = self.saved_replies(set, cx);
+        let groups: Vec<_> = quick_replies::groups(saved.as_deref(), set)
+            .into_iter()
+            .filter(|group| !group.replies.is_empty())
+            .collect();
+        if groups.is_empty() {
+            dock = dock.child(
+                div()
+                    .driver_id(|| QUICK_EMPTY_ID.to_owned())
+                    .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                    .text_color(gpui::rgb(t.muted))
+                    .child(QUICK_EMPTY_TEXT),
+            );
+        }
+        for group in groups {
             let mut row = div().flex().flex_wrap().gap(px(COMPOSER_GAP));
             for (index, text) in group.replies.iter().enumerate() {
                 let bytes = quick_replies::quick_bytes(text);
@@ -701,8 +721,10 @@ impl PhoneRoot {
                     })),
                 );
             }
+            let section = format!("{}-group-{}", target.reply_prefix(), group.title);
             dock = dock.child(
                 div()
+                    .driver_id(move || section)
                     .flex()
                     .flex_col()
                     .gap(px(4.0))

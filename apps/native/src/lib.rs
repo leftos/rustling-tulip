@@ -281,6 +281,7 @@ use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::SystemNotifier;
 use crate::overlay_owner::{Overlay, OverlayOwners};
+use crate::phone::quick_replies::{ReplyGroup, ReplySet};
 use crate::popout_view::PopoutView;
 use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
 use crate::quit_view::{ExitView, Quitter};
@@ -3186,6 +3187,19 @@ impl RootView {
     pub fn set_ui_text_size(&mut self, offset: i8, cx: &mut Context<Self>) {
         self.sidebar.set_ui_text_size(offset);
         fonts::set_ui_text_size(self.sidebar.ui_state().ui_text_size, cx);
+        self.save_ui();
+        cx.refresh_windows();
+    }
+
+    /// Saves the phone's Quick replies for `set`: `groups`, or `None` for the
+    /// built-in set. The open Quick dock redraws with them.
+    pub fn set_phone_replies(
+        &mut self,
+        set: ReplySet,
+        groups: Option<Vec<ReplyGroup>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.set_phone_replies(set, groups);
         self.save_ui();
         cx.refresh_windows();
     }

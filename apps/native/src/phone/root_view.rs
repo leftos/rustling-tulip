@@ -19,6 +19,7 @@ use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
+use super::quick_replies::{ReplyGroup, ReplySet};
 use super::session::SessionPage;
 use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
@@ -301,11 +302,21 @@ impl PhoneRoot {
     /// groups for a session with an agent, the shell pair otherwise.
     #[must_use]
     pub fn quick_reply_items(&self, cx: &App) -> Vec<String> {
-        let set = super::quick_replies::ReplySet::of(self.shown_has_agent(cx));
-        super::quick_replies::groups(None, set)
+        let set = ReplySet::of(self.shown_has_agent(cx));
+        let saved = self.saved_replies(set, cx);
+        super::quick_replies::groups(saved.as_deref(), set)
             .into_iter()
             .flat_map(|group| group.replies)
             .collect()
+    }
+
+    /// The saved groups of `set`, or `None` while the built-in set shows.
+    pub(super) fn saved_replies(&self, set: ReplySet, cx: &App) -> Option<Vec<ReplyGroup>> {
+        let state = self.root.read(cx).sidebar.ui_state();
+        match set {
+            ReplySet::Agent => state.phone_agent_replies.clone(),
+            ReplySet::Shell => state.phone_shell_replies.clone(),
+        }
     }
 
     /// Whether the shown session has an agent.

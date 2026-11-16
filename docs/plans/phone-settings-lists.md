@@ -630,6 +630,7 @@ Driver ids; today's ids keep their meaning except the dock's indices (P8):
 | `phone-edit-field`, `phone-edit-save`, `phone-edit-error` | a text editor's field, Save and refusal | A4 |
 | `phone-quick-empty` | the Quick dock's empty line | A2 |
 | `phone-dock-quick`, `phone-terminal-quick`, `phone-quick-{title}-{index}`, `phone-terminal-quick-{title}-{index}` | unchanged | |
+| `phone-quick-group-{title}`, `phone-terminal-quick-group-{title}` | a reply group's section, its title over its replies; drawn only while the group has a reply | A2 |
 | `phone-key-bar`, `phone-bar-hide`, `phone-dock-keys` | unchanged | |
 | `phone-key-bar-scroll` | the bar's scrolling row | B2 |
 | `phone-bar-{id}` | a bar key: `phone-bar-esc` … `phone-bar-quick` as today, then `phone-bar-shift-tab`, `phone-bar-enter`, `phone-bar-ctrl-c`, `phone-bar-1` … `phone-bar-9`, and `phone-bar-key-{n}` for added keys | B2 |

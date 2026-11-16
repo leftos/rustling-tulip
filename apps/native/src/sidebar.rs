@@ -19,6 +19,7 @@ use crate::chat::{ChatMode, PaneView};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
+use crate::phone::quick_replies::{self, ReplyGroup, ReplySet};
 use crate::popouts::{PopoutKey, SavedPopout};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon};
 use crate::source_control::{Part, ScKey, ScUiState};
@@ -573,6 +574,23 @@ pub struct UiState {
     /// file slug; `None` is the built-in theme.
     #[serde(default)]
     pub theme: Option<String>,
+    /// The phone's Quick replies for sessions with an agent, in order;
+    /// `None` is the built-in agent set (`phone::quick_replies::defaults`). A
+    /// value that is not a list reads as `None`, a group that does not decode
+    /// is dropped, and the list loads normalised.
+    #[serde(
+        default,
+        deserialize_with = "decodable_reply_groups",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub phone_agent_replies: Option<Vec<ReplyGroup>>,
+    /// The same for sessions with no agent; `None` is the y/n pair.
+    #[serde(
+        default,
+        deserialize_with = "decodable_reply_groups",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub phone_shell_replies: Option<Vec<ReplyGroup>>,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -1059,6 +1077,36 @@ fn json_type(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Reads a phone Quick reply set, never failing the file: `null` or a value
+/// that is not a list loads as absent, each group that does not decode is
+/// dropped with a warning, and what reads is normalised.
+fn decodable_reply_groups<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<ReplyGroup>>, D::Error> {
+    let entries = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::Array(entries) => entries,
+        other => {
+            tracing::warn!(
+                "the saved phone Quick replies are {}, not a list; the built-in replies show",
+                json_type(&other)
+            );
+            return Ok(None);
+        }
+    };
+    let groups = entries
+        .iter()
+        .filter_map(|entry| match ReplyGroup::deserialize(entry) {
+            Ok(group) => Some(group),
+            Err(err) => {
+                tracing::warn!("saved Quick reply group {entry} does not decode ({err}); dropped");
+                None
+            }
+        })
+        .collect();
+    Ok(Some(quick_replies::normalized(groups)))
+}
+
 /// The Trusted launch choice older releases saved, read so each host's
 /// agent Settings take it as the agent's bypass choice; written back while
 /// it is owed.
@@ -1451,6 +1499,8 @@ impl Default for UiState {
             ui_font_weight: crate::fonts::DEFAULT_UI_WEIGHT,
             terminal_frame_width: None,
             theme: None,
+            phone_agent_replies: None,
+            phone_shell_replies: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -2735,6 +2785,15 @@ impl SidebarModel {
     /// Sets the theme the interface draws in; `None` is the built-in theme.
     pub fn set_theme_id(&mut self, id: Option<String>) {
         self.ui.theme = id;
+    }
+
+    /// Saves the phone's Quick replies for `set`; `None` restores the
+    /// built-in set.
+    pub fn set_phone_replies(&mut self, set: ReplySet, groups: Option<Vec<ReplyGroup>>) {
+        match set {
+            ReplySet::Agent => self.ui.phone_agent_replies = groups,
+            ReplySet::Shell => self.ui.phone_shell_replies = groups,
+        }
     }
 
     /// The look the interface draws in now: the six appearance fields.
@@ -4971,6 +5030,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::agent_options::test_selection as agent_selection;
+    use crate::phone::quick_replies::ReplyGroup;
     use crate::tabs::tests::{follow_pane, pane, tab};
     use protocol::{
         AgentSelection, AgentState, AttentionReason, GridNode, OptionValue, PaneFollow,
@@ -6874,6 +6934,126 @@ pub(crate) mod tests {
         assert_eq!(saved["theme"], "late-night");
     }
 
+    /// Reply groups as the phone's Quick reply tests write them.
+    fn reply_groups(entries: &[(&str, &[&str])]) -> Vec<ReplyGroup> {
+        entries
+            .iter()
+            .map(|(title, replies)| ReplyGroup {
+                title: (*title).to_owned(),
+                replies: replies.iter().map(|reply| (*reply).to_owned()).collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn phone_replies_absent_from_a_v0_5_1_alpha_file_load_as_defaults() {
+        let dir = TestDir::new("phone-replies-absent");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+
+        assert_eq!(
+            ui.phone_agent_replies, None,
+            "absent: the agent defaults show"
+        );
+        assert_eq!(
+            ui.phone_shell_replies, None,
+            "absent: the shell defaults show"
+        );
+    }
+
+    #[test]
+    fn phone_replies_round_trip() {
+        let dir = TestDir::new("phone-replies-round-trip");
+        let state = UiState {
+            phone_agent_replies: Some(reply_groups(&[("mine", &["run the tests"])])),
+            phone_shell_replies: Some(Vec::new()),
+            ..UiState::default()
+        };
+
+        save_ui_state(&dir.0, &state).expect("save");
+
+        assert_eq!(load_ui_state(&dir.0), state);
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["phone_agent_replies"][0]["title"], "mine");
+        assert_eq!(
+            saved["phone_shell_replies"],
+            json!([]),
+            "an empty set is kept"
+        );
+    }
+
+    #[test]
+    fn phone_replies_null_loads_as_absent() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_agent_replies": null,
+            "phone_shell_replies": null,
+        }))
+        .expect("null reply sets");
+
+        assert_eq!(state.phone_agent_replies, None);
+        assert_eq!(state.phone_shell_replies, None);
+    }
+
+    #[test]
+    fn phone_replies_that_are_not_a_list_load_as_absent() {
+        for bad in [
+            json!(5),
+            json!("yes"),
+            json!(true),
+            json!({ "title": "confirm" }),
+        ] {
+            let state: UiState = serde_json::from_value(json!({
+                "sidebar_collapsed": true,
+                "phone_agent_replies": bad,
+            }))
+            .expect("a reply set never fails the file");
+
+            assert_eq!(state.phone_agent_replies, None, "{bad}");
+            assert!(state.sidebar_collapsed, "{bad}: the rest of the file loads");
+        }
+    }
+
+    #[test]
+    fn phone_reply_group_that_does_not_decode_is_dropped() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_agent_replies": [
+                { "title": "mine", "replies": ["ok"] },
+                { "title": "bad", "replies": "yes" },
+                "not a group",
+                { "replies": ["no title"] },
+                { "title": "more" },
+            ],
+        }))
+        .expect("a group never fails the file");
+
+        assert_eq!(
+            state.phone_agent_replies,
+            Some(reply_groups(&[("mine", &["ok"]), ("more", &[])])),
+            "only the groups that decode stay, in their order"
+        );
+    }
+
+    #[test]
+    fn phone_replies_load_normalised() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_agent_replies": [
+                { "title": "  mine ", "replies": ["run the tests", " ", "a\nb"] },
+                { "title": "mine", "replies": ["again"] },
+                { "title": "", "replies": [] },
+            ],
+        }))
+        .expect("a reply set loads");
+
+        assert_eq!(
+            state.phone_agent_replies,
+            Some(reply_groups(&[
+                ("mine", &["run the tests"]),
+                ("mine 2", &["again"]),
+                ("Group", &[]),
+            ]))
+        );
+    }
+
     #[test]
     fn ui_state_round_trips() {
         let dir = TestDir::new("round-trip");
@@ -6898,6 +7078,8 @@ pub(crate) mod tests {
             ui_font_weight: 500,
             terminal_frame_width: Some(2),
             theme: Some("my-theme".to_owned()),
+            phone_agent_replies: None,
+            phone_shell_replies: None,
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),

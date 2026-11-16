@@ -81,6 +81,45 @@ pub(crate) fn quick_bytes(text: &str) -> Vec<u8> {
     bytes
 }
 
+/// A saved list as the views can draw it: titles trimmed and made unique, a
+/// blank title named "Group", and a reply that is blank or holds a line break
+/// dropped.
+#[must_use]
+pub(crate) fn normalized(groups: Vec<ReplyGroup>) -> Vec<ReplyGroup> {
+    let mut taken = Vec::new();
+    groups
+        .into_iter()
+        .map(|group| ReplyGroup {
+            title: unique_title(&mut taken, group.title.trim()),
+            replies: group
+                .replies
+                .into_iter()
+                .filter(|reply| is_one_line(reply))
+                .collect(),
+        })
+        .collect()
+}
+
+/// `title`, made unique among the titles `taken` holds by numbering it " 2",
+/// " 3" and so on; a blank title is "Group".
+fn unique_title(taken: &mut Vec<String>, title: &str) -> String {
+    let base = if title.is_empty() { "Group" } else { title };
+    let mut candidate = base.to_owned();
+    let mut number = 2;
+    while taken.contains(&candidate) {
+        candidate = format!("{base} {number}");
+        number += 1;
+    }
+    taken.push(candidate.clone());
+    candidate
+}
+
+/// Whether `reply` can be typed as a quick reply: it is not blank and holds
+/// no line break.
+fn is_one_line(reply: &str) -> bool {
+    !reply.trim().is_empty() && !reply.contains(['\n', '\r'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +218,58 @@ mod tests {
     #[test]
     fn a_quick_reply_types_utf8_then_return() {
         assert_eq!(quick_bytes("é"), [0xc3, 0xa9, 0x0d]);
+    }
+
+    #[test]
+    fn normalized_trims_titles() {
+        let loaded = normalized(vec![group(" confirm ", &["yes"])]);
+        assert_eq!(loaded, vec![group("confirm", &["yes"])]);
+    }
+
+    #[test]
+    fn normalized_names_a_blank_title_group() {
+        let loaded = normalized(vec![group("", &["a"])]);
+        assert_eq!(loaded, vec![group("Group", &["a"])]);
+    }
+
+    #[test]
+    fn normalized_numbers_repeated_titles() {
+        let loaded = normalized(vec![
+            group("a", &["x"]),
+            group("a", &["y"]),
+            group("a", &["z"]),
+        ]);
+        let titles: Vec<&str> = loaded.iter().map(|group| group.title.as_str()).collect();
+        assert_eq!(titles, ["a", "a 2", "a 3"]);
+    }
+
+    #[test]
+    fn normalized_numbering_skips_a_taken_title() {
+        let loaded = normalized(vec![
+            group("a", &["x"]),
+            group("a 2", &["y"]),
+            group("a", &["z"]),
+        ]);
+        let titles: Vec<&str> = loaded.iter().map(|group| group.title.as_str()).collect();
+        assert_eq!(titles, ["a", "a 2", "a 3"]);
+    }
+
+    #[test]
+    fn normalized_drops_blank_replies() {
+        let loaded = normalized(vec![group("a", &["", "  ", "ok"])]);
+        assert_eq!(loaded, vec![group("a", &["ok"])]);
+    }
+
+    #[test]
+    fn normalized_drops_multi_line_replies() {
+        let loaded = normalized(vec![group("a", &["one\ntwo", "x\ry", "ok"])]);
+        assert_eq!(loaded, vec![group("a", &["ok"])]);
+    }
+
+    #[test]
+    fn normalized_keeps_the_defaults() {
+        for set in [ReplySet::Agent, ReplySet::Shell] {
+            assert_eq!(normalized(defaults(set)), defaults(set));
+        }
     }
 }
