@@ -2810,7 +2810,10 @@ fn escape_on_the_toggle_disarms_a_tab_close(cx: &mut TestAppContext) {
             .count()
     };
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    // A stopped session keeps the two-click close; a live one would ask in
+    // a dialog instead.
+    let stopped = session("s1").in_repo("r1").status("stopped").build();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![stopped]));
     show_compact(&mut h);
     h.sent();
 

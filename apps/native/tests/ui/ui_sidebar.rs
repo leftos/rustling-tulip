@@ -1920,12 +1920,13 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
     );
 
     // An armed confirm survives the Escape that clears the row focus.
+    send_empty_split_tab(&mut h, "t9");
     let closes = |sent: &[ClientMessage], id: &str| {
         sent.iter()
             .filter(|message| matches!(message, ClientMessage::CloseTab { tab_id } if tab_id == id))
             .count()
     };
-    h.click_on("tab-close-t1");
+    h.click_on("tab-close-t9");
     assert!(h.sent().is_empty(), "the first close click only arms");
     // Focusing the row without a press: a press anywhere drops the arm.
     h.root_update(|root, window, cx| root.focus_container_row("repo:r1", window, cx));
@@ -1939,12 +1940,27 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
         None,
         "Escape clears the row focus first"
     );
-    h.click_on("tab-close-t1");
+    h.click_on("tab-close-t9");
     assert_eq!(
-        closes(&h.sent(), "t1"),
+        closes(&h.sent(), "t9"),
         1,
         "the armed confirm survived that Escape"
     );
+}
+
+/// Adds tab `tab_id` of two empty panes, which keeps the two-click close (a
+/// tab showing a live session asks in a dialog instead), and drains what
+/// was sent.
+fn send_empty_split_tab(h: &mut Harness, tab_id: &str) {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane(&format!("{tab_id}-a"), None),
+        pane(&format!("{tab_id}-b"), None),
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(tab_id, &grid),
+    });
+    h.sent();
 }
 
 /// Two repos, with the keyboard on r1's row (folded by that click).

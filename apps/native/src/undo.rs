@@ -28,6 +28,15 @@ pub fn closed_tab_message(name: &str) -> String {
     format!("Closed tab \"{name}\"")
 }
 
+/// What the shelf says of a closed tab named `name` whose `stopped` live
+/// sessions its close stopped. Undo puts the layout back, its panes on the
+/// stopped sessions.
+#[must_use]
+pub fn stopped_tab_message(name: &str, stopped: usize) -> String {
+    let sessions = if stopped == 1 { "session" } else { "sessions" };
+    format!("Closed tab \"{name}\" and stopped {stopped} {sessions}")
+}
+
 /// What the shelf says of a closed pane whose session shows as `label`.
 #[must_use]
 pub fn closed_pane_message(label: &str) -> String {
@@ -298,6 +307,18 @@ fn emptied(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_tab_message_counts_the_stopped_sessions() {
+        assert_eq!(
+            stopped_tab_message("work", 1),
+            "Closed tab \"work\" and stopped 1 session"
+        );
+        assert_eq!(
+            stopped_tab_message("work", 3),
+            "Closed tab \"work\" and stopped 3 sessions"
+        );
+    }
 
     /// A tab of one pane showing `session`, or an empty pane when none.
     fn tab_of(id: &str, session: Option<&str>) -> TabEntry {

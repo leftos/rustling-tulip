@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- Closing a tab, or closing the other tabs, that show running sessions now asks whether to keep those sessions running or stop them.
 - The iPhone app has a Settings screen, opened from Home: the Notifications switch, and your hosts with the Add a host form and the phone's SSH key, now live there, and Appearance chooses the phone's theme and text size.
 - On the iPhone, put the keyboard away by tapping the chat or the terminal, or with the new Hide keyboard and Hide keys.
 - On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.

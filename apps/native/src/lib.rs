@@ -187,6 +187,8 @@ mod summary;
 mod summary_view;
 pub mod syntax;
 mod tab_bar;
+mod tab_close;
+mod tab_close_view;
 mod tab_menu;
 mod tab_name;
 mod tabs;
@@ -1198,6 +1200,11 @@ pub struct RootView {
     tab_menu: Option<TabMenu>,
     /// The open tab menu's keyboard focus, so Esc reaches it.
     tab_menu_focus: FocusHandle,
+    /// The tab-close dialog, which asks whether a tab's live sessions keep
+    /// running or stop, while open.
+    tab_close: Option<tab_close::TabClose>,
+    /// The open tab-close dialog's keyboard focus.
+    tab_close_dialog_focus: FocusHandle,
     /// The pane-close and Move panes dialogs and the empty pane's menu.
     pane_ui: pane_menu::PaneUi,
     /// Each session's appearance changes the client sent and the daemon has
@@ -1853,6 +1860,8 @@ impl RootView {
             container_sends: HashMap::new(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
+            tab_close: None,
+            tab_close_dialog_focus: cx.focus_handle(),
             pane_ui: pane_menu::PaneUi::new(cx.focus_handle(), cx.focus_handle()),
             pending_appearance: appearance::InFlightAppearance::default(),
             seen_sessions: HashMap::new(),
@@ -3025,6 +3034,7 @@ impl RootView {
             || self.start_notice.is_some()
             || self.exit.is_some()
             || self.open_in_main(Overlay::PaneClose)
+            || self.tab_close.is_some()
             || self.pane_ui.move_panes.is_some()
             || self.open_in_main(Overlay::EmptyPaneMenu)
             || self.open_in_main(Overlay::PaneOverflowMenu)
@@ -4574,12 +4584,13 @@ impl RootView {
             self.renaming = None;
         }
         self.drop_stale_tab_menu();
+        let dropped_tab_close = self.refresh_tab_close();
         let dropped_pane_ui = self.drop_stale_pane_ui();
         let dropped_picker = self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
         self.try_restore_popouts(window, cx);
         let dropped_changes = self.seed_source_control(window, cx);
-        if dropped_pane_ui || dropped_picker || dropped_changes {
+        if dropped_tab_close || dropped_pane_ui || dropped_picker || dropped_changes {
             self.after_notice_closed(window, cx);
         }
         cx.notify();
@@ -5005,6 +5016,7 @@ impl RootView {
         // feature or a dropped connection takes the chip away; its popover
         // closes with it rather than reopening when the chip comes back.
         self.close_accounts_without_chip();
+        self.refresh_tab_close_after_event(window, cx);
         if moves_badge {
             self.schedule_taskbar_badge(window, cx);
         }
@@ -6308,7 +6320,7 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.on_pane_ui_key(ks, window, cx) {
+        if self.on_tab_close_key(ks, window, cx) || self.on_pane_ui_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -6920,7 +6932,7 @@ impl Render for RootView {
             .children(self.recover_layer(window, cx))
             .children(self.pairing_layer(cx))
             .children(self.device_block_layer(cx))
-            .children(self.pane_close_layer(here, cx))
+            .children(self.close_dialog_layers(here, cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)
             .children(repo_remove_layer)

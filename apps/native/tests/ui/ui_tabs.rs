@@ -26,6 +26,20 @@ fn two_tabs() -> Fixture {
     fixture
 }
 
+/// Presses `selector`, a button of the tab-close dialog. The harness reads
+/// every `tab-close-*` selector as a tab's × button, so the click goes by
+/// the button's drawn bounds.
+fn press_tab_close(h: &mut Harness, selector: &str) {
+    let bounds = h.bounds(selector);
+    assert!(bounds.origin.x >= px(0.0), "{selector} is not on screen");
+    h.click(bounds.center(), Modifiers::none());
+}
+
+/// Whether the tab-close dialog's panel is drawn.
+fn tab_close_drawn(h: &mut Harness) -> bool {
+    h.bounds("tab-close-panel").origin.x >= px(0.0)
+}
+
 #[gpui::test]
 fn new_tab_button_creates_a_tab_that_becomes_active(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -116,7 +130,7 @@ fn split_right_sends_a_horizontal_split_and_shift_places_first(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn tab_close_arms_first_and_esc_disarms_and_middle_click_closes(cx: &mut TestAppContext) {
+fn tab_close_asks_first_and_esc_cancels_and_middle_click_closes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_tabs());
     h.answer_scrollback("s1", b"");
@@ -130,16 +144,14 @@ fn tab_close_arms_first_and_esc_disarms_and_middle_click_closes(cx: &mut TestApp
     };
 
     h.click_on("tab-close-t1");
-    assert!(h.sent().is_empty(), "the first click only arms");
+    assert!(h.sent().is_empty(), "the first click only asks");
+    assert!(tab_close_drawn(&mut h), "the dialog asks keep or stop");
     h.keys("escape");
+    assert!(!tab_close_drawn(&mut h), "Esc cancels the dialog");
+    assert_eq!(closes(&h.sent(), "t1"), 0, "and closes nothing");
     h.click_on("tab-close-t1");
-    assert_eq!(
-        closes(&h.sent(), "t1"),
-        0,
-        "Esc disarmed, so this click arms again"
-    );
-    h.click_on("tab-close-t1");
-    assert_eq!(closes(&h.sent(), "t1"), 1, "the second click closes");
+    press_tab_close(&mut h, "tab-close-keep");
+    assert_eq!(closes(&h.sent(), "t1"), 1, "Keep running closes");
 
     let pill = h.center("tab-t2");
     h.cx.simulate_mouse_down(pill, MouseButton::Middle, Modifiers::none());
@@ -148,6 +160,346 @@ fn tab_close_arms_first_and_esc_disarms_and_middle_click_closes(cx: &mut TestApp
         closes(&h.sent(), "t2"),
         1,
         "middle-click closes an empty tab"
+    );
+}
+
+/// The closes and stops among `sent`, in order: `close <tab>` and
+/// `stop <session>`.
+fn closes_and_stops(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CloseTab { tab_id } => Some(format!("close {tab_id}")),
+            ClientMessage::StopSession { session_id, .. } => Some(format!("stop {session_id}")),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tab_close_open(h: &mut Harness) -> bool {
+    h.root(|root, _| root.tab_close_open())
+}
+
+#[gpui::test]
+fn closing_a_tab_with_a_live_session_asks_keep_or_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        Vec::<String>::new(),
+        "it asks first"
+    );
+    assert!(tab_close_drawn(&mut h), "tab-close-panel is painted");
+    let (title, body) = h
+        .root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open");
+    assert_eq!(title, "Close tab?");
+    assert!(
+        body.starts_with("This tab shows 1 session: "),
+        "the body names the session: {body}"
+    );
+}
+
+#[gpui::test]
+fn keep_running_closes_the_tab_and_stops_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    press_tab_close(&mut h, "tab-close-keep");
+    assert_eq!(closes_and_stops(&h.sent()), ["close t1"], "no StopSession");
+    assert!(!tab_close_open(&mut h), "the dialog closes");
+    let messages: Vec<String> = undo_entries(&mut h)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(messages, ["Closed tab \"t1\""]);
+}
+
+#[gpui::test]
+fn stop_sessions_stops_each_live_session_once_then_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("a").build());
+    fixture.sessions.push(session("b").build());
+    fixture
+        .sessions
+        .push(session("c").status("stopped").build());
+    let grid = split(
+        SplitDirection::Horizontal,
+        split(
+            SplitDirection::Vertical,
+            pane("p1", Some("a")),
+            pane("p2", Some("b")),
+        ),
+        split(
+            SplitDirection::Vertical,
+            pane("p3", Some("a")),
+            pane("p4", Some("c")),
+        ),
+    );
+    fixture.tabs[0] = tab("t1", &grid);
+    fixture.tabs.push(tab("t2", &pane("p9", None)));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("tab-close-t1");
+    let (_, body) = h
+        .root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open");
+    assert_eq!(body, "This tab shows 2 sessions.");
+    press_tab_close(&mut h, "tab-close-stop");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        ["stop a", "stop b", "close t1"],
+        "a and b once each, before the close; none for the stopped c"
+    );
+    let messages: Vec<String> = undo_entries(&mut h)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(messages, ["Closed tab \"t1\" and stopped 2 sessions"]);
+}
+
+#[gpui::test]
+fn one_live_session_is_named_in_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").label("fix login").build());
+    fixture.tabs.push(tab("t2", &pane("p2", None)));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-close-t1");
+    let (_, body) = h
+        .root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open");
+    assert_eq!(body, "This tab shows 1 session: fix login.");
+    let labels: Vec<String> = h
+        .root(|root, _| root.tab_close_controls())
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(labels, ["Cancel", "Keep running", "Stop session", "✕"]);
+}
+
+#[gpui::test]
+fn cancel_escape_and_the_cross_leave_the_tab_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    for way in ["tab-close-cancel", "escape", "tab-close-dismiss"] {
+        h.sent();
+        h.click_on("tab-close-t1");
+        assert!(tab_close_open(&mut h), "{way}: the dialog opened");
+        if way == "escape" {
+            h.keys("escape");
+        } else {
+            press_tab_close(&mut h, way);
+        }
+        assert!(!tab_close_open(&mut h), "{way} closes the dialog");
+        assert!(!tab_close_drawn(&mut h), "{way}: and it is off screen");
+        assert_eq!(
+            closes_and_stops(&h.sent()),
+            Vec::<String>::new(),
+            "{way} sends nothing"
+        );
+        assert!(
+            h.root(|root, _| root.tab_ids().iter().any(|id| id == "t1")),
+            "{way}: the tab stays"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_dialog_focuses_keep_running_and_tab_wraps(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    let focus = |h: &mut Harness| h.root(|root, _| root.tab_close_focus());
+    assert_eq!(focus(&mut h).as_deref(), Some("tab-close-keep"));
+    h.keys("tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("tab-close-stop"));
+    h.keys("tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("tab-close-dismiss"));
+    h.keys("tab");
+    assert_eq!(
+        focus(&mut h).as_deref(),
+        Some("tab-close-cancel"),
+        "Tab wraps"
+    );
+    h.keys("shift-tab");
+    assert_eq!(
+        focus(&mut h).as_deref(),
+        Some("tab-close-dismiss"),
+        "Shift+Tab wraps back"
+    );
+    h.keys("shift-tab");
+    h.keys("shift-tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("tab-close-keep"));
+    h.keys("enter");
+    assert!(!tab_close_open(&mut h), "Enter presses the focused button");
+    assert_eq!(closes_and_stops(&h.sent()), ["close t1"]);
+}
+
+/// Two clicks on `tab_id`'s × close it with no dialog: the first sends
+/// nothing, the second the close.
+fn closes_on_the_second_click(h: &mut Harness, tab_id: &str) {
+    h.sent();
+    h.click_on(&format!("tab-close-{tab_id}"));
+    assert!(!tab_close_open(h), "no dialog");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        Vec::<String>::new(),
+        "the first click arms"
+    );
+    h.click_on(&format!("tab-close-{tab_id}"));
+    assert_eq!(closes_and_stops(&h.sent()), [format!("close {tab_id}")]);
+}
+
+#[gpui::test]
+fn a_tab_of_empty_panes_keeps_the_two_click_close(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = two_tabs();
+    fixture.tabs.push(tab(
+        "t3",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p31", None),
+            pane("p32", None),
+        ),
+    ));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    closes_on_the_second_click(&mut h, "t3");
+}
+
+#[gpui::test]
+fn a_tab_whose_sessions_are_stopped_keeps_the_two_click_close(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").status("stopped").build());
+    fixture.tabs.push(tab("t2", &pane("p2", None)));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    closes_on_the_second_click(&mut h, "t1");
+}
+
+#[gpui::test]
+fn the_menu_close_and_a_middle_click_ask_too(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-close");
+    assert!(tab_close_open(&mut h), "the menu's Close asks");
+    assert!(
+        h.root(|root, _| root.tab_menu().is_none()),
+        "the menu gives way"
+    );
+    assert_eq!(closes_and_stops(&h.sent()), Vec::<String>::new());
+    press_tab_close(&mut h, "tab-close-cancel");
+
+    let pill = h.center("tab-t1");
+    h.cx.simulate_mouse_down(pill, MouseButton::Middle, Modifiers::none());
+    h.cx.simulate_mouse_up(pill, MouseButton::Middle, Modifiers::none());
+    assert!(tab_close_open(&mut h), "a middle click asks");
+    assert_eq!(closes_and_stops(&h.sent()), Vec::<String>::new());
+    press_tab_close(&mut h, "tab-close-keep");
+    assert_eq!(closes_and_stops(&h.sent()), ["close t1"]);
+}
+
+/// The open dialog's body; panics when it is closed.
+fn tab_close_body(h: &mut Harness) -> String {
+    h.root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open")
+        .1
+}
+
+/// `id` as its host lists it once it has stopped.
+fn stopped_update(id: &str) -> DaemonMessage {
+    DaemonMessage::SessionUpdated {
+        session: session(id).status("stopped").build(),
+        request_id: None,
+    }
+}
+
+#[gpui::test]
+fn stop_after_a_session_ends_stops_only_the_live_ones(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    fixture.tabs[0] = tab("t1", &grid);
+    fixture.tabs.push(tab("t2", &pane("p9", None)));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("tab-close-t1");
+    assert_eq!(tab_close_body(&mut h), "This tab shows 2 sessions.");
+
+    h.send(stopped_update("s2"));
+    assert!(tab_close_open(&mut h), "s1 still runs");
+    assert!(
+        tab_close_body(&mut h).starts_with("This tab shows 1 session: "),
+        "the body follows the count"
+    );
+    let stop = h
+        .root(|root, _| root.tab_close_controls())
+        .into_iter()
+        .find(|(selector, _)| selector == "tab-close-stop")
+        .map(|(_, label)| label);
+    assert_eq!(stop.as_deref(), Some("Stop session"));
+    h.sent();
+    press_tab_close(&mut h, "tab-close-stop");
+    assert_eq!(closes_and_stops(&h.sent()), ["stop s1", "close t1"]);
+    let messages: Vec<String> = undo_entries(&mut h)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(messages, ["Closed tab \"t1\" and stopped 1 session"]);
+}
+
+#[gpui::test]
+fn the_dialog_closes_when_its_last_live_session_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    assert!(tab_close_open(&mut h));
+    h.send(stopped_update("s1"));
+    assert!(
+        !tab_close_open(&mut h),
+        "no live session is left to ask about"
+    );
+    assert!(!tab_close_drawn(&mut h));
+    assert_eq!(closes_and_stops(&h.sent()), Vec::<String>::new());
+    assert!(
+        h.root(|root, _| root.tab_ids().iter().any(|id| id == "t1")),
+        "the tab stays"
+    );
+}
+
+#[gpui::test]
+fn stop_skips_a_session_whose_host_went_offline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::mixed_tabs(cx, &dir);
+    let remote = rustling_tulip_native::target::Target::tailnet(support::REMOTE, None);
+    h.host(&remote).sent();
+    h.click_on("tab-close-t1");
+    assert_eq!(tab_close_body(&mut h), "This tab shows 2 sessions.");
+
+    h.host(&remote)
+        .events_together(vec![rustling_tulip_native::NetEvent::State(
+            rustling_tulip_native::Connection::new(),
+        )]);
+    assert!(
+        tab_close_body(&mut h).starts_with("This tab shows 1 session: "),
+        "the offline host's session is no longer counted"
+    );
+    h.sent();
+    press_tab_close(&mut h, "tab-close-stop");
+    assert_eq!(closes_and_stops(&h.sent()), ["stop a1", "close t1"]);
+    assert_eq!(
+        closes_and_stops(&h.host(&remote).sent()),
+        Vec::<String>::new(),
+        "nothing goes to the offline host"
     );
 }
 
@@ -391,6 +743,14 @@ fn sidebar_click_on_an_unbound_session_fills_the_empty_pane(cx: &mut TestAppCont
 fn three_tabs() -> Fixture {
     let mut fixture = two_tabs();
     fixture.tabs.push(tab("t3", &pane("p3", None)));
+    fixture
+}
+
+/// [`three_tabs`] with `s1` stopped, so no tab shows a live session and
+/// Close other tabs keeps its two-click confirm.
+fn three_quiet_tabs() -> Fixture {
+    let mut fixture = three_tabs();
+    fixture.sessions[0] = session("s1").status("stopped").build();
     fixture
 }
 
@@ -1063,7 +1423,7 @@ fn a_popped_out_tabs_menu_keeps_its_rearrange_rows(cx: &mut TestAppContext) {
 #[gpui::test]
 fn close_others_arms_then_sends_close_for_each_other(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &three_tabs());
+    let mut h = Harness::with(cx, &dir, &three_quiet_tabs());
     h.sent();
     h.right_click_on("tab-t2");
     assert!(menu_text(&mut h).contains(&"Close other tabs".to_owned()));
@@ -1088,6 +1448,92 @@ fn close_others_arms_then_sends_close_for_each_other(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(closed, ["t1", "t3"]);
     assert!(!h.in_model("tab-menu"));
+}
+
+#[gpui::test]
+fn close_others_with_live_sessions_asks_keep_or_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-close-others");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        Vec::<String>::new(),
+        "it asks first"
+    );
+    assert!(tab_close_drawn(&mut h), "tab-close-panel is painted");
+    assert!(!h.in_model("tab-menu"), "the menu gives way");
+    let (title, body) = h
+        .root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open");
+    assert_eq!(title, "Close other tabs?");
+    assert!(
+        body.starts_with("The other tabs show 1 session: "),
+        "t1's s1 is counted: {body}"
+    );
+}
+
+#[gpui::test]
+fn close_others_keep_running_closes_them_and_stops_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-close-others");
+    press_tab_close(&mut h, "tab-close-keep");
+    assert_eq!(closes_and_stops(&h.sent()), ["close t1", "close t3"]);
+    assert!(!tab_close_open(&mut h));
+    assert!(undo_entries(&mut h).is_empty(), "no undo, as before");
+}
+
+#[gpui::test]
+fn close_others_stop_stops_each_live_session_once_then_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("x").build());
+    fixture.sessions.push(session("a").build());
+    fixture.sessions.push(session("b").build());
+    fixture
+        .sessions
+        .push(session("c").status("stopped").build());
+    let two = |first: (&str, &str), second: (&str, &str)| {
+        split(
+            SplitDirection::Horizontal,
+            pane(first.0, Some(first.1)),
+            pane(second.0, Some(second.1)),
+        )
+    };
+    fixture.tabs.push(tab("t2", &two(("p2", "a"), ("p3", "b"))));
+    fixture.tabs.push(tab("t3", &two(("p4", "a"), ("p5", "c"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-close-others");
+    let (_, body) = h
+        .root(|root, _| root.tab_close_texts())
+        .expect("the dialog is open");
+    assert_eq!(body, "The other tabs show 2 sessions.");
+    press_tab_close(&mut h, "tab-close-stop");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        ["stop a", "stop b", "close t2", "close t3"],
+        "a once though two tabs show it; not x, which only t1 shows; not the stopped c"
+    );
+    assert!(undo_entries(&mut h).is_empty(), "no undo, as before");
+}
+
+#[gpui::test]
+fn close_others_without_live_sessions_keeps_the_two_click_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-close-others");
+    assert!(!tab_close_open(&mut h), "t2 and t3 show no session");
+    assert!(h.sent().is_empty(), "the first press only arms");
+    assert!(menu_text(&mut h).contains(&"Confirm closing 2 other tabs".to_owned()));
+    h.click_on("tab-menu-close-others");
+    assert_eq!(closes_and_stops(&h.sent()), ["close t2", "close t3"]);
 }
 
 #[gpui::test]
@@ -1280,7 +1726,7 @@ fn merge_disabled_when_a_diff_tab_is_selected(cx: &mut TestAppContext) {
 #[gpui::test]
 fn close_others_disarms_after_another_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &three_tabs());
+    let mut h = Harness::with(cx, &dir, &three_quiet_tabs());
     h.sent();
     let closes = |sent: &[ClientMessage]| {
         sent.iter()
@@ -1425,7 +1871,7 @@ fn undo_before_the_removal_arrives_sends_restore_tab(cx: &mut TestAppContext) {
 #[gpui::test]
 fn close_others_offers_no_undo(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &three_tabs());
+    let mut h = Harness::with(cx, &dir, &three_quiet_tabs());
     h.sent();
     h.right_click_on("tab-t2");
     h.click_on("tab-menu-close-others");
@@ -1509,11 +1955,11 @@ fn restored_active_tab_becomes_active(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &two_tabs());
     h.sent();
     h.click_on("tab-close-t1");
-    h.click_on("tab-close-t1");
+    press_tab_close(&mut h, "tab-close-keep");
     let sent = h.sent();
     assert!(
         matches!(sent.as_slice(), [ClientMessage::CloseTab { tab_id }] if tab_id == "t1"),
-        "the second click closes the tab holding s1: {sent:?}"
+        "Keep running closes the tab holding s1: {sent:?}"
     );
 
     let (id, message) = undo_entries(&mut h)
@@ -1585,7 +2031,7 @@ fn refused_restore_does_not_activate_the_next_new_tab(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &two_tabs());
     h.sent();
     h.click_on("tab-close-t1");
-    h.click_on("tab-close-t1");
+    press_tab_close(&mut h, "tab-close-keep");
     h.sent();
     h.send(DaemonMessage::TabRemoved {
         tab_id: "t1".to_owned(),

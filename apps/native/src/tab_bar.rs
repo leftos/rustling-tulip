@@ -24,6 +24,7 @@ use crate::overlay_owner::Overlay;
 use crate::popouts::PopoutKey;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
+use crate::tab_close::Scope;
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{
     PillClick, TabBadge, TabCounts, bound_pane_count, collect_panes, session_pane_count,
@@ -445,7 +446,7 @@ impl RootView {
                 self.close_tab_menu(window, cx);
             }
             TabAction::Close => {
-                if self.close_tab_click(tab_id, cx) {
+                if self.close_tab_click(tab_id, window, cx) {
                     self.close_tab_menu(window, cx);
                 }
                 cx.notify();
@@ -464,17 +465,29 @@ impl RootView {
         }
     }
 
-    /// The first press arms Close other tabs; the second closes every tab
-    /// but `tab_id`.
+    /// The first press on Close other tabs asks in the tab-close dialog
+    /// when another tab shows a live session, and otherwise arms; the
+    /// second closes every tab but `tab_id`.
     fn close_other_tabs(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(menu) = &mut self.tab_menu else {
+        let Some(armed) = self.tab_menu.as_ref().map(|menu| menu.close_others_armed) else {
             return;
         };
-        if !menu.close_others_armed {
-            menu.close_others_armed = true;
+        if !armed {
+            if self.open_tab_close(Scope::OtherTabs, tab_id, window, cx) {
+                return;
+            }
+            if let Some(menu) = &mut self.tab_menu {
+                menu.close_others_armed = true;
+            }
             cx.notify();
             return;
         }
+        self.close_other_tabs_now(tab_id);
+        self.close_tab_menu(window, cx);
+    }
+
+    /// Closes every tab but `tab_id`, with no undo entry.
+    pub(crate) fn close_other_tabs_now(&mut self, tab_id: &str) {
         let others: Vec<String> = self
             .tabs
             .tabs()
@@ -486,7 +499,6 @@ impl RootView {
             self.tabs.mark_closing(&other);
             self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: other });
         }
-        self.close_tab_menu(window, cx);
     }
 
     /// Merges the selected tabs, in strip order, into a new tab that shows
@@ -684,8 +696,8 @@ impl RootView {
         let on_click = cx.listener(move |this, event: &ClickEvent, window, cx| {
             this.click_tab(&click_id, event, window, cx);
         });
-        let on_middle = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-            this.close_tab_click(&middle_id, cx);
+        let on_middle = cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+            this.close_tab_click(&middle_id, window, cx);
             cx.stop_propagation();
             cx.notify();
         });
@@ -1195,22 +1207,51 @@ impl RootView {
         );
     }
 
-    /// A close click: closes the tab, or arms the close when the tab holds
-    /// a session or a split. Returns whether it asked to close the tab.
-    fn close_tab_click(&mut self, tab_id: &str, cx: &mut Context<Self>) -> bool {
+    /// A close click: asks in the tab-close dialog when the tab shows a
+    /// live session; otherwise closes the tab, or arms the close when the
+    /// tab holds a session or a split. Returns whether it closed the tab or
+    /// opened the dialog.
+    fn close_tab_click(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open_tab_close(Scope::Tab, tab_id, window, cx) {
+            return true;
+        }
         let Some(tab) = self.tabs.tab(tab_id).cloned() else {
             return false;
         };
         let close = self.tabs.close_confirm.click(&tab);
         if close {
-            if let Some(snapshot) = self.tab_snapshot(&tab.id, None) {
-                let name = self.sidebar.tab_display_name(&tab);
-                self.record_undo(undo::closed_tab_message(&name), vec![snapshot], cx);
-            }
-            self.tabs.mark_closing(&tab.id);
-            self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: tab.id });
+            self.close_tab_now(tab_id, None, cx);
         }
         close
+    }
+
+    /// Closes `tab_id` now: its undo entry, which tells of the `stopped`
+    /// sessions when its close stopped some, its closing mark and the
+    /// `CloseTab`.
+    pub(crate) fn close_tab_now(
+        &mut self,
+        tab_id: &str,
+        stopped: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.tab(tab_id).cloned() else {
+            return;
+        };
+        if let Some(snapshot) = self.tab_snapshot(&tab.id, None) {
+            let name = self.sidebar.tab_display_name(&tab);
+            let message = match stopped {
+                Some(count) => undo::stopped_tab_message(&name, count),
+                None => undo::closed_tab_message(&name),
+            };
+            self.record_undo(message, vec![snapshot], cx);
+        }
+        self.tabs.mark_closing(&tab.id);
+        self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: tab.id });
     }
 
     fn start_rename(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1693,8 +1734,8 @@ fn close_button(
         })
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                this.close_tab_click(&id, cx);
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.close_tab_click(&id, window, cx);
                 cx.stop_propagation();
                 cx.notify();
             }),
