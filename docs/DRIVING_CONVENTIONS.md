@@ -213,7 +213,7 @@ Source: `rt.ps1` (`Invoke-NativeDriveCheck`), `.gate/desktop.toml`, `docs/native
 
 The pointer methods (`click`, `drag`, `move`, `wheel`) post window messages to the client's own hwnd, which leaves the cursor and the foreground alone and reaches the cloaked window. Keys and text go through `dispatch_keystroke` in process instead, so chords work without the real keyboard.
 
-Refuse what posting cannot deliver rather than send it wrong: gpui reads modifiers from `GetKeyState`, not the message, so a pointer request with `modifiers` is `refused` with a hint naming `key` or `action`; `type_text` refuses control characters; and a request is checked whole before anything is posted, so a refusal sends nothing.
+Refuse what posting cannot deliver rather than send it wrong: gpui reads modifiers from `GetKeyState`, not the message, so a `move`, `drag` or `wheel` with `modifiers` is `refused`, and a `click` with `modifiers` is dispatched in-process through `Window::dispatch_event` instead (then a posted move to the same point keeps the platform's pointer position in step); `type_text` refuses control characters; and a request is checked whole before anything is posted, so a refusal sends nothing.
 
 Post like a real mouse: each press follows a posted move of its own, since gpui answers a move with `TrackMouseEvent` and gets `WM_MOUSELEAVE` at once because the real cursor is elsewhere, and hover-only UI therefore needs `action` `set_hover`.
 

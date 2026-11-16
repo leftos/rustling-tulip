@@ -279,8 +279,42 @@ impl TargetParams {
     }
 }
 
-/// `click`'s params: the target, the button (left by default) and how many
-/// clicks, 1 or 2. `modifiers` is read only to refuse the request.
+/// The modifier keys a `click` holds: each one false unless named true.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent key a request names, as gpui's Modifiers holds them"
+)]
+pub struct ClickModifiers {
+    #[serde(default)]
+    pub control: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub platform: bool,
+}
+
+impl ClickModifiers {
+    /// These keys as gpui holds them, the function key never.
+    #[must_use]
+    pub fn to_gpui(self) -> gpui::Modifiers {
+        gpui::Modifiers {
+            control: self.control,
+            alt: self.alt,
+            shift: self.shift,
+            platform: self.platform,
+            function: false,
+        }
+    }
+}
+
+/// `click`'s params: the target, the button (left by default), how many
+/// clicks, 1 or 2, and the modifier keys it holds. A click with
+/// `modifiers` is dispatched in-process, since posted input cannot carry
+/// them; `null` reads as none given.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClickParams {
@@ -295,7 +329,7 @@ pub struct ClickParams {
     #[serde(default)]
     pub count: Option<u8>,
     #[serde(default)]
-    pub modifiers: Option<Value>,
+    pub modifiers: Option<ClickModifiers>,
 }
 
 impl ClickParams {
@@ -504,7 +538,10 @@ impl KeyParams {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply, Request, WheelParams};
+    use super::{
+        ClickParams, ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply, Request,
+        WheelParams,
+    };
 
     fn request(text: &str) -> Request {
         Request::decode(text).expect("a request")
@@ -623,6 +660,36 @@ mod tests {
             refused.hint.as_deref(),
             Some("send ctrl-k, then ctrl-s, as two requests")
         );
+    }
+
+    #[test]
+    fn click_modifiers_null_reads_as_none() {
+        let params: ClickParams =
+            serde_json::from_value(json!({"element": "e", "modifiers": null})).expect("decodes");
+        assert!(params.modifiers.is_none());
+    }
+
+    #[test]
+    fn click_modifiers_shift_reads_shift_only() {
+        let params: ClickParams =
+            serde_json::from_value(json!({"element": "e", "modifiers": {"shift": true}}))
+                .expect("decodes");
+        let held = params.modifiers.expect("modifiers given").to_gpui();
+        assert_eq!(
+            held,
+            gpui::Modifiers {
+                shift: true,
+                ..gpui::Modifiers::none()
+            }
+        );
+    }
+
+    #[test]
+    fn click_modifiers_unknown_key_fails_to_decode() {
+        let decoded = serde_json::from_value::<ClickParams>(
+            json!({"element": "e", "modifiers": {"meta": true}}),
+        );
+        assert!(decoded.is_err(), "meta is not a modifier name");
     }
 
     #[test]

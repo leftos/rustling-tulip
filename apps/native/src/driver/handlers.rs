@@ -6,14 +6,17 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, Bounds, ClipboardItem, Context, Entity, Keystroke, Modifiers, Pixels, Window};
+use gpui::{
+    App, Bounds, ClipboardItem, Context, Entity, Keystroke, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Window,
+};
 use serde_json::{Value, json};
 
 use crate::RootView;
 use crate::connection_picker::THIS_PC;
 use crate::driver::pointer;
 use crate::driver::protocol::{
-    ActionParams, ClickParams, DragParams, ErrorCode, FindParams, KeyParams, MoveParams,
+    ActionParams, Button, ClickParams, DragParams, ErrorCode, FindParams, KeyParams, MoveParams,
     PaneTextParams, ParamError, PasteParams, Reply, Request, Target, TypeTextParams, WaitParams,
     WheelParams,
 };
@@ -307,10 +310,11 @@ pub fn wait_read(
     }
 }
 
-/// What a pointer request carrying `modifiers` is refused with: gpui reads
-/// them from the keyboard's state, which a posted message cannot set.
-const MODIFIERS_HINT: &str =
-    "posted pointer input cannot carry modifiers; press a chord with key, or use action";
+/// What a `move`, `drag` or `wheel` carrying `modifiers` is refused with:
+/// they are posted, and gpui reads modifiers from the keyboard's state,
+/// which a posted message cannot set; only `click` dispatches in-process
+/// and takes them.
+const MODIFIERS_HINT: &str = "only click takes modifiers: move, drag and wheel are posted, and posted input cannot carry them";
 
 /// The most names a `not_found` hint lists.
 const NEAR_NAMES: usize = 10;
@@ -428,14 +432,85 @@ fn point(at: (f32, f32)) -> Value {
     json!({ "x": at.0, "y": at.1 })
 }
 
-/// Clicks the params' button at their target, once or twice.
-fn click(request: &Request, window: &Window, cx: &App) -> Result<Value, Reply> {
+/// The gpui button a driver `button` names.
+fn mouse_button(button: Button) -> MouseButton {
+    match button {
+        Button::Left => MouseButton::Left,
+        Button::Right => MouseButton::Right,
+    }
+}
+
+/// Clicks `button` at the logical point `at`, `count` times, holding
+/// `modifiers`, by dispatching the events in-process: a move there, a press
+/// and release per click, then every modifier let go.
+fn dispatch_click(
+    at: (f32, f32),
+    (button, count): (Button, u8),
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let position = gpui::point(gpui::px(at.0), gpui::px(at.1));
+    let button = mouse_button(button);
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    );
+    for click_count in 1..=usize::from(count) {
+        window.dispatch_event(
+            PlatformInput::MouseDown(MouseDownEvent {
+                button,
+                position,
+                modifiers,
+                click_count,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::MouseUp(MouseUpEvent {
+                button,
+                position,
+                modifiers,
+                click_count,
+            }),
+            cx,
+        );
+    }
+    let capslock = window.capslock();
+    window.dispatch_event(
+        PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+            modifiers: Modifiers::none(),
+            capslock,
+        }),
+        cx,
+    );
+}
+
+/// Clicks the params' button at their target, once or twice: posted, or
+/// dispatched in-process when the params hold modifiers.
+fn click(request: &Request, window: &mut Window, cx: &mut App) -> Result<Value, Reply> {
     let params: ClickParams = request.params()?;
     let (target, button, count) = params
         .read()
         .map_err(|refused| bad_params(request, refused))?;
-    refuse_modifiers(request)?;
     let at = resolve(request, &target, window, cx)?;
+    if let Some(modifiers) = params.modifiers {
+        dispatch_click(at, (button, count), modifiers.to_gpui(), window, cx);
+        // The Win32 layer keeps its own pointer position, which only a real
+        // move updates: post one to the click point so a later posted move
+        // is not dropped as a move to where the pointer already is. A window
+        // with no Win32 handle (the UI specs) has no such position.
+        if let Ok(address) = pointer::window_address(window) {
+            let client = pointer::physical(at, window.scale_factor());
+            post(request, address, &pointer::move_messages(client))?;
+        }
+        return Ok(json!({ "at": point(at), "dispatched": true }));
+    }
     let (address, scale) = posting_window(request, window)?;
     post(
         request,

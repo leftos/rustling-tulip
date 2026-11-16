@@ -4,13 +4,15 @@
 
 use crate::support;
 
-use gpui::{Modifiers, TestAppContext};
+use std::path::{Path, PathBuf};
+
+use gpui::{Capslock, Modifiers, ModifiersChangedEvent, PlatformInput, TestAppContext};
 use protocol::ClientMessage;
 use rustling_tulip_native::driver::handlers::{handle, wait_read};
 use rustling_tulip_native::driver::protocol::{ErrorCode, Failure, Outcome, Reply, Request};
 use rustling_tulip_native::driver::wait::parse_predicate;
 use serde_json::{Value, json};
-use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
 
 /// Repos `r1` and `r2`, one session of `r1` alone in pane `p1` of tab `t1`.
 fn two_repos() -> Fixture {
@@ -120,9 +122,8 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     );
 }
 
-/// What a pointer request with `modifiers` is refused with.
-const MODIFIERS_HINT: &str =
-    "posted pointer input cannot carry modifiers; press a chord with key, or use action";
+/// What a move, drag or wheel request with `modifiers` is refused with.
+const MODIFIERS_HINT: &str = "only click takes modifiers: move, drag and wheel are posted, and posted input cannot carry them";
 
 #[gpui::test]
 fn driver_pointer_with_modifiers_is_refused(cx: &mut TestAppContext) {
@@ -131,14 +132,6 @@ fn driver_pointer_with_modifiers_is_refused(cx: &mut TestAppContext) {
     let row = json!({"element": "container-repo:r1"});
 
     for (method, params) in [
-        (
-            "click",
-            json!({"element": "container-repo:r1", "modifiers": {"control": true}}),
-        ),
-        (
-            "click",
-            json!({"element": "container-repo:r1", "modifiers": null}),
-        ),
         (
             "move",
             json!({"element": "container-repo:r1", "modifiers": {"shift": true}}),
@@ -160,6 +153,107 @@ fn driver_pointer_with_modifiers_is_refused(cx: &mut TestAppContext) {
             "{method} {params}"
         );
     }
+}
+
+/// A shell session whose folder is `dir`, alone in pane `p1`, its scrollback
+/// answered, the pane focused, and its pty printing a link to
+/// `docs/notes.md`, which `dir` holds; returns the harness and the file.
+fn notes_link<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
+    let file = write_file(dir.path(), "docs/notes.md");
+    let shell = session("s1").shell(&dir.path().to_string_lossy()).build();
+    let mut h = Harness::with(cx, dir, &Fixture::single(shell));
+    h.answer_scrollback("s1", b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h.pty("s1", b"wrote docs/notes.md");
+    (h, file)
+}
+
+/// Writes `rel` under `root`; returns the path a link to it resolves to.
+#[expect(
+    clippy::expect_used,
+    reason = "a spec fails with the message of the step it lost"
+)]
+fn write_file(root: &Path, rel: &str) -> PathBuf {
+    let path = root.join(rel);
+    let parent = path.parent().expect("a file has a parent folder");
+    std::fs::create_dir_all(parent).expect("create the file's folder");
+    std::fs::write(&path, "x\n").expect("write the file");
+    let resolved = std::fs::canonicalize(&path).expect("canonicalize the file");
+    let text = resolved.to_string_lossy();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+/// Clicks the link to `docs/notes.md` through the driver with `modifiers`.
+fn driver_click_notes(h: &mut Harness<'_>, modifiers: &Value) -> Value {
+    let on = h.cell_center("p1", 9, 0);
+    let (x, y) = (f32::from(on.x), f32::from(on.y));
+    result(h, "click", json!({"x": x, "y": y, "modifiers": modifiers}))
+}
+
+#[gpui::test]
+fn driver_click_with_ctrl_shift_on_a_terminal_path_opens_the_link_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _file) = notes_link(cx, &dir);
+
+    let reply = driver_click_notes(&mut h, &json!({"control": true, "shift": true}));
+    assert_eq!(reply["dispatched"], json!(true), "{reply}");
+    assert!(
+        h.in_model("link-menu"),
+        "Ctrl+Shift+click opens the link menu"
+    );
+}
+
+#[gpui::test]
+fn driver_click_with_modifiers_leaves_no_modifier_held(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _file) = notes_link(cx, &dir);
+
+    // Caps lock on first: the harness starts with it off, which is also
+    // what a click that dropped it would leave.
+    let capslock_before = h.cx.update(|window, cx| {
+        let on = Capslock { on: true };
+        let changed = ModifiersChangedEvent {
+            modifiers: Modifiers::none(),
+            capslock: on,
+        };
+        window.dispatch_event(PlatformInput::ModifiersChanged(changed), cx);
+        window.capslock()
+    });
+    assert!(capslock_before.on, "caps lock is on before the click");
+    driver_click_notes(&mut h, &json!({"control": true, "shift": true}));
+    let (held, capslock) =
+        h.cx.update(|window, _| (window.modifiers(), window.capslock()));
+    assert_eq!(held, Modifiers::none(), "the click lets every modifier go");
+    assert_eq!(
+        capslock, capslock_before,
+        "the click leaves caps lock as it was"
+    );
+}
+
+#[gpui::test]
+fn driver_click_with_an_unknown_modifier_is_bad_params(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    for params in [
+        json!({"element": "container-repo:r1", "modifiers": {"ctrl": true}}),
+        json!({"element": "container-repo:r1", "modifiers": {"control": "yes"}}),
+    ] {
+        let failed = failure(&mut h, "click", params.clone());
+        assert_eq!(failed.code, ErrorCode::BadParams, "{params}");
+    }
+}
+
+#[gpui::test]
+fn driver_click_with_ctrl_on_a_terminal_path_opens_the_default_app(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, file) = notes_link(cx, &dir);
+
+    driver_click_notes(&mut h, &json!({"control": true}));
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert!(!h.in_model("link-menu"), "Ctrl+click opens no menu");
 }
 
 #[gpui::test]
