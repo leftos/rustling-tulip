@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- Ctrl+Shift+click on a file path in a terminal offers Follow in tab, which opens a tab that follows the file live, like tail -f, on any host.
 - The iPhone's Chat can pull a draft from the terminal's prompt box or send it as it stands, and shows Claude's suggested next prompt to send or edit.
 - Closing a tab, or closing the other tabs, that show running sessions now asks whether to keep those sessions running or stop them.
 - The iPhone app has a Settings screen, opened from Home: the Notifications switch, and your hosts with the Add a host form and the phone's SSH key, now live there, and Appearance chooses the phone's theme and text size.

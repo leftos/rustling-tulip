@@ -1012,11 +1012,13 @@ impl RootView {
                     tracing::debug!(%slot_id, "a gone terminal's link click; no menu");
                     return;
                 };
+                let follow = self.link_menu_follows(&host, session.as_deref());
                 let menu = LinkMenu {
                     link: link.clone(),
                     base_dirs: base_dirs.clone(),
                     session: session.clone(),
                     host,
+                    follow,
                     at: *at,
                     selected: 0,
                     max_height: window.viewport_size().height * MENU_MAX_SHARE,

@@ -1,16 +1,23 @@
 //! The link menu in the window: a Ctrl+Shift+click on a path opens it at the
-//! click, its rows open the path in the default app, in the viewer or in its
-//! folder, and Up, Down, Enter, Esc and a click outside drive it.
+//! click, its rows open the path in the default app, in the viewer, in a
+//! follow tab or in its folder, and Up, Down, Enter, Esc and a click outside
+//! drive it.
+
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Div, Keystroke, MouseButton, MouseDownEvent, ScrollEvent, Stateful,
     Window, WindowId, anchored, deferred, div, prelude::*,
 };
+use protocol::FEATURE_FILE_TAIL;
 
-use crate::link_menu::{self, LinkMenu};
+use crate::link_menu::{self, LinkMenu, RowPick};
+use crate::open;
 use crate::open_view::LinkSource;
 use crate::overlay_owner::Overlay;
+use crate::remote_mode::Capabilities;
 use crate::session_menu::{menu_frame, menu_item};
+use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::{RootView, fonts};
 
@@ -25,8 +32,9 @@ impl RootView {
     }
 
     /// The text of the open link menu's row tagged `id` (`link-menu-default`,
-    /// `link-menu-viewer` or `link-menu-folder`); `None` while the menu is
-    /// closed or for any other id.
+    /// `link-menu-viewer`, `link-menu-follow` or `link-menu-folder`); `None`
+    /// while the menu is closed, for a row it does not offer, or for any
+    /// other id.
     #[must_use]
     pub fn link_menu_row_label(&self, id: &str) -> Option<&'static str> {
         let menu = self.link_menu.as_ref()?;
@@ -81,6 +89,13 @@ impl RootView {
         let Some(row) = menu.rows().get(index).copied() else {
             return;
         };
+        let action = match row.pick {
+            RowPick::Open(action) => action,
+            RowPick::Follow => {
+                self.follow_link(menu, window, cx);
+                return;
+            }
+        };
         let LinkMenu {
             link,
             base_dirs,
@@ -91,9 +106,80 @@ impl RootView {
         let source = LinkSource {
             host: &host,
             session: session.as_deref(),
-            action: row.action,
+            action,
         };
         self.open_link(&link, base_dirs, &source, window, cx);
+    }
+
+    /// Whether a link menu on a pane of `host` showing `session` offers
+    /// "Follow in tab": the pane has a session, on a host whose daemon
+    /// follows files.
+    pub(crate) fn link_menu_follows(&self, host: &HostKey, session: Option<&str>) -> bool {
+        session.is_some()
+            && self
+                .conn_of(host)
+                .is_some_and(|conn| conn.supports(FEATURE_FILE_TAIL))
+    }
+
+    /// Whether a link in a pane of `host` names a file of This PC.
+    fn link_is_here(&self, host: &HostKey) -> bool {
+        match self.conn_of(host) {
+            Some(conn) => Capabilities::for_target(conn.target()).opens_local_files(),
+            None => *host == HostKey::Local,
+        }
+    }
+
+    /// Opens a follow tab of `menu`'s link, through its session's host,
+    /// never by a fetch. On This PC it follows the first of the link's
+    /// readings that exists, checked on a background thread, as built (a
+    /// session folder joined with the link's path) and never canonicalized,
+    /// so a folder reached through a link or a mapped drive keeps that
+    /// spelling for the daemon's check; else the
+    /// first as it stands (a follow of a missing file waits for it); on a
+    /// remote host the first as it stands, which that host's daemon
+    /// resolves from the session's folder.
+    fn follow_link(&mut self, menu: LinkMenu, window: &mut Window, cx: &mut Context<Self>) {
+        let LinkMenu {
+            link,
+            base_dirs,
+            session,
+            host,
+            ..
+        } = menu;
+        let Some(session) = session else {
+            tracing::debug!("a link menu without a session follows nothing");
+            return;
+        };
+        let Some(first) = link.candidates.first().map(|reading| reading.path.clone()) else {
+            tracing::debug!("a link without a reading follows nothing");
+            return;
+        };
+        if !self.link_is_here(&host) {
+            self.open_follow_tab(&host, &session, &first);
+            return;
+        }
+        let candidates = link.candidates;
+        let ui_dir = self.ui_dir.clone();
+        let opener = Arc::clone(&self.opener);
+        let resolve = cx.background_executor().spawn(async move {
+            open::first_existing_reading(
+                &candidates,
+                &base_dirs,
+                ui_dir.as_deref(),
+                opener.as_ref(),
+            )
+            .map(|reading| reading.to_string_lossy().into_owned())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = resolve.await.unwrap_or(first);
+            // Fails only when the view or the main window is gone, leaving
+            // no layout to open the tab in.
+            RootView::update_in_main_window(&this, cx, |root, _, _| {
+                root.open_follow_tab(&host, &session, &path);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The keys an open link menu takes while it holds the keyboard: Up and
@@ -127,7 +213,7 @@ impl RootView {
             }
             _ => return false,
         };
-        menu.selected = link_menu::moved(menu.selected, delta);
+        menu.selected = link_menu::moved(menu.selected, delta, menu.rows().len());
         cx.notify();
         true
     }

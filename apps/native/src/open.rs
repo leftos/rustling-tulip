@@ -618,6 +618,28 @@ pub fn first_existing_candidate(
     })
 }
 
+/// The reading of the first of `candidates` that exists under `base_dirs`,
+/// as [`readings`] built it (a base dir joined with the link's path, or the
+/// absolute path itself), not canonicalized, so a session folder reached
+/// through a link or a mapped drive keeps that spelling. `None` when no
+/// candidate exists; a candidate with a reading on a network host that
+/// [`resolve_link`] would refuse is passed over as
+/// [`first_existing_candidate`] does. Touches the file system, so it runs
+/// off the UI thread.
+#[must_use]
+pub fn first_existing_reading(
+    candidates: &[TerminalLinkCandidate],
+    base_dirs: &[String],
+    ui_dir: Option<&Path>,
+    opener: &dyn Opener,
+) -> Option<PathBuf> {
+    let index = first_existing_candidate(candidates, base_dirs, ui_dir, opener)?;
+    let candidate = candidates.get(index)?;
+    readings(&candidate.path, base_dirs)
+        .into_iter()
+        .find(|reading| opener.existing(reading).is_some())
+}
+
 /// [`resolve_link`] with the listed and mapped host lookups and the
 /// existence check named.
 fn resolve_with(

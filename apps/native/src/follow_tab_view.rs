@@ -14,6 +14,7 @@ use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::grid_view::muted_note;
+use crate::notices::ToastKind;
 use crate::tabs::host_of_wire;
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
@@ -33,6 +34,9 @@ pub const CANNOT_FOLLOW: &str = "This host can't follow files.";
 
 /// What a follow tab says once its host no longer lists its session.
 pub const SESSION_ENDED: &str = "The session has ended.";
+
+/// The toast an `OpenFollowTab` the daemon refused raises.
+pub const OPEN_FAILED_TITLE: &str = "Couldn't open the follow tab";
 
 /// A follow tab's line height, as a multiple of its text size.
 const LINE_RATIO: f32 = 1.4;
@@ -501,6 +505,12 @@ impl RootView {
                 ..
             } if self.follow_opens.failed(id) => {
                 tracing::warn!("the daemon could not open a follow tab: {message}");
+                self.push_toast(
+                    ToastKind::Warning,
+                    OPEN_FAILED_TITLE,
+                    Some(message.clone()),
+                    cx,
+                );
                 true
             }
             _ => false,

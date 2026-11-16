@@ -14,10 +14,14 @@ use crate::support;
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, point, px};
-use protocol::{ClientMessage, SessionSnapshot, SplitDirection};
-use rustling_tulip_native::{OpenOutcome, PopoutKey, ToastKind};
+use protocol::{
+    ClientMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL, FollowSource, SessionSnapshot,
+    SplitDirection,
+};
+use rustling_tulip_native::target::{HostKey, Target};
+use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey, ToastKind};
 use serde_json::{Value, json};
-use support::{Fixture, Harness, Opened, TestDir, pane, session, split, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, saved_remote, session, split, tab};
 
 const URL: &str = "https://example.com/docs";
 
@@ -200,13 +204,131 @@ fn row_label(h: &mut Harness<'_>, id: &'static str) -> Option<&'static str> {
     h.root(move |root, _| root.link_menu_row_label(id))
 }
 
+/// Reports This PC's connection as a daemon that follows files.
+fn file_tail_daemon(h: &mut Harness<'_>) {
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    let features = vec![
+        FEATURE_AGENT_COMMANDS.to_owned(),
+        FEATURE_FILE_TAIL.to_owned(),
+    ];
+    conn.on_welcome(support::PROTOCOL, features, None);
+    h.event(NetEvent::State(conn));
+}
+
+/// [`notes_menu`] over a daemon that follows files.
+/// Returns the harness and the path a follow of the link names.
+fn follow_menu<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, String) {
+    write_file(dir.path(), "docs/notes.md");
+    follow_menu_in(cx, dir, dir.path())
+}
+
+/// A shell in `cwd` over a daemon that follows files, with a
+/// Ctrl+Shift+click on its link to `docs/notes.md` made; returns the
+/// harness and the path a follow of it names: the session folder joined
+/// with the link's path, not canonicalized.
+fn follow_menu_in<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    cwd: &Path,
+) -> (Harness<'a>, String) {
+    let mut h = attached(cx, dir, shell_in(cwd));
+    file_tail_daemon(&mut h);
+    h.sent();
+    h.pty("s1", b"wrote docs/notes.md");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl_shift());
+    let path = cwd.join("docs/notes.md").to_string_lossy().into_owned();
+    (h, path)
+}
+
+/// Makes `link` a folder link to `target`: a symlink, else a junction,
+/// which needs no privilege; `false` when the OS makes neither.
+#[cfg(windows)]
+fn link_folder(target: &Path, link: &Path) -> bool {
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return true;
+    }
+    std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Makes `link` a folder link to `target`; `false` when the OS refuses.
+#[cfg(not(windows))]
+fn link_folder(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+/// The `(source, host)` of every `OpenFollowTab` among `sent`.
+fn follow_opens(sent: &[ClientMessage]) -> Vec<(FollowSource, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenFollowTab { source, host, .. } => {
+                Some((source.clone(), host.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A file source of `path` in session `s1`.
+fn s1_file(path: &str) -> FollowSource {
+    FollowSource::File {
+        session_id: "s1".to_owned(),
+        path: path.to_owned(),
+    }
+}
+
+const FOUR_ROWS: [&str; 4] = [
+    "link-menu-default",
+    "link-menu-viewer",
+    "link-menu-follow",
+    "link-menu-folder",
+];
+
 #[gpui::test]
-fn ctrl_shift_click_on_a_path_shows_three_entries(cx: &mut TestAppContext) {
+fn ctrl_shift_click_on_a_path_shows_four_entries(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = follow_menu(cx, &dir);
+    for id in FOUR_ROWS {
+        assert!(h.in_model(id), "{id} is in the menu");
+    }
+    let tops: Vec<_> = FOUR_ROWS.iter().map(|id| h.bounds(id).origin.y).collect();
+    assert!(
+        tops.windows(2).all(|pair| pair[0] < pair[1]),
+        "the rows run default, viewer, follow, folder: {tops:?}"
+    );
+    assert_eq!(
+        row_label(&mut h, "link-menu-default"),
+        Some("Open in default app")
+    );
+    assert_eq!(
+        row_label(&mut h, "link-menu-viewer"),
+        Some("Open in viewer")
+    );
+    assert_eq!(row_label(&mut h, "link-menu-follow"), Some("Follow in tab"));
+    assert_eq!(
+        row_label(&mut h, "link-menu-folder"),
+        Some("Open containing folder")
+    );
+}
+
+#[gpui::test]
+fn a_link_on_a_host_without_file_tail_shows_three_entries(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, _, _) = notes_menu(cx, &dir);
     for id in ["link-menu-default", "link-menu-viewer", "link-menu-folder"] {
         assert!(h.in_model(id), "{id} is in the menu");
     }
+    assert!(!h.in_model("link-menu-follow"), "no follow row");
+    assert_eq!(row_label(&mut h, "link-menu-follow"), None);
     assert_eq!(
         row_label(&mut h, "link-menu-default"),
         Some("Open in default app")
@@ -260,6 +382,94 @@ fn down_then_enter_picks_the_viewer(cx: &mut TestAppContext) {
     h.keys("enter");
     assert_eq!(viewer_opens(&mut h), [file]);
     assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn down_down_enter_picks_follow(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, path) = follow_menu(cx, &dir);
+    h.keys("down");
+    h.keys("down");
+    h.keys("enter");
+    assert_eq!(follow_opens(&h.sent()), [(s1_file(&path), None)]);
+    assert!(!h.in_model("link-menu"), "the pick closes the menu");
+    assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn the_follow_entry_opens_a_follow_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, path) = follow_menu(cx, &dir);
+    h.click_on("link-menu-follow");
+    let sent = h.sent();
+    assert_eq!(
+        follow_opens(&sent),
+        [(s1_file(&path), None)],
+        "the reading found, to This PC: {sent:?}"
+    );
+    assert_eq!(h.opened(), [], "no default app");
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
+}
+
+#[gpui::test]
+fn the_follow_entry_names_a_linked_folder_by_its_link(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let real = dir.path().join("real");
+    write_file(&real, "docs/notes.md");
+    let linked = dir.path().join("linked");
+    if !link_folder(&real, &linked) {
+        // The OS made neither a symlink nor a junction: nothing to check.
+        return;
+    }
+    let (mut h, path) = follow_menu_in(cx, &dir, &linked);
+    h.click_on("link-menu-follow");
+    let sent = h.sent();
+    assert_eq!(
+        follow_opens(&sent),
+        [(s1_file(&path), None)],
+        "the path through the link's name, not its target: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_follow_of_a_remote_pane_names_its_host_and_fetches_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1").shell("C:/wt/x").build();
+    let mut h = support::remote_in_pane_with_features(
+        cx,
+        &dir,
+        &json!({}),
+        &["r1"],
+        s1,
+        &[FEATURE_FILE_TAIL],
+    );
+    h.sent();
+    h.host(&saved_remote()).sent();
+    h.host(&saved_remote()).pty("s1", b"see docs/notes.txt");
+    let on = h.cell_center("p2", 6, 0);
+    h.click(on, ctrl_shift());
+    assert!(
+        h.in_model("link-menu-follow"),
+        "the remote host follows files"
+    );
+    h.click_on("link-menu-follow");
+    let host = HostKey::of(&saved_remote()).wire().map(str::to_owned);
+    let sent = h.sent();
+    assert_eq!(
+        follow_opens(&sent),
+        [(s1_file("docs/notes.txt"), host)],
+        "the link's path as it stands, to This PC: {sent:?}"
+    );
+    let remote_sent = h.host(&saved_remote()).sent();
+    let fetched = sent.iter().chain(&remote_sent).any(|msg| {
+        matches!(
+            msg,
+            ClientMessage::FetchFile { .. }
+                | ClientMessage::StatPath { .. }
+                | ClientMessage::ListSessionFolders { .. }
+        )
+    });
+    assert!(!fetched, "nothing is fetched or probed: {remote_sent:?}");
 }
 
 #[gpui::test]

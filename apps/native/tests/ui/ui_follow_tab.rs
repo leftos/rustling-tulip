@@ -9,8 +9,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL, TabEntry};
-use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::target::{HostKey, Target};
+use rustling_tulip_native::{Connection, NetEvent, ToastKind};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, session};
 
@@ -335,5 +335,40 @@ fn reopening_a_tail_box_on_a_refused_file_asks_again(cx: &mut TestAppContext) {
         note(&mut h).as_deref(),
         Some("Waiting for build.log\u{2026}"),
         "the tab's refusal is cleared"
+    );
+}
+
+#[gpui::test]
+fn a_refused_follow_open_raises_a_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_daemon(cx, &dir);
+    h.root_update(|root, _, _| root.open_follow_tab(&HostKey::Local, "s1", LOG));
+    let sent = h.sent();
+    let id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::OpenFollowTab { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| unreachable!("an OpenFollowTab: {sent:?}"));
+    let message = "open follow tab failed: the path is empty";
+    h.send(DaemonMessage::Error {
+        message: message.to_owned(),
+        code: None,
+        request_id: Some(id),
+    });
+    let toasts: Vec<(ToastKind, String, Option<String>)> = h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| (toast.kind, toast.title.clone(), toast.detail.clone()))
+            .collect()
+    });
+    assert_eq!(
+        toasts,
+        [(
+            ToastKind::Warning,
+            "Couldn't open the follow tab".to_owned(),
+            Some(message.to_owned())
+        )]
     );
 }
