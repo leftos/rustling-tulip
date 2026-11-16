@@ -467,9 +467,6 @@ pub struct Follow {
     pub path: String,
     /// The path [`check`] made of it.
     pub normal: PathBuf,
-    /// Whether this follow replaces an earlier one of the same file, so its
-    /// first message carries `reset`.
-    pub restart: bool,
 }
 
 /// Follow `spec`'s file until `cancel` fires or `tx` closes. The path is
@@ -481,10 +478,7 @@ pub struct Follow {
 pub async fn follow(spec: Follow, tx: mpsc::Sender<DaemonMessage>, cancel: CancellationToken) {
     let (wake_tx, mut wake) = mpsc::unbounded_channel();
     let mut watcher: Option<RecommendedWatcher> = None;
-    let mut cursor = Cursor {
-        sent: spec.restart,
-        ..Cursor::default()
-    };
+    let mut cursor = Cursor::default();
     let mut poll = tokio::time::interval(POLL);
     let mut pending: Option<JoinHandle<Step>> = None;
     loop {
@@ -670,9 +664,6 @@ struct Cursor {
     /// The last [`CHECK_BYTES`] bytes sent, ending at `offset`, to tell a
     /// file rewritten in place.
     last: Vec<u8>,
-    /// Whether anything was sent, so a file that comes back starts over;
-    /// set from the start for a restarted follow.
-    sent: bool,
     /// The last refusal or read failure logged, so a repeat is not.
     noted: Option<String>,
 }
@@ -687,12 +678,13 @@ impl Cursor {
 
     /// Where to read from in a file of `len` bytes and id `file_id`, and
     /// whether the client starts over there: the file's end when it is new
-    /// to the follow, shrank, was replaced, was rewritten before the offset
-    /// or gained more than [`TAIL_CHUNK`] bytes since the last read.
+    /// to the follow (its first read, or its return after going missing),
+    /// shrank, was replaced, was rewritten before the offset or gained more
+    /// than [`TAIL_CHUNK`] bytes since the last read.
     fn plan(&self, file: &mut File, len: u64, file_id: (u64, u64)) -> std::io::Result<(u64, bool)> {
         let tail_start = len.saturating_sub(TAIL_CHUNK as u64);
         let Some(offset) = self.offset else {
-            return Ok((tail_start, self.sent));
+            return Ok((tail_start, true));
         };
         let changed =
             len < offset || self.file_id != Some(file_id) || !self.ends_with_last(file, offset)?;
@@ -755,7 +747,6 @@ impl Cursor {
         let surplus = self.last.len().saturating_sub(CHECK_BYTES);
         self.last.drain(..surplus);
         self.offset = Some(read.offset + read.data.len() as u64);
-        self.sent = true;
     }
 }
 

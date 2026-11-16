@@ -4246,10 +4246,10 @@ export type ClientMessage =
    * or root-relative path, a path climbing above its root,
    * a path over 1024 characters or 64 components, a link whose target
    * does not resolve, a relative path for a session with no folder and an
-   * unknown session are refused with an `Error` carrying `request_id`. A
-   * repeat for the same session and path restarts that follow, whose
-   * first `FileTail` carries `reset`. Advertised by the `file_tail`
-   * feature.
+   * unknown session are refused with an `Error` carrying `request_id`.
+   * Every follow's first `FileTail` carries `reset`, a repeat for the same
+   * session and path, which restarts that follow, included. Advertised by
+   * the `file_tail` feature.
    */
   | { type: "tail_file"; session_id: string; path: string; request_id?: string | null }
   /**
@@ -5893,11 +5893,13 @@ export type DaemonMessage =
   /**
    * Bytes of a file followed by [`ClientMessage::TailFile`], base64,
    * at most 64 KiB a message. `path` is the path as the request named it;
-   * `offset` is the file offset of the first byte. `reset` means the file
-   * shrank, was replaced or rewritten, grew by more than 64 KiB since the
-   * last message (this data is then its last 64 KiB), or the follow was
-   * restarted: the client drops what it holds, chunks that arrived before
-   * this one included, and starts over from this data.
+   * `offset` is the file offset of the first byte. `reset` marks a
+   * follow's first message (a restarted follow's included), and later
+   * means the file shrank, was replaced or rewritten, came back after
+   * going missing, or grew by more than 64 KiB since the last message
+   * (this data is then its last 64 KiB): the client drops what it holds,
+   * chunks that arrived before this one included, and starts over from
+   * this data.
    */
   | { type: "file_tail"; session_id: string; path: string; data_b64: string; offset: number; reset?: boolean }
   /**

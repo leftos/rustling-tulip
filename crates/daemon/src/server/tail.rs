@@ -3,7 +3,8 @@
 //! ([`crate::file_tail`]), on a task of its own, whose `FileTail` messages
 //! ride the connection's file queue; `UntailFile`, the session's removal and
 //! the connection's end stop it. A connection runs as many follows as it
-//! asks for. `UntailFile` and a restart wait for the stopped follow's task
+//! asks for. Every follow's first `FileTail` carries `reset`, a restart's
+//! included. `UntailFile` and a restart wait for the stopped follow's task
 //! to end, so nothing it sends comes after what follows; the follow does not
 //! wait for a read still blocked.
 
@@ -105,7 +106,6 @@ async fn start(
     file_tail::prepare(normal.clone()).await.map_err(refuse)?;
     let key = (session_id.clone(), path.clone());
     let old = ctx.tails.lock().await.remove(&key);
-    let restart = old.is_some();
     if let Some(old) = old {
         old.stop().await;
     }
@@ -113,7 +113,6 @@ async fn start(
         session_id,
         path,
         normal,
-        restart,
     };
     let id = NEXT_FOLLOW.fetch_add(1, Ordering::Relaxed);
     let token = CancellationToken::new();
@@ -328,7 +327,7 @@ mod tests {
         let (data, offset, reset) = conn.next_tail().await;
         assert_eq!(offset, 100_000 - 65_536);
         assert_eq!(data, content[100_000 - 65_536..]);
-        assert!(!reset);
+        assert!(reset);
 
         append(&folder.join("build.log"), b"hello\n");
         let (data, offset, reset) = conn.next_tail().await;
@@ -346,7 +345,7 @@ mod tests {
         std::fs::write(&log, "0123456789").expect("write log");
         let mut conn = Conn::new();
         conn.tail(&hub, "run.log").await;
-        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, true));
 
         std::fs::write(&log, "abc").expect("shrink log");
         // The truncation and the write may be seen apart: what counts is a
@@ -375,7 +374,7 @@ mod tests {
         ] {
             conn.tail(&hub, &path).await;
             assert!(conn.out_rx.try_recv().is_err(), "{path:?} is not refused");
-            assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, false));
+            assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, true));
         }
         conn.send(
             &hub,
@@ -401,7 +400,7 @@ mod tests {
         let mut conn = Conn::new();
         conn.tail(&hub, "link/secret.log").await;
         assert!(conn.out_rx.try_recv().is_err(), "the link is not refused");
-        assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"secret".to_vec(), 0, true));
         conn.tail(&hub, "link/not-yet.log").await;
         assert!(
             conn.out_rx.try_recv().is_err(),
@@ -409,7 +408,7 @@ mod tests {
         );
         std::fs::write(scratch.path().join("outside").join("not-yet.log"), "late")
             .expect("write log");
-        assert_eq!(conn.next_tail().await, (b"late".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"late".to_vec(), 0, true));
     }
 
     #[tokio::test]
@@ -424,7 +423,7 @@ mod tests {
 
         std::fs::create_dir_all(folder.join("later")).expect("create folder");
         std::fs::write(folder.join("later").join("new.log"), "hi").expect("write log");
-        assert_eq!(conn.next_tail().await, (b"hi".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"hi".to_vec(), 0, true));
     }
 
     #[tokio::test]
@@ -570,7 +569,7 @@ mod tests {
         std::fs::write(&log, "0123456789").expect("write log");
         let mut conn = Conn::new();
         conn.tail(&hub, "big.log").await;
-        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, true));
 
         // One length change, as a preallocating writer makes it.
         let grown = 10 + 200_000u64;
@@ -591,9 +590,58 @@ mod tests {
         std::fs::write(folder.join("a.log"), "abc").expect("write log");
         let mut conn = Conn::new();
         conn.tail(&hub, "a.log").await;
-        assert_eq!(conn.next_tail().await, (b"abc".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"abc".to_vec(), 0, true));
         conn.tail(&hub, "a.log").await;
         assert_eq!(conn.next_tail().await, (b"abc".to_vec(), 0, true));
+    }
+
+    /// The client drops a follow's `FileTail`s until one carries `reset`
+    /// (`ChatTails::on_file_tail`), so every fresh follow's first message
+    /// carries it: for a file with bytes, an empty file and a file that
+    /// appears later.
+    #[tokio::test]
+    async fn a_fresh_follow_starts_with_reset() {
+        let (hub, _scratch, folder) = hub_with_folder("tail-fresh-reset");
+        std::fs::write(folder.join("full.log"), "first\n").expect("write log");
+        std::fs::write(folder.join("empty.log"), "").expect("write log");
+
+        let mut full = Conn::new();
+        full.tail(&hub, "full.log").await;
+        assert_eq!(
+            full.next_tail().await,
+            (b"first\n".to_vec(), 0, true),
+            "a file with bytes"
+        );
+
+        let mut empty = Conn::new();
+        empty.tail(&hub, "empty.log").await;
+        assert_eq!(
+            empty.next_tail().await,
+            (Vec::new(), 0, true),
+            "an empty file"
+        );
+
+        // The first open is held until it is seen, then let go to find the
+        // file missing; the second open, taken only once that step was
+        // applied, is held while the file is written.
+        let missing = OpenHold::new("later.log");
+        let mut later = Conn::new();
+        later.tail(&hub, "later.log").await;
+        tokio::time::timeout(HANG_GUARD, missing.entered())
+            .await
+            .expect("hung: the follow never opened its file");
+        let appearing = OpenHold::new("later.log");
+        drop(missing);
+        tokio::time::timeout(HANG_GUARD, appearing.entered())
+            .await
+            .expect("hung: the follow never opened its file again");
+        std::fs::write(folder.join("later.log"), "x\n").expect("write log");
+        drop(appearing);
+        assert_eq!(
+            later.next_tail().await,
+            (b"x\n".to_vec(), 0, true),
+            "a file that appears"
+        );
     }
 
     #[tokio::test]
@@ -639,7 +687,7 @@ mod tests {
         std::fs::write(&log, "0123456789").expect("write log");
         let mut conn = Conn::new();
         conn.tail(&hub, "run.log").await;
-        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, false));
+        assert_eq!(conn.next_tail().await, (b"0123456789".to_vec(), 0, true));
 
         // Rewritten in place and longer, never shorter than the offset.
         std::fs::OpenOptions::new()
