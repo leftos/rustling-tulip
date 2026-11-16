@@ -38,6 +38,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
+- Compact Chat folds Code Mode scripts into their tool group, counted as scripts, with each script's own tool calls kept under it.
 - The desktop app now draws with the same updated toolkit the coming iPhone app uses, so text and row spacing look slightly different.
 
 ## v0.14.0-alpha

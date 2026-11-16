@@ -37,8 +37,8 @@ use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
     self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftPull,
-    PaneView, PaneViews, PromptStack, RowShape, RunSummary, RunningWork, SendTracker, Strip,
-    SuggestionChip, ViewKey,
+    PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork, ScriptRow,
+    SendTracker, Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -3250,6 +3250,12 @@ fn chat_column(
     for row in chat::display_rows_folding(chat.log.entries(), look.mode, look.min_run) {
         let drawn = match row {
             DisplayRow::Single(entry) => chat_row(look, chat, entry, CHAT_ROW, cx),
+            DisplayRow::Script(script) => div()
+                .flex()
+                .flex_col()
+                .gap(px(ROW_GAP))
+                .children(script_cards(look, chat, &script, cx))
+                .into_any_element(),
             DisplayRow::Run { entries, summary } => run_row(look, chat, &entries, &summary, cx),
         };
         rows.push(drawn);
@@ -3321,7 +3327,8 @@ pub(crate) fn view_segment(view: PaneView) -> (&'static str, &'static str) {
 const CHAT_ROW: &str = "chat-row";
 
 /// The chat pane header's Compact toggle's tooltip.
-pub(crate) const COMPACT_TIP: &str = "Fold runs of read, search and run calls into one line";
+pub(crate) const COMPACT_TIP: &str =
+    "Fold runs of read, search and run calls and Code Mode scripts into one line";
 
 /// The chat pane header's Compact toggle, `base` being the header control it
 /// is drawn on (tagged `chat-compact-<pane>`, no hover look of its own):
@@ -3357,18 +3364,32 @@ pub(crate) fn compact_toggle(
         .into_any_element()
 }
 
-/// A Compact run of read, search and run calls: one line tagged
+/// A script's cards: the script call's card, then each inner call's card,
+/// in order.
+fn script_cards(
+    look: &RowLook<'_>,
+    chat: &SessionChat,
+    script: &ScriptRow<'_>,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    std::iter::once(script.call)
+        .chain(script.inner.iter().copied())
+        .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx))
+        .collect()
+}
+
+/// A Compact run of read, search, run and script calls: one line tagged
 /// `chat-run-<pane>-<first id>` saying what they did, with the running mark
 /// (tagged `chat-run-running-<pane>-<first id>`) while one runs; a click
 /// opens it to the calls' cards as Comfortable draws them, under the line.
 fn run_row(
     look: &RowLook<'_>,
     chat: &SessionChat,
-    entries: &[&ChatEntry],
+    entries: &[RunItem<'_>],
     summary: &RunSummary,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let Some(first) = entries.first().and_then(|entry| chat::entry_id(entry)) else {
+    let Some(first) = entries.first().and_then(RunItem::id) else {
         return div().into_any_element();
     };
     let t = &look.theme;
@@ -3404,10 +3425,14 @@ fn run_row(
         .child(div().flex_1().min_w(px(0.0)).child(summary.text()))
         .children(running);
     let cards: Vec<AnyElement> = if open {
-        entries
-            .iter()
-            .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx))
-            .collect()
+        let mut cards = Vec::new();
+        for item in entries {
+            match item {
+                RunItem::Entry(entry) => cards.push(chat_row(look, chat, entry, CHAT_ROW, cx)),
+                RunItem::Script(script) => cards.extend(script_cards(look, chat, script, cx)),
+            }
+        }
+        cards
     } else {
         Vec::new()
     };

@@ -339,8 +339,8 @@ impl ChatLog {
 }
 
 /// How a chat pane draws tool calls: Compact folds each run of consecutive
-/// read, search and run calls into one line; Comfortable draws one card per
-/// call.
+/// read, search, run and script calls into one line; Comfortable draws one
+/// card per call. In both, a script call is one row holding the calls it ran.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChatMode {
     #[default]
@@ -379,21 +379,24 @@ impl ChatMode {
 }
 
 /// What one Compact run of tool calls did: how many read, searched and ran,
-/// how many of them failed, and whether one still runs.
+/// how many scripts it holds, how many of them failed, and whether one
+/// still runs. A script's inner calls are not counted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunSummary {
     pub read: usize,
     pub searched: usize,
     pub ran: usize,
     pub failed: usize,
+    pub scripts: usize,
     pub running: bool,
 }
 
 impl RunSummary {
     /// The run's line in the terminal's words, such as
-    /// `1 read · 2 searched · 2 ran · 1 failed`: the counts read, searched,
-    /// ran with the zero ones left out, then the failed count when one
-    /// failed.
+    /// `1 read · 2 searched · 2 ran · 1 failed · 1 script`: the counts read,
+    /// searched, ran with the zero ones left out, then the failed count when
+    /// one failed, then the script count (`1 script`, `2 scripts`) when the
+    /// run holds one.
     #[must_use]
     pub fn text(&self) -> String {
         let mut parts: Vec<String> = [
@@ -408,6 +411,11 @@ impl RunSummary {
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
         }
+        match self.scripts {
+            0 => {}
+            1 => parts.push("1 script".to_owned()),
+            many => parts.push(format!("{many} scripts")),
+        }
         parts.join(" \u{b7} ")
     }
 
@@ -416,32 +424,100 @@ impl RunSummary {
             ToolKind::Read => self.read += 1,
             ToolKind::Search => self.searched += 1,
             ToolKind::Run => self.ran += 1,
-            ToolKind::Script | ToolKind::Other | ToolKind::Unknown => {}
+            ToolKind::Script => self.scripts += 1,
+            ToolKind::Other | ToolKind::Unknown => {}
         }
         self.failed += usize::from(failed);
         self.running |= running;
     }
 }
 
-/// One row a chat pane draws: an entry on its own, or (in Compact) a run of
-/// consecutive read, search and run calls drawn as one line, its calls in
-/// order.
+/// A script call (a tool call of the Script kind) and the calls it ran (the
+/// tool entries whose `parent_id` is its id), in log order, with whether it
+/// still runs: it has no result, and no turn end or user message follows it
+/// unless it runs in the background (it has an eval number).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRow<'a> {
+    pub call: &'a ChatEntry,
+    pub inner: Vec<&'a ChatEntry>,
+    pub running: bool,
+}
+
+impl ScriptRow<'_> {
+    /// The script as plain data, for tests and the spec hooks.
+    #[must_use]
+    pub fn shape(&self) -> RowShape {
+        RowShape::Script {
+            id: entry_id(self.call).unwrap_or_default().to_owned(),
+            inner: self
+                .inner
+                .iter()
+                .filter_map(|entry| entry_id(entry))
+                .map(ToOwned::to_owned)
+                .collect(),
+            running: self.running,
+        }
+    }
+
+    /// Ends the script's run when its turn is over, unless it runs in the
+    /// background.
+    fn settle(&mut self) {
+        self.running &= runs_in_background(self.call);
+    }
+}
+
+/// One item of a Compact run: an entry (a read, search or run call, or a
+/// thinking row between them), or a script with its inner calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunItem<'a> {
+    Entry(&'a ChatEntry),
+    Script(ScriptRow<'a>),
+}
+
+impl RunItem<'_> {
+    /// The item's id: the entry's, or the script call's.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Entry(entry) => entry_id(entry),
+            Self::Script(script) => entry_id(script.call),
+        }
+    }
+}
+
+/// One row a chat pane draws: an entry on its own, a script with the calls
+/// it ran, or (in Compact) a run of consecutive read, search, run and script
+/// calls drawn as one line, its items in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayRow<'a> {
     Single(&'a ChatEntry),
+    Script(ScriptRow<'a>),
     Run {
-        entries: Vec<&'a ChatEntry>,
+        entries: Vec<RunItem<'a>>,
         summary: RunSummary,
     },
 }
 
+impl<'a> From<RunItem<'a>> for DisplayRow<'a> {
+    /// A run's item standing on its own: an entry as a single row, a script
+    /// as its script row.
+    fn from(item: RunItem<'a>) -> Self {
+        match item {
+            RunItem::Entry(entry) => Self::Single(entry),
+            RunItem::Script(script) => Self::Script(script),
+        }
+    }
+}
+
 impl DisplayRow<'_> {
-    /// The row's id: the entry's, or the run's first call's.
+    /// The row's id: the entry's, the script call's, or the run's first
+    /// item's.
     #[must_use]
     pub fn id(&self) -> Option<&str> {
         match self {
             Self::Single(entry) => entry_id(entry),
-            Self::Run { entries, .. } => entries.first().and_then(|entry| entry_id(entry)),
+            Self::Script(script) => entry_id(script.call),
+            Self::Run { entries, .. } => entries.first().and_then(RunItem::id),
         }
     }
 
@@ -450,10 +526,11 @@ impl DisplayRow<'_> {
     pub fn shape(&self) -> RowShape {
         match self {
             Self::Single(entry) => RowShape::Entry(entry_id(entry).unwrap_or_default().to_owned()),
+            Self::Script(script) => script.shape(),
             Self::Run { entries, summary } => RowShape::Run {
                 ids: entries
                     .iter()
-                    .filter_map(|entry| entry_id(entry))
+                    .filter_map(RunItem::id)
                     .map(ToOwned::to_owned)
                     .collect(),
                 line: summary.text(),
@@ -463,16 +540,120 @@ impl DisplayRow<'_> {
     }
 }
 
-/// A [`DisplayRow`] as plain data: an entry's id, or a run's call ids, its
-/// line and whether a call in it still runs.
+/// A [`DisplayRow`] as plain data: an entry's id; a script's id, its inner
+/// calls' ids and whether it still runs; or a run's item ids (a script in it
+/// by its own id), its line and whether a call in it still runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowShape {
     Entry(String),
+    Script {
+        id: String,
+        inner: Vec<String>,
+        running: bool,
+    },
     Run {
         ids: Vec<String>,
         line: String,
         running: bool,
     },
+}
+
+/// Each script call's inner calls, by the script's id. Only calls of the
+/// Script kind take inner calls, and a script is never another script's
+/// inner call.
+type ScriptCalls<'a> = HashMap<&'a str, Vec<&'a ChatEntry>>;
+
+/// The inner calls of every script among `entries`, in log order wherever
+/// in the log the script stands.
+fn script_calls<'a>(entries: &[&'a ChatEntry]) -> ScriptCalls<'a> {
+    let mut scripts: ScriptCalls<'a> = entries
+        .iter()
+        .filter(|entry| is_script(entry))
+        .filter_map(|entry| entry_id(entry))
+        .map(|id| (id, Vec::new()))
+        .collect();
+    for &entry in entries {
+        if let ChatEntry::Tool {
+            parent_id: Some(parent),
+            kind,
+            ..
+        } = entry
+            && *kind != ToolKind::Script
+            && let Some(calls) = scripts.get_mut(parent.as_str())
+        {
+            calls.push(entry);
+        }
+    }
+    scripts
+}
+
+/// Whether `entry` is a call a script in `scripts` ran, which draws inside
+/// that script's row and not on its own.
+fn is_inner(entry: &ChatEntry, scripts: &ScriptCalls<'_>) -> bool {
+    matches!(
+        entry,
+        ChatEntry::Tool { parent_id: Some(parent), kind, .. }
+            if *kind != ToolKind::Script && scripts.contains_key(parent.as_str())
+    )
+}
+
+/// Whether `entry` is a script call: a tool call of the Script kind.
+fn is_script(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::Tool {
+            kind: ToolKind::Script,
+            ..
+        }
+    )
+}
+
+/// Whether call `entry` names files to tail, which keeps its card (or its
+/// script's row) in sight for the Tail button.
+fn tails_files(entry: &ChatEntry) -> bool {
+    matches!(entry, ChatEntry::Tool { tail_paths, .. } if !tail_paths.is_empty())
+}
+
+/// Whether script call `entry` failed: its result is an error, or it carries
+/// an error line.
+fn script_failed(entry: &ChatEntry) -> bool {
+    let ChatEntry::Tool { result, script, .. } = entry else {
+        return false;
+    };
+    result.as_ref().is_some_and(|outcome| outcome.is_error)
+        || script.as_ref().is_some_and(|facts| facts.error.is_some())
+}
+
+/// Whether script call `entry` runs in the background: it has an eval
+/// number and no result yet.
+fn runs_in_background(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::Tool { result: None, script: Some(facts), .. } if facts.eval.is_some()
+    )
+}
+
+/// The row of script call `call`, holding its inner calls from `scripts`.
+fn script_row<'a>(call: &'a ChatEntry, scripts: &ScriptCalls<'a>) -> ScriptRow<'a> {
+    let inner = entry_id(call)
+        .and_then(|id| scripts.get(id))
+        .cloned()
+        .unwrap_or_default();
+    ScriptRow {
+        call,
+        inner,
+        running: matches!(call, ChatEntry::Tool { result: None, .. }),
+    }
+}
+
+/// The row `entry` draws as on its own: its script row for a script call,
+/// else a single row.
+fn standing_row<'a>(entry: &'a ChatEntry, scripts: &ScriptCalls<'a>) -> DisplayRow<'a> {
+    if is_script(entry) {
+        DisplayRow::Script(script_row(entry, scripts))
+    } else {
+        DisplayRow::Single(entry)
+    }
 }
 
 /// The read, search or run kind a Compact run takes `entry` into, with
@@ -497,42 +678,89 @@ fn run_kind(entry: &ChatEntry) -> Option<(ToolKind, bool, bool)> {
         })
 }
 
-/// A Compact run being gathered: its entries so far, what its calls did, and
+/// A Compact run being gathered: its items so far, what its calls did, and
 /// the thinking rows after its last call, which join it only when another
 /// call follows them.
 #[derive(Default)]
 struct OpenRun<'a> {
-    entries: Vec<&'a ChatEntry>,
+    entries: Vec<RunItem<'a>>,
     summary: RunSummary,
     thinking: Vec<&'a ChatEntry>,
-    /// How many calls its entries hold.
+    /// How many calls (scripts included) its items hold.
     calls: usize,
 }
 
 impl<'a> OpenRun<'a> {
-    /// Closes the run: pushes it, or its entries one by one in order when it
-    /// holds fewer than `min_run` calls, then the thinking rows after its
-    /// last call on their own.
+    /// Takes `entry` into the run when it joins one: a read, search or run
+    /// call, a script that no other call ran and none of whose inner calls
+    /// names files to tail, or a thinking row after a call
+    /// of the run. Says whether it took it.
+    fn take(&mut self, entry: &'a ChatEntry, scripts: &ScriptCalls<'a>) -> bool {
+        if let Some((kind, failed, running)) = run_kind(entry) {
+            self.summary.add(kind, failed, running);
+            self.push(RunItem::Entry(entry));
+            return true;
+        }
+        if is_script(entry)
+            && matches!(
+                entry,
+                ChatEntry::Tool {
+                    parent_id: None,
+                    ..
+                }
+            )
+        {
+            let script = script_row(entry, scripts);
+            if script.inner.iter().any(|call| tails_files(call)) {
+                return false;
+            }
+            self.summary
+                .add(ToolKind::Script, script_failed(entry), script.running);
+            self.push(RunItem::Script(script));
+            return true;
+        }
+        if matches!(entry, ChatEntry::Thinking { .. }) && !self.entries.is_empty() {
+            self.thinking.push(entry);
+            return true;
+        }
+        false
+    }
+
+    /// Adds call `item`, after the thinking rows that came before it.
+    fn push(&mut self, item: RunItem<'a>) {
+        self.entries
+            .extend(self.thinking.drain(..).map(RunItem::Entry));
+        self.entries.push(item);
+        self.calls += 1;
+    }
+
+    /// Closes the run: pushes it, or its items one by one in order when it
+    /// holds fewer than `min_run` calls (an entry as a single row, a script
+    /// as its script row), then the thinking rows after its last call on
+    /// their own.
     fn flush(&mut self, rows: &mut Vec<DisplayRow<'a>>, min_run: usize) {
         let entries = std::mem::take(&mut self.entries);
         let summary = std::mem::take(&mut self.summary);
         if self.calls >= min_run && !entries.is_empty() {
             rows.push(DisplayRow::Run { entries, summary });
         } else {
-            rows.extend(entries.into_iter().map(DisplayRow::Single));
+            rows.extend(entries.into_iter().map(DisplayRow::from));
         }
         self.calls = 0;
         rows.extend(self.thinking.drain(..).map(DisplayRow::Single));
     }
 }
 
-/// The rows a chat pane draws for `entries` in `mode`: one per entry in
-/// Comfortable; in Compact, each run of consecutive read, search and run
-/// calls (a run of one included, thinking rows between its calls folded in)
-/// becomes one [`DisplayRow::Run`], and every other entry stands alone and
-/// ends the run before it. A run counts as running only while a call has no
-/// result and no turn end or user message follows it (a message still
-/// queued does not count).
+/// The rows a chat pane draws for `entries` in `mode`. In both modes a
+/// script call is one [`DisplayRow::Script`] holding the calls it ran, which
+/// draw nowhere else; a call whose script is not among `entries` stands as
+/// any other. In Comfortable every other entry is its own row; in Compact,
+/// each run of consecutive read, search, run and script calls (a run of one
+/// included, thinking rows between its calls folded in) becomes one
+/// [`DisplayRow::Run`], and every other entry stands alone and ends the run
+/// before it. A call counts as running only while it has no result and no
+/// turn end or user message follows it (a message still queued does not
+/// count); a script running in the background runs on past its turn's end.
 #[must_use]
 pub fn display_rows<'a>(
     entries: impl IntoIterator<Item = &'a ChatEntry>,
@@ -542,48 +770,53 @@ pub fn display_rows<'a>(
 }
 
 /// The rows [`display_rows`] draws, except that in Compact a run holding
-/// fewer than `min_run` calls stands as its entries, each its own
-/// [`DisplayRow::Single`] in order (the thinking rows folded into it
-/// included).
+/// fewer than `min_run` calls stands as its items in order: each entry its
+/// own [`DisplayRow::Single`] (the thinking rows folded into it included),
+/// each script its own [`DisplayRow::Script`], so no minimum hides a script.
 #[must_use]
 pub fn display_rows_folding<'a>(
     entries: impl IntoIterator<Item = &'a ChatEntry>,
     mode: ChatMode,
     min_run: usize,
 ) -> Vec<DisplayRow<'a>> {
+    let entries: Vec<&'a ChatEntry> = entries.into_iter().collect();
+    let scripts = script_calls(&entries);
     let mut rows = Vec::new();
     let mut run = OpenRun::default();
     for entry in entries {
-        if mode == ChatMode::Compact {
-            if let Some((kind, failed, running)) = run_kind(entry) {
-                run.summary.add(kind, failed, running);
-                run.entries.append(&mut run.thinking);
-                run.entries.push(entry);
-                run.calls += 1;
-                continue;
-            }
-            if matches!(entry, ChatEntry::Thinking { .. }) && !run.entries.is_empty() {
-                run.thinking.push(entry);
-                continue;
-            }
+        if is_inner(entry, &scripts) {
+            continue;
+        }
+        if mode == ChatMode::Compact && run.take(entry, &scripts) {
+            continue;
         }
         run.flush(&mut rows, min_run);
-        rows.push(DisplayRow::Single(entry));
+        rows.push(standing_row(entry, &scripts));
     }
     run.flush(&mut rows, min_run);
     settle_finished_runs(&mut rows);
     rows
 }
 
-/// Clears the running mark of every run an entry that [`ends_turn`] comes
-/// after: that turn is over, so a call it left without a result runs no
-/// more.
+/// Clears the running mark of every run and script an entry that
+/// [`ends_turn`] comes after: that turn is over, so a call it left without
+/// a result runs no more, except a script running in the background, which
+/// keeps its run running too.
 fn settle_finished_runs(rows: &mut [DisplayRow<'_>]) {
     let mut ended = false;
     for row in rows.iter_mut().rev() {
         match row {
             DisplayRow::Single(entry) if ends_turn(entry) => ended = true,
-            DisplayRow::Run { summary, .. } if ended => summary.running = false,
+            DisplayRow::Script(script) if ended => script.settle(),
+            DisplayRow::Run { entries, summary } if ended => {
+                summary.running = false;
+                for item in entries.iter_mut() {
+                    if let RunItem::Script(script) = item {
+                        script.settle();
+                        summary.running |= script.running;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -3352,9 +3585,12 @@ mod strip_tests {
 
 #[cfg(test)]
 mod run_tests {
-    use protocol::{ChatEntry, ToolKind, ToolOutcome};
+    use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
 
-    use super::{ChatLog, ChatMode, RowShape, RunSummary, display_rows, display_rows_folding};
+    use super::{
+        ChatLog, ChatMode, DisplayRow, RowShape, RunItem, RunSummary, display_rows,
+        display_rows_folding,
+    };
 
     fn answer(id: &str) -> ChatEntry {
         ChatEntry::Answer {
@@ -3678,6 +3914,288 @@ mod run_tests {
         );
     }
 
+    /// Script call `id` with no result yet (`None`), or a result that failed
+    /// or not.
+    fn script(id: &str, failed: Option<bool>) -> ChatEntry {
+        let mut entry = with_result(id, "REPL", ToolKind::Script, failed);
+        if let ChatEntry::Tool { script, .. } = &mut entry {
+            *script = Some(ScriptFacts {
+                description: format!("script {id}"),
+                ..ScriptFacts::default()
+            });
+        }
+        entry
+    }
+
+    /// Script call `id` with `facts` changed by `change`.
+    fn script_with(id: &str, failed: Option<bool>, change: impl Fn(&mut ScriptFacts)) -> ChatEntry {
+        let mut entry = script(id, failed);
+        if let ChatEntry::Tool {
+            script: Some(facts),
+            ..
+        } = &mut entry
+        {
+            change(facts);
+        }
+        entry
+    }
+
+    /// Finished call `id` of tool `name`, of `kind`, that the call `parent`
+    /// (a script or a subagent's task) ran.
+    fn inner(id: &str, name: &str, kind: ToolKind, parent: &str) -> ChatEntry {
+        let mut entry = call(id, name, kind);
+        if let ChatEntry::Tool { parent_id, .. } = &mut entry {
+            *parent_id = Some(parent.to_owned());
+        }
+        entry
+    }
+
+    fn script_shape(id: &str, calls: &[&str], running: bool) -> RowShape {
+        RowShape::Script {
+            id: id.to_owned(),
+            inner: calls.iter().map(|call| (*call).to_owned()).collect(),
+            running,
+        }
+    }
+
+    /// The shapes of the scripts inside the Compact runs of `entries`.
+    fn scripts_in_runs(entries: &[ChatEntry], min_run: usize) -> Vec<RowShape> {
+        display_rows_folding(entries, ChatMode::Compact, min_run)
+            .iter()
+            .flat_map(|row| match row {
+                DisplayRow::Run { entries, .. } => entries
+                    .iter()
+                    .filter_map(|item| match item {
+                        RunItem::Script(script) => Some(script.shape()),
+                        RunItem::Entry(_) => None,
+                    })
+                    .collect(),
+                DisplayRow::Single(_) | DisplayRow::Script(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn turn_end(id: &str) -> ChatEntry {
+        ChatEntry::TurnEnd {
+            id: id.to_owned(),
+            duration_ms: Some(1_000),
+        }
+    }
+
+    #[test]
+    fn a_group_with_one_script_and_two_inner_calls() {
+        let entries = [
+            answer("a1"),
+            script("s1", Some(false)),
+            inner("r1", "Read", ToolKind::Read, "s1"),
+            inner("b1", "Bash", ToolKind::Run, "s1"),
+            answer("a2"),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [entry("a1"), line(&["s1"], "1 script"), entry("a2")],
+            "Compact folds the script into a group and its inner calls are not rows"
+        );
+        assert_eq!(
+            scripts_in_runs(&entries, 1),
+            [script_shape("s1", &["r1", "b1"], false)]
+        );
+        assert_eq!(
+            shapes(&entries, ChatMode::Comfortable),
+            [
+                entry("a1"),
+                script_shape("s1", &["r1", "b1"], false),
+                entry("a2")
+            ],
+            "Comfortable draws the script as one row holding its inner calls"
+        );
+    }
+
+    #[test]
+    fn a_script_with_nothing_but_its_call_is_one_row() {
+        let entries = [script("s1", None), turn_end("e1")];
+        assert_eq!(
+            shapes(&entries, ChatMode::Comfortable),
+            [script_shape("s1", &[], false), entry("e1")]
+        );
+        assert_eq!(
+            folding_shapes(&entries, 4),
+            [script_shape("s1", &[], false), entry("e1")],
+            "a group too short to fold still draws its script as a script row"
+        );
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["s1"], "1 script"), entry("e1")]
+        );
+        assert_eq!(
+            scripts_in_runs(&entries, 1),
+            [script_shape("s1", &[], false)]
+        );
+    }
+
+    #[test]
+    fn an_orphan_inner_call_stays_an_ordinary_row() {
+        let entries = [inner("r1", "Read", ToolKind::Read, "gone"), answer("a1")];
+        for mode in [ChatMode::Compact, ChatMode::Comfortable] {
+            assert_eq!(shapes(&entries, mode), [entry("r1"), entry("a1")]);
+        }
+    }
+
+    #[test]
+    fn a_subagents_calls_are_not_taken_by_a_script() {
+        let entries = [
+            call("task1", "Task", ToolKind::Other),
+            script("s1", Some(false)),
+            inner("r1", "Read", ToolKind::Read, "task1"),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Comfortable),
+            [entry("task1"), script_shape("s1", &[], false), entry("r1")]
+        );
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [entry("task1"), line(&["s1"], "1 script"), entry("r1")]
+        );
+    }
+
+    #[test]
+    fn bash_script_bash_in_compact_folds_into_one_run_with_the_script_inside() {
+        let entries = [
+            call("b1", "Bash", ToolKind::Run),
+            script("s1", Some(false)),
+            inner("r1", "Read", ToolKind::Read, "s1"),
+            call("b2", "Bash", ToolKind::Run),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["b1", "s1", "b2"], "2 ran \u{b7} 1 script")]
+        );
+        assert_eq!(
+            scripts_in_runs(&entries, 1),
+            [script_shape("s1", &["r1"], false)]
+        );
+        assert_eq!(
+            folding_shapes(&entries, 4),
+            [entry("b1"), script_shape("s1", &["r1"], false), entry("b2")],
+            "under the minimum the script stays a script row and the Bashes stand alone"
+        );
+    }
+
+    #[test]
+    fn a_script_whose_inner_call_tails_a_file_stands_alone() {
+        let mut tailing = inner("b2", "Bash", ToolKind::Run, "s1");
+        if let ChatEntry::Tool { tail_paths, .. } = &mut tailing {
+            tail_paths.push("C:/work/build.log".to_owned());
+        }
+        let entries = [
+            call("b1", "Bash", ToolKind::Run),
+            script("s1", Some(false)),
+            tailing,
+            call("b3", "Bash", ToolKind::Run),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                line(&["b1"], "1 ran"),
+                script_shape("s1", &["b2"], false),
+                line(&["b3"], "1 ran")
+            ],
+            "the script stays in sight so its inner call's Tail button does"
+        );
+    }
+
+    #[test]
+    fn the_run_summary_counts_scripts() {
+        let entries = [
+            call("b1", "Bash", ToolKind::Run),
+            script("s1", Some(false)),
+            inner("r1", "Read", ToolKind::Read, "s1"),
+            inner("g1", "Grep", ToolKind::Search, "s1"),
+            script("s2", Some(false)),
+            call("b2", "Bash", ToolKind::Run),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["b1", "s1", "s2", "b2"], "2 ran \u{b7} 2 scripts")],
+            "inner calls are not counted into read, searched or ran"
+        );
+        let one = RunSummary {
+            ran: 2,
+            scripts: 1,
+            ..RunSummary::default()
+        };
+        assert_eq!(one.text(), "2 ran \u{b7} 1 script");
+        let failed = RunSummary {
+            ran: 1,
+            failed: 1,
+            scripts: 1,
+            ..RunSummary::default()
+        };
+        assert_eq!(failed.text(), "1 ran \u{b7} 1 failed \u{b7} 1 script");
+    }
+
+    #[test]
+    fn a_background_script_stays_running_after_its_turn_ends() {
+        let background = script_with("s1", None, |facts| facts.eval = Some(3));
+        let entries = [background, script("s2", None), turn_end("e1")];
+        assert_eq!(
+            shapes(&entries, ChatMode::Comfortable),
+            [
+                script_shape("s1", &[], true),
+                script_shape("s2", &[], false),
+                entry("e1")
+            ],
+            "a background script runs on; a script its ended turn left runs no more"
+        );
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                RowShape::Run {
+                    ids: vec!["s1".to_owned(), "s2".to_owned()],
+                    line: "2 scripts".to_owned(),
+                    running: true,
+                },
+                entry("e1")
+            ]
+        );
+        assert_eq!(
+            shapes(&[script("s2", None), turn_end("e1")], ChatMode::Compact),
+            [line(&["s2"], "1 script"), entry("e1")]
+        );
+    }
+
+    #[test]
+    fn a_failed_script_marks_its_run_failed() {
+        let errored = script_with("s2", Some(false), |facts| {
+            facts.error = Some("boom".to_owned());
+        });
+        let entries = [script("s1", Some(true)), errored];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["s1", "s2"], "2 failed \u{b7} 2 scripts")]
+        );
+    }
+
+    #[test]
+    fn a_scripts_update_keeps_its_inner_calls_and_its_place() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![
+            answer("a1"),
+            script("s1", None),
+            inner("r1", "Read", ToolKind::Read, "s1"),
+            answer("a2"),
+        ]);
+        log.upsert(vec![script("s1", Some(false))]);
+        let rows: Vec<RowShape> = display_rows(log.entries(), ChatMode::Comfortable)
+            .iter()
+            .map(DisplayRow::shape)
+            .collect();
+        assert_eq!(
+            rows,
+            [entry("a1"), script_shape("s1", &["r1"], false), entry("a2")]
+        );
+    }
+
     #[test]
     fn comfortable_draws_one_row_per_entry() {
         let entries = [
@@ -3706,6 +4224,7 @@ mod run_tests {
             searched: 2,
             ran: 2,
             failed: 0,
+            scripts: 0,
             running: false,
         };
         assert_eq!(summary.text(), "1 read \u{b7} 2 searched \u{b7} 2 ran");
@@ -3813,7 +4332,7 @@ mod final_reply_tests {
                 .iter()
                 .filter_map(|row| match row {
                     DisplayRow::Single(entry) => super::entry_id(entry),
-                    DisplayRow::Run { .. } => None,
+                    DisplayRow::Script(_) | DisplayRow::Run { .. } => None,
                 })
                 .collect();
             assert!(
