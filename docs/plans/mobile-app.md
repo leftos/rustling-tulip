@@ -293,6 +293,22 @@ The web app's open features wait for the native app and are built there once its
 
 **Retiring the web app:** once MA.16's hand check and PR.8 pass, the web app is removed in an item of its own (`apps/pwa`, `tools/protocol-ts`, the tailnet router's static routes and the `-Pwa` build steps), since the native app then replaces it. Whether the daemon's direct Web Push sender goes with it is decided in that item.
 
+## Launch notes
+
+The changelog bullets for the iPhone app's features, kept out of the desktop releases' notes while the app is on TestFlight only. The release that launches the app takes them into its changelog section, audited then.
+
+- The iPhone's Chat can pull a draft from the terminal's prompt box or send it as it stands, and shows Claude's suggested next prompt to send or edit.
+- The iPhone app has a Settings screen, opened from Home: the Notifications switch, and your hosts with the Add a host form and the phone's SSH key, now live there, and Appearance chooses the phone's theme and text size.
+- On the iPhone, put the keyboard away by tapping the chat or the terminal, or with the new Hide keyboard and Hide keys.
+- The iPhone's Needs you card on Home shows each answer with its description, every question of a longer prompt, and Open on every card.
+- `rustling-tulipd push-fallback` sends each paired iPhone a push it cannot open, to check that its fallback alert shows.
+- On the iPhone, a host shown as Offline has a Retry button that tries it again at once, instead of waiting for it to redial.
+- On the iPhone, holding a finger on Chat text selects the word under it, and dragging while still holding widens the selection; handles at its ends move either end, dragging near the chat's edge scrolls it, and Copy puts it on the clipboard.
+- The iPhone's Chat draws each Code Mode script as one line: its description, number, time and the calls it ran, with a failed script's error under it.
+- A Needs you notification on the iPhone now leaves the notification list once the prompt is answered in any client, usually without opening the app, and the app badge shows what still waits.
+- On the iPhone, one tap on a short summary in Chat opens its full text, and a single tap follows a link in Chat.
+- On the iPhone, opening the app from a notification no longer shows your PC as not paired after a push woke the app while the phone was locked.
+
 ## Measured on a real iPhone
 
 MA.12, on the owner's iPhone with the TestFlight build and the Tailscale app, against the PC's daemon over the tailnet:

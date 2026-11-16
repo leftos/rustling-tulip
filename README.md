@@ -14,24 +14,24 @@ It is alpha software.
 - Add any folder as a repo: one that is not a git repo shows as DIR and opens sessions in place, with no worktree or branch choice.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
-- Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead. A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it.
+- Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead. A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it. On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
-- Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
+- Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus, at any of eight spots around the screen's edge; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents (each with its model and effort level) and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
-- A session's dispatch runs (DS) and subagents (SA) nest under it in the sidebar, a run's own subagents under the run, and a chevron folds them away. Click one, or drag it onto a pane, to follow its transcript: replies, tool calls and their output, which a click expands. A run's pane adds its cost, tokens and a Stop button, and the Dashboard lists each run under the session that started it.
+- A session's dispatch runs (DS) and subagents (SA) nest under it in the sidebar, a run's own subagents under the run, and a chevron folds them away; a button beside the Sessions title folds or opens them all at once. Settings chooses whether finished subagents stay, how many and for how long, and whether their rows draw compact. Click one, or drag it onto a pane, to follow its transcript: replies, tool calls and their output, which a click expands. A run's pane adds its cost, tokens and a Stop button, and the Dashboard lists each run under the session that started it.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
-- Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
+- Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane. Closing a tab with running sessions asks whether to keep them running or stop them.
 - A tab you haven't named is named after the repos and workspaces of its sessions.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, with session names smaller than the repo name that holds them, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
 - Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, Claude's model (Fable included) and its effort level from Low to Max, and in Advanced takes your own command-line arguments, which Duplicate and Launch last repeat.
 - Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
-- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer or its folder too, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer, its folder or Follow in tab, a tab that tails the file live on any host, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
@@ -45,7 +45,9 @@ It is alpha software.
 - A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
 - Answer Claude's questions, plans and permission prompts from cards, by click or key or in your own words in the card's text box, and send messages from a box under the chat that keeps your text when a send is refused.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
-- A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows.
+- A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows, wherever the file is. A file link in an answer opens the file, and Ctrl+Shift+click on it offers the same menu as the terminal's.
+- Pull a draft left in the terminal's prompt box into the message box to edit, or send it as it stands, and send or edit Claude's suggested next prompt with one click.
+- Each Code Mode script shows as one line with its description, time and the calls it ran, and a failed script's error under it.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
 - Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
 - Compact mode, on by default, folds a run of reads, searches and commands into one line you can open. The chat column keeps a readable width on wide panes, and each turn's final answer sits in its own box.
@@ -81,7 +83,7 @@ It is alpha software.
 
 ### Remote access over Tailscale
 
-- Turn on remote access in Settings and your other PCs on your tailnet can open this PC's sessions. The daemon serves only your tailnet, over TLS with a Tailscale certificate.
+- Turn on remote access in Settings and your other PCs on your tailnet can open this PC's sessions. The daemon serves only your tailnet, over TLS with a Tailscale certificate, and Settings › Remote access tells you when Tailscale is slow to answer while it keeps serving.
 - The host picker lists your tailnet machines and the hosts you saved, and the app connects to every saved host you have switched on when it starts.
 - A new device has to be approved on the host PC with a one-time pairing code. The Devices list shows who is connected and when each device was last seen, and Block cuts a device off until you forget it.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
@@ -159,6 +161,15 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.15.0-alpha
+
+- Follow in tab opens a tab that tails a file live, on any host, from a terminal's file path or a Chat file link.
+- Chat can pull a draft from the terminal's prompt box to edit or send it as is, and offers Claude's suggested next prompt.
+- Closing a tab with running sessions asks whether to keep them running or stop them.
+- Chat draws each Code Mode script as one line with its description, time and the calls it ran.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.15.0-alpha).
 
 ## What's new in v0.14.0-alpha
 
