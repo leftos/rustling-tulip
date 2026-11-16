@@ -218,11 +218,8 @@
 - [ ] RT-1246 Clear desktop Chat's one-Esc hold when the turn stops or the send was lost
 - [ ] RT-1250 Keep a Chat card box's text across card changes and keys that answer without it
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
-- [ ] RT-1753 Pull a prompt-box draft into Chat's message box, or send it as it stands · release vNext
-- [ ] RT-1757 Draw Code Mode's REPL scripts in Chat as lines in their tool group · release vNext
-  - [ ] RT-1760 Draw a Code Mode script as one line in desktop Chat · release vNext
-  - [ ] RT-1761 Draw Code Mode script lines in the phone's Chat · release vNext
 - [ ] RT-1804 Keep the Chat message box focused after a composer-row button click
+- [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 
 ## Settings and themes
 
@@ -474,8 +471,6 @@
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
 - [ ] RT-1366 Rename, delete and make folders on a host from the file manager
 - [ ] RT-1367 Upload files from this machine to a host folder in the file manager
-- [ ] RT-1807 Follow a linked log file in an in-app tab from the link's Ctrl+Shift+click menu · release vNext
-  - [ ] RT-1811 Open the link menu from a Chat file link · release vNext
 
 ## Phone app
 
@@ -512,10 +507,6 @@
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 - [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext+1
-- [ ] RT-1754 Select Chat text on the phone with a long press: handles and Copy · release vNext
-  - [ ] RT-1789 Drag the phone Chat selection handles · release vNext
-  - [ ] RT-1790 Copy the phone Chat selection, and clear it on a tap, page change or reload · release vNext
-  - [ ] RT-1791 Scroll phone Chat while a selection drag nears its edge, and document selection · release vNext
 - [ ] RT-1756 Arrange the phone's Keys in a grid in Settings, with multi-key keys like Ctrl+B · release vNext+1
 - [ ] RT-1765 Draw the phone tray's read-only options without a pressed state
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
@@ -530,6 +521,7 @@
 - [ ] RT-1785 Even out the phone Appearance page: theme row spacing and the text size label
 - [ ] RT-1793 Keep an offline host's card on Settings › Hosts from jumping on each redial
 - [ ] RT-1797 Hit-test a wrapped right- or centre-aligned Chat table cell by its own line's offset
+- [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone
 
 ## Dashboard, Gates and Linear
 
@@ -605,6 +597,7 @@
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1291 Take the worktree size walk off the connection's reader
 - [ ] RT-1711 Run the daemon's read-only git calls with --no-optional-locks
+- [ ] RT-1815 Follow a shell's cd into another registered repo or workspace · release vNext+1
 
 ## Agents and subagents
 
@@ -764,6 +757,10 @@
 - [ ] RT-1806 Give the main window's dialogs one order for drawing and keys
 - [ ] RT-1813 Move follow tabs to the kept host key when two host keys reach one daemon
 
+## No project
+
+- [ ] RT-1816 Groom the plan: 22 commits since the hygiene stamp
+
 ## Design files
 
 - [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1116, RT-1117
@@ -781,7 +778,7 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1754, RT-1791, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-106, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
