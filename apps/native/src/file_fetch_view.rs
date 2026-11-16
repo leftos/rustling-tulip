@@ -1460,38 +1460,74 @@ impl RootView {
             {
                 self.after_folder_saved(id, path, window, cx);
             }
-            WriteOutcome::Saved(path) => {
-                tracing::info!(id, path = %path.display(), "fetched a file");
-                // The dialog closes first, so a run confirm the open asks
-                // for is not refused as a dialog over a dialog.
-                if self.fetch_dialog_follows(id) {
-                    self.close_fetch_dialog(window, cx);
-                }
-                if self.waits_on_media(id) {
-                    if self
-                        .fetches
-                        .get(id)
-                        .is_some_and(FetchEntry::connection_lost)
-                    {
-                        self.open_page_without_media(id, path, window, cx);
-                    } else {
-                        self.scan_saved_page(id, path, window, cx);
-                    }
-                    return;
-                }
-                let Some(entry) = self.fetches.remove(id) else {
-                    return;
-                };
-                if let Some(page_id) = entry.parent() {
-                    let rel = &entry.request().rel_path;
-                    self.after_child_saved(page_id.to_owned(), rel, path, window, cx);
-                    return;
-                }
-                self.after_file_saved(id, &entry, path, window, cx);
-            }
+            WriteOutcome::Saved(path) => self.after_file_written(id, path, window, cx),
             WriteOutcome::Failed(reason) => self.end_fetch(id, &reason, true, window, cx),
             WriteOutcome::Aborted => {}
         }
+    }
+
+    /// The file fetch `id` is saved at `path`: its dialog closes, a page
+    /// waits for its media, a child reports to its parent, and anything
+    /// else opens as its request asks.
+    fn after_file_written(
+        &mut self,
+        id: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(id, path = %path.display(), "fetched a file");
+        // The dialog closes first, so a run confirm the open asks
+        // for is not refused as a dialog over a dialog.
+        if self.fetch_dialog_follows(id) {
+            self.close_fetch_dialog(window, cx);
+        }
+        if self.waits_on_media(id) {
+            self.after_write_page_media(id, path, window, cx);
+            return;
+        }
+        let Some(entry) = self.fetches.remove(id) else {
+            return;
+        };
+        self.after_write_removed(id, &entry, path, window, cx);
+    }
+
+    /// The saved page fetch `id` opens without its media when its connection
+    /// was lost, and scans for them otherwise.
+    fn after_write_page_media(
+        &mut self,
+        id: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .fetches
+            .get(id)
+            .is_some_and(FetchEntry::connection_lost)
+        {
+            self.open_page_without_media(id, path, window, cx);
+        } else {
+            self.scan_saved_page(id, path, window, cx);
+        }
+    }
+
+    /// The saved fetch `id`, removed from the list as `entry`, reports to its
+    /// parent page when it is a batch child, and opens otherwise.
+    fn after_write_removed(
+        &mut self,
+        id: &str,
+        entry: &FetchEntry,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(page_id) = entry.parent() {
+            let rel = &entry.request().rel_path;
+            self.after_child_saved(page_id.to_owned(), rel, path, window, cx);
+            return;
+        }
+        self.after_file_saved(id, entry, path, window, cx);
     }
 
     /// Whether the saved file fetch `id` is a page that opens once its
