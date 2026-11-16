@@ -643,6 +643,25 @@ fn unfocused_window_notifies(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_session_on_screen_is_notified_once_the_window_is_inactive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.cx.deactivate_window();
+    h.cx.run_until_parked();
+    assert!(
+        !h.cx.update(|window, _| window.is_window_active()),
+        "the window lost the focus"
+    );
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login: Waiting for input")],
+        "s1 is on screen, but the window no longer has the keyboard"
+    );
+}
+
+#[gpui::test]
 fn window_focused_choice_skips_a_session_on_another_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     save_notifications(&dir, &serde_json::json!({ "skip_when": "focused" }));

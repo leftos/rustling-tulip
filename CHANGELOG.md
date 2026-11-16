@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
+- Notifications and their sounds now show while a full-screen app or game is in front; Do Not Disturb and presentation mode still hold them.
 - Subagent and dispatch rows in the sidebar now draw All comfortable, Finished compact or All compact, chosen in Settings › General.
 - A subagent or dispatch run pane now draws its transcript in the same font, size and line spacing as the terminal beside it.
 

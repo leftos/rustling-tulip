@@ -100,13 +100,15 @@ pub trait Notifier: Send + Sync {
 
     /// Whether Windows would hold back a toast raised now: this app's
     /// toasts are off, or the user is not taking notifications (Do Not
-    /// Disturb, a presentation, a full-screen app). Called off the UI
-    /// thread.
+    /// Disturb, presentation mode, a locked screen, the first hour after
+    /// signing in). A full-screen app or game does not hold them back.
+    /// Called off the UI thread.
     fn suppressed(&self) -> bool;
 
-    /// Whether the user is in Do Not Disturb, a presentation or a
-    /// full-screen app, whatever Windows' own toast setting for this app
-    /// says. Called off the UI thread.
+    /// Whether the user is in Do Not Disturb, presentation mode or away
+    /// from the screen, whatever Windows' own toast setting for this app
+    /// says. A full-screen app or game is not busy. Called off the UI
+    /// thread.
     fn user_busy(&self) -> bool;
 
     /// Whether this platform shows OS toasts at all; where it does not, every
@@ -185,10 +187,10 @@ impl Notifier for SystemNotifier {
     }
 }
 
-/// Whether Windows lets notifications through now: not a presentation, a
-/// full-screen app or a game, and not the first hour after signing in or
-/// upgrading. Do Not Disturb is not part of this state; [`do_not_disturb_on`]
-/// reads it from the quiet-hours state.
+/// Whether Windows lets notifications through now: not a presentation, not
+/// the first hour after signing in or upgrading, and not a locked screen. An
+/// app or a game in full screen does not count. Do Not Disturb is not part of
+/// this state; [`do_not_disturb_on`] reads it from the quiet-hours state.
 #[cfg(windows)]
 fn user_takes_notifications() -> windows::core::Result<bool> {
     use windows::Win32::UI::Shell::SHQueryUserNotificationState;
@@ -197,16 +199,25 @@ fn user_takes_notifications() -> windows::core::Result<bool> {
     Ok(takes_notifications(state))
 }
 
-/// Whether `state` has Windows letting notifications through: only
-/// `QUNS_ACCEPTS_NOTIFICATIONS` does, while a presentation, a full-screen app,
-/// a game, a locked screen, the first hour after signing in or upgrading and
-/// the rest hold them back. `QUNS_QUIET_TIME` is that first hour, not Do Not
-/// Disturb, which this state does not report.
+/// Whether `state` has Windows letting this app's own toasts show:
+/// `QUNS_ACCEPTS_NOTIFICATIONS`, `QUNS_BUSY` and `QUNS_APP` do, and so does
+/// `QUNS_RUNNING_D3D_FULL_SCREEN`, so the app's own toasts and their sound
+/// show over a full-screen app or game. A locked screen, presentation mode and
+/// quiet hours hold them back. `QUNS_BUSY` also covers Windows' presentation
+/// settings being applied, which this rule lets through with a full-screen
+/// app. `QUNS_QUIET_TIME` is that first hour after signing in or upgrading, not
+/// Do Not Disturb, which this state does not report.
 #[cfg(windows)]
 pub(crate) fn takes_notifications(
     state: windows::Win32::UI::Shell::QUERY_USER_NOTIFICATION_STATE,
 ) -> bool {
-    state == windows::Win32::UI::Shell::QUNS_ACCEPTS_NOTIFICATIONS
+    use windows::Win32::UI::Shell::{
+        QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    matches!(
+        state,
+        QUNS_ACCEPTS_NOTIFICATIONS | QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_APP
+    )
 }
 
 /// The shell's quiet-hours state, which Windows 11's Do Not Disturb sets: its
@@ -2239,25 +2250,31 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn only_accepts_notifications_takes_them() {
+    fn a_full_screen_app_or_game_takes_the_apps_own_toasts() {
         use windows::Win32::UI::Shell::{
-            QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY, QUNS_NOT_PRESENT,
-            QUNS_PRESENTATION_MODE, QUNS_QUIET_TIME, QUNS_RUNNING_D3D_FULL_SCREEN,
+            QUERY_USER_NOTIFICATION_STATE, QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY,
+            QUNS_NOT_PRESENT, QUNS_PRESENTATION_MODE, QUNS_QUIET_TIME,
+            QUNS_RUNNING_D3D_FULL_SCREEN,
         };
         for state in [
-            QUNS_NOT_PRESENT,
+            QUNS_ACCEPTS_NOTIFICATIONS,
             QUNS_BUSY,
             QUNS_RUNNING_D3D_FULL_SCREEN,
-            QUNS_PRESENTATION_MODE,
-            QUNS_QUIET_TIME,
             QUNS_APP,
         ] {
             assert!(
-                !takes_notifications(state),
-                "{state:?} holds notifications back"
+                takes_notifications(state),
+                "{state:?} lets the app's own toasts show"
             );
         }
-        assert!(takes_notifications(QUNS_ACCEPTS_NOTIFICATIONS));
+        for state in [
+            QUNS_NOT_PRESENT,
+            QUNS_PRESENTATION_MODE,
+            QUNS_QUIET_TIME,
+            QUERY_USER_NOTIFICATION_STATE(8),
+        ] {
+            assert!(!takes_notifications(state), "{state:?} holds them back");
+        }
     }
 
     #[cfg(windows)]
