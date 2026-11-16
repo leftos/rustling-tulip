@@ -116,7 +116,7 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(
         failed.hint.as_deref(),
         Some(
-            "methods: action, click, drag, find, key, move, pane_text, paste, ping, screenshot, \
+            "methods: action, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, \
              state, type_text, wait_for, wheel"
         )
     );

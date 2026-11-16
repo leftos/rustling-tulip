@@ -946,7 +946,7 @@ function Invoke-FullSuite {
     # The driver specs compile only with the off-by-default `driver` feature, which the workspace run leaves off.
     # A name filter in $Rest that matches no driver test leaves this call empty: not a failure.
     Invoke-FeatureTest -Name test-driver -Package 'rustling-tulip-native' -Features 'driver' `
-        -Filter 'test(/^driver::/) | test(/^ui_driver_registry::/)' -Extra @('--no-tests', 'warn')
+        -Filter 'test(/^driver::/) | test(/^ui_driver_registry::/) | test(/^ui_driver::/)' -Extra @('--no-tests', 'warn')
     $driverExit = $LASTEXITCODE
     # The phone app's checks come last, and all three steps run even when an earlier suite failed.
     # A test filter names exact tests, so a filtered run leaves the phone app's checks out.

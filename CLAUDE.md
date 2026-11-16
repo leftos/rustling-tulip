@@ -110,7 +110,7 @@ cargo deny check          # advisories, licenses, source allowlist (see deny.tom
 # and with incremental builds, so an edit rebuilds in seconds instead of minutes. --release is for shipping builds only.
 # nextest's own --profile picks a config profile, not the build profile: the build profile is --cargo-profile.
 cargo nextest run --workspace --cargo-profile test-release
-cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E 'test(/^driver::/) | test(/^ui_driver_registry::/)'   # the driver specs, which need the off-by-default driver feature; the full suite runs this after the workspace run
+cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E 'test(/^driver::/) | test(/^ui_driver_registry::/) | test(/^ui_driver::/)'   # the driver specs, which need the off-by-default driver feature; the full suite runs this after the workspace run
 cargo nextest run -p daemon --cargo-profile test-release <test_name>
 cargo nextest run -p protocol --cargo-profile test-release
 
