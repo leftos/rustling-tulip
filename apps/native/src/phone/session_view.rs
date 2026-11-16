@@ -13,6 +13,7 @@ use super::composer::{self, Dock};
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
+use super::long_press::long_press_drag_area;
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat_view::chat_available;
@@ -227,11 +228,37 @@ impl PhoneRoot {
         }
     }
 
+    /// The area over session `session_id`'s chat body that takes a long
+    /// press: the hold selects the word under the finger, and the held
+    /// finger's moves widen the selection.
+    fn chat_hold(&self, session_id: &str) -> impl IntoElement + use<> {
+        let (press_root, move_root) = (self.root.downgrade(), self.root.downgrade());
+        let (press_id, move_id) = (session_id.to_owned(), session_id.to_owned());
+        long_press_drag_area(
+            move |at, _, cx| {
+                // Fails only when the app's root is gone.
+                press_root
+                    .update(cx, |root, cx| root.phone_select_start(&press_id, at, cx))
+                    .ok();
+            },
+            move |at, _, cx| {
+                move_root
+                    .update(cx, |root, cx| root.phone_select_widen(&move_id, at, cx))
+                    .ok();
+            },
+        )
+    }
+
     /// While a session is shown: its page, the header over the body of the
     /// page it is on, with whether the on-screen keyboard is up for the
     /// composer's buttons and the chat's tap.
+    /// Off the Chat page, and with no session shown, the chat's texts from
+    /// its last frame are forgotten.
     pub(super) fn session_page(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Option<Div> {
-        let header = self.session_header(cx)?;
+        let Some(header) = self.session_header(cx) else {
+            self.root.read(cx).forget_phone_chat_text();
+            return None;
+        };
         let page = self.shown_page(header.chat_mirrored);
         let t = theme(cx);
         // `Show prompt` sits between the page's body and the composer.
@@ -242,9 +269,10 @@ impl PhoneRoot {
                 let on_tap = cx.listener(move |_, _: &MouseUpEvent, window, _| {
                     Self::chat_tapped(keyboard_up, window);
                 });
+                let hold = self.chat_hold(&id);
                 let chat = self
                     .root
-                    .update(cx, |root, cx| root.phone_chat_body(&id, on_tap, cx));
+                    .update(cx, |root, cx| root.phone_chat_body(&id, on_tap, hold, cx));
                 let composer = self.composer(&id, keyboard_up, cx);
                 div()
                     .driver_id(|| "phone-session-chat".to_owned())
@@ -257,6 +285,7 @@ impl PhoneRoot {
                     .children(composer)
             }
             Page::Terminal => {
+                self.root.read(cx).forget_phone_chat_text();
                 let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
                 self.terminal_page(&id, keyboard_up, cx)
             }

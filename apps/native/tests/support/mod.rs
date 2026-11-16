@@ -4281,6 +4281,23 @@ impl<'a> Harness<'a> {
         self.touch(TouchPhase::Ended, at);
     }
 
+    /// A finger held at window point `at` past the long-press time, then
+    /// lifted there.
+    pub fn long_press_at(&mut self, at: Point<Pixels>) {
+        self.touch(TouchPhase::Started, at);
+        self.advance(gpui::GestureTuning::default().long_press_duration + Duration::from_millis(1));
+        self.touch(TouchPhase::Ended, at);
+    }
+
+    /// A finger held at window point `from` past the long-press time, moved
+    /// while held to `to`, and lifted there.
+    pub fn long_press_drag(&mut self, from: Point<Pixels>, to: Point<Pixels>) {
+        self.touch(TouchPhase::Started, from);
+        self.advance(gpui::GestureTuning::default().long_press_duration + Duration::from_millis(1));
+        self.touch(TouchPhase::Moved, to);
+        self.touch(TouchPhase::Ended, to);
+    }
+
     /// Scrolls `container` until what `selector` tags lies inside its bounds,
     /// so a click can reach a row below the fold.
     pub fn scroll_into_view(&mut self, container: &str, selector: &str) {

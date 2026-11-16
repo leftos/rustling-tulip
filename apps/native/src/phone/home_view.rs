@@ -619,7 +619,7 @@ impl PhoneRoot {
         let session_id = row.session_id.clone();
         let phone = cx.weak_entity();
         let (press_host, press_id) = (row.host.clone(), row.session_id.clone());
-        let long_press = long_press_area(move |_, cx| {
+        let long_press = long_press_area(move |_, _, cx| {
             // Fails only when the phone's root is gone.
             phone
                 .update(cx, |this, cx| {

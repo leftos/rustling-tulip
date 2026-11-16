@@ -17,6 +17,7 @@ use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
     ComposerState, DaemonMessage, FEATURE_FILE_TAIL, SessionSnapshot, ToolKind, ToolOutcome,
+    WorkShell,
 };
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
@@ -2071,4 +2072,311 @@ fn the_selected_text_hook_copies_the_seeded_range(cx: &mut TestAppContext) {
     h.root_update(|root, _, cx| root.clear_phone_chat_selection("a", cx));
     assert!(painted_selection(&mut h).is_empty(), "a cleared selection");
     assert_eq!(h.root(|root, _| root.phone_chat_selected_text("a")), "");
+}
+
+// ── Selecting with a hold ──────────────────────────────────────────────────
+
+/// The first point, from the left edge of what `row` tags at its middle
+/// height, that the phone's chat maps to a byte in `bytes` of entry
+/// `entry`'s first unit.
+fn on_bytes(
+    h: &mut Harness<'_>,
+    row: &str,
+    entry: &str,
+    bytes: std::ops::Range<usize>,
+) -> Point<Pixels> {
+    let bounds = h.bounds(row);
+    let y = bounds.top() + bounds.size.height / 2.0;
+    let mut x = bounds.left();
+    let mut found = None;
+    while found.is_none() && x < bounds.right() {
+        let at = point(x, y);
+        if let Some((hit_entry, 0, byte)) = hit(h, at)
+            && hit_entry == entry
+            && bytes.contains(&byte)
+        {
+            found = Some(at);
+        }
+        x += px(1.0);
+    }
+    found.expect("the row draws those bytes")
+}
+
+/// The text session `a`'s phone chat selection copies.
+fn selected_text(h: &mut Harness<'_>) -> String {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.phone_chat_selected_text("a"))
+}
+
+#[gpui::test]
+fn a_long_press_on_chat_text_selects_the_word(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);
+    let at = on_bytes(&mut h, "chat-row-phone-a1", "a1", 7..10);
+
+    h.long_press_at(at);
+
+    assert_eq!(selected_text(&mut h), "bravo");
+    assert_eq!(
+        painted_selection(&mut h),
+        vec![("a1".to_owned(), 0, 6..11)],
+        "the word's bytes are drawn selected"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_on_a_cards_one_liner_selects_without_toggling_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![tailing_tool("t1")]);
+    let closed = h.bounds("chat-row-phone-t1");
+    // Its one-liner is "cargo build > build.log": over the "log".
+    let at = on_bytes(&mut h, "chat-row-phone-t1", "t1", 21..23);
+
+    h.long_press_at(at);
+
+    assert_eq!(selected_text(&mut h), "log");
+    assert_eq!(
+        h.bounds("chat-row-phone-t1"),
+        closed,
+        "the card stays closed"
+    );
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+    assert!(
+        h.bounds("chat-row-phone-t1").size.height > closed.size.height,
+        "where a tap opens it"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_on_a_button_selects_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_tailing(cx, &dir, vec![tailing_tool("t1")]);
+    assert!(drawn(&mut h, "chat-tail-t1-0"), "the card offers its file");
+    select(&mut h, "a", pos("t1", 0, 0), pos("t1", 0, 5));
+    assert_eq!(selected_text(&mut h), "cargo");
+
+    h.long_press_on("chat-tail-t1-0");
+
+    assert_eq!(
+        selected_text(&mut h),
+        "cargo",
+        "a hold on a button keeps the selection"
+    );
+    assert!(
+        !drawn(&mut h, "chat-tail-box-t1-0"),
+        "and does not press the button"
+    );
+    let card = h.bounds("chat-row-phone-t1");
+    let below = point(card.left() + px(20.0), card.bottom() + px(40.0));
+    assert!(
+        h.bounds("phone-chat").contains(&below),
+        "the chat has room below its rows"
+    );
+
+    h.long_press_at(below);
+
+    assert_eq!(
+        selected_text(&mut h),
+        "cargo",
+        "nor does a hold on the empty space below the rows"
+    );
+}
+
+#[gpui::test]
+fn a_tap_still_opens_a_stretch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![stretched("a1")]);
+    let links = stretch_links(&mut h);
+    let [(_, key)]: [(String, String); 1] = links
+        .clone()
+        .try_into()
+        .expect("the answer draws one closed stretch");
+    let answer = h.bounds("chat-row-phone-a1");
+    let at = point(
+        answer.origin.x + px(30.0),
+        answer.origin.y + answer.size.height / 2.0,
+    );
+
+    // The hold goes on a letter of the short form, right of the tap's point.
+    let drawn_text = h
+        .root(|root, _| root.chat_answer_text("a", "a1"))
+        .expect("the answer is drawn");
+    let mut on_letter = at;
+    while let Some((_, 0, byte)) = hit(&mut h, on_letter)
+        && !drawn_text[byte..].starts_with(char::is_alphabetic)
+        && on_letter.x < answer.right()
+    {
+        on_letter.x += px(1.0);
+    }
+
+    h.long_press_at(on_letter);
+
+    assert_eq!(stretch_links(&mut h), links, "a hold opens nothing");
+    let word = selected_text(&mut h);
+    assert!(
+        "tap here to open the long form and read it all"
+            .split(' ')
+            .any(|part| part == word),
+        "it selects a word of the short form, not {word:?}"
+    );
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        stretch_links(&mut h),
+        [("\u{2039}".to_owned(), key)],
+        "a tap after the hold still opens the stretch"
+    );
+}
+
+#[gpui::test]
+fn a_hold_drag_widens_the_selection_across_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let second = "delta echo foxtrot";
+    let entries = vec![answer_with("a1", "alpha bravo"), answer_with("a2", second)];
+    let mut h = chat_loaded(cx, &dir, entries);
+    let from = on_bytes(&mut h, "chat-row-phone-a1", "a1", 7..10);
+    let to = on_bytes(&mut h, "chat-row-phone-a2", "a2", 7..9);
+    let (_, _, byte) = hit(&mut h, to).expect("the finger ends on a2");
+
+    h.long_press_drag(from, to);
+
+    assert_eq!(
+        selected_text(&mut h),
+        format!("bravo\n\n{}", &second[..byte]),
+        "from the held word's start to the finger"
+    );
+}
+
+#[gpui::test]
+fn a_hold_dragged_back_keeps_the_first_word(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let text = "alpha bravo charlie";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", text)]);
+    let from = on_bytes(&mut h, "chat-row-phone-a1", "a1", 13..18);
+    let to = on_bytes(&mut h, "chat-row-phone-a1", "a1", 1..4);
+    let (_, _, byte) = hit(&mut h, to).expect("the finger ends on a1");
+
+    h.long_press_drag(from, to);
+
+    assert_eq!(
+        selected_text(&mut h),
+        &text[byte..],
+        "from the finger to the held word's end"
+    );
+}
+
+#[gpui::test]
+fn a_hold_with_a_small_move_keeps_the_word(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);
+    let at = on_bytes(&mut h, "chat-row-phone-a1", "a1", 7..10);
+
+    h.long_press_drag(at, point(at.x + px(2.0), at.y));
+
+    assert_eq!(
+        selected_text(&mut h),
+        "bravo",
+        "a move inside the held word keeps the whole word"
+    );
+}
+
+#[gpui::test]
+fn a_hold_beside_a_wrapped_line_selects_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // Long words, of uneven lengths, so the first line ends well short of
+    // the row's right edge.
+    let words: Vec<String> = ('a'..='t')
+        .zip([23, 31, 27, 35, 25].into_iter().cycle())
+        .map(|(letter, len)| letter.to_string().repeat(len))
+        .collect();
+    let text = words.join(" ");
+    let text = text.as_str();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", text)]);
+    let reply = h.bounds("chat-row-phone-a1");
+    let line = reply.top() + px(4.0);
+    let edge = reply.right() - px(1.0);
+    let (_, _, wrap) = hit(&mut h, point(edge, line)).expect("the first line is hit");
+    assert!(wrap > 0 && wrap < text.len(), "the answer wraps at {wrap}");
+    // Leftwards from the edge, the blank keeps the wrap's byte until the
+    // line's last glyph.
+    let mut x = edge;
+    while x > reply.left() && hit(&mut h, point(x, line)).is_some_and(|(_, _, byte)| byte == wrap) {
+        x -= px(1.0);
+    }
+    assert!(edge - x >= px(4.0), "the first line ends short of the edge");
+    let blank = point((x + edge) / 2.0, line);
+
+    h.long_press_at(blank);
+
+    assert_eq!(
+        selected_text(&mut h),
+        "",
+        "no glyph under the finger, no word"
+    );
+}
+
+#[gpui::test]
+fn a_hold_left_of_a_right_aligned_cell_selects_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let table = "| k | n |\n| --- | ---: |\n| a | 42 |\n";
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", table)]);
+    let (line, left, _) = second_cell(&mut h);
+
+    h.long_press_at(point(left + px(2.0), line));
+
+    assert_eq!(
+        selected_text(&mut h),
+        "",
+        "the cell's blank left part has no glyph"
+    );
+}
+
+#[gpui::test]
+fn a_hold_on_the_work_strip_shows_its_tooltip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    let counted = WorkShell {
+        id: String::new(),
+        description: String::new(),
+        command: None,
+        since: None,
+        from_screen: true,
+    };
+    h.host(&saved_remote()).send(DaemonMessage::ChatWork {
+        session_id: "a".to_owned(),
+        subagents: Vec::new(),
+        shells: vec![counted],
+        wakeup_at: None,
+    });
+    assert!(drawn(&mut h, "work-item-0"), "the strip shows the shell");
+    let tip = "tooltip=Counted from the screen; no details reported yet";
+    let at = h.center("work-item-0");
+
+    h.touch(TouchPhase::Started, at);
+    h.advance(
+        gpui::GestureTuning::default().long_press_duration + std::time::Duration::from_millis(1),
+    );
+
+    assert!(drawn(&mut h, tip), "the held segment shows its tooltip");
+    h.touch(TouchPhase::Ended, at);
+    assert_eq!(selected_text(&mut h), "", "and the chat selects nothing");
+}
+
+#[gpui::test]
+fn the_chat_registry_is_forgotten_off_the_chat_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1"), answer("a1")]);
+    let on_text = on_bytes(&mut h, "chat-row-phone-a1", "a1", 1..5);
+
+    h.click_on("phone-session-toggle");
+
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert_eq!(
+        hit(&mut h, on_text),
+        None,
+        "no text is hit once the chat is not drawn"
+    );
 }

@@ -192,6 +192,24 @@ impl Units {
             .position(|unit| unit.entry == pos.entry && unit.index == pos.unit)
     }
 
+    /// The word ([`word_at`]) of the unit `pos` names, around its byte, as
+    /// its (start, end) positions; `None` when no unit has `pos`, or the
+    /// byte is at the text's end or on white space.
+    pub(crate) fn word_around(&self, pos: &TextPos) -> Option<(TextPos, TextPos)> {
+        let text = &self.units.get(self.index_of(pos)?)?.text;
+        let word = word_at(text, pos.byte);
+        let blank = text.get(word.clone())?.chars().all(char::is_whitespace);
+        if blank {
+            return None;
+        }
+        let at = |byte| TextPos {
+            entry: pos.entry.clone(),
+            unit: pos.unit,
+            byte,
+        };
+        Some((at(word.start), at(word.end)))
+    }
+
     /// `pos` moved into the units the chat now holds: `None` when its entry
     /// has no units any more, a unit index past the entry's last unit moved
     /// to that unit's end, and a byte past the text's end or inside a
@@ -325,6 +343,26 @@ impl Selection {
     }
 }
 
+/// The selection a held finger at `focus` makes from `word`, the (start,
+/// end) of the word the hold picked: the word itself while the finger lies
+/// within it (its ends included) in the units' order (entry, unit, byte);
+/// anchored at the word's end while the finger lies before it, at its
+/// start while after it; `None` when any of them names no unit.
+pub(crate) fn widen(units: &Units, word: &(TextPos, TextPos), focus: TextPos) -> Option<Selection> {
+    let (start, end) = word;
+    let at = (units.index_of(&focus)?, focus.byte);
+    let from = (units.index_of(start)?, start.byte);
+    let to = (units.index_of(end)?, end.byte);
+    let (anchor, focus) = if at < from {
+        (end.clone(), focus)
+    } else if at <= to {
+        (start.clone(), end.clone())
+    } else {
+        (start.clone(), focus)
+    };
+    Some(Selection { anchor, focus })
+}
+
 /// The range of `text` a word covers at `byte`: the run of letters, digits
 /// and underscores the byte falls in, with a hyphen or apostrophe between
 /// two of them kept inside. A byte on such a joining hyphen or apostrophe
@@ -332,13 +370,6 @@ impl Selection {
 /// punctuation, or a hyphen or apostrophe with no word on one side) is that
 /// character alone. A byte at or past the text's end gives an empty range
 /// at the end. Both ends are character boundaries.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the phone Chat's long press reads the word under a byte"
-    )
-)]
 pub(crate) fn word_at(text: &str, byte: usize) -> Range<usize> {
     let len = text.len();
     if byte >= len {
@@ -938,5 +969,101 @@ mod tests {
         }
         assert_eq!(units.locate("u1", UnitSource::ToolInput), None);
         assert_eq!(units.locate("zz", UnitSource::User), None);
+    }
+
+    #[test]
+    fn word_around_picks_the_word_under_the_byte() {
+        let entries = [user("u1", "alpha bravo, charlie")];
+        let rows = single_rows(&entries);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        assert_eq!(
+            units.word_around(&pos("u1", 0, 8)),
+            Some((pos("u1", 0, 6), pos("u1", 0, 11)))
+        );
+        assert_eq!(
+            units.word_around(&pos("u1", 0, 11)),
+            Some((pos("u1", 0, 11), pos("u1", 0, 12))),
+            "punctuation is its own word"
+        );
+    }
+
+    #[test]
+    fn word_around_white_space_the_end_or_no_unit_is_none() {
+        let entries = [user("u1", "alpha  bravo")];
+        let rows = single_rows(&entries);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        assert_eq!(units.word_around(&pos("u1", 0, 5)), None, "a space");
+        assert_eq!(units.word_around(&pos("u1", 0, 12)), None, "the end");
+        assert_eq!(units.word_around(&pos("u1", 1, 0)), None, "no unit");
+        assert_eq!(units.word_around(&pos("zz", 0, 0)), None, "no entry");
+    }
+
+    /// Two users' texts, "alpha bravo charlie" and "delta echo", and the
+    /// word "bravo" of the first.
+    fn bravo() -> (Units, (TextPos, TextPos)) {
+        let entries = [user("u1", "alpha bravo charlie"), user("u2", "delta echo")];
+        let rows = single_rows(&entries);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        (units, (pos("u1", 0, 6), pos("u1", 0, 11)))
+    }
+
+    #[test]
+    fn widen_after_the_word_anchors_at_its_start() {
+        let (units, word) = bravo();
+        for focus in [pos("u1", 0, 15), pos("u2", 0, 3)] {
+            assert_eq!(
+                widen(&units, &word, focus.clone()),
+                Some(Selection {
+                    anchor: pos("u1", 0, 6),
+                    focus
+                })
+            );
+        }
+        assert_eq!(
+            widen(&units, &word, pos("u1", 0, 6)),
+            Some(Selection {
+                anchor: pos("u1", 0, 6),
+                focus: pos("u1", 0, 11)
+            }),
+            "at the word's start, the word"
+        );
+    }
+
+    #[test]
+    fn widen_inside_the_word_keeps_the_word() {
+        let (units, word) = bravo();
+        for focus in [pos("u1", 0, 8), pos("u1", 0, 11)] {
+            assert_eq!(
+                widen(&units, &word, focus),
+                Some(Selection {
+                    anchor: pos("u1", 0, 6),
+                    focus: pos("u1", 0, 11)
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn widen_before_the_word_anchors_at_its_end() {
+        let (units, word) = bravo();
+        let focus = pos("u1", 0, 2);
+        let selection = widen(&units, &word, focus.clone());
+        assert_eq!(
+            selection,
+            Some(Selection {
+                anchor: pos("u1", 0, 11),
+                focus
+            })
+        );
+        let copied = selection.map(|selection| selected_text(&units, &selection));
+        assert_eq!(copied.as_deref(), Some("pha bravo"));
+    }
+
+    #[test]
+    fn widen_to_no_unit_is_none() {
+        let (units, word) = bravo();
+        assert_eq!(widen(&units, &word, pos("zz", 0, 0)), None);
+        let gone = (pos("zz", 0, 0), pos("zz", 0, 1));
+        assert_eq!(widen(&units, &gone, pos("u1", 0, 0)), None);
     }
 }

@@ -180,6 +180,9 @@ pub(crate) struct SessionChat {
     send_error: Option<String>,
     /// The phone's selection of the chat's text; it goes with the chat.
     selection: Option<Selection>,
+    /// The (start, end) of the word the phone's latest hold picked, which
+    /// the held finger widens the selection from.
+    hold: Option<(TextPos, TextPos)>,
 }
 
 /// What one daemon refusal ended in a chat: the text of a send it refused
@@ -479,11 +482,37 @@ pub(crate) struct TextRegistry {
 }
 
 impl TextRegistry {
-    /// Forgets the last frame's texts, before a new frame registers its own.
-    fn clear(&mut self) {
+    /// Forgets the last frame's texts: before a new frame registers its
+    /// own, and while the phone draws no chat, so no hit reads stale ones.
+    fn forget(&mut self) {
         self.texts.clear();
         self.painted = false;
         self.painted_ranges.clear();
+    }
+
+    /// The first text whose bounds hold window point `at`, while it is
+    /// inside `viewport`; `None` before the frame has painted.
+    fn inside(&self, at: Point<Pixels>, viewport: Option<Bounds<Pixels>>) -> Option<&DrawnText> {
+        if !self.painted || !viewport.is_none_or(|view| view.contains(&at)) {
+            return None;
+        }
+        self.texts
+            .iter()
+            .find(|text| text.layout.bounds().contains(&at))
+    }
+
+    /// The (entry id, unit index, byte) of the glyph under window point
+    /// `at`, only when it is on a text inside `viewport` and on one of its
+    /// glyphs ([`glyph_at`]): not the nearest text, nor the blank beside a
+    /// line; `None` before the frame has painted. A hold starts here; the
+    /// held finger's moves read [`Self::hit`], which takes the nearest byte.
+    fn hit_inside(
+        &self,
+        at: Point<Pixels>,
+        viewport: Option<Bounds<Pixels>>,
+    ) -> Option<(String, u32, usize)> {
+        let text = self.inside(at, viewport)?;
+        Some((text.entry.clone(), text.unit, glyph_at(text, at)?))
     }
 
     /// The (entry id, unit index, byte) window point `at` falls on: the
@@ -500,12 +529,7 @@ impl TextRegistry {
         if !self.painted {
             return None;
         }
-        let in_view = viewport.is_none_or(|view| view.contains(&at));
-        let inside = self
-            .texts
-            .iter()
-            .find(|text| in_view && text.layout.bounds().contains(&at));
-        let text = match inside {
+        let text = match self.inside(at, viewport) {
             Some(text) => text,
             None => self.nearest(at)?,
         };
@@ -563,6 +587,22 @@ fn byte_at(text: &DrawnText, at: Point<Pixels>) -> usize {
         }
     };
     chat_select::char_floor(&drawn, byte)
+}
+
+/// The byte of the glyph of `text` under window point `at`, moved back to
+/// a character's start; `None` where the point is on no glyph: above or
+/// below the text's lines, or in the blank beside a line (the layout's
+/// position lookup answers `Err` there, which [`byte_at`] takes as the
+/// nearest byte).
+fn glyph_at(text: &DrawnText, at: Point<Pixels>) -> Option<usize> {
+    let layout = &text.layout;
+    let bounds = layout.bounds();
+    if at.y < bounds.top() || at.y > bounds.bottom() {
+        return None;
+    }
+    let shifted = point(at.x - align_shift(layout, text.align), at.y);
+    let index = layout.index_for_position(shifted).ok()?;
+    Some(chat_select::char_floor(&layout.text(), index))
 }
 
 /// How far right of its bounds' left edge a centred or right-aligned text
@@ -1457,12 +1497,89 @@ impl RootView {
     /// none before the chat's texts have been painted.
     #[must_use]
     pub fn phone_chat_hit(&self, point: Point<Pixels>) -> Option<(String, u32, usize)> {
-        let viewport = self
-            .chat
+        self.chat
+            .phone_text
+            .borrow()
+            .hit(point, self.phone_viewport())
+    }
+
+    /// The phone chat's scroll area, in window coordinates, once drawn.
+    fn phone_viewport(&self) -> Option<Bounds<Pixels>> {
+        self.chat
             .scrolls
             .get(PHONE_PANE)
-            .map(|scroll| scroll.handle().bounds());
-        self.chat.phone_text.borrow().hit(point, viewport)
+            .map(|scroll| scroll.handle().bounds())
+    }
+
+    /// The phone draws no chat now (another page, or no session): its last
+    /// frame's texts are forgotten, so no hit reads them.
+    pub(crate) fn forget_phone_chat_text(&self) {
+        self.chat.phone_text.borrow_mut().forget();
+    }
+
+    /// A hold at window point `point` on the phone's chat of session
+    /// `session_id`: on a selectable text the selection becomes the word
+    /// under the finger, which a held drag widens from; anywhere else (a
+    /// button, a muted row, white space, empty space, or before the chat
+    /// has painted) nothing is selected and the selection stays. Whether
+    /// the hold selected a word.
+    pub(crate) fn phone_select_start(
+        &mut self,
+        session_id: &str,
+        point: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let hit = self
+            .chat
+            .phone_text
+            .borrow()
+            .hit_inside(point, self.phone_viewport());
+        let word = self.chat.sessions.get(session_id).and_then(|chat| {
+            let (entry, unit, byte) = hit?;
+            phone_units(chat).word_around(&TextPos { entry, unit, byte })
+        });
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return false;
+        };
+        chat.hold.clone_from(&word);
+        let Some((start, end)) = word else {
+            return false;
+        };
+        chat.selection = Some(Selection {
+            anchor: start,
+            focus: end,
+        });
+        cx.notify();
+        true
+    }
+
+    /// The held finger of the hold that picked a word in session
+    /// `session_id`'s phone chat is at window point `point`: the selection
+    /// runs from that word to the text nearest the finger
+    /// ([`chat_select::widen`]).
+    pub(crate) fn phone_select_widen(
+        &mut self,
+        session_id: &str,
+        point: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let hit = self
+            .chat
+            .phone_text
+            .borrow()
+            .hit(point, self.phone_viewport());
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        let (Some(word), Some((entry, unit, byte))) = (chat.hold.as_ref(), hit) else {
+            return;
+        };
+        let focus = TextPos { entry, unit, byte };
+        let widened = chat_select::widen(&phone_units(chat), word, focus);
+        if widened.is_some() && widened != chat.selection {
+            chat.selection = widened;
+            cx.notify();
+        }
     }
 
     /// Spec hook: selects session `session_id`'s chat text from `anchor` to
@@ -2705,10 +2822,13 @@ impl RootView {
     /// runs. A release anywhere in it reaches `on_up` first, in the capture
     /// phase, before the row, link or button the tap hit acts, which is how
     /// the phone puts the keyboard away whatever a child does with the click.
+    /// `hold`, an area over the rows (not the strip), takes their long
+    /// presses.
     pub(crate) fn phone_chat_body(
         &self,
         session_id: &str,
         on_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+        hold: impl IntoElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let select = self.phone_select_draw(session_id, cx);
@@ -2738,7 +2858,19 @@ impl RootView {
             .min_h(px(0.0))
             .size_full()
             .capture_any_mouse_up(on_up)
-            .child(main)
+            .child(
+                // The hold covers the rows only: the strip below keeps its
+                // own long press, which shows a segment's tooltip.
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .child(main)
+                    .child(hold),
+            )
             .children(strip)
             .child(painted_mark(self.chat.phone_text.clone()))
             .into_any_element()
@@ -2749,7 +2881,7 @@ impl RootView {
     /// holds, in order; the registry is emptied first, for this frame's
     /// texts.
     fn phone_select_draw(&self, session_id: &str, cx: &App) -> Option<SelectDraw> {
-        self.chat.phone_text.borrow_mut().clear();
+        self.chat.phone_text.borrow_mut().forget();
         let chat = self.chat.sessions.get(session_id)?;
         let units = phone_units(chat);
         let selected = chat
