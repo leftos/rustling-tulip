@@ -6,15 +6,16 @@
 //! auto-switch state.
 //!
 //! The writes (`SwitchAccount`, `AddCurrentLogin`, `RemoveAccount`,
-//! `SetAccountAlias`, `SetAccountOrder`, `SetAutoSwitch`,
-//! `SetAutoSwitchRules`) each run on a task of their own, so a write never
-//! holds the connection's later messages, and call the service's seam method
-//! on a blocking thread; every one but the switch, `SetAutoSwitch` and
-//! `SetAutoSwitchRules` is local-only, refused before it gets here
-//! (`remote::host_only_refusal`). On a host with an account service,
-//! a `SetAutoSwitch` that sets neither field, and a `SetAutoSwitchRules` that
-//! sets no field, are refused `account_refused` before any seam call; a
-//! successful one wakes the engine task after its refresh.
+//! `SetAccountAlias`, `SetAccountMaySpendCredits`, `SetAccountOrder`,
+//! `SetAutoSwitch`, `SetAutoSwitchRules`) each run on a task of their own, so
+//! a write never holds the connection's later messages, and call the
+//! service's seam method on a blocking thread; every one but the switch,
+//! `SetAutoSwitch` and `SetAutoSwitchRules` is local-only, refused before it
+//! gets here (`remote::host_only_refusal`). On a host with an account
+//! service, a `SetAutoSwitch` that sets neither field, and a
+//! `SetAutoSwitchRules` that sets no field, are refused `account_refused`
+//! before any seam call; a successful one, like a successful
+//! `SetAccountMaySpendCredits`, wakes the engine task after its refresh.
 //! After the write returns,
 //! whether it succeeded or not, the handler asks the driver for a refresh
 //! and waits up to [`REFRESH_WAIT`] for it, so the driver stays the cache's
@@ -240,6 +241,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 service.set_alias(number, alias).map(|_| None)
             });
         }
+        m @ ClientMessage::SetAccountMaySpendCredits { .. } => may_spend_credits(hub, ctx, m),
         ClientMessage::SetAccountOrder { order, request_id } => {
             write(hub, ctx, request_id, "set order", move |service| {
                 service.set_order(order).map(|_| None)
@@ -276,6 +278,30 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             }
         }
         other => warn!(?other, "accounts::handle: routed a message it does not own"),
+    }
+}
+
+/// The `SetAccountMaySpendCredits` arm of [`handle`]: the write goes to the
+/// service's `set_may_spend_credits` and, once it succeeds, wakes the engine
+/// task after its refresh, since the opt-in steers its fallback to paid usage.
+fn may_spend_credits(hub: &Hub, ctx: &ConnCtx<'_>, msg: ClientMessage) {
+    match msg {
+        ClientMessage::SetAccountMaySpendCredits {
+            number,
+            enabled,
+            request_id,
+        } => write_then(
+            hub,
+            ctx,
+            request_id,
+            "set may spend credits",
+            AfterWrite::WakeEngine,
+            move |service| service.set_may_spend_credits(number, enabled).map(|_| None),
+        ),
+        other => warn!(
+            ?other,
+            "accounts::may_spend_credits: routed a message it does not own"
+        ),
     }
 }
 
@@ -395,7 +421,8 @@ fn write(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AfterWrite {
     Nothing,
-    /// Wakes the engine task, for a write to the auto-switch settings.
+    /// Wakes the engine task, for a write to the auto-switch settings or to an
+    /// account's credits opt-in.
     WakeEngine,
 }
 
@@ -626,12 +653,14 @@ pub(crate) mod fake {
             kind: AccountKindRow::Oauth,
             active,
             disabled: false,
+            may_spend_credits: false,
             usage: UsageRow {
                 status: UsageStatus::Ok,
                 five_hour: None,
                 seven_day: None,
                 model_limits: Vec::new(),
                 extra_usage: None,
+                prepaid: None,
                 fetched_at: None,
                 error: None,
             },
@@ -749,6 +778,24 @@ pub(crate) mod fake {
                     }
                 }
             })?;
+            Ok(true)
+        }
+
+        fn set_may_spend_credits(
+            &self,
+            number: u32,
+            enabled: bool,
+        ) -> Result<bool, AccountsFailure> {
+            self.write(
+                format!("may spend credits {number} {enabled}"),
+                |snapshot| {
+                    for row in &mut snapshot.accounts {
+                        if row.number == number {
+                            row.may_spend_credits = enabled;
+                        }
+                    }
+                },
+            )?;
             Ok(true)
         }
 
@@ -912,6 +959,7 @@ mod tests {
             kind: AccountKindRow::Oauth,
             active: number == 1,
             disabled: false,
+            may_spend_credits: false,
             usage: UsageRow {
                 status: UsageStatus::Ok,
                 five_hour: Some(UsageWindowRow {
@@ -921,6 +969,7 @@ mod tests {
                 seven_day: None,
                 model_limits: Vec::new(),
                 extra_usage: None,
+                prepaid: None,
                 fetched_at: None,
                 error: None,
             },
@@ -1044,6 +1093,9 @@ mod tests {
             user_disabled: false,
             spend_limit_reached: false,
             limit: Some(f64::NAN),
+            used: None,
+            currency: None,
+            resets_at: None,
         });
         hub.accounts = Some(shared(Ok(AccountsSnapshot {
             accounts: vec![odd],
@@ -1445,6 +1497,35 @@ mod tests {
         assert_eq!(answers[0], [1, 2, ADDED], "the added login is listed");
         assert_eq!(answers[1], [1, ADDED], "the removed account is gone");
         assert_eq!(answers[3], [ADDED, 1], "the new order");
+    }
+
+    #[tokio::test]
+    async fn set_account_may_spend_credits_reaches_the_service_and_wakes_the_engine() {
+        let service = Arc::new(Writable::two_accounts());
+        let (hub, _scratch) = write_hub("may-spend-credits", &service);
+        let handle = Arc::clone(hub.accounts.as_ref().expect("the hub has accounts"));
+
+        let reply = ask_as(
+            &hub,
+            ClientMessage::SetAccountMaySpendCredits {
+                number: 2,
+                enabled: true,
+                request_id: Some("c1".to_owned()),
+            },
+            &AuthKind::Local,
+        )
+        .await;
+
+        let accounts = accounts_of(reply, "c1");
+        let flags: Vec<(u32, bool)> = accounts
+            .iter()
+            .map(|account| (account.number, account.may_spend_credits))
+            .collect();
+        assert_eq!(flags, [(1, false), (2, true)]);
+        assert_eq!(service.calls(), ["may spend credits 2 true"]);
+        tokio::time::timeout(Duration::from_secs(5), handle.engine_wake.notified())
+            .await
+            .expect("the write woke the engine");
     }
 
     #[tokio::test]

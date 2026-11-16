@@ -1253,6 +1253,8 @@ mod tests {
             seven_day: Some(window(12.0, Some(now() + TimeDelta::days(2)))),
             model_limits: Vec::new(),
             extra_usage: None,
+            prepaid: None,
+            may_spend_credits: false,
             fetched_at: Some(now()),
             error: None,
         }

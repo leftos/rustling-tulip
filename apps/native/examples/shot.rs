@@ -3574,6 +3574,8 @@ fn shot_accounts(now: DateTime<Utc>, request_id: Option<String>) -> DaemonMessag
         seven_day: Some(window(seven, Some(60 * 45))),
         model_limits: Vec::new(),
         extra_usage: None,
+        prepaid: None,
+        may_spend_credits: false,
         fetched_at: Some(now - chrono::Duration::seconds(12)),
         error: None,
     };

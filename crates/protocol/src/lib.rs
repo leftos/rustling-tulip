@@ -99,6 +99,11 @@ pub const FEATURE_ACCOUNTS: &str = "accounts";
 /// accounts that a client may tell the user of, such as a switch.
 pub const FEATURE_ACCOUNT_EVENTS: &str = "account_events";
 
+/// `Welcome.features` entry: the host takes
+/// [`ClientMessage::SetAccountMaySpendCredits`] and sends
+/// `AccountSnapshot.prepaid` and `may_spend_credits`.
+pub const FEATURE_ACCOUNT_SPEND_CREDITS: &str = "account_spend_credits";
+
 /// `Welcome.features` entry: the daemon pushes [`DaemonMessage::GateState`]
 /// and answers [`ClientMessage::SetGateSlotCount`] and
 /// [`ClientMessage::GateHistory`]. A client shows the Gates view only when
@@ -3945,7 +3950,9 @@ pub struct AccountModelLimit {
 }
 
 /// An account's extra (paid) usage: whether it is on, whether the user turned
-/// it off, whether its spend limit is reached, and the limit when one is set.
+/// it off, whether its spend limit is reached, the monthly limit (`None` with
+/// extra usage on means uncapped), what this period spent, its currency and
+/// when the monthly spend resets. Amounts are in major currency units.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountExtraUsage {
     #[serde(default)]
@@ -3956,6 +3963,33 @@ pub struct AccountExtraUsage {
     pub spend_limit_reached: bool,
     #[serde(default)]
     pub limit: Option<f64>,
+    /// What this period spent, in major currency units.
+    #[serde(default)]
+    pub used: Option<f64>,
+    /// The spend's currency, such as `USD`.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// When the monthly spend resets.
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// An account's prepaid credit balance as last read: `amount_minor / 10^exponent` in `currency`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountPrepaid {
+    /// The balance in minor units, such as cents.
+    pub amount_minor: i64,
+    /// How many decimal places the minor unit is.
+    pub exponent: u32,
+    /// The balance's currency; `None` for an organization with no prepaid balance.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Whether the organization tops its balance up on its own; `None` when not known.
+    #[serde(default)]
+    pub auto_reload: Option<bool>,
+    /// When the balance was read.
+    #[serde(default)]
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// One account as the host knows it, for display. It never carries a token,
@@ -3984,6 +4018,13 @@ pub struct AccountSnapshot {
     pub model_limits: Vec<AccountModelLimit>,
     #[serde(default)]
     pub extra_usage: Option<AccountExtraUsage>,
+    /// The prepaid credit balance, once a read of it has succeeded.
+    #[serde(default)]
+    pub prepaid: Option<AccountPrepaid>,
+    /// The owner allows the auto-switch engine to spend this account's
+    /// prepaid credits when it falls back to paid usage.
+    #[serde(default)]
+    pub may_spend_credits: bool,
     /// When the usage shown was fetched.
     #[serde(default)]
     pub fetched_at: Option<DateTime<Utc>>,
@@ -6291,6 +6332,17 @@ pub enum ClientMessage {
         number: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Allow or forbid account `number` to spend its prepaid credits when the
+    /// auto-switch engine falls back to paid usage. Answered like
+    /// [`ClientMessage::SwitchAccount`]. Local only.
+    /// A tailnet connection is refused with `Error { code: local_only }`,
+    /// which does not echo `request_id`.
+    SetAccountMaySpendCredits {
+        number: u32,
+        enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -10186,6 +10238,15 @@ mod tests {
                 r#"{"type":"set_account_alias","number":1}"#,
             ),
             (
+                ClientMessage::SetAccountMaySpendCredits {
+                    number: 1,
+                    enabled: true,
+                    request_id: Some("r1".to_owned()),
+                },
+                r#"{"type":"set_account_may_spend_credits","number":1,"enabled":true,"request_id":"r1"}"#,
+                r#"{"type":"set_account_may_spend_credits","number":1,"enabled":false}"#,
+            ),
+            (
                 ClientMessage::SetAccountOrder {
                     order: vec![2, 1],
                     request_id: Some("r1".to_owned()),
@@ -10211,6 +10272,7 @@ mod tests {
                 | ClientMessage::AddCurrentLogin { request_id }
                 | ClientMessage::RemoveAccount { request_id, .. }
                 | ClientMessage::SetAccountAlias { request_id, .. }
+                | ClientMessage::SetAccountMaySpendCredits { request_id, .. }
                 | ClientMessage::SetAccountOrder { request_id, .. } => request_id.clone(),
                 other => panic!("not an account write: {other:?}"),
             };
@@ -10284,10 +10346,47 @@ mod tests {
                 user_disabled: false,
                 spend_limit_reached: false,
                 limit: Some(50.0),
+                used: Some(7.29),
+                currency: Some("USD".to_owned()),
+                resets_at: Some(at),
             }),
+            prepaid: Some(AccountPrepaid {
+                amount_minor: 102_003,
+                exponent: 2,
+                currency: Some("USD".to_owned()),
+                auto_reload: Some(false),
+                fetched_at: Some(at),
+            }),
+            may_spend_credits: true,
             fetched_at: Some(at),
             error: Some("http-429".to_owned()),
         }
+    }
+
+    #[test]
+    fn account_snapshot_carries_spend_prepaid_and_the_credits_opt_in() {
+        let sent = full_account_snapshot();
+        let json = serde_json::to_string(&sent).expect("serializes");
+        assert!(json.contains(r#""may_spend_credits":true"#), "{json}");
+        assert!(json.contains(r#""amount_minor":102003"#), "{json}");
+        let back: AccountSnapshot = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, sent);
+    }
+
+    #[test]
+    fn an_account_snapshot_without_spend_or_prepaid_decodes() {
+        let old: AccountSnapshot = serde_json::from_str(
+            r#"{"number":1,"email":"a@b.c","kind":"oauth","active":true,"disabled":false,"status":"ok","extra_usage":{"enabled":true,"limit":20.0}}"#,
+        )
+        .expect("a snapshot from before spend and prepaid decodes");
+        assert_eq!(old.prepaid, None);
+        assert!(!old.may_spend_credits);
+        let extra = old.extra_usage.expect("the extra usage stays");
+        assert!(extra.enabled);
+        assert_eq!(extra.limit, Some(20.0));
+        assert_eq!(extra.used, None);
+        assert_eq!(extra.currency, None);
+        assert_eq!(extra.resets_at, None);
     }
 
     fn full_auto_switch_state() -> AutoSwitchState {

@@ -297,6 +297,18 @@ pub trait AccountsService: Send + Sync {
         Err(AccountsFailure::unsupported())
     }
 
+    /// Allows (`enabled` true) or forbids account `number` to spend its
+    /// prepaid credits when the auto-switch engine falls back to paid usage.
+    /// Blocks.
+    ///
+    /// # Errors
+    ///
+    /// The account is unknown, or the write failed.
+    fn set_may_spend_credits(&self, number: u32, enabled: bool) -> Result<bool, AccountsFailure> {
+        let _ = (number, enabled);
+        Err(AccountsFailure::unsupported())
+    }
+
     /// Sets the rotation order to `order`, which names every account in it
     /// once. Blocks.
     ///
@@ -427,6 +439,9 @@ pub struct AccountRow {
     pub active: bool,
     /// Held out of automatic switching.
     pub disabled: bool,
+    /// The owner allows the auto-switch engine to spend this account's
+    /// prepaid credits when it falls back to paid usage.
+    pub may_spend_credits: bool,
     pub usage: UsageRow,
 }
 
@@ -459,13 +474,34 @@ pub struct ModelLimitRow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
-/// An account's extra (paid) usage.
+/// An account's extra (paid) usage. Amounts are in major currency units;
+/// `limit` is `None` when the spend is uncapped or the cap is not known.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtraUsageRow {
     pub enabled: bool,
     pub user_disabled: bool,
     pub spend_limit_reached: bool,
     pub limit: Option<f64>,
+    /// What this period spent.
+    pub used: Option<f64>,
+    /// The spend's currency, such as `USD`.
+    pub currency: Option<String>,
+    /// When the monthly spend resets.
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// An account's prepaid credit balance as last read:
+/// `amount_minor / 10^exponent` in `currency`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepaidRow {
+    pub amount_minor: i64,
+    pub exponent: u32,
+    pub currency: Option<String>,
+    /// Whether the organization tops its balance up on its own; `None` when
+    /// not known.
+    pub auto_reload: Option<bool>,
+    /// When the balance was read.
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// An account's usage as last read.
@@ -476,6 +512,8 @@ pub struct UsageRow {
     pub seven_day: Option<UsageWindowRow>,
     pub model_limits: Vec<ModelLimitRow>,
     pub extra_usage: Option<ExtraUsageRow>,
+    /// The prepaid credit balance, once a read of it has succeeded.
+    pub prepaid: Option<PrepaidRow>,
     /// When the usage shown was fetched.
     pub fetched_at: Option<DateTime<Utc>>,
     /// The last read's failure, such as `http-429`.

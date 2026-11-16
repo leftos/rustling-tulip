@@ -114,6 +114,13 @@ export const FEATURE_ACCOUNTS = "accounts";
 export const FEATURE_ACCOUNT_EVENTS = "account_events";
 
 /**
+ * `Welcome.features` entry: the host takes
+ * [`ClientMessage::SetAccountMaySpendCredits`] and sends
+ * `AccountSnapshot.prepaid` and `may_spend_credits`.
+ */
+export const FEATURE_ACCOUNT_SPEND_CREDITS = "account_spend_credits";
+
+/**
  * `Welcome.features` entry: the daemon pushes [`DaemonMessage::GateState`]
  * and answers [`ClientMessage::SetGateSlotCount`] and
  * [`ClientMessage::GateHistory`]. A client shows the Gates view only when
@@ -3018,13 +3025,35 @@ export interface AccountModelLimit {
 
 /**
  * An account's extra (paid) usage: whether it is on, whether the user turned
- * it off, whether its spend limit is reached, and the limit when one is set.
+ * it off, whether its spend limit is reached, the monthly limit (`None` with
+ * extra usage on means uncapped), what this period spent, its currency and
+ * when the monthly spend resets. Amounts are in major currency units.
  */
 export interface AccountExtraUsage {
   enabled?: boolean;
   user_disabled?: boolean;
   spend_limit_reached?: boolean;
   limit?: number | null;
+  /** What this period spent, in major currency units. */
+  used?: number | null;
+  /** The spend's currency, such as `USD`. */
+  currency?: string | null;
+  /** When the monthly spend resets. */
+  resets_at?: string | null;
+}
+
+/** An account's prepaid credit balance as last read: `amount_minor / 10^exponent` in `currency`. */
+export interface AccountPrepaid {
+  /** The balance in minor units, such as cents. */
+  amount_minor: number;
+  /** How many decimal places the minor unit is. */
+  exponent: number;
+  /** The balance's currency; `None` for an organization with no prepaid balance. */
+  currency?: string | null;
+  /** Whether the organization tops its balance up on its own; `None` when not known. */
+  auto_reload?: boolean | null;
+  /** When the balance was read. */
+  fetched_at?: string | null;
 }
 
 /**
@@ -3046,6 +3075,13 @@ export interface AccountSnapshot {
   seven_day?: AccountUsageWindow | null;
   model_limits?: AccountModelLimit[];
   extra_usage?: AccountExtraUsage | null;
+  /** The prepaid credit balance, once a read of it has succeeded. */
+  prepaid?: AccountPrepaid | null;
+  /**
+   * The owner allows the auto-switch engine to spend this account's
+   * prepaid credits when it falls back to paid usage.
+   */
+  may_spend_credits?: boolean;
   /** When the usage shown was fetched. */
   fetched_at?: string | null;
   /** The last poll's failure, such as `http-429`. */
@@ -4968,6 +5004,14 @@ export type ClientMessage =
    * which does not echo `request_id`.
    */
   | { type: "set_account_alias"; number: number; alias?: string | null; request_id?: string | null }
+  /**
+   * Allow or forbid account `number` to spend its prepaid credits when the
+   * auto-switch engine falls back to paid usage. Answered like
+   * [`ClientMessage::SwitchAccount`]. Local only.
+   * A tailnet connection is refused with `Error { code: local_only }`,
+   * which does not echo `request_id`.
+   */
+  | { type: "set_account_may_spend_credits"; number: number; enabled: boolean; request_id?: string | null }
   /**
    * Set the store's rotation order; `order` names every account once.
    * Answered like [`ClientMessage::SwitchAccount`]. Local only.

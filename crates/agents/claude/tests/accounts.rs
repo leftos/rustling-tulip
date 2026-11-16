@@ -782,6 +782,144 @@ fn accounts_service_snapshot_sends_model_limits_and_extra_usage() {
     assert_eq!(bob.usage.extra_usage, None);
 }
 
+#[cfg(accounts_locks)]
+#[test]
+fn accounts_service_snapshot_sends_spend_prepaid_and_the_credits_opt_in() {
+    let dir = scratch("accounts_service_snapshot_sends_spend_prepaid_and_the_credits_opt_in");
+    let root = dir.join("accounts");
+    std::fs::create_dir_all(root.join("cache")).expect("the store folders can be made");
+    let accounts = json!({
+        "schemaVersion": 1,
+        "nextNumber": 3,
+        "order": [1, 2],
+        "active": 1,
+        "accounts": {
+            "1": {
+                "email": "alice@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "added": "2026-09-01T10:00:00Z",
+                "maySpendCredits": true
+            },
+            "2": {
+                "email": "bob@example.com",
+                "uuid": "00000000-0000-4000-8000-000000000002",
+                "added": "2026-09-02T11:00:00Z"
+            }
+        }
+    });
+    std::fs::write(root.join("accounts.json"), accounts.to_string())
+        .expect("accounts.json can be written");
+    let usage = json!({
+        "schemaVersion": 3,
+        "accounts": {
+            "1": {
+                "email": "alice@example.com",
+                "lastGood": {
+                    "seven_day": {"pct": 10.0},
+                    "extra_usage": {"enabled": true},
+                    "spend": {
+                        "used": 729.0,
+                        "limit": 5000.0,
+                        "pct": 14.58,
+                        "currency": "USD",
+                        "resets_at": "2026-10-01T00:00:00Z"
+                    }
+                },
+                "fetchedAt": 1_793_000_000,
+                "prepaid": {
+                    "amountMinor": 102_003,
+                    "exponent": 2,
+                    "currency": "USD",
+                    "autoReload": false,
+                    "fetchedAt": 1_793_000_100
+                }
+            },
+            "2": {
+                "email": "bob@example.com",
+                "lastGood": {"five_hour": {"pct": 1.0}},
+                "fetchedAt": 1_793_000_000
+            }
+        }
+    });
+    std::fs::write(root.join("cache").join("usage.json"), usage.to_string())
+        .expect("usage.json can be written");
+
+    let snapshot = service(root).snapshot().expect("the store reads");
+
+    let (alice, bob) = (&snapshot.accounts[0], &snapshot.accounts[1]);
+    assert_eq!((alice.number, bob.number), (1, 2));
+    assert!(alice.may_spend_credits);
+    let extra = alice
+        .usage
+        .extra_usage
+        .as_ref()
+        .expect("the extra-usage block");
+    assert!(extra.enabled);
+    assert!(
+        (extra.used.expect("the spend") - 729.0).abs() < 1e-9,
+        "{:?}",
+        extra.used
+    );
+    assert!(
+        (extra.limit.expect("the cap") - 5000.0).abs() < 1e-9,
+        "{:?}",
+        extra.limit
+    );
+    assert_eq!(extra.currency.as_deref(), Some("USD"));
+    assert_eq!(
+        extra.resets_at.map(|at| at.to_rfc3339()),
+        Some("2026-10-01T00:00:00+00:00".to_owned())
+    );
+    let prepaid = alice.usage.prepaid.as_ref().expect("the prepaid balance");
+    assert_eq!(prepaid.amount_minor, 102_003);
+    assert_eq!(prepaid.exponent, 2);
+    assert_eq!(prepaid.currency.as_deref(), Some("USD"));
+    assert_eq!(prepaid.auto_reload, Some(false));
+    assert_eq!(
+        prepaid.fetched_at.map(|at| at.timestamp()),
+        Some(1_793_000_100)
+    );
+    assert!(!bob.may_spend_credits);
+    assert_eq!(bob.usage.prepaid, None);
+}
+
+#[cfg(accounts_locks)]
+#[test]
+fn set_may_spend_credits_turns_the_opt_in_on_and_off() {
+    let dir = scratch("set_may_spend_credits_turns_the_opt_in_on_and_off");
+    let service = two_accounts(&dir);
+    let flags = |service: &Arc<dyn AccountsService>| -> Vec<bool> {
+        service
+            .snapshot()
+            .expect("the store reads")
+            .accounts
+            .iter()
+            .map(|row| row.may_spend_credits)
+            .collect()
+    };
+
+    let changed = service
+        .set_may_spend_credits(1, true)
+        .expect("the opt-in is set");
+    assert!(changed);
+    assert_eq!(flags(&service), [true, false]);
+
+    let changed = service
+        .set_may_spend_credits(1, false)
+        .expect("the opt-in is cleared");
+    assert!(changed);
+    assert_eq!(flags(&service), [false, false]);
+
+    let failure = service
+        .set_may_spend_credits(7, true)
+        .expect_err("no account has number 7");
+    assert_eq!(
+        failure.kind,
+        AccountsFailureKind::UnknownAccount,
+        "{failure:?}"
+    );
+}
+
 /// A store at `dir/accounts` holding OAuth accounts `numbers` (account `n`
 /// is `user<n>@example.com`), in rotation `order`, with `active` in use and
 /// `rows` as its usage table's rows.

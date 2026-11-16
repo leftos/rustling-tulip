@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Duration;
 
 use self::history::UsageHistory;
-use agent_api::accounts::{AccountEventRow, EngineTick};
+use agent_api::accounts::{AccountEventRow, EngineTick, PrepaidRow};
 use agent_api::{
     AccountKindRow, AccountRef, AccountRow, AccountsConfig, AccountsError, AccountsFailure,
     AccountsFailureKind, AccountsService, AccountsSnapshot, AutoState, AutoSwitchRules,
@@ -34,13 +34,13 @@ use claude_accounts::pace::{
 use claude_accounts::{
     AccessToken, AccountKind, AccountLock, AccountRecord, AccountsRoot, AutoSwitchSection,
     AutoswitchState, CaptureError, CaptureKind, ClaudePaths, Drain, FetchScope, Identity,
-    LockError, LockTiming, PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, ProbeVerdicts,
-    ProfileTransport, RateWindow, RawProfile, RawToken, RawUsage, RefreshContext, RefreshRequest,
-    RefreshTransport, Secret, Settings, SettingsError, Store, StoreError, StoreErrorKind,
-    StrategyName, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome, SwitchPrecondition,
-    TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL, UsageEntry, UsageTable,
-    UsageTransport, UsageWindow, capture_live_login, delete_live_keychain_item, poll_with_refresh,
-    probe_outgoing,
+    LockError, LockTiming, PROFILE_TIMEOUT, PROFILE_URL, PROFILE_USER_AGENT, PrepaidEntry,
+    ProbeVerdicts, ProfileTransport, RateWindow, RawProfile, RawToken, RawUsage, RefreshContext,
+    RefreshRequest, RefreshTransport, Secret, Settings, SettingsError, Store, StoreError,
+    StoreErrorKind, StrategyName, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
+    SwitchPrecondition, TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL,
+    UsageEntry, UsageTable, UsageTransport, UsageWindow, capture_live_login,
+    delete_live_keychain_item, poll_with_refresh, probe_outgoing,
 };
 use directories::UserDirs;
 use protocol::AutoSwitchStrategy;
@@ -562,6 +562,19 @@ impl AccountsService for ClaudeAccounts {
         };
         store
             .set_alias(&lock, number, alias.as_deref())
+            .map_err(|error| store_failure(&error))
+    }
+
+    /// As [`AccountsService::set_alias`]: the account lock, then a drain
+    /// guard held across the write.
+    fn set_may_spend_credits(&self, number: u32, enabled: bool) -> Result<bool, AccountsFailure> {
+        let store = self.store().map_err(|error| store_failure(&error))?;
+        let lock = AccountLock::acquire(store.root()).map_err(|error| lock_failure(&error))?;
+        let Ok(_work) = self.drain.begin() else {
+            return Err(draining());
+        };
+        store
+            .set_may_spend_credits(&lock, number, enabled)
             .map_err(|error| store_failure(&error))
     }
 
@@ -1579,12 +1592,14 @@ fn account_row(record: AccountRecord, active: Option<u32>, entry: &UsageEntry) -
         kind,
         active: active == Some(record.number),
         disabled: record.disabled,
+        may_spend_credits: record.may_spend_credits,
         usage: UsageRow {
             status,
             five_hour: entry.five_hour.as_ref().map(window_row),
             seven_day: entry.seven_day.as_ref().map(window_row),
             model_limits: model_limit_rows(entry.last_good.as_ref()),
             extra_usage: extra_usage_row(entry.last_good.as_ref()),
+            prepaid: entry.prepaid.as_ref().and_then(prepaid_row),
             fetched_at: entry
                 .fetched_at
                 .and_then(|at| chrono_time(at.as_nanosecond())),
@@ -1614,7 +1629,8 @@ fn model_limit_rows(last_good: Option<&Value>) -> Vec<ModelLimitRow> {
         .collect()
 }
 
-/// The extra-usage switches of a reading, with the spend's cap when it holds one.
+/// The extra-usage switches of a reading, with the spend's used amount, cap,
+/// currency and reset when it holds them.
 fn extra_usage_row(last_good: Option<&Value>) -> Option<ExtraUsageRow> {
     let Value::Object(reading) = last_good? else {
         return None;
@@ -1623,14 +1639,32 @@ fn extra_usage_row(last_good: Option<&Value>) -> Option<ExtraUsageRow> {
         return None;
     };
     let flag = |key: &str| extra.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let spend = |key: &str| reading.get("spend").and_then(|spend| spend.get(key));
     Some(ExtraUsageRow {
         enabled: flag("enabled"),
         user_disabled: flag("user_disabled"),
         spend_limit_reached: flag("spend_limit_reached"),
-        limit: reading
-            .get("spend")
-            .and_then(|spend| spend.get("limit"))
-            .and_then(Value::as_f64),
+        limit: spend("limit").and_then(Value::as_f64),
+        used: spend("used").and_then(Value::as_f64),
+        currency: spend("currency").and_then(Value::as_str).map(str::to_owned),
+        resets_at: spend("resets_at")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .and_then(|at| chrono_time(at.as_nanosecond())),
+    })
+}
+
+/// The prepaid balance of a usage row, once a read of it has succeeded: both
+/// its amount and its exponent are known.
+fn prepaid_row(prepaid: &PrepaidEntry) -> Option<PrepaidRow> {
+    Some(PrepaidRow {
+        amount_minor: prepaid.amount_minor?,
+        exponent: prepaid.exponent?,
+        currency: prepaid.currency.clone(),
+        auto_reload: prepaid.auto_reload,
+        fetched_at: prepaid
+            .fetched_at
+            .and_then(|at| chrono_time(at.as_nanosecond())),
     })
 }
 

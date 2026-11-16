@@ -1,17 +1,18 @@
 //! The accounts snapshot on the wire. Every number the wire carries is
 //! finite: serde writes a NaN or an infinity as `null`, which the client
 //! cannot decode, so the whole frame would be lost. A window or a per-model
-//! limit whose percentage is not finite is left out, an extra-usage limit
-//! that is not finite is `None`, and an auto-switch state whose threshold or
-//! hysteresis is not finite is dropped; so is a fleet verdict whose
-//! remaining allowance or rate is not finite, while its state stays.
+//! limit whose percentage is not finite is left out, an extra-usage limit or
+//! spent amount that is not finite is `None`, and an auto-switch state whose
+//! threshold or hysteresis is not finite is dropped; so is a fleet verdict
+//! whose remaining allowance or rate is not finite, while its state stays.
+use agent_api::accounts::PrepaidRow;
 use agent_api::{
     AccountKindRow, AccountRow, AccountsSnapshot, AutoState, ExtraUsageRow, FleetRow,
     FleetWindowRow, ModelLimitRow, UsageStatus, UsageWindowRow,
 };
 use protocol::{
-    AccountExtraUsage, AccountKind, AccountModelLimit, AccountSnapshot, AccountUsageStatus,
-    AccountUsageWindow, AutoSwitchState, FleetVerdict, FleetWindow,
+    AccountExtraUsage, AccountKind, AccountModelLimit, AccountPrepaid, AccountSnapshot,
+    AccountUsageStatus, AccountUsageWindow, AutoSwitchState, FleetVerdict, FleetWindow,
 };
 
 /// A snapshot as the wire carries it: what `Accounts` and `AccountsUpdated`
@@ -36,7 +37,8 @@ fn finite(value: f64) -> Option<f64> {
 }
 
 /// `row` on the wire. A window or a per-model limit whose percentage is not
-/// finite is left out, and an extra-usage limit that is not finite is `None`.
+/// finite is left out, and an extra-usage limit or spent amount that is not
+/// finite is `None`.
 pub(crate) fn account_snapshot(row: &AccountRow) -> AccountSnapshot {
     let usage = &row.usage;
     AccountSnapshot {
@@ -55,6 +57,8 @@ pub(crate) fn account_snapshot(row: &AccountRow) -> AccountSnapshot {
         seven_day: usage.seven_day.as_ref().and_then(usage_window),
         model_limits: usage.model_limits.iter().filter_map(model_limit).collect(),
         extra_usage: usage.extra_usage.as_ref().map(extra_usage),
+        prepaid: usage.prepaid.as_ref().map(prepaid),
+        may_spend_credits: row.may_spend_credits,
         fetched_at: usage.fetched_at,
         error: usage.error.clone(),
     }
@@ -94,6 +98,19 @@ fn extra_usage(extra: &ExtraUsageRow) -> AccountExtraUsage {
         user_disabled: extra.user_disabled,
         spend_limit_reached: extra.spend_limit_reached,
         limit: extra.limit.and_then(finite),
+        used: extra.used.and_then(finite),
+        currency: extra.currency.clone(),
+        resets_at: extra.resets_at,
+    }
+}
+
+fn prepaid(prepaid: &PrepaidRow) -> AccountPrepaid {
+    AccountPrepaid {
+        amount_minor: prepaid.amount_minor,
+        exponent: prepaid.exponent,
+        currency: prepaid.currency.clone(),
+        auto_reload: prepaid.auto_reload,
+        fetched_at: prepaid.fetched_at,
     }
 }
 
@@ -178,6 +195,7 @@ pub(crate) mod test_support {
             kind: AccountKindRow::Oauth,
             active: number == 1,
             disabled: false,
+            may_spend_credits: false,
             usage: UsageRow {
                 status: UsageStatus::Ok,
                 five_hour: Some(UsageWindowRow {
@@ -187,6 +205,7 @@ pub(crate) mod test_support {
                 seven_day: None,
                 model_limits: Vec::new(),
                 extra_usage: None,
+                prepaid: None,
                 fetched_at: None,
                 error: None,
             },
@@ -216,7 +235,7 @@ pub(crate) mod test_support {
     reason = "a test fails with the message of the precondition it lost"
 )]
 mod tests {
-    use super::test_support::{auto, fleet, row};
+    use super::test_support::{at, auto, fleet, row};
     use super::*;
     use protocol::FleetWindow;
 
@@ -278,6 +297,9 @@ mod tests {
                 user_disabled: false,
                 spend_limit_reached: true,
                 limit: Some(value),
+                used: None,
+                currency: None,
+                resets_at: None,
             });
 
             let account = account_snapshot(&odd);
@@ -285,6 +307,73 @@ mod tests {
             let extra = account.extra_usage.expect("the extra usage stays");
             assert!(extra.enabled && extra.spend_limit_reached, "{value}");
             assert_eq!(extra.limit, None, "{value}");
+        }
+    }
+
+    #[test]
+    fn spend_prepaid_and_the_credits_opt_in_map_onto_the_wire() {
+        let mut full = row(1, 10.0);
+        full.may_spend_credits = true;
+        full.usage.extra_usage = Some(ExtraUsageRow {
+            enabled: true,
+            user_disabled: false,
+            spend_limit_reached: false,
+            limit: Some(5000.0),
+            used: Some(729.0),
+            currency: Some("USD".to_owned()),
+            resets_at: Some(at()),
+        });
+        full.usage.prepaid = Some(PrepaidRow {
+            amount_minor: 102_003,
+            exponent: 2,
+            currency: Some("USD".to_owned()),
+            auto_reload: Some(false),
+            fetched_at: Some(at()),
+        });
+
+        let account = account_snapshot(&full);
+
+        assert!(account.may_spend_credits);
+        let extra = account.extra_usage.expect("the extra usage is carried");
+        assert_eq!(extra.limit, Some(5000.0));
+        assert_eq!(extra.used, Some(729.0));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.resets_at, Some(at()));
+        assert_eq!(
+            account.prepaid,
+            Some(AccountPrepaid {
+                amount_minor: 102_003,
+                exponent: 2,
+                currency: Some("USD".to_owned()),
+                auto_reload: Some(false),
+                fetched_at: Some(at()),
+            })
+        );
+        let bare = account_snapshot(&row(2, 10.0));
+        assert!(!bare.may_spend_credits);
+        assert_eq!(bare.prepaid, None);
+    }
+
+    #[test]
+    fn a_non_finite_extra_used_is_none() {
+        for value in NON_FINITE {
+            let mut odd = row(1, 10.0);
+            odd.usage.extra_usage = Some(ExtraUsageRow {
+                enabled: true,
+                user_disabled: false,
+                spend_limit_reached: false,
+                limit: Some(20.0),
+                used: Some(value),
+                currency: None,
+                resets_at: None,
+            });
+
+            let account = account_snapshot(&odd);
+
+            let extra = account.extra_usage.expect("the extra usage stays");
+            assert_eq!(extra.used, None, "{value}");
+            assert_eq!(extra.limit, Some(20.0), "{value}");
+            serde_json::to_string(&extra).expect("every number left is finite");
         }
     }
 

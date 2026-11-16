@@ -46,8 +46,8 @@ pub(crate) struct Accounts {
     /// Interest in the accounts: wakes a driver parked because the store
     /// held no account.
     pub(crate) wake: Notify,
-    /// A change to the auto-switch settings: wakes the engine task for a
-    /// tick now. A wake while a tick runs is kept for after it.
+    /// A change to the auto-switch settings or to an account's credits
+    /// opt-in: wakes the engine task for a tick now. A wake while a tick runs is kept for after it.
     pub(crate) engine_wake: Notify,
     /// The driver's task, once started; taken by [`Accounts::join_driver`].
     driver: Mutex<Option<JoinHandle<()>>>,

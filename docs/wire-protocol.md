@@ -63,13 +63,17 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   A daemon lists `accounts` in `Welcome.features` only when it holds an accounts service: on 64-bit Windows and macOS, where the Claude plugin's account locks work, and not on Linux, 32-bit Windows or in an elevated daemon. A client hides its accounts surfaces when the feature is absent. `AccountsUpdated { accounts, auto }` (`accounts_updated`) is broadcast to every connected client when a poll finishes, or a write's refresh finishes, and the mapped snapshot differs from the cached one (the first successful poll always broadcasts); `ListAccounts` answers from that cache. A connection whose state stream lagged also gets `AccountsUpdated` from the cached snapshot, and nothing before the first poll.
 
-  The account writes are `SwitchAccount { number, request_id? }` (any origin) and, local origin only, `AddCurrentLogin { request_id? }`, `RemoveAccount { number, request_id? }`, `SetAccountAlias { number, alias?, request_id? }` and `SetAccountOrder { order, request_id? }`.
+  The account writes are `SwitchAccount { number, request_id? }` (any origin) and, local origin only, `AddCurrentLogin { request_id? }`, `RemoveAccount { number, request_id? }`, `SetAccountAlias { number, alias?, request_id? }`, `SetAccountOrder { order, request_id? }` and `SetAccountMaySpendCredits { number, enabled, request_id? }`.
+
+  `SetAccountMaySpendCredits { number, enabled, request_id? }` (`set_account_may_spend_credits`, local origin only) allows or forbids account `number` to spend its prepaid credits when auto-switch falls back to paid usage. It is answered like `SwitchAccount`, and a write that succeeds wakes the auto-switch engine. A tailnet connection is answered `Error { code: "local_only", message: "account administration is local-only" }` with no `request_id`.
+
+  Each `accounts` row carries `may_spend_credits` (`bool`, `false` when absent, the account record's `maySpendCredits`) and `prepaid { amount_minor, exponent, currency?, auto_reload?, fetched_at? }`, present only once a balance read has succeeded; the balance is `amount_minor / 10^exponent` in `currency`. `extra_usage` also carries `used`, `currency` and `resets_at`, in major currency units, and a `limit` of `null` with extra usage on means uncapped; the daemon drops a `used` that is not finite. A daemon lists `account_spend_credits` in `Welcome.features`, right after `account_events`, whenever it holds an accounts service; a client hides the opt-in when it is absent.
 
   A write that succeeds is answered to the requester with `Accounts { accounts, auto, request_id }` after the driver re-reads the store (it waits up to 10 s, then answers from the cache), and other connections get `AccountsUpdated` only when the snapshot changed.
 
   A write that fails is answered with `Error { code, message, request_id }`, the code one of `account_busy`, `account_draining`, `account_unknown`, `account_refused`, `account_unsupported` or `account_failed`; a host with no account service answers every write `account_unsupported`.
 
-  A tailnet connection that sends one of the four admin messages, or one of the two login messages below, gets `Error { code: "local_only" }` with no `request_id`. Remove refuses the active account and the live login.
+  A tailnet connection that sends one of the admin messages (`SetAccountMaySpendCredits` included), or one of the login messages below, gets `Error { code: "local_only" }` with no `request_id`. Remove refuses the active account and the live login.
 
   The daemon-driven login is `StartAccountLogin { request_id? }` and `CancelAccountLogin { request_id? }`, both local origin only, and it answers with `AccountLogin { state, session_id?, message?, request_id? }` (`account_login`). `state` is `started`, `succeeded`, `failed` or `cancelled`, and a value the client does not know decodes as `Unknown`.
 

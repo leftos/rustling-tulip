@@ -517,6 +517,7 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         ClientMessage::AddCurrentLogin { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::SetAccountAlias { .. }
+        | ClientMessage::SetAccountMaySpendCredits { .. }
         | ClientMessage::SetAccountOrder { .. }
         | ClientMessage::StartAccountLogin { .. }
         | ClientMessage::CancelAccountLogin { .. } => Some("account administration is local-only"),
@@ -694,6 +695,11 @@ mod tests {
             ClientMessage::SetAccountOrder {
                 order: vec![2, 1],
                 request_id: Some("a4".to_owned()),
+            },
+            ClientMessage::SetAccountMaySpendCredits {
+                number: 1,
+                enabled: true,
+                request_id: Some("a5".to_owned()),
             },
         ];
         for msg in admin {

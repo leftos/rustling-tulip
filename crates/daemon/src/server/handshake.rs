@@ -321,10 +321,11 @@ struct HeldServices {
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
 /// version this daemon speaks, [`DAEMON_FEATURES`], this daemon's stable id
 /// and the connection's `origin`, which only the accepting listener decides.
-/// `accounts` appends `protocol::FEATURE_ACCOUNTS` and
-/// `protocol::FEATURE_ACCOUNT_EVENTS`, in that order, after those entries:
-/// the hub holds an accounts service only where the agent's account store
-/// works, and a daemon without one lists neither. `gate_state` then appends
+/// `accounts` appends `protocol::FEATURE_ACCOUNTS`,
+/// `protocol::FEATURE_ACCOUNT_EVENTS` and
+/// `protocol::FEATURE_ACCOUNT_SPEND_CREDITS`, in that order, after those
+/// entries: the hub holds an accounts service only where the agent's account
+/// store works, and a daemon without one lists none of them. `gate_state` then appends
 /// `protocol::FEATURE_GATE_STATE`: the hub holds a gate state only where the
 /// gate's live inputs are read (64-bit Windows). `dispatch_runs` then appends
 /// `protocol::FEATURE_DISPATCH_RUNS`: the hub holds dispatch runs only where
@@ -344,6 +345,7 @@ fn welcome_message(
     if held.accounts {
         features.push(protocol::FEATURE_ACCOUNTS.to_owned());
         features.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
+        features.push(protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned());
     }
     if held.gate_state {
         features.push(protocol::FEATURE_GATE_STATE.to_owned());
@@ -809,6 +811,7 @@ mod tests {
             .collect();
         expected.push(protocol::FEATURE_ACCOUNTS.to_owned());
         expected.push(protocol::FEATURE_ACCOUNT_EVENTS.to_owned());
+        expected.push(protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned());
         assert!(
             matches!(
                 &welcome,
@@ -1518,6 +1521,7 @@ mod tests {
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_ACCOUNTS)
                         && features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_EVENTS)
+                        && features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_SPEND_CREDITS)
             ),
             "{welcome:?}"
         );
@@ -1537,6 +1541,7 @@ mod tests {
                 DaemonMessage::Welcome { features, .. }
                     if !features.iter().any(|f| f == protocol::FEATURE_ACCOUNTS)
                         && !features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_EVENTS)
+                        && !features.iter().any(|f| f == protocol::FEATURE_ACCOUNT_SPEND_CREDITS)
                         && DAEMON_FEATURES.iter().all(|f| features.iter().any(|seen| seen == f))
             ),
             "{welcome:?}"

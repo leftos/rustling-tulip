@@ -273,7 +273,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   `CLAUDE_SECURESTORAGE_CONFIG_DIR` set makes the crate refuse to refresh, and an `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's environment overrides the credential file for every session it spawns; the daemon shows either as the reason switching has no effect.
 
-  Paid fallback and prepaid balances are not surfaced.
+  The prepaid balance, the extra-usage spend and each account's credits opt-in (`maySpendCredits`) are on the wire, and a local client sets the opt-in; the paid fallback's own state and events are not surfaced (RT-1835).
 
   The crate (`crates/agents/claude/accounts/`, `publish = false`; its README.md holds its behaviour) is reached only through the Claude plugin, since app code never names an agent. The daemon's `accounts/snapshot.rs` maps the plugin's `agent_api` rows to protocol rows, so the daemon never names the crate's types.
 

@@ -961,6 +961,8 @@ pub fn account(number: u32, alias: &str) -> AccountBuilder {
         }),
         model_limits: Vec::new(),
         extra_usage: None,
+        prepaid: None,
+        may_spend_credits: false,
         fetched_at: Some(now),
         error: None,
     })

@@ -1724,6 +1724,8 @@ mod tests {
             seven_day: None,
             model_limits: Vec::new(),
             extra_usage: None,
+            prepaid: None,
+            may_spend_credits: false,
             fetched_at: None,
             error: None,
         }

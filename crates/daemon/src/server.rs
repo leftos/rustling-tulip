@@ -987,6 +987,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::AddCurrentLogin { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::SetAccountAlias { .. }
+        | ClientMessage::SetAccountMaySpendCredits { .. }
         | ClientMessage::SetAccountOrder { .. }
         | ClientMessage::SetAutoSwitch { .. }
         | ClientMessage::SetAutoSwitchRules { .. }
