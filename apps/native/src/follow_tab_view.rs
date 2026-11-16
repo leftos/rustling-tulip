@@ -379,7 +379,9 @@ impl RootView {
     /// muted colour, and its host's name when that is not This PC.
     fn follow_header(&self, followed: &Followed<'_>, offset: i8, t: &UiTheme) -> Div {
         let host = (followed.host != HostKey::Local).then(|| self.host_name(&followed.host));
+        let name = format!("follow-tab-header-{}", followed.tab_id);
         div()
+            .driver_id(move || name)
             .flex()
             .flex_none()
             .items_center()
@@ -414,7 +416,8 @@ impl RootView {
 
     /// A follow tab's lines (tagged `follow-tab-lines-<id>`) in the
     /// terminal font, scrolling, following the bottom while scrolled to it
-    /// and holding still while scrolled up.
+    /// and holding still while scrolled up. The scrolling viewport is inset
+    /// by [`PAD_Y`] so a line never paints under the header's border.
     fn follow_lines(&self, tab_id: &str, lines: Vec<&str>, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let size = ui_px_at(fonts::ui_text_size(cx), UI_TEXT_SIZE);
@@ -430,8 +433,6 @@ impl RootView {
             .flex()
             .flex_col()
             .px(px(PAD_X))
-            .py(px(PAD_Y))
-            .bg(gpui::rgb(t.sunken))
             .font_family(SharedString::from(
                 family.unwrap_or(DEFAULT_FAMILY).to_owned(),
             ))
@@ -439,34 +440,52 @@ impl RootView {
             .text_size(size)
             .line_height(px(line))
             .text_color(gpui::rgb(t.text_2))
-            .children(lines.into_iter().map(|text| div().child(text.to_owned())));
-        let Some(handle) = self.follow_scrolls.get(tab_id).cloned() else {
-            return column.into_any_element();
-        };
-        if self.follow_tab_following(tab_id).unwrap_or(false) {
-            handle.scroll_to_bottom();
-        }
-        let tab_id = tab_id.to_owned();
-        column
-            .track_scroll(&handle)
-            .on_scroll(cx.listener(move |_, _: &ScrollEvent, _, cx| {
-                let (tab_id, handle) = (tab_id.clone(), handle.clone());
-                // Read once the wheel has moved the lines.
-                let root = cx.weak_entity();
-                cx.defer(move |cx| {
-                    let scrolled = -handle.offset().y / px(1.0);
-                    let max_scroll = handle.max_offset().y / px(1.0);
-                    let read = root.update(cx, |this, cx| {
-                        this.chat
-                            .tails
-                            .on_tab_scrolled(&tab_id, scrolled, max_scroll);
-                        cx.notify();
+            .children(lines.into_iter().enumerate().map(|(index, text)| {
+                let line = div().child(text.to_owned());
+                if index == 0 {
+                    let name = format!("follow-tab-line-0-{tab_id}");
+                    line.driver_id(move || name)
+                } else {
+                    line
+                }
+            }));
+        let viewport = if let Some(handle) = self.follow_scrolls.get(tab_id).cloned() {
+            if self.follow_tab_following(tab_id).unwrap_or(false) {
+                handle.scroll_to_bottom();
+            }
+            let tab_id = tab_id.to_owned();
+            column
+                .track_scroll(&handle)
+                .on_scroll(cx.listener(move |_, _: &ScrollEvent, _, cx| {
+                    let (tab_id, handle) = (tab_id.clone(), handle.clone());
+                    // Read once the wheel has moved the lines.
+                    let root = cx.weak_entity();
+                    cx.defer(move |cx| {
+                        let scrolled = -handle.offset().y / px(1.0);
+                        let max_scroll = handle.max_offset().y / px(1.0);
+                        let read = root.update(cx, |this, cx| {
+                            this.chat
+                                .tails
+                                .on_tab_scrolled(&tab_id, scrolled, max_scroll);
+                            cx.notify();
+                        });
+                        if let Err(err) = read {
+                            tracing::debug!("a follow tab scroll's root view has gone: {err:#}");
+                        }
                     });
-                    if let Err(err) = read {
-                        tracing::debug!("a follow tab scroll's root view has gone: {err:#}");
-                    }
-                });
-            }))
+                }))
+                .into_any_element()
+        } else {
+            column.into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .py(px(PAD_Y))
+            .bg(gpui::rgb(t.sunken))
+            .child(viewport)
             .into_any_element()
     }
 

@@ -7,7 +7,9 @@ use crate::support;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use gpui::TestAppContext;
+use gpui::{
+    Modifiers, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase, point, px,
+};
 use protocol::{ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL, TabEntry};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, ToastKind};
@@ -371,4 +373,67 @@ fn a_refused_follow_open_raises_a_toast(cx: &mut TestAppContext) {
             Some(message.to_owned())
         )]
     );
+}
+
+/// A follow tab's vertical padding, mirroring `follow_tab_view::PAD_Y`.
+const PAD_Y: f32 = 6.0;
+
+/// Asserts the file's first line starts `PAD_Y` below the header's border,
+/// so the border never cuts through its top.
+fn first_line_clears_the_header(h: &mut Harness<'_>) {
+    let header = h.bounds("follow-tab-header-f1");
+    let first = h.bounds("follow-tab-line-0-f1");
+    let gap = first.top() - header.bottom();
+    assert!(
+        gap >= px(PAD_Y - 0.5),
+        "the first line starts PAD_Y below the header's border: header {header:?}, first line {first:?}, gap {gap:?}"
+    );
+}
+
+#[gpui::test]
+fn the_first_followed_line_sits_below_the_header_border(cx: &mut TestAppContext) {
+    use std::fmt::Write as _;
+
+    let dir = TestDir::new();
+    let mut h = tail_daemon(cx, &dir);
+    tab_arrives(&mut h);
+    h.click_on("tab-f1");
+
+    // A file that fits its tab without scrolling.
+    h.send(file_tail(b"line-0 initial\nline-1 second\n", true));
+    assert_eq!(
+        lines(&mut h),
+        Some(strings(&["line-0 initial", "line-1 second"]))
+    );
+    first_line_clears_the_header(&mut h);
+
+    // A file taller than its tab follows its bottom: the lines' viewport
+    // starts PAD_Y below the header, so the top line is clipped there
+    // instead of painted under the border.
+    let mut long = String::new();
+    for n in 0..120 {
+        let _ = writeln!(long, "line-{n}");
+    }
+    h.send(file_tail(long.as_bytes(), true));
+    let header = h.bounds("follow-tab-header-f1");
+    let viewport = h.bounds("follow-tab-lines-f1");
+    let first = h.bounds("follow-tab-line-0-f1");
+    assert!(
+        viewport.top() - header.bottom() >= px(PAD_Y - 0.5),
+        "the lines' viewport starts PAD_Y below the header's border: header {header:?}, viewport {viewport:?}, first line {first:?}"
+    );
+    assert!(
+        first.top() < viewport.top(),
+        "a tall file follows its bottom, its first line scrolled out: viewport {viewport:?}, first line {first:?}"
+    );
+    // Scrolled back to the top the first line clears the header too.
+    h.cx.simulate_event(ScrollEvent {
+        position: viewport.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(1_000_000.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+        source: ScrollSource::Pointer,
+    });
+    h.cx.run_until_parked();
+    first_line_clears_the_header(&mut h);
 }
