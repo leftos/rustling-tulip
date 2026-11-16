@@ -112,6 +112,33 @@ fn ctrl_click_on_a_url_opens_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn ctrl_click_on_a_scheme_less_web_address_opens_it_as_a_url(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"open claude.ai/public/artifacts/abc now");
+    let on = h.cell_center("p1", 12, 0);
+    h.click(on, ctrl());
+    assert!(!h.in_model("link-menu"), "a web address opens no menu");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(
+            "https://claude.ai/public/artifacts/abc".to_owned()
+        )]
+    );
+    let asked = h
+        .sent()
+        .into_iter()
+        .filter(|msg| {
+            matches!(
+                msg,
+                ClientMessage::StatPath { .. } | ClientMessage::ListSessionFolders { .. }
+            )
+        })
+        .count();
+    assert_eq!(asked, 0, "a web address fetches or stats no path");
+}
+
+#[gpui::test]
 fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "src/main.rs");

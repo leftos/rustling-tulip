@@ -868,6 +868,12 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
         if trimmed.is_empty() || overlaps_existing_link(start_index, end_index, &links) {
             continue;
         }
+        // A host name with a path after it is a web address, whatever files
+        // share its name, so a Ctrl+click always opens the browser.
+        if web_address(&trimmed) && !stitch_in_host(&trimmed, start_index, segments) {
+            links.push(web_link(start_index, &trimmed, segments));
+            continue;
+        }
         // A path in matching quotes may be the whole quoted text, spaces and
         // all, and an absolute one may run on over the words after it; text
         // alone cannot tell either from prose.
@@ -911,6 +917,83 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
     links.sort_by_key(|link| link.start_index);
     add_absolute_base_readings(&mut links);
     links
+}
+
+/// The top-level domains a scheme-less `host.tld/...` token may end its host
+/// in to be read as a web address. `app` and `dev` are left out: a macOS
+/// bundle, a .NET project or a workspace folder ends its name in them.
+const WEB_TLDS: &[&str] = &[
+    "ai", "au", "be", "biz", "ca", "ch", "cloud", "co", "com", "de", "edu", "es", "eu", "fi", "fr",
+    "gg", "gov", "info", "io", "it", "jp", "me", "net", "nl", "no", "org", "page", "pl", "se",
+    "site", "so", "tech", "to", "tv", "uk", "us", "xyz",
+];
+
+/// File extensions a first component may end in that make it a file name,
+/// never a host.
+const FILE_EXTENSIONS: &[&str] = &[
+    "md", "rs", "py", "js", "ts", "sh", "txt", "log", "json", "toml", "yaml", "yml", "html",
+];
+
+/// Whether a path-shaped token is a web address without its scheme: its first
+/// component is a host name ending in a known top-level domain (any letters
+/// after `www.`), and a `/`, `?` or `#` follows it.
+fn web_address(token: &str) -> bool {
+    // A drive, `./`, `~` or `\` lead leaves a first component no host label
+    // takes, so only the characters a label allows are checked.
+    let Some(end) = token.find(['/', '?', '#']) else {
+        return false;
+    };
+    let host = &token[..end];
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 || !labels.iter().all(|label| host_label(label)) {
+        return false;
+    }
+    let tld = labels[labels.len() - 1].to_ascii_lowercase();
+    if FILE_EXTENSIONS.contains(&tld.as_str()) {
+        return false;
+    }
+    if labels[0].eq_ignore_ascii_case("www") {
+        return tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic());
+    }
+    WEB_TLDS.contains(&tld.as_str())
+}
+
+/// One label of a host name: letters, digits and hyphens, not digits alone.
+fn host_label(label: &str) -> bool {
+    !label.is_empty()
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !label.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether a hard stitch joins rows inside the host of `token`, which starts
+/// at character `start_index`: the upper row's last word may then be glued
+/// onto the host, so the token is read as a path. A stitch where the host
+/// ends, or after it, leaves the host whole.
+fn stitch_in_host(token: &str, start_index: usize, segments: &[Segment]) -> bool {
+    let host = token
+        .find(['/', '?', '#'])
+        .map_or(token, |end| &token[..end]);
+    let host_end = start_index + chars_len(host);
+    let mut offset = 0;
+    segments.iter().any(|segment| {
+        let at = offset;
+        offset += segment.chars();
+        segment.stitched && at > start_index && at < host_end
+    })
+}
+
+/// The link for web address `token` at character `start_index`: its text as
+/// matched, opened as `https://` plus the token, with no other reading.
+fn web_link(start_index: usize, token: &str, segments: &[Segment]) -> TerminalLink {
+    let mut link = build_link(LinkKind::Url, start_index, token, segments);
+    let target = format!("https://{token}");
+    for candidate in &mut link.candidates {
+        candidate.path.clone_from(&target);
+    }
+    link.target = target;
+    link
 }
 
 /// The text between the quote just before character `start` of `chars` and
@@ -1325,7 +1408,7 @@ mod tests {
     use super::{
         LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch,
         detect_links, detect_row_links, group_rows, hyperlink_links, spaced_candidates,
-        trim_link_candidate,
+        trim_link_candidate, web_address,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -2191,6 +2274,68 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_stitch_glued_onto_a_host_is_no_web_address() {
+        let cols = 40;
+        let rows = [
+            row("The page is published and live now at", cols, false),
+            row("claude.ai/public/x", cols, false),
+        ];
+
+        assert!(can_stitch(&rows[0], &rows[1], cols));
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(targets(&links), ["atclaude.ai/public/x"]);
+        assert_eq!(links[0].kind, LinkKind::Path);
+        assert_eq!(
+            links[0].candidates,
+            vec![
+                candidate("atclaude.ai/public/x", None, None),
+                candidate("at", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_cut_by_a_hard_stitch_stays_a_path() {
+        let cols = 20;
+        let rows = [
+            row("now see the claude.", cols, false),
+            row("ai/x", cols, false),
+        ];
+
+        assert!(can_stitch(&rows[0], &rows[1], cols));
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(targets(&links), ["claude.ai/x"]);
+        assert_eq!(links[0].kind, LinkKind::Path);
+        assert_eq!(
+            links[0].candidates,
+            vec![
+                candidate("claude.ai/x", None, None),
+                candidate("claude.", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stitch_after_the_host_keeps_one_web_address() {
+        let cols = 20;
+        for wrapped in [true, false] {
+            let rows = [
+                row("now see claude.ai/pu", cols, false),
+                row("blic/x", cols, wrapped),
+            ];
+
+            let links = detect_row_links(&rows, cols);
+
+            assert_eq!(links.len(), 1, "wrapped {wrapped}");
+            assert_eq!(links[0].kind, LinkKind::Url, "wrapped {wrapped}");
+            assert_eq!(links[0].target, "https://claude.ai/public/x");
+            assert_eq!(links[0].end_row, 1);
+        }
+    }
+
+    #[test]
     fn fallbacks_are_ordered_longest_first_with_two_stitches() {
         let cols = 20;
         let head = "./aaaa/bbbb/cccc.ttt";
@@ -2418,5 +2563,102 @@ mod tests {
         let links = detect_links("see /home/u/a.md and d.html");
 
         assert_eq!(targets(&links), ["/home/u/a.md", "/home/u/d.html"]);
+    }
+
+    #[test]
+    fn a_scheme_less_web_address_is_a_url() {
+        for token in [
+            "claude.ai/public/artifacts/abc",
+            "github.com/leftos/rustling-tulip",
+            "www.example.com/docs",
+            "example.co.uk/a?b=1",
+            "claude.ai/s/abc#x",
+        ] {
+            let links = detect_links(&format!("open {token} now"));
+            let https = format!("https://{token}");
+
+            assert_eq!(links.len(), 1, "{token}");
+            assert_eq!(links[0].kind, LinkKind::Url, "{token}");
+            assert_eq!(links[0].text, token);
+            assert_eq!(links[0].target, https);
+            assert_eq!(links[0].candidates, vec![candidate(&https, None, None)]);
+            assert_eq!(links[0].spaced, [] as [TerminalLink; 0], "{token}");
+        }
+    }
+
+    #[test]
+    fn a_web_address_drops_trailing_punctuation() {
+        let links = detect_links("see claude.ai/public/artifacts/abc.");
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].text, "claude.ai/public/artifacts/abc");
+        assert_eq!(links[0].target, "https://claude.ai/public/artifacts/abc");
+    }
+
+    #[test]
+    fn path_shaped_tokens_that_name_no_host_stay_paths() {
+        for token in [
+            "src/main.rs",
+            "docs/README.md",
+            "./claude.ai/x",
+            "../github.com/x",
+            "v1.2/notes.txt",
+            "notes.md/x",
+            "target/release/app.exe",
+            "X:/dev/claude.ai/x",
+            "/usr/share/x",
+            "foo.zz/x",
+            "docs.rs/gpui",
+            "Code.app/Contents/Resources/app/bin/code",
+            "Yamv.App/Program.cs",
+            "leftos.dev/src/x",
+        ] {
+            let links = detect_links(&format!("open {token} now"));
+
+            assert_eq!(links.len(), 1, "{token}");
+            assert_eq!(links[0].kind, LinkKind::Path, "{token}");
+            assert_eq!(links[0].text, token);
+        }
+        assert_eq!(detect_links("open claude.ai now"), [] as [TerminalLink; 0]);
+    }
+
+    #[test]
+    fn web_address_reads_the_first_component_as_a_host() {
+        for token in [
+            "claude.ai/x",
+            "GitHub.COM/x",
+            "WWW.Example.zz/x",
+            "example.co.uk/a?b=1",
+            "my-site.io#top",
+            "claude.ai?q",
+        ] {
+            assert!(web_address(token), "{token}");
+        }
+        for token in [
+            "foo.zz/x",
+            "claude.ai",
+            "claude.ai\\x",
+            "./claude.ai/x",
+            "../claude.ai/x",
+            "~/claude.ai/x",
+            "/claude.ai/x",
+            "\\claude.ai/x",
+            "X:/claude.ai/x",
+            "notes.md/x",
+            "docs.rs/gpui",
+            "lib.rs/x",
+            "Code.app/Contents/x",
+            "RustlingTulip.app/PlugIns/x.appex",
+            "leftos.dev/src/x",
+            "www.notes.json/x",
+            "v1.2/x",
+            "1.2.3.com/x",
+            "src/main.rs",
+            "a..com/x",
+            "www.example.1a/x",
+        ] {
+            assert!(!web_address(token), "{token}");
+        }
     }
 }
