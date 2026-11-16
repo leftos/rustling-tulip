@@ -4,8 +4,8 @@
 //! takes the back gesture. It only renders and forwards taps.
 
 use gpui::{
-    AnyElement, App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent,
-    Stateful, Window, div, prelude::*, px,
+    AnyElement, App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Pixels,
+    Point, Stateful, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -214,8 +214,36 @@ impl PhoneRoot {
         if let Some(page) = self.page.as_mut() {
             page.toggle();
             self.composer_dock = Dock::None;
+            // Leaving the Chat page, or coming back to it, ends its selection.
+            if let Some((_, id)) = self.shown.clone() {
+                self.root
+                    .update(cx, |root, cx| root.clear_phone_chat_selection(&id, cx));
+            }
             cx.notify();
         }
+    }
+
+    /// A release at window point `at` in session `session_id`'s chat body
+    /// ends its selection once the release's own handlers (a button, a
+    /// link, a stretch, a card, a handle's replayed tap) have acted on it as
+    /// it was; a release inside a selection handle's hit area keeps it.
+    fn chat_released(
+        &self,
+        session_id: &str,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.root.read(cx).phone_chat_release_on_handle(at) {
+            return;
+        }
+        let root = self.root.downgrade();
+        let id = session_id.to_owned();
+        window.defer(cx, move |_, cx| {
+            // Fails only when the app's root is gone.
+            root.update(cx, |root, cx| root.clear_phone_chat_selection(&id, cx))
+                .ok();
+        });
     }
 
     /// A release anywhere in the shown session's chat body: while the
@@ -315,8 +343,10 @@ impl PhoneRoot {
         let body = match page {
             Page::Chat => {
                 let id = self.shown.as_ref().map(|(_, id)| id.clone())?;
-                let on_tap = cx.listener(move |_, _: &MouseUpEvent, window, _| {
+                let tapped_id = id.clone();
+                let on_tap = cx.listener(move |this, event: &MouseUpEvent, window, cx| {
                     Self::chat_tapped(keyboard_up, window);
+                    this.chat_released(&tapped_id, event.position, window, cx);
                 });
                 let hold = self.chat_hold(&id);
                 let handles = self.chat_handles(&id);

@@ -2961,3 +2961,212 @@ fn a_script_draws_as_one_wrapping_line_on_the_phone(cx: &mut TestAppContext) {
     );
     assert!(error.right() <= right, "the error stays within the chat");
 }
+
+// ── Copying and ending the selection ───────────────────────────────────────
+
+/// The copied chip's driver id, its label (`copied::CHIP_LABEL`).
+const COPIED_CHIP: &str = "\u{2713} copied";
+
+/// Session `a`'s page on a phone-sized window, its chat's load answered
+/// with `entries`.
+fn chat_loaded_on_a_phone<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    let h = chat_loaded(cx, dir, entries);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(874.0)));
+    h.cx.run_until_parked();
+    h
+}
+
+#[gpui::test]
+fn copy_puts_the_selection_on_the_clipboard_and_clears_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut entries: Vec<ChatEntry> = (0..4).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo charlie"));
+    let mut h = chat_loaded_on_a_phone(cx, &dir, entries);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    h.cx.run_until_parked();
+    assert!(
+        drawn(&mut h, "phone-chat-copy"),
+        "Copy shows with the handles"
+    );
+    assert!(!drawn(&mut h, COPIED_CHIP), "no chip before the copy");
+    let copy = h.bounds("phone-chat-copy");
+    let start = h.bounds("phone-chat-handle-start");
+    assert!(
+        copy.bottom() <= start.top(),
+        "Copy sits above the start handle: {copy:?} over {start:?}"
+    );
+    assert!(copy.size.height >= touch_target(), "a touch target tall");
+
+    h.tap_on("phone-chat-copy");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.clipboard().as_deref(), Some("bravo"));
+    assert!(drawn(&mut h, COPIED_CHIP), "the copied chip shows");
+    assert_eq!(
+        h.root(|root, _| root.copied_chip()),
+        Some(5),
+        "and reports the copy"
+    );
+    assert_eq!(selected_text(&mut h), "", "the copy ends the selection");
+    for gone in [
+        "phone-chat-handle-start",
+        "phone-chat-handle-end",
+        "phone-chat-copy",
+    ] {
+        assert!(!drawn(&mut h, gone), "{gone} is gone with the selection");
+    }
+}
+
+#[gpui::test]
+fn copy_sits_below_the_end_when_the_start_is_at_the_top(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on_a_phone(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);
+    let rows = h.bounds("phone-chat");
+    assert!(
+        h.bounds("chat-row-phone-a1").top() < rows.top() + px(40.0),
+        "the answer is the first row, at the top of the rows"
+    );
+
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    h.cx.run_until_parked();
+
+    assert!(drawn(&mut h, "phone-chat-copy"), "Copy shows");
+    let copy = h.bounds("phone-chat-copy");
+    let end = h.bounds("phone-chat-handle-end");
+    assert!(
+        copy.top() >= end.bottom(),
+        "no room above: Copy sits below the end handle: {copy:?} under {end:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_elsewhere_clears_the_selection_and_still_acts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let entries = vec![
+        answer_with("a0", "alpha bravo charlie"),
+        stretched("a1"),
+        answer_with("a2", "delta echo foxtrot"),
+    ];
+    let mut h = chat_loaded_on_a_phone(cx, &dir, entries);
+    let [(_, key)]: [(String, String); 1] = stretch_links(&mut h)
+        .try_into()
+        .expect("the answer draws one closed stretch");
+    select(&mut h, "a", pos("a0", 0, 6), pos("a0", 0, 11));
+    assert_eq!(selected_text(&mut h), "bravo");
+    let answer = h.bounds("chat-row-phone-a1");
+    let at = point(
+        answer.origin.x + px(30.0),
+        answer.origin.y + answer.size.height / 2.0,
+    );
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        stretch_links(&mut h),
+        [("\u{2039}".to_owned(), key)],
+        "the tap still opens the stretch"
+    );
+    assert_eq!(selected_text(&mut h), "", "and ends the selection");
+
+    select(&mut h, "a", pos("a0", 0, 6), pos("a0", 0, 11));
+    assert_eq!(selected_text(&mut h), "bravo");
+    draw_insets(&mut h, Some(keyboard_insets(px(336.0))));
+    let plain = on_bytes(&mut h, "chat-row-phone-a2", "a2", 1..4);
+    clear_keyboard_calls();
+
+    h.touch(TouchPhase::Started, plain);
+    h.touch(TouchPhase::Ended, plain);
+
+    assert_eq!(selected_text(&mut h), "", "a tap on plain text ends it");
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "and still puts the keyboard away"
+    );
+}
+
+#[gpui::test]
+fn a_pan_keeps_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut entries: Vec<ChatEntry> = (0..40).map(|n| user(&format!("u{n}"))).collect();
+    entries.push(answer_with("a1", "alpha bravo"));
+    let mut h = chat_loaded(cx, &dir, entries);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    let before = chat_offset(&mut h);
+    let at = h.bounds("chat-row-phone-u37").center();
+
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    pan_at(&mut h, at, px(100.0), TouchPhase::Moved);
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+
+    assert_ne!(chat_offset(&mut h), before, "the pan scrolls the chat");
+    assert_eq!(selected_text(&mut h), "bravo", "and keeps the selection");
+}
+
+#[gpui::test]
+fn leaving_the_chat_page_clears_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo")]);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    assert_eq!(selected_text(&mut h), "bravo");
+
+    h.click_on("phone-session-toggle");
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    h.click_on("phone-session-toggle");
+
+    assert!(drawn(&mut h, "phone-session-chat"), "back on the Chat page");
+    assert_eq!(selected_text(&mut h), "", "the selection ended");
+}
+
+#[gpui::test]
+fn back_to_home_clears_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo")]);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    assert_eq!(selected_text(&mut h), "bravo");
+
+    h.click_on("phone-session-back");
+    assert_eq!(shown(&mut h), None);
+    h.click_on(&row("a"));
+    let request = loads_of(&h.host(&saved_remote()).sent(), "a")
+        .pop()
+        .expect("opening the page again loads its chat");
+    h.host(&saved_remote()).send(chat_reply(
+        "a",
+        request,
+        vec![answer_with("a1", "alpha bravo")],
+    ));
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"));
+    assert!(drawn(&mut h, "chat-row-phone-a1"), "the chat is back");
+    assert_eq!(selected_text(&mut h), "", "the selection ended");
+}
+
+#[gpui::test]
+fn an_empty_selection_has_no_copy(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);
+    select(&mut h, "a", pos("a1", 0, 6), pos("a1", 0, 11));
+    assert!(drawn(&mut h, "phone-chat-copy"), "Copy shows for \"bravo\"");
+    let (start, _) = handle_aims(&mut h);
+
+    drag_handle(&mut h, "end", start);
+
+    assert_eq!(selected_text(&mut h), "", "the end meets the start");
+    assert!(drawn(&mut h, "phone-chat-handle-start"), "the handles stay");
+    assert!(!drawn(&mut h, "phone-chat-copy"), "but Copy goes");
+
+    h.set_clipboard("kept");
+    h.root_update(|root, _, cx| root.phone_copy_selection("a", cx));
+
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("kept"),
+        "copying nothing leaves the clipboard as it was"
+    );
+}

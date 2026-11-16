@@ -1066,6 +1066,31 @@ impl PhoneRoot {
     }
 }
 
+/// How far below the safe area's top the copied chip sits: under the
+/// session header.
+const CHIP_TOP: f32 = 60.0;
+
+impl PhoneRoot {
+    /// The "copied" chip, centred across the screen `top` (the safe area's
+    /// top inset) plus [`CHIP_TOP`] down, while a copy is recent; it takes
+    /// no input.
+    fn copied_chip_layer(&self, top: Pixels, cx: &App) -> Option<Div> {
+        let t = crate::ui_theme::theme(cx);
+        let offset = crate::fonts::ui_text_size(cx);
+        let chip = self.root.read(cx).copied_chip_element(offset, &t)?;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(top + px(CHIP_TOP))
+                .flex()
+                .justify_center()
+                .child(chip),
+        )
+    }
+}
+
 impl Render for PhoneRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The ready line follows the first frame, not the window's opening.
@@ -1129,6 +1154,7 @@ impl Render for PhoneRoot {
             .text_color(gpui::rgb(t.text))
             .child(padded().size_full().child(body))
             .child(Self::pan_guard(cx))
+            .children(self.copied_chip_layer(padding.top, cx))
             .children(sheet)
             .children(prompt_sheet)
             .children(pairing.map(|layer| {

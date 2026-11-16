@@ -22,7 +22,7 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Autocapitalize, Bounds, ClickEvent, Context, Div, ElementId, Entity,
     Focusable, HighlightStyle, Hsla, KeyDownEvent, Keystroke, MouseUpEvent, Pixels, Point,
-    ScrollEvent, ScrollHandle, SharedString, StyledText, Subscription, Task, TextAlign,
+    ScrollEvent, ScrollHandle, SharedString, Size, StyledText, Subscription, Task, TextAlign,
     TextInputAction, TextInputConfiguration, TextLayout, Window, WindowId, canvas, div, point,
     prelude::*, px, relative,
 };
@@ -347,6 +347,14 @@ impl SessionChat {
         self.interrupt_sent = false;
     }
 
+    /// Ends the phone's selection: it, the hold it grew from and any
+    /// handle drag moving it.
+    fn drop_selection(&mut self) {
+        self.selection = None;
+        self.hold = None;
+        self.handle_drag = None;
+    }
+
     /// Applies one chat message: a `Chat` that answers this chat's load or
     /// that the daemon sent unasked (a reset that keeps open cards open), an
     /// append, a screen change, or the running work. A reply to an older
@@ -651,11 +659,13 @@ impl HandleSpot {
 }
 
 /// The selection handles a frame measured: each end's spot, relative to
-/// `origin` (the window point of the rows' box the handles draw in); an
-/// end is `None` when its caret was not drawn inside the chat's scroll area.
+/// `origin` (the window point of the rows' box the handles draw in), and
+/// that box's size; an end is `None` when its caret was not drawn inside
+/// the chat's scroll area.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HandleSpots {
     origin: Point<Pixels>,
+    layer: Size<Pixels>,
     start: Option<HandleSpot>,
     end: Option<HandleSpot>,
 }
@@ -668,6 +678,125 @@ impl HandleSpots {
             HandleEnd::End => self.end,
         }
     }
+
+    /// Whether window point `at` lies inside a drawn handle's square hit
+    /// area, within the layer that clips it.
+    fn covers(self, at: Point<Pixels>) -> bool {
+        if !Bounds::new(self.origin, self.layer).contains(&at) {
+            return false;
+        }
+        let side = px(HANDLE_TARGET);
+        [HandleEnd::Start, HandleEnd::End].into_iter().any(|end| {
+            self.of(end).is_some_and(|spot| {
+                let origin = self.origin + spot.hit_origin(end);
+                Bounds::new(origin, gpui::size(side, side)).contains(&at)
+            })
+        })
+    }
+}
+
+/// Whether window point `at` lies inside a hit area of the handles
+/// `spots` measured; never with no handles.
+fn in_handle_area(spots: Option<HandleSpots>, at: Point<Pixels>) -> bool {
+    spots.is_some_and(|spots| spots.covers(at))
+}
+
+/// The Copy button's label.
+const COPY_LABEL: &str = "Copy";
+/// The Copy button's horizontal padding.
+const COPY_PAD: f32 = 14.0;
+/// The Copy button's corner radius.
+const COPY_RADIUS: f32 = 8.0;
+
+/// The Copy button's size, a touch target tall and its label plus its
+/// padding and border wide, and its label's text size.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the label is four characters, far inside f32's exact integer range"
+)]
+fn copy_button_size(cx: &App) -> (Size<Pixels>, Pixels) {
+    let text_size = fonts::ui_px(cx, UI_TEXT_SIZE);
+    let text = cx.text_system();
+    let id = text.resolve_font(&gpui::font(fonts::ui_family(cx)));
+    let measured: anyhow::Result<f32> = COPY_LABEL
+        .chars()
+        .map(|ch| {
+            text.advance(id, text_size, ch)
+                .map(|advance| advance.width / px(1.0))
+        })
+        .sum();
+    // A face without one of the label's glyphs: a full em a letter.
+    let label = measured.unwrap_or(COPY_LABEL.chars().count() as f32 * (text_size / px(1.0)));
+    let width = label.ceil() + 2.0 * COPY_PAD + 2.0;
+    (gpui::size(px(width), px(HANDLE_TARGET)), text_size)
+}
+
+/// The phone chat's Copy button at `origin` in the handle layer, of
+/// `size`, its label at `text_size`; a tap on it runs `on_copy` and goes
+/// no further.
+fn copy_button(
+    origin: Point<Pixels>,
+    (size, text_size): (Size<Pixels>, Pixels),
+    t: &UiTheme,
+    on_copy: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id("phone-chat-copy")
+        .driver_id(|| "phone-chat-copy".to_owned())
+        .absolute()
+        .left(origin.x)
+        .top(origin.y)
+        .w(size.width)
+        .h(size.height)
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(COPY_PAD))
+        .rounded(px(COPY_RADIUS))
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .text_color(gpui::rgb(t.text))
+        .text_size(text_size)
+        .on_click(move |_: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            on_copy(window, cx);
+        })
+        .child(COPY_LABEL)
+        .into_any_element()
+}
+
+/// The gap between the Copy button and the handle hit area it sits beside.
+const COPY_GAP: f32 = 4.0;
+
+/// The top-left of the phone chat's Copy button, of size `button`, in a
+/// handle layer of size `layer`, for a selection whose ends draw at
+/// `start` and `end`: its bottom edge [`COPY_GAP`] above the top of the
+/// start handle's hit area, centred on the start's caret and kept inside
+/// the layer's width; when that would put its top above the layer's top,
+/// its top edge [`COPY_GAP`] below the bottom of the end handle's hit
+/// area instead, still centred on the start's caret; when it fits there
+/// neither, its bottom on the layer's bottom, its top never above the
+/// layer's top.
+fn copy_button_origin(
+    start: HandleSpot,
+    end: HandleSpot,
+    layer: Size<Pixels>,
+    button: Size<Pixels>,
+) -> Point<Pixels> {
+    let unit = px(1.0);
+    let (width, height) = (button.width / unit, button.height / unit);
+    let right = (layer.width / unit - width).max(0.0);
+    let x = (start.caret.x / unit - width / 2.0).clamp(0.0, right);
+    let above = start.hit_origin(HandleEnd::Start).y / unit - COPY_GAP - height;
+    let below = end.hit_origin(HandleEnd::End).y / unit + HANDLE_TARGET + COPY_GAP;
+    let lowest = (layer.height / unit - height).max(0.0);
+    let y = if above >= 0.0 {
+        above
+    } else {
+        below.min(lowest)
+    };
+    point(px(x), px(y))
 }
 
 /// A selection handle's drag in progress: the selection's end that stays,
@@ -720,9 +849,13 @@ fn handle_element(end: HandleEnd, spot: HandleSpot, color: Hsla, area: AnyElemen
         .into_any_element()
 }
 
-/// The (start, end) spots of `spots`, as a frame draws its handles from.
-fn spot_pair(spots: Option<HandleSpots>) -> Option<(Option<HandleSpot>, Option<HandleSpot>)> {
-    spots.map(|spots| (spots.start, spots.end))
+/// The (start, end) spots of `spots` and the layer's size, as a frame
+/// draws its handles and its Copy button from.
+type SpotPair = (Option<HandleSpot>, Option<HandleSpot>, Size<Pixels>);
+
+/// The [`SpotPair`] of `spots`.
+fn spot_pair(spots: Option<HandleSpots>) -> Option<SpotPair> {
+    spots.map(|spots| (spots.start, spots.end, spots.layer))
 }
 
 /// A canvas over the rows' box that measures, once the rows before it are
@@ -742,6 +875,7 @@ fn handle_measure(
                 let registry = registry.borrow();
                 HandleSpots {
                     origin: bounds.origin,
+                    layer: bounds.size,
                     start: registry.spot(start, bounds.origin, view),
                     end: registry.spot(end, bounds.origin, view),
                 }
@@ -1682,6 +1816,16 @@ impl RootView {
     /// session's chat loads while it can show, as a pane's would, and the
     /// last one shown unloads.
     pub(crate) fn show_phone_chat(&mut self, shown: Option<(HostKey, String)>, cx: &App) {
+        // Another session, or none: the one shown before loses its selection.
+        if let Some((_, before)) = self
+            .chat
+            .phone
+            .as_ref()
+            .filter(|before| shown.as_ref() != Some(*before))
+            && let Some(chat) = self.chat.sessions.get_mut(before)
+        {
+            chat.drop_selection();
+        }
         self.chat.phone = shown;
         self.chat.phone_refused = None;
         self.sync_chat_loads(cx);
@@ -1912,12 +2056,32 @@ impl RootView {
         }
     }
 
-    /// Spec hook: drops session `session_id`'s chat selection.
+    /// Ends session `session_id`'s phone chat selection, with the hold it
+    /// grew from and any handle drag; specs call it too.
     pub fn clear_phone_chat_selection(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
-            chat.selection = None;
+            chat.drop_selection();
             cx.notify();
         }
+    }
+
+    /// The Copy button's tap on session `session_id`'s phone chat: the
+    /// selection goes on the clipboard, with the copied chip, and ends. An
+    /// empty selection copies nothing, so the clipboard keeps what it held;
+    /// specs call it too.
+    pub fn phone_copy_selection(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let text = self.phone_chat_selected_text(session_id);
+        if !text.is_empty() {
+            self.copy_to_clipboard(&text, cx);
+        }
+        self.clear_phone_chat_selection(session_id, cx);
+    }
+
+    /// Whether a release at window point `at` lies inside a selection
+    /// handle's hit area, as the latest frame measured them: such a tap
+    /// keeps the selection.
+    pub(crate) fn phone_chat_release_on_handle(&self, at: Point<Pixels>) -> bool {
+        in_handle_area(self.chat.phone_text.borrow().handles, at)
     }
 
     /// Spec hook: each (entry id, unit index, bytes) the phone chat's
@@ -3230,7 +3394,7 @@ impl RootView {
                     .w_full()
                     .child(main)
                     .child(hold)
-                    .child(self.phone_handle_layer(ends, handles, cx)),
+                    .child(self.phone_handle_layer(session_id, ends, handles, cx)),
             )
             .children(strip)
             .child(painted_mark(self.chat.phone_text.clone()))
@@ -3241,14 +3405,17 @@ impl RootView {
     /// the selection's ordered `ends` whose caret the previous frame drew
     /// inside the chat's scroll area, each holding its drag area from
     /// `areas`, then the canvas that measures where they go this frame
-    /// ([`handle_measure`]). No selection draws no handle. The layer is
+    /// ([`handle_measure`]). While a handle draws, so does the Copy button
+    /// beside them ([`copy_button_origin`]), which copies session
+    /// `session_id`'s selection. No selection draws no handle. The layer is
     /// clipped to the rows' box, so no handle reaches over the work strip,
     /// the composer or the header, nor takes a touch there.
     fn phone_handle_layer(
         &self,
+        session_id: &str,
         ends: Option<(TextPos, TextPos)>,
         areas: HandleAreas,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> Div {
         let drawn = ends
             .as_ref()
@@ -3259,6 +3426,10 @@ impl RootView {
             if let Some(spot) = drawn.and_then(|spots| spots.of(end)) {
                 layer.push(handle_element(end, spot, color, area));
             }
+        }
+        // An empty selection keeps its handles but has nothing to copy.
+        if ends.as_ref().is_some_and(|(start, end)| start != end) {
+            layer.extend(Self::phone_copy_button(session_id, drawn, cx));
         }
         let viewport = self
             .chat
@@ -3274,6 +3445,28 @@ impl RootView {
             .size_full()
             .overflow_hidden()
             .children(layer)
+    }
+
+    /// The Copy button of session `session_id`'s phone chat, placed from
+    /// the handles `drawn`; none while no handle draws. With one end's
+    /// handle off the chat, the button sits by the other's.
+    fn phone_copy_button(
+        session_id: &str,
+        drawn: Option<HandleSpots>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let spots = drawn?;
+        let (start, end) = (spots.start.or(spots.end)?, spots.end.or(spots.start)?);
+        let measured = copy_button_size(cx);
+        let origin = copy_button_origin(start, end, spots.layer, measured.0);
+        let root = cx.entity().downgrade();
+        let id = session_id.to_owned();
+        let on_copy = move |_: &mut Window, cx: &mut App| {
+            // Fails only when the app's root is gone.
+            root.update(cx, |root, cx| root.phone_copy_selection(&id, cx))
+                .ok();
+        };
+        Some(copy_button(origin, measured, &theme(cx), on_copy))
     }
 
     /// What the phone draws session `session_id`'s selectable texts with,
@@ -4580,5 +4773,156 @@ mod tests {
             point(px(79.0), px(173.0))
         );
         assert_eq!(spot.hit_origin(HandleEnd::End), point(px(79.0), px(203.0)));
+    }
+
+    /// Handles measured at window origin (10, 10): the start's caret at
+    /// (100, 200), the end's at (100, 300), each on a 20 px line.
+    fn two_handles() -> HandleSpots {
+        HandleSpots {
+            origin: point(px(10.0), px(10.0)),
+            layer: LAYER,
+            start: Some(spot_at(100.0, 200.0)),
+            end: Some(spot_at(100.0, 300.0)),
+        }
+    }
+
+    #[test]
+    fn handle_area_holds_a_release_inside_either_handle() {
+        // The start's hit area spans (89, 183) to (133, 227) in the window,
+        // the end's (89, 313) to (133, 357).
+        let spots = Some(two_handles());
+        assert!(
+            in_handle_area(spots, point(px(90.0), px(184.0))),
+            "inside the start's"
+        );
+        assert!(
+            in_handle_area(spots, point(px(132.0), px(356.0))),
+            "inside the end's"
+        );
+        assert!(
+            !in_handle_area(spots, point(px(110.0), px(260.0))),
+            "between them, outside both"
+        );
+        assert!(
+            !in_handle_area(spots, point(px(140.0), px(200.0))),
+            "beside the start's, outside both"
+        );
+    }
+
+    #[test]
+    fn handle_area_holds_nothing_without_handles() {
+        assert!(!in_handle_area(None, point(px(110.0), px(200.0))));
+        let none_drawn = HandleSpots {
+            start: None,
+            end: None,
+            ..two_handles()
+        };
+        assert!(!in_handle_area(
+            Some(none_drawn),
+            point(px(110.0), px(200.0))
+        ));
+    }
+
+    /// A spot whose caret is at (`x`, `y`) on a 20 px line.
+    fn spot_at(x: f32, y: f32) -> HandleSpot {
+        HandleSpot {
+            caret: point(px(x), px(y)),
+            line_height: px(20.0),
+        }
+    }
+
+    const LAYER: Size<Pixels> = Size {
+        width: px(390.0),
+        height: px(600.0),
+    };
+    const BUTTON: Size<Pixels> = Size {
+        width: px(60.0),
+        height: px(44.0),
+    };
+
+    #[test]
+    fn copy_button_sits_above_the_start_in_a_wide_layer() {
+        // The start's hit area tops out at 300 - 5 - 22 = 273.
+        let origin =
+            copy_button_origin(spot_at(200.0, 300.0), spot_at(250.0, 340.0), LAYER, BUTTON);
+        assert_eq!(
+            origin,
+            point(px(170.0), px(225.0)),
+            "centred on the start's caret, its bottom 4 px above the hit area"
+        );
+    }
+
+    #[test]
+    fn copy_button_is_clamped_at_the_left_and_right_edges() {
+        let end = spot_at(250.0, 340.0);
+        assert_eq!(
+            copy_button_origin(spot_at(10.0, 300.0), end, LAYER, BUTTON),
+            point(px(0.0), px(225.0)),
+            "kept inside the left edge"
+        );
+        assert_eq!(
+            copy_button_origin(spot_at(380.0, 300.0), end, LAYER, BUTTON),
+            point(px(330.0), px(225.0)),
+            "kept inside the right edge"
+        );
+    }
+
+    #[test]
+    fn copy_button_goes_below_the_end_when_the_start_is_near_the_top() {
+        // The start's hit area tops out at 30 - 27 = 3: no room above it.
+        // The end's hit area runs from 60 + 20 + 5 - 22 = 63 to 107.
+        let origin = copy_button_origin(spot_at(200.0, 30.0), spot_at(100.0, 60.0), LAYER, BUTTON);
+        assert_eq!(
+            origin,
+            point(px(170.0), px(111.0)),
+            "its top 4 px below the end's hit area, centred on the start"
+        );
+    }
+
+    #[test]
+    fn copy_button_is_clamped_inside_a_layer_with_no_room_above_or_below() {
+        // No room above the start (as above); below the end's hit area it
+        // would run from 111 to 155, past a 150 px layer's bottom.
+        let short = Size {
+            width: px(390.0),
+            height: px(150.0),
+        };
+        let origin = copy_button_origin(spot_at(200.0, 30.0), spot_at(100.0, 60.0), short, BUTTON);
+        assert_eq!(
+            origin,
+            point(px(170.0), px(106.0)),
+            "its bottom on the layer's bottom, centred on the start"
+        );
+        let tiny = Size {
+            width: px(390.0),
+            height: px(30.0),
+        };
+        let origin = copy_button_origin(spot_at(200.0, 30.0), spot_at(100.0, 60.0), tiny, BUTTON);
+        assert_eq!(
+            origin.y,
+            px(0.0),
+            "never above the layer's top, even when it does not fit"
+        );
+    }
+
+    #[test]
+    fn handle_area_holds_no_release_outside_the_layer() {
+        // The layer spans window y 10 to 340; the end's square runs from
+        // 313 to 357.
+        let spots = HandleSpots {
+            layer: Size {
+                width: px(390.0),
+                height: px(330.0),
+            },
+            ..two_handles()
+        };
+        assert!(
+            in_handle_area(Some(spots), point(px(110.0), px(320.0))),
+            "inside the end's square and the layer"
+        );
+        assert!(
+            !in_handle_area(Some(spots), point(px(110.0), px(350.0))),
+            "inside the end's square but below the layer, where it is clipped"
+        );
     }
 }

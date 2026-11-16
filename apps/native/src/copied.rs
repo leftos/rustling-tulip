@@ -135,6 +135,24 @@ impl RootView {
 
     /// The chip, centred just above the footer bar while a copy is recent.
     pub(crate) fn chip_layer(&self, offset: i8, t: &UiTheme) -> Option<AnyElement> {
+        let chip = self.copied_chip_element(offset, t)?;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(ui_px_at(offset, FOOTER_HEIGHT) + px(8.0))
+                .flex()
+                .justify_center()
+                .child(chip)
+                .into_any_element(),
+        )
+    }
+
+    /// The chip itself, fading out, while a copy is recent; where it sits
+    /// is its caller's: the desktop's [`Self::chip_layer`] and the phone's
+    /// root.
+    pub(crate) fn copied_chip_element(&self, offset: i8, t: &UiTheme) -> Option<AnyElement> {
         let chars = self.copy_chip.chars()?;
         let generation = self.copy_chip.generation();
         let chip = toast_frame(
@@ -149,19 +167,12 @@ impl RootView {
         .child(CHIP_LABEL)
         .tooltip(tooltip(chip_tooltip(chars)));
         Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(ui_px_at(offset, FOOTER_HEIGHT) + px(8.0))
-                .flex()
-                .justify_center()
-                .child(chip.with_animation(
-                    ElementId::Name(SharedString::from(format!("copied-fade-{generation}"))),
-                    Animation::new(CHIP_LIFETIME).with_easing(|delta| 1.0 - delta),
-                    Styled::opacity,
-                ))
-                .into_any_element(),
+            chip.with_animation(
+                ElementId::Name(SharedString::from(format!("copied-fade-{generation}"))),
+                Animation::new(CHIP_LIFETIME).with_easing(|delta| 1.0 - delta),
+                Styled::opacity,
+            )
+            .into_any_element(),
         )
     }
 }
