@@ -1697,8 +1697,8 @@ mod tests {
     use gpui::{
         AppContext as _, Autocapitalize, ClipboardItem, Entity, EntityInputHandler as _,
         IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render, Styled,
-        TestAppContext, TextInputAction, TextInputConfiguration, VisualTestContext, Window, div,
-        point, px,
+        TestAppContext, TextInputAction, TextInputConfiguration, TextInputStateChange,
+        VisualTestContext, Window, div, point, px,
     };
 
     use super::{
@@ -2508,35 +2508,78 @@ mod tests {
         assert_eq!(caret(&input, cx), (3, 3));
     }
 
-    /// The test platform's record of `notify_text_input_changed` is private to
-    /// gpui, so this pins the mark the draw reports and clears. The mark is
-    /// read inside the update that sets the text, since the update's end draws.
+    /// A focused input reports an app's text change to the window as exactly
+    /// one `ContentChanged`, and a blurred input's draw reports nothing. The
+    /// mark the draw takes is read inside the update, since the update's end
+    /// draws.
     #[gpui::test]
     fn an_app_set_text_reports_the_change_to_the_platform(cx: &mut TestAppContext) {
         let (input, cx) = open(cx, single, "draft");
-        let set_text = |text: &'static str, cx: &mut VisualTestContext| {
-            report_after(&input, cx, |input, _, cx| input.set_text(text, cx))
-        };
+        cx.run_until_parked();
+        let before = platform_changes(cx);
         assert_eq!(
-            set_text("", cx),
+            report_after(&input, cx, |input, _, cx| input.set_text("", cx)),
             PlatformReport::Content,
             "set_text marks the text stale"
         );
         cx.run_until_parked();
+        let after = platform_changes(cx);
+        assert_eq!(
+            &after[before.len()..],
+            &[TextInputStateChange::ContentChanged],
+            "the focused input's draw reports the text change to the window"
+        );
         assert_eq!(
             report_of(&input, cx),
             PlatformReport::None,
-            "the draw of a focused input reports it"
+            "the draw that reported it cleared the mark"
         );
 
         cx.update(Window::blur);
-        assert_eq!(set_text("sent", cx), PlatformReport::Content);
         cx.run_until_parked();
+        let after_blur = platform_changes(cx);
+        assert_eq!(
+            report_after(&input, cx, |input, _, cx| input.set_text("sent", cx)),
+            PlatformReport::Content
+        );
+        cx.run_until_parked();
+        let after = platform_changes(cx);
+        assert_eq!(
+            &after[after_blur.len()..],
+            &[],
+            "an unfocused input's draw reports nothing to the platform"
+        );
         assert_eq!(
             report_of(&input, cx),
             PlatformReport::None,
             "an unfocused input's draw clears the mark too"
         );
+    }
+
+    /// A caret move on a focused input reports exactly one `SelectionChanged`
+    /// to the window, and nothing else.
+    #[gpui::test]
+    fn a_caret_move_reports_the_selection_to_the_platform(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "abc");
+        cx.run_until_parked();
+        let before = platform_changes(cx);
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(0, cx)));
+        cx.run_until_parked();
+        let after = platform_changes(cx);
+        assert_eq!(
+            &after[before.len()..],
+            &[TextInputStateChange::SelectionChanged],
+            "the focused input's draw reports the caret move to the window"
+        );
+        assert_eq!(caret(&input, cx), (0, 0));
+    }
+
+    /// Every text input state change the input's window has reported, in
+    /// order. The read itself draws, so a pending mark lands in the record
+    /// before the caller's baseline is taken.
+    fn platform_changes(cx: &mut VisualTestContext) -> Vec<TextInputStateChange> {
+        let handle = cx.update(|window, _| window.window_handle());
+        cx.text_input_state_changes(handle)
     }
 
     /// The report the input holds for its next draw.
