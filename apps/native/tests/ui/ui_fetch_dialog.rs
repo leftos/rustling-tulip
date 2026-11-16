@@ -621,6 +621,7 @@ fn already_fetching_shows_inline(cx: &mut TestAppContext) {
         repo_name: "r1".to_owned(),
         worktree_path: Some("C:/wt/x".to_owned()),
         rel_path: "src/a.rs".to_owned(),
+        host_path: false,
         line: None,
         column: None,
         open_when_done: true,

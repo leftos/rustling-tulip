@@ -21,7 +21,7 @@ use protocol::{ClientMessage, DaemonMessage, PathKind, SessionFolder, SessionSna
 use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{
     Fixture, Harness, HostHandle, Opened, TestDir, remote_in_pane, repo, saved_remote, session,
 };
@@ -53,6 +53,7 @@ fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
         repo_name: "repo".to_owned(),
         worktree_path: Some("C:/wt/r1".to_owned()),
         rel_path: rel.to_owned(),
+        host_path: false,
         line,
         column,
         open_when_done: true,
@@ -1123,6 +1124,333 @@ fn a_failed_listing_shows_why(cx: &mut TestAppContext) {
             ))
         )]
     );
+}
+
+/// [`asking_with`] a host that sends folders, lists a session's folders and
+/// serves any absolute path.
+fn serving_paths<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    s: SessionSnapshot,
+) -> (Harness<'a>, PathBuf) {
+    asking_with(
+        cx,
+        dir,
+        s,
+        &[
+            protocol::FEATURE_FOLDER_FETCH,
+            protocol::FEATURE_SESSION_FOLDERS,
+            protocol::FEATURE_HOST_PATHS,
+        ],
+    )
+}
+
+/// The host-path messages in `sent`, as `(kind, id, path)`.
+fn host_path_messages(sent: &[ClientMessage]) -> Vec<(&'static str, &str, &str)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatHostPath { id, path } => Some(("stat", id.as_str(), path.as_str())),
+            ClientMessage::FetchHostFile { id, path } => Some(("file", id.as_str(), path.as_str())),
+            ClientMessage::FetchHostFolder { id, path } => {
+                Some(("folder", id.as_str(), path.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_link_outside_every_folder_is_fetched_by_its_host_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = serving_paths(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see D:\elsewhere\a.rs", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", "C:/wt/x")],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        stats_in(&sent).is_empty(),
+        "no repo-relative stat: {sent:?}"
+    );
+    let [("stat", stat_id, r"D:\elsewhere\a.rs")] = host_path_messages(&sent)[..] else {
+        panic!("one StatHostPath for the link's host path, got {sent:?}");
+    };
+    let stat_id = stat_id.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat_id,
+        kind: PathKind::File,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let [("file", fetch_id, r"D:\elsewhere\a.rs")] = host_path_messages(&sent)[..] else {
+        panic!("one FetchHostFile for the link's host path, got {sent:?}");
+    };
+    let fetch_id = fetch_id.to_owned();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::FetchFile { .. })),
+        "no repo-relative fetch: {sent:?}"
+    );
+    stream_on(&mut h, &saved_remote(), &fetch_id, b"fn a() {", b"}\n");
+
+    let saved = root.join(HOST).join("D").join("elsewhere").join("a.rs");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"fn a() {}\n");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title.starts_with("Couldn't")),
+        "nothing is refused: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_link_inside_a_session_folder_stays_repo_relative_on_a_host_serving_paths(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = serving_paths(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let sent = h.host(&saved_remote()).sent();
+    assert!(asks_in(&sent).is_empty(), "no ask is made: {sent:?}");
+    assert!(host_path_messages(&sent).is_empty(), "{sent:?}");
+    let mut stat = None;
+    for msg in &sent {
+        if let ClientMessage::StatPath { id, .. } = msg {
+            stat = Some(id.clone());
+        }
+    }
+    assert_eq!(stats_in(&sent), [(Some(WORKTREE), "docs/notes.txt")]);
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat.expect("one StatPath is sent"),
+        kind: PathKind::File,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(host_path_messages(&sent).is_empty(), "{sent:?}");
+    let mut fetch = None;
+    for msg in &sent {
+        if let ClientMessage::FetchFile {
+            id,
+            repo_id,
+            worktree_path,
+            path,
+        } = msg
+        {
+            fetch = Some((
+                id.clone(),
+                repo_id.clone(),
+                worktree_path.clone(),
+                path.clone(),
+            ));
+        }
+    }
+    let (id, repo_id, worktree, path) = fetch.expect("one FetchFile is sent");
+    assert_eq!(repo_id, "r1");
+    assert_eq!(worktree.as_deref(), Some(WORKTREE));
+    assert_eq!(path, "docs/notes.txt");
+    stream_on(&mut h, &saved_remote(), &id, b"first, ", b"second");
+
+    let saved = root.join(HOST).join("r1").join("docs").join("notes.txt");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+}
+
+#[gpui::test]
+fn a_relative_link_from_an_outside_cwd_tries_its_host_path_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = serving_paths(
+        cx,
+        &dir,
+        session("s1").shell("D:/work").worktree("r1").build(),
+    );
+
+    click_link(&mut h, "wrote logs/run.log", 9);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![session_folder("r1", WORKTREE)],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        stats_in(&sent).is_empty(),
+        "the root-joined reading waits: {sent:?}"
+    );
+    let [("stat", stat_id, r"D:\work\logs\run.log")] = host_path_messages(&sent)[..] else {
+        panic!("one StatHostPath for the cwd's reading first, got {sent:?}");
+    };
+    let stat_id = stat_id.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat_id,
+        kind: PathKind::File,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let [("file", fetch_id, r"D:\work\logs\run.log")] = host_path_messages(&sent)[..] else {
+        panic!("one FetchHostFile for the cwd's reading, got {sent:?}");
+    };
+    let fetch_id = fetch_id.to_owned();
+    stream_on(&mut h, &saved_remote(), &fetch_id, b"log ", b"line\n");
+
+    let saved = root
+        .join(HOST)
+        .join("D")
+        .join("work")
+        .join("logs")
+        .join("run.log");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"log line\n");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+}
+
+#[gpui::test]
+fn a_link_in_a_sibling_worktree_stays_repo_relative_on_a_host_serving_paths(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, _) = serving_paths(cx, &dir, session("s1").worktree("r1").build());
+
+    click_link(&mut h, r"see C:\wt\s\r2\docs\notes.md", 6);
+    let sent = h.host(&saved_remote()).sent();
+    let id = asks_in(&sent)[0].0.to_owned();
+    h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+        id,
+        folders: vec![
+            session_folder("r1", WORKTREE),
+            session_folder("r2", "C:/wt/s/r2"),
+        ],
+        error: None,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(host_path_messages(&sent).is_empty(), "{sent:?}");
+    assert_eq!(stats_in(&sent), [(Some("C:/wt/s/r2"), "docs/notes.md")]);
+    let mut stat = None;
+    for msg in &sent {
+        if let ClientMessage::StatPath { id, .. } = msg {
+            stat = Some(id.clone());
+        }
+    }
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: stat.expect("one StatPath is sent"),
+        kind: PathKind::File,
+        size: 0,
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(host_path_messages(&sent).is_empty(), "{sent:?}");
+    let fetched: Vec<(&str, Option<&str>, &str)> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile {
+                repo_id,
+                worktree_path,
+                path,
+                ..
+            } => Some((repo_id.as_str(), worktree_path.as_deref(), path.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetched, [("r2", Some("C:/wt/s/r2"), "docs/notes.md")]);
+}
+
+#[gpui::test]
+fn the_fetch_dialog_reads_a_path_under_another_root_against_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s = session("s1")
+        .members(&[("r1", "main", "C:/wt/x"), ("r2", "main", "C:/wt/y")])
+        .cwd("C:/wt/x")
+        .build();
+    let (mut h, _) = serving_paths(cx, &dir, s);
+
+    h.open_fetch_dialog_from_more();
+    assert_eq!(
+        h.root(|root, _| root.fetch_dialog_scope()).as_deref(),
+        Some("r1")
+    );
+    for text in ["C:", "/"] {
+        let keys: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+        h.keys(&keys.join(" "));
+        assert!(
+            !h.root(RootView::fetch_dialog_can_submit),
+            "{text:?} cannot be fetched"
+        );
+        h.keys("enter");
+        let refusal = if text == "/" {
+            "/ is a filesystem root".to_owned()
+        } else {
+            r"C:\ is a filesystem root".to_owned()
+        };
+        assert_eq!(h.root(|root, _| root.fetch_dialog_error()), Some(refusal));
+        let erase = vec!["backspace"; text.len()].join(" ");
+        h.keys(&erase);
+    }
+    assert!(h.host(&saved_remote()).sent().iter().all(|msg| !matches!(
+        msg,
+        ClientMessage::FetchFile { .. } | ClientMessage::FetchHostFile { .. }
+    )));
+
+    let keys: Vec<String> = "C:/wt/y/src/lib.rs"
+        .chars()
+        .map(|c| c.to_string())
+        .collect();
+    h.keys(&keys.join(" "));
+    h.keys("enter");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(host_path_messages(&sent).is_empty(), "{sent:?}");
+    let fetched: Vec<(&str, Option<&str>, &str)> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile {
+                repo_id,
+                worktree_path,
+                path,
+                ..
+            } => Some((repo_id.as_str(), worktree_path.as_deref(), path.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetched, [("r2", Some("C:/wt/y"), "src/lib.rs")]);
+}
+
+#[gpui::test]
+fn the_fetch_dialog_fetches_an_outside_path_by_its_host_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = serving_paths(cx, &dir, session("s1").worktree("r1").build());
+
+    h.open_fetch_dialog_from_more();
+    let keys: Vec<String> = "D:/logs/run.log".chars().map(|c| c.to_string()).collect();
+    h.keys(&keys.join(" "));
+    assert!(
+        h.root(RootView::fetch_dialog_can_submit),
+        "an outside path can be fetched"
+    );
+    h.keys("enter");
+
+    let sent = h.host(&saved_remote()).sent();
+    let [("file", id, r"D:\logs\run.log")] = host_path_messages(&sent)[..] else {
+        panic!("one FetchHostFile for the typed path, got {sent:?}");
+    };
+    let id = id.to_owned();
+    assert_eq!(h.root(|root, _| root.fetch_dialog_error()), None);
+    stream_on(&mut h, &saved_remote(), &id, b"log ", b"line\n");
+
+    let saved = root.join(HOST).join("D").join("logs").join("run.log");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"log line\n");
 }
 
 #[gpui::test]

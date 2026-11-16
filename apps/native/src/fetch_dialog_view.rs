@@ -136,7 +136,8 @@ impl RootView {
                 )
             })
             .unwrap_or_default();
-        let form = FetchForm::new(roots, cwd.as_deref());
+        let form =
+            FetchForm::new(roots, cwd.as_deref()).with_host_paths(self.host_serves_paths(&host));
         let path_input = cx.new(|cx| TextInput::new(String::new(), PLACEHOLDER, cx));
         let subscriptions = Self::watch_fetch_field(&path_input, window, cx);
         self.renaming = None;

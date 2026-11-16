@@ -376,6 +376,7 @@ fn fetch(h: &mut Harness<'_>, root: &Path, rel: &str, line: Option<u32>, bytes: 
         repo_name: "repo".to_owned(),
         worktree_path: Some("C:/wt/r1".to_owned()),
         rel_path: rel.to_owned(),
+        host_path: false,
         line,
         column: None,
         open_when_done: true,

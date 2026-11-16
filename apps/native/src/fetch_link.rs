@@ -121,44 +121,159 @@ pub fn readings(
     roots: &[Root],
     join_roots: &[Root],
 ) -> Vec<FetchRequest> {
-    let parsed: Vec<(&Root, HostPath)> = roots
-        .iter()
-        .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
-        .collect();
-    let joining: Vec<(&Root, HostPath)> = join_roots
-        .iter()
-        .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
-        .collect();
+    readings_with(host, candidates, cwd, (roots, join_roots), false)
+}
+
+/// [`readings`] on a host that serves any absolute path: a place no root
+/// holds is read too, as its host path, in its turn among the places, so
+/// the cwd's reading outside every root comes before a root-joined one.
+/// A place some root holds is never read by its host path.
+#[must_use]
+pub fn host_path_readings(
+    host: &HostKey,
+    candidates: &[TerminalLinkCandidate],
+    cwd: Option<&str>,
+    roots: &[Root],
+    join_roots: &[Root],
+) -> Vec<FetchRequest> {
+    readings_with(host, candidates, cwd, (roots, join_roots), true)
+}
+
+/// [`readings`], and with `serving` [`host_path_readings`]; `roots` is
+/// the roots matched and the roots joined.
+fn readings_with(
+    host: &HostKey,
+    candidates: &[TerminalLinkCandidate],
+    cwd: Option<&str>,
+    roots: (&[Root], &[Root]),
+    serving: bool,
+) -> Vec<FetchRequest> {
+    let parsed = parse_roots(roots.0);
+    let joining = parse_roots(roots.1);
     let cwd = cwd.and_then(HostPath::parse);
     let mut found: Vec<FetchRequest> = Vec::new();
     for candidate in candidates {
         for place in places(&candidate.path, cwd.as_ref(), &joining) {
+            let mut held = false;
             for (root, root_path) in &parsed {
                 let Some(rel) = root_path.relative_or_root(&place) else {
                     continue;
                 };
-                let request = FetchRequest {
-                    host: host.clone(),
-                    repo_id: root.repo_id.clone(),
-                    repo_name: root.repo_name.clone(),
-                    worktree_path: Some(root.path.clone()),
-                    rel_path: rel,
-                    line: candidate.line,
-                    column: candidate.column,
-                    open_when_done: true,
-                    action: LinkAction::Viewer,
-                };
-                let seen = found.iter().any(|other| {
-                    (&other.repo_id, &other.worktree_path, &other.rel_path)
-                        == (&request.repo_id, &request.worktree_path, &request.rel_path)
-                });
-                if !seen {
-                    found.push(request);
-                }
+                held = true;
+                push_new(&mut found, root_reading(host, candidate, root, rel));
+            }
+            if serving && !held && !place.segments.is_empty() {
+                push_new(&mut found, host_reading(host, candidate, place.render()));
             }
         }
     }
     found
+}
+
+/// Each of `roots` with its path parsed; a root whose path is not an
+/// absolute host path is left out.
+fn parse_roots(roots: &[Root]) -> Vec<(&Root, HostPath)> {
+    roots
+        .iter()
+        .filter_map(|root| HostPath::parse(&root.path).map(|path| (root, path)))
+        .collect()
+}
+
+/// The reading of `rel` under `root` for `candidate`'s line.
+fn root_reading(
+    host: &HostKey,
+    candidate: &TerminalLinkCandidate,
+    root: &Root,
+    rel: String,
+) -> FetchRequest {
+    FetchRequest {
+        host: host.clone(),
+        repo_id: root.repo_id.clone(),
+        repo_name: root.repo_name.clone(),
+        worktree_path: Some(root.path.clone()),
+        rel_path: rel,
+        host_path: false,
+        line: candidate.line,
+        column: candidate.column,
+        open_when_done: true,
+        action: LinkAction::Viewer,
+    }
+}
+
+/// The reading of the absolute host path `path` for `candidate`'s line.
+fn host_reading(host: &HostKey, candidate: &TerminalLinkCandidate, path: String) -> FetchRequest {
+    FetchRequest {
+        host: host.clone(),
+        repo_id: String::new(),
+        repo_name: String::new(),
+        worktree_path: None,
+        rel_path: path,
+        host_path: true,
+        line: candidate.line,
+        column: candidate.column,
+        open_when_done: true,
+        action: LinkAction::Viewer,
+    }
+}
+
+/// Appends `request` to `found` unless a reading of the same path is
+/// already there.
+fn push_new(found: &mut Vec<FetchRequest>, request: FetchRequest) {
+    let key = |r: &FetchRequest| {
+        (
+            r.host_path,
+            r.repo_id.clone(),
+            r.worktree_path.clone(),
+            r.rel_path.clone(),
+        )
+    };
+    if !found.iter().any(|other| key(other) == key(&request)) {
+        found.push(request);
+    }
+}
+
+/// The host-path fetches from `host` to try for a link's `candidates`
+/// (longest first) that lie outside every session folder: each candidate
+/// as an absolute host path, itself when absolute, else joined to `cwd`
+/// (never to a root); `.` and `..` are resolved as text. A relative
+/// candidate with no `cwd` gives no reading.
+#[must_use]
+pub fn host_readings(
+    host: &HostKey,
+    candidates: &[TerminalLinkCandidate],
+    cwd: Option<&str>,
+) -> Vec<FetchRequest> {
+    let cwd = cwd.and_then(HostPath::parse);
+    let mut found: Vec<FetchRequest> = Vec::new();
+    for candidate in candidates {
+        let place = if split_anchor(&unify(&candidate.path)).is_some() {
+            HostPath::parse(&candidate.path)
+        } else {
+            cwd.as_ref().and_then(|cwd| cwd.join(&candidate.path))
+        };
+        let Some(place) = place.filter(|place| !place.segments.is_empty()) else {
+            continue;
+        };
+        push_new(&mut found, host_reading(host, candidate, place.render()));
+    }
+    found
+}
+
+/// The absolute host path `text` names, `.` and `..` resolved and written
+/// in its host's own separators; `None` for a relative path or one that
+/// climbs above its anchor.
+#[must_use]
+pub(crate) fn absolute_host_path(text: &str) -> Option<String> {
+    HostPath::parse(text).map(|path| path.render())
+}
+
+/// The folder holding the absolute host path `path`, in its host's own
+/// separators; `None` for a relative path or a filesystem root itself.
+#[must_use]
+pub(crate) fn host_parent(path: &str) -> Option<String> {
+    let mut parsed = HostPath::parse(path)?;
+    parsed.segments.pop()?;
+    Some(parsed.render())
 }
 
 /// Where the link path `path` may be on the host: itself when absolute,
@@ -259,6 +374,16 @@ impl HostPath {
                 .all(|(mine, theirs)| self.same_name(mine, theirs))
     }
 
+    /// This path as its host writes it: `C:\a\b` for a drive, `\\srv\share\a`
+    /// for a network path, `/a/b` on Unix.
+    fn render(&self) -> String {
+        match self.anchor.as_str() {
+            "/" => format!("/{}", self.segments.join("/")),
+            "//" => format!(r"\\{}", self.segments.join(r"\")),
+            drive => format!(r"{drive}\{}", self.segments.join(r"\")),
+        }
+    }
+
     /// `path` relative to this folder, `/` separated; `None` unless it lies
     /// strictly below it.
     fn relative(&self, path: &Self) -> Option<String> {
@@ -322,8 +447,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Root, RootStrip, link_leaves_roots, readings as all_readings, root_holding, roots,
-        strip_root,
+        Root, RootStrip, host_parent, host_path_readings, host_readings, link_leaves_roots,
+        readings as all_readings, root_holding, roots, strip_root,
     };
     use crate::file_fetch::FetchRequest;
     use crate::links::TerminalLinkCandidate;
@@ -384,6 +509,7 @@ mod tests {
             repo_name: root.repo_name.clone(),
             worktree_path: Some(root.path.clone()),
             rel_path: rel.to_owned(),
+            host_path: false,
             line: None,
             column: None,
             open_when_done: true,
@@ -741,5 +867,183 @@ mod tests {
         );
         assert_eq!(strip_root("C:/wt/x", "src/a.rs"), RootStrip::NotAbsolute);
         assert_eq!(strip_root("C:/wt/x", r"src\a.rs"), RootStrip::NotAbsolute);
+    }
+
+    /// The host paths `host_readings` gives for `candidates` from `cwd`.
+    fn host_paths(candidates: &[TerminalLinkCandidate], cwd: Option<&str>) -> Vec<String> {
+        host_readings(&HostKey::Local, candidates, cwd)
+            .into_iter()
+            .map(|request| {
+                assert!(request.host_path, "every host reading is a host path");
+                assert!(request.repo_id.is_empty() && request.worktree_path.is_none());
+                request.rel_path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_absolute_link_is_its_own_host_reading() {
+        assert_eq!(
+            host_paths(&[candidate(r"D:\elsewhere\a.rs", Some(3), None)], None),
+            [r"D:\elsewhere\a.rs"]
+        );
+        assert_eq!(
+            host_paths(&[plain("/etc/./x/../hosts")], None),
+            ["/etc/hosts"]
+        );
+        assert_eq!(
+            host_paths(&[plain(r"\\?\UNC\srv\share\a.txt")], None),
+            [r"\\srv\share\a.txt"]
+        );
+        let line = host_readings(
+            &HostKey::Local,
+            &[candidate("/a/b", Some(4), Some(2))],
+            None,
+        );
+        assert_eq!((line[0].line, line[0].column), (Some(4), Some(2)));
+    }
+
+    #[test]
+    fn a_relative_link_joins_only_the_cwd_as_a_host_reading() {
+        assert_eq!(
+            host_paths(&[plain("logs/run.log")], Some("D:/work")),
+            [r"D:\work\logs\run.log"]
+        );
+        assert!(
+            host_paths(&[plain("logs/run.log")], None).is_empty(),
+            "no cwd, no reading"
+        );
+        assert!(
+            host_paths(&[plain("/")], None).is_empty(),
+            "a filesystem root is no file"
+        );
+    }
+
+    /// Each reading [`host_path_readings`] (`serving`) or [`all_readings`]
+    /// gives for `link` from `cwd`, matched against `roots` and joined to
+    /// `own`, as `"repo:rel"` or `"host:path"`.
+    fn sequence(
+        serving: bool,
+        link: &str,
+        cwd: Option<&str>,
+        roots: &[Root],
+        own: &[Root],
+    ) -> Vec<String> {
+        let read = if serving {
+            host_path_readings
+        } else {
+            all_readings
+        };
+        read(&HostKey::Local, &[plain(link)], cwd, roots, own)
+            .into_iter()
+            .map(|request| {
+                if request.host_path {
+                    format!("host:{}", request.rel_path)
+                } else {
+                    format!("{}:{}", request.repo_id, request.rel_path)
+                }
+            })
+            .collect()
+    }
+
+    /// One row of [`host_path_readings_case_table`]: its name, whether the
+    /// host serves any path, the link, the cwd, the roots matched, and the
+    /// expected sequence.
+    type CaseRow<'a> = (
+        &'a str,
+        bool,
+        &'a str,
+        Option<&'a str>,
+        &'a [Root],
+        &'a [&'a str],
+    );
+
+    #[test]
+    fn host_path_readings_case_table() {
+        let own = [root("r1", "C:/wt/x")];
+        let listed = [root("r1", "C:/wt/x"), root("r2", "C:/wt/s/r2")];
+        let rows: [CaseRow<'_>; 8] = [
+            (
+                "cwd outside, host_paths",
+                true,
+                "run.log",
+                Some("D:/logs"),
+                &own,
+                &[r"host:D:\logs\run.log", "r1:run.log"],
+            ),
+            (
+                "cwd outside, no host_paths",
+                false,
+                "run.log",
+                Some("D:/logs"),
+                &own,
+                &["r1:run.log"],
+            ),
+            (
+                "cwd inside, host_paths",
+                true,
+                "run.log",
+                Some("C:/wt/x/sub"),
+                &own,
+                &["r1:sub/run.log", "r1:run.log"],
+            ),
+            (
+                "cwd inside, no host_paths",
+                false,
+                "run.log",
+                Some("C:/wt/x/sub"),
+                &own,
+                &["r1:sub/run.log", "r1:run.log"],
+            ),
+            (
+                "own root, host_paths",
+                true,
+                "C:/wt/x/a.rs",
+                None,
+                &own,
+                &["r1:a.rs"],
+            ),
+            (
+                "sibling worktree, host_paths",
+                true,
+                r"C:\wt\s\r2\docs\n.md",
+                None,
+                &listed,
+                &["r2:docs/n.md"],
+            ),
+            (
+                "sibling worktree, no host_paths",
+                false,
+                r"C:\wt\s\r2\docs\n.md",
+                None,
+                &listed,
+                &["r2:docs/n.md"],
+            ),
+            (
+                "absolute outside, no host_paths",
+                false,
+                r"D:\elsewhere\a.rs",
+                None,
+                &listed,
+                &[],
+            ),
+        ];
+        for (row, serving, link, cwd, roots, expected) in rows {
+            assert_eq!(sequence(serving, link, cwd, roots, &own), expected, "{row}");
+        }
+        assert_eq!(
+            sequence(true, r"D:\elsewhere\a.rs", None, &listed, &own),
+            [r"host:D:\elsewhere\a.rs"],
+            "absolute outside, host_paths"
+        );
+    }
+
+    #[test]
+    fn host_parent_drops_the_last_segment() {
+        assert_eq!(host_parent(r"D:\x\a.rs").as_deref(), Some(r"D:\x"));
+        assert_eq!(host_parent(r"D:\a.rs").as_deref(), Some(r"D:\"));
+        assert_eq!(host_parent("/etc/hosts").as_deref(), Some("/etc"));
+        assert_eq!(host_parent("/").as_deref(), None);
+        assert_eq!(host_parent("a/b").as_deref(), None);
     }
 }

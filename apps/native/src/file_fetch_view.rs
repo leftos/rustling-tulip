@@ -256,14 +256,7 @@ impl RootView {
             session.and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id));
         let cwd = found.and_then(|session| session.current_cwd.clone());
         let mut readings = found
-            .map(|session| {
-                fetch_link::session_readings(
-                    host,
-                    &link.candidates,
-                    session,
-                    self.sidebar.repos_of(host),
-                )
-            })
+            .map(|session| self.link_readings(host, &link.candidates, session))
             .unwrap_or_default();
         let own_roots = found
             .map(|session| {
@@ -296,6 +289,9 @@ impl RootView {
             return;
         }
         if readings.is_empty() {
+            if self.start_host_readings(host, &link.candidates, cwd.as_deref(), action, cx) {
+                return;
+            }
             tracing::warn!(
                 target = %link.target,
                 session = session.unwrap_or("none"),
@@ -403,7 +399,12 @@ impl RootView {
         };
         self.dismiss_toast_key(id, cx);
         let roots: Vec<fetch_link::Root> = folders.iter().map(fetch_link::Root::from).collect();
-        let mut readings = fetch_link::readings(
+        let read = if self.host_serves_paths(&ask.host) {
+            fetch_link::host_path_readings
+        } else {
+            fetch_link::readings
+        };
+        let mut readings = read(
             &ask.host,
             &ask.candidates,
             ask.cwd.as_deref(),
@@ -411,6 +412,10 @@ impl RootView {
             &ask.own_roots,
         );
         if readings.is_empty() {
+            let (host, cwd) = (ask.host.clone(), ask.cwd.as_deref());
+            if self.start_host_readings(&host, &ask.candidates, cwd, ask.action, cx) {
+                return true;
+            }
             let label = self.host_label_of(&ask.host);
             let detail = file_fetch::outside_detail(
                 folders,
@@ -436,6 +441,57 @@ impl RootView {
         }
         self.start_link_readings(readings, &ask.host, cx);
         true
+    }
+
+    /// A link's readings on `host` under `session`'s own folders: on a host
+    /// that serves any path, a place outside them reads as its host path in
+    /// its turn ([`fetch_link::host_path_readings`]).
+    fn link_readings(
+        &self,
+        host: &HostKey,
+        candidates: &[crate::links::TerminalLinkCandidate],
+        session: &protocol::SessionSnapshot,
+    ) -> Vec<FetchRequest> {
+        let repos = self.sidebar.repos_of(host);
+        if !self.host_serves_paths(host) {
+            return fetch_link::session_readings(host, candidates, session, repos);
+        }
+        let cwd = session.current_cwd.as_deref();
+        let own = fetch_link::roots(&session.members, cwd, repos);
+        fetch_link::host_path_readings(host, candidates, cwd, &own, &own)
+    }
+
+    /// A link outside every session folder on `host`: when the host serves
+    /// absolute paths, fetches the link's host-path readings as `action`
+    /// asks. `false` when the host does not serve them or the link has no
+    /// such reading, which leaves the refusal to the caller.
+    fn start_host_readings(
+        &mut self,
+        host: &HostKey,
+        candidates: &[crate::links::TerminalLinkCandidate],
+        cwd: Option<&str>,
+        action: LinkAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.host_serves_paths(host) {
+            return false;
+        }
+        let mut readings = fetch_link::host_readings(host, candidates, cwd);
+        if readings.is_empty() {
+            return false;
+        }
+        for reading in &mut readings {
+            reading.action = action;
+        }
+        tracing::info!(host = ?host, "fetching a link outside every session folder by its host path");
+        self.start_link_readings(readings, host, cx);
+        true
+    }
+
+    /// Whether `host`'s daemon fetches any absolute path.
+    pub(crate) fn host_serves_paths(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_HOST_PATHS))
     }
 
     /// `host` as fetch toasts name it ([`file_fetch::host_label`]); "The
@@ -497,16 +553,8 @@ impl RootView {
 
     /// Asks `host` what `reading` names, for the stat `id`.
     fn send_stat(&self, host: &HostKey, id: String, reading: &FetchRequest) {
-        tracing::info!(%id, rel = %reading.rel_path, "asking the host what a link names");
-        self.send_to(
-            host,
-            ClientMessage::StatPath {
-                id,
-                repo_id: reading.repo_id.clone(),
-                worktree_path: reading.worktree_path.clone(),
-                path: reading.rel_path.clone(),
-            },
-        );
+        tracing::info!(%id, rel = %reading.rel_path, host_path = reading.host_path, "asking the host what a link names");
+        self.send_to(host, file_fetch::stat_message(id, reading));
     }
 
     /// The host said what the stat `id`'s reading names: a folder is
@@ -600,9 +648,8 @@ impl RootView {
         let name = file_fetch::fetch_name(&request).to_owned();
         let (host_key, host, target) =
             self.fetch_target_with(&request, file_fetch::folder_download_path)?;
-        let repo_id = request.repo_id.clone();
-        let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
+        let sent = request.clone();
         let entry = FetchEntry::new(host_key.clone(), host.clone(), request, target).for_folder();
         let Ok(id) = self.fetches.insert(entry) else {
             tracing::info!(rel = %rel_path, "the folder is already being fetched");
@@ -612,16 +659,8 @@ impl RootView {
                 detail: None,
             });
         };
-        tracing::info!(%id, %host, rel = %rel_path, "fetching a folder");
-        self.send_to(
-            &host_key,
-            ClientMessage::FetchFolder {
-                id: id.clone(),
-                repo_id,
-                worktree_path,
-                path: rel_path,
-            },
-        );
+        tracing::info!(%id, %host, rel = %rel_path, host_path = sent.host_path, "fetching a folder");
+        self.send_to(&host_key, file_fetch::folder_message(id.clone(), &sent));
         self.push_toast_spec(
             ToastSpec {
                 kind: ToastKind::Info,
@@ -761,9 +800,8 @@ impl RootView {
     ) -> Result<String, Refusal> {
         let name = file_fetch::file_name(&request.rel_path).to_owned();
         let (host_key, host, target) = self.fetch_target(&request)?;
-        let repo_id = request.repo_id.clone();
-        let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
+        let sent = request.clone();
         let mut entry = FetchEntry::new(host_key.clone(), host.clone(), request, target);
         if let Some(group) = group {
             entry = entry.in_group(group);
@@ -787,16 +825,8 @@ impl RootView {
                 detail: None,
             });
         };
-        tracing::info!(%id, %host, rel = %rel_path, popup, "fetching a file");
-        self.send_to(
-            &host_key,
-            ClientMessage::FetchFile {
-                id: id.clone(),
-                repo_id,
-                worktree_path,
-                path: rel_path,
-            },
-        );
+        tracing::info!(%id, %host, rel = %rel_path, popup, host_path = sent.host_path, "fetching a file");
+        self.send_to(&host_key, file_fetch::file_message(id.clone(), &sent));
         if !popup {
             self.push_toast_spec(
                 ToastSpec {
@@ -847,6 +877,9 @@ impl RootView {
             });
         };
         let target = match &self.remote_files_root {
+            Ok(root) if request.host_path => {
+                file_fetch::host_download_path(root, &folder, &request.rel_path)
+            }
             Ok(root) => place(root, &folder, &request.repo_name, &request.rel_path),
             Err(err) => Err(format!("No folder for fetched files: {err}")),
         };
@@ -879,9 +912,8 @@ impl RootView {
                 return;
             }
         };
-        let repo_id = request.repo_id.clone();
-        let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
+        let sent = request.clone();
         let Some(id) = self
             .fetches
             .insert_child(page_id, host_key.clone(), host, request, target)
@@ -890,15 +922,7 @@ impl RootView {
             return;
         };
         tracing::info!(%id, page = page_id, rel = %rel_path, "fetching a page's media file");
-        self.send_to(
-            &host_key,
-            ClientMessage::FetchFile {
-                id,
-                repo_id,
-                worktree_path,
-                path: rel_path,
-            },
-        );
+        self.send_to(&host_key, file_fetch::file_message(id, &sent));
     }
 
     /// Starts the page `page_id`'s next media fetches; opens the page once
@@ -1533,12 +1557,14 @@ impl RootView {
     /// Whether the saved file fetch `id` is a page that opens once its
     /// media are fetched. Open containing folder on a host that sends
     /// folders fetches the page's whole folder instead, which brings them.
+    /// A page fetched by its host path opens without its media.
     fn waits_on_media(&self, id: &str) -> bool {
         self.fetches.get(id).is_some_and(|entry| {
             let request = entry.request();
             let folder_brings_media =
                 request.action == LinkAction::Folder && self.host_sends_folders(entry.host_key());
             request.open_when_done
+                && !request.host_path
                 && html_media::is_html_page(&request.rel_path)
                 && !folder_brings_media
         })

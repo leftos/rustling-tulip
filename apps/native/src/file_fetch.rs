@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
-use protocol::SessionFolder;
+use protocol::{ClientMessage, SessionFolder};
 
 use crate::folder_unpack::Announced;
 
@@ -36,8 +36,14 @@ pub struct FetchRequest {
     pub repo_name: String,
     /// The worktree the path is under; `None` for the repo root.
     pub worktree_path: Option<String>,
-    /// The path relative to the repo root or worktree, `/` or `\` separated.
+    /// The path relative to the repo root or worktree, `/` or `\` separated;
+    /// for a host-path request, the absolute path on the host.
     pub rel_path: String,
+    /// Whether `rel_path` is an absolute path on the host, outside every
+    /// session folder: fetched with the host-path messages and landing
+    /// under [`host_download_path`]'s place; `repo_id`, `repo_name` and
+    /// `worktree_path` are then unused.
+    pub host_path: bool,
     /// The line to open the saved copy at; `None` opens it in its default
     /// app.
     pub line: Option<u32>,
@@ -165,26 +171,33 @@ pub fn file_name(rel: &str) -> &str {
 }
 
 /// The name a fetch of `request` goes by: its path's last segment, or its
-/// repo's name for the root itself.
+/// repo's name for the root itself; a host path naming a filesystem root
+/// goes by the whole path.
 #[must_use]
 pub fn fetch_name(request: &FetchRequest) -> &str {
     if request.rel_path.is_empty() {
-        &request.repo_name
-    } else {
-        file_name(&request.rel_path)
+        return &request.repo_name;
+    }
+    match file_name(&request.rel_path) {
+        "" if request.host_path => &request.rel_path,
+        name => name,
     }
 }
 
 /// The fetch of the folder holding `file`'s file: everything before the
-/// last separator of its path (the repo root for a file directly in it),
-/// never opened and without a line.
+/// last separator of its path (the repo root for a file directly in it;
+/// for a host path, its parent folder on the host), never opened and
+/// without a line.
 #[must_use]
 pub fn parent_folder_request(file: &FetchRequest) -> FetchRequest {
-    let rel_path = file
-        .rel_path
-        .rsplit_once(['/', '\\'])
-        .map_or("", |(parent, _)| parent)
-        .to_owned();
+    let rel_path = if file.host_path {
+        crate::fetch_link::host_parent(&file.rel_path).unwrap_or_else(|| file.rel_path.clone())
+    } else {
+        file.rel_path
+            .rsplit_once(['/', '\\'])
+            .map_or("", |(parent, _)| parent)
+            .to_owned()
+    };
     FetchRequest {
         rel_path,
         line: None,
@@ -260,6 +273,114 @@ pub fn folder_download_path(
             .join(sanitize_segment(repo_name)));
     }
     download_path(root, host, repo_name, rel)
+}
+
+/// Where the file or folder at the absolute host path `path` on `host`
+/// lands: `<root>/<host>/<anchor>/<rest>`, the anchor being the drive
+/// letter (`C`), `unc/<server>/<share>` for a network path, or `root` for a
+/// Unix path. Every segment is made safe; the path is read as text and
+/// never resolved.
+///
+/// # Errors
+/// Why `path` is refused: not absolute, a filesystem root itself, or with
+/// an empty, `.` or `..` segment.
+pub fn host_download_path(root: &Path, host: &str, path: &str) -> Result<PathBuf, String> {
+    let unified = display_host_path(path).replace('\\', "/");
+    let (anchor, rest) =
+        host_anchor(&unified).ok_or_else(|| format!("{path} is not an absolute path"))?;
+    if rest.is_empty() {
+        return Err(format!("{path} is a filesystem root"));
+    }
+    let segments = rel_segments(rest)?;
+    if anchor == "unc" && segments.len() < 3 {
+        return Err(format!("{path} names no file below a network share"));
+    }
+    let mut target = root.join(sanitize_segment(host)).join(anchor);
+    target.extend(segments);
+    Ok(target)
+}
+
+/// The folder an absolute host path's copy lands under for its anchor
+/// (`unc`, the drive letter upper-cased, or `root`), and the rest of the
+/// path; `None` for a relative path.
+fn host_anchor(unified: &str) -> Option<(String, &str)> {
+    if let Some(unc) = unified.strip_prefix("//") {
+        return Some(("unc".to_owned(), unc));
+    }
+    if let Some(rest) = drive_rest(unified) {
+        return Some((unified[..1].to_ascii_uppercase(), rest));
+    }
+    unified
+        .strip_prefix('/')
+        .map(|rest| ("root".to_owned(), rest))
+}
+
+/// What follows `X:/` in the drive path `unified`; `None` when it is not
+/// one (a drive-relative `X:a` included).
+fn drive_rest(unified: &str) -> Option<&str> {
+    let mut chars = unified.chars();
+    let lettered =
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':');
+    if !lettered {
+        return None;
+    }
+    let after = &unified[2..];
+    if after.is_empty() {
+        return Some("");
+    }
+    after.strip_prefix('/')
+}
+
+/// The message asking the host for `request`'s file as the fetch `id`.
+#[must_use]
+pub fn file_message(id: String, request: &FetchRequest) -> ClientMessage {
+    if request.host_path {
+        return ClientMessage::FetchHostFile {
+            id,
+            path: request.rel_path.clone(),
+        };
+    }
+    ClientMessage::FetchFile {
+        id,
+        repo_id: request.repo_id.clone(),
+        worktree_path: request.worktree_path.clone(),
+        path: request.rel_path.clone(),
+    }
+}
+
+/// The message asking the host for `request`'s folder as the fetch `id`.
+#[must_use]
+pub fn folder_message(id: String, request: &FetchRequest) -> ClientMessage {
+    if request.host_path {
+        return ClientMessage::FetchHostFolder {
+            id,
+            path: request.rel_path.clone(),
+        };
+    }
+    ClientMessage::FetchFolder {
+        id,
+        repo_id: request.repo_id.clone(),
+        worktree_path: request.worktree_path.clone(),
+        path: request.rel_path.clone(),
+    }
+}
+
+/// The message asking the host what `request`'s path names, as the stat
+/// `id`.
+#[must_use]
+pub fn stat_message(id: String, request: &FetchRequest) -> ClientMessage {
+    if request.host_path {
+        return ClientMessage::StatHostPath {
+            id,
+            path: request.rel_path.clone(),
+        };
+    }
+    ClientMessage::StatPath {
+        id,
+        repo_id: request.repo_id.clone(),
+        worktree_path: request.worktree_path.clone(),
+        path: request.rel_path.clone(),
+    }
 }
 
 /// The part file the fetch `id` writes `target` into: hidden, beside it,
@@ -1453,6 +1574,7 @@ impl FetchRegistry {
                 repo_name: page.repo_name.clone(),
                 worktree_path: page.worktree_path.clone(),
                 rel_path,
+                host_path: page.host_path,
                 line: None,
                 column: None,
                 open_when_done: false,
@@ -1528,14 +1650,16 @@ mod tests {
 
     use super::{
         AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
-        WriteOutcome, WriteStep, display_host_path, download_path, folder_download_path,
-        host_folder, host_label, is_under, outside_detail, parent_folder_request, part_path,
-        run_writer, sanitize_segment,
+        WriteOutcome, WriteStep, display_host_path, download_path, fetch_name, file_message,
+        folder_download_path, folder_message, host_download_path, host_folder, host_label,
+        is_under, outside_detail, parent_folder_request, part_path, run_writer, sanitize_segment,
+        stat_message,
     };
     use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
     use crate::target::{HostKey, Target};
     use crate::temp_dir::TempDir;
+    use protocol::ClientMessage;
     use protocol::SessionFolder;
 
     fn chunk(seq: u64, data: &[u8]) -> WriteStep {
@@ -1799,6 +1923,7 @@ mod tests {
             repo_name: "repo".to_owned(),
             worktree_path: None,
             rel_path: rel.to_owned(),
+            host_path: false,
             line: None,
             column: None,
             open_when_done: false,
@@ -1816,6 +1941,7 @@ mod tests {
             repo_name: "repo".to_owned(),
             worktree_path: Some("C:/wt/x".to_owned()),
             rel_path: rel.to_owned(),
+            host_path: false,
             line: None,
             column: None,
             open_when_done: true,
@@ -1883,6 +2009,134 @@ mod tests {
             "docs",
             "a backslash separates segments too"
         );
+    }
+
+    #[test]
+    fn host_download_path_of_a_drive_path_lands_under_its_letter() {
+        let root = Path::new("root");
+        assert_eq!(
+            host_download_path(root, "host", r"C:\x\y.txt").expect("a drive path"),
+            root.join("host").join("C").join("x").join("y.txt")
+        );
+        assert_eq!(
+            host_download_path(root, "host", r"\\?\c:\x\y.txt").expect("a verbatim drive path"),
+            root.join("host").join("C").join("x").join("y.txt"),
+            "the verbatim prefix goes and the letter is upper-cased"
+        );
+    }
+
+    #[test]
+    fn host_download_path_of_a_unc_path_lands_under_unc_server_share() {
+        let root = Path::new("root");
+        assert_eq!(
+            host_download_path(root, "host", r"\\srv\share\a.txt").expect("a network path"),
+            root.join("host")
+                .join("unc")
+                .join("srv")
+                .join("share")
+                .join("a.txt")
+        );
+        assert!(
+            host_download_path(root, "host", r"\\srv\share").is_err(),
+            "a share itself names no file below it"
+        );
+    }
+
+    #[test]
+    fn host_download_path_of_a_unix_path_lands_under_root() {
+        let root = Path::new("root");
+        assert_eq!(
+            host_download_path(root, "host", "/etc/hosts").expect("a Unix path"),
+            root.join("host").join("root").join("etc").join("hosts")
+        );
+    }
+
+    #[test]
+    fn host_download_path_refuses_a_parent_or_empty_segment() {
+        let root = Path::new("root");
+        for refused in [
+            r"C:\x\..\y.txt",
+            "/etc/../hosts",
+            r"\\srv\share\..\a.txt",
+            r"C:\x\\y.txt",
+            "/etc/./hosts",
+            r"C:\",
+            "/",
+            r"C:x\y.txt",
+            r"x\y.txt",
+            "",
+        ] {
+            assert!(
+                host_download_path(root, "host", refused).is_err(),
+                "{refused:?} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn host_download_path_makes_unsafe_characters_safe() {
+        let root = Path::new("root");
+        assert_eq!(
+            host_download_path(root, "Box:1", "/tmp/a:b?/CON.txt/x. ").expect("a Unix path"),
+            root.join("Box_1")
+                .join("root")
+                .join("tmp")
+                .join("a_b_")
+                .join("_CON.txt")
+                .join("x._"),
+            "the host and every segment are made safe"
+        );
+    }
+
+    /// The host-path request for `path`.
+    fn host_reading(path: &str) -> FetchRequest {
+        FetchRequest {
+            repo_id: String::new(),
+            repo_name: String::new(),
+            worktree_path: None,
+            host_path: true,
+            ..reading(path)
+        }
+    }
+
+    #[test]
+    fn parent_folder_request_of_a_host_path_is_its_host_parent() {
+        assert_eq!(
+            parent_folder_request(&host_reading(r"D:\elsewhere\a.rs")).rel_path,
+            r"D:\elsewhere"
+        );
+        assert_eq!(
+            parent_folder_request(&host_reading("/etc/hosts")).rel_path,
+            "/etc"
+        );
+        let root = parent_folder_request(&host_reading(r"D:\a.rs"));
+        assert_eq!(
+            root.rel_path, r"D:\",
+            "the drive root, which the host refuses"
+        );
+        assert!(root.host_path);
+        assert_eq!(fetch_name(&root), r"D:\", "a root goes by its whole path");
+    }
+
+    #[test]
+    fn a_host_path_request_sends_the_host_path_messages() {
+        let request = host_reading("/etc/hosts");
+        assert!(matches!(
+            file_message("f1".to_owned(), &request),
+            ClientMessage::FetchHostFile { id, path } if id == "f1" && path == "/etc/hosts"
+        ));
+        assert!(matches!(
+            folder_message("f2".to_owned(), &request),
+            ClientMessage::FetchHostFolder { id, path } if id == "f2" && path == "/etc/hosts"
+        ));
+        assert!(matches!(
+            stat_message("s1".to_owned(), &request),
+            ClientMessage::StatHostPath { id, path } if id == "s1" && path == "/etc/hosts"
+        ));
+        assert!(matches!(
+            file_message("f3".to_owned(), &reading("a.txt")),
+            ClientMessage::FetchFile { .. }
+        ));
     }
 
     #[test]

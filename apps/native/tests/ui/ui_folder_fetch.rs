@@ -1460,6 +1460,129 @@ fn open_containing_folder_on_a_remote_file_fetches_its_folder_then_reveals_the_f
     );
 }
 
+/// The host-path messages sent to the saved host since the last look, as
+/// `(kind, id, path)`; the ask for the session's folders is answered with
+/// [`WORKTREE`] alone.
+fn host_path_messages(h: &mut Harness<'_>) -> Vec<(&'static str, String, String)> {
+    let sent = h.host(&saved_remote()).sent();
+    let mut found = Vec::new();
+    for msg in sent {
+        match msg {
+            ClientMessage::ListSessionFolders { id, .. } => {
+                h.host(&saved_remote()).send(DaemonMessage::SessionFolders {
+                    id,
+                    folders: vec![protocol::SessionFolder {
+                        repo_id: "r1".to_owned(),
+                        repo_name: "r1".to_owned(),
+                        path: WORKTREE.to_owned(),
+                    }],
+                    error: None,
+                });
+                found.extend(host_path_messages(h));
+            }
+            ClientMessage::StatHostPath { id, path } => found.push(("stat", id, path)),
+            ClientMessage::FetchHostFile { id, path } => found.push(("file", id, path)),
+            ClientMessage::FetchHostFolder { id, path } => found.push(("folder", id, path)),
+            _ => {}
+        }
+    }
+    found
+}
+
+#[gpui::test]
+fn open_containing_folder_on_an_outside_file_fetches_its_host_parent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").build(),
+        &[
+            protocol::FEATURE_FOLDER_FETCH,
+            protocol::FEATURE_SESSION_FOLDERS,
+            protocol::FEATURE_HOST_PATHS,
+        ],
+    );
+
+    pick_containing_folder(&mut h, r"see D:\elsewhere\a.rs", 6);
+    let sent = host_path_messages(&mut h);
+    let [("stat", stat_id, path)] = sent.as_slice() else {
+        panic!("one StatHostPath, got {sent:?}");
+    };
+    assert_eq!(path, r"D:\elsewhere\a.rs");
+    stat(&mut h, stat_id, PathKind::File);
+    let sent = host_path_messages(&mut h);
+    let [("file", file_id, path)] = sent.as_slice() else {
+        panic!("one FetchHostFile, got {sent:?}");
+    };
+    assert_eq!(path, r"D:\elsewhere\a.rs");
+    stream_file(&mut h, file_id, b"fn a() {}\n");
+    settle_until(&mut h, "the file's folder to be asked for", |h| {
+        shows(h, &format!("Fetching folder elsewhere from {HOST}"))
+    });
+
+    let sent = host_path_messages(&mut h);
+    let [("folder", folder_id, path)] = sent.as_slice() else {
+        panic!("one FetchHostFolder, got {sent:?}");
+    };
+    assert_eq!(path, r"D:\elsewhere", "the file's parent on the host");
+    let folder_id = folder_id.clone();
+    stream_folder(
+        &mut h,
+        &folder_id,
+        &[("a.rs", b"fn a() {}\n"), ("b.rs", b"fn b() {}\n")],
+    );
+    settle_until(&mut h, "the fetched file to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    let saved = root.join(HOST).join("D").join("elsewhere").join("a.rs");
+    assert_eq!(h.opened(), [Opened::Reveal(saved.clone())]);
+    assert!(
+        saved.with_file_name("b.rs").is_file(),
+        "the folder lands around the file"
+    );
+}
+
+#[gpui::test]
+fn open_containing_folder_reveals_the_copy_when_the_host_refuses_a_drive_root(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").build(),
+        &[
+            protocol::FEATURE_FOLDER_FETCH,
+            protocol::FEATURE_SESSION_FOLDERS,
+            protocol::FEATURE_HOST_PATHS,
+        ],
+    );
+
+    pick_containing_folder(&mut h, r"see D:\a.rs", 6);
+    let sent = host_path_messages(&mut h);
+    let [("stat", stat_id, _)] = sent.as_slice() else {
+        panic!("one StatHostPath, got {sent:?}");
+    };
+    stat(&mut h, stat_id, PathKind::File);
+    let sent = host_path_messages(&mut h);
+    let [("file", file_id, path)] = sent.as_slice() else {
+        panic!("one FetchHostFile, got {sent:?}");
+    };
+    assert_eq!(path, r"D:\a.rs");
+    stream_file(&mut h, file_id, b"fn a() {}\n");
+    settle_until(&mut h, "the saved copy to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    let saved = root.join(HOST).join("D").join("a.rs");
+    assert_eq!(h.opened(), [Opened::Reveal(saved)]);
+    assert!(
+        host_path_messages(&mut h).is_empty(),
+        "no folder fetch of a drive root is sent"
+    );
+}
+
 #[gpui::test]
 fn open_containing_folder_reveals_the_copy_when_the_folder_is_already_fetching(
     cx: &mut TestAppContext,

@@ -736,6 +736,7 @@ fn fetch_request(target: &Target, repo_id: &str, rel: &str) -> FetchRequest {
         repo_name: "repo".to_owned(),
         worktree_path: None,
         rel_path: rel.to_owned(),
+        host_path: false,
         line: None,
         column: None,
         open_when_done: false,

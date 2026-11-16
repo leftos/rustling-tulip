@@ -5,7 +5,9 @@
 //! fetch goes through [`crate::RootView`]'s file fetch.
 
 use crate::fetch_link::{self, Root, RootStrip};
-use crate::file_fetch::{FetchRequest, display_host_path};
+use std::path::Path;
+
+use crate::file_fetch::{FetchRequest, display_host_path, host_download_path};
 use crate::links::split_path_position;
 use crate::open::LinkAction;
 use crate::spawn_form::human_size;
@@ -61,6 +63,8 @@ pub(crate) enum PathProblem {
         path: String,
         root: String,
     },
+    /// An absolute host path the fetch refuses, with the fetch's reason.
+    Refused(String),
 }
 
 impl PathProblem {
@@ -72,6 +76,7 @@ impl PathProblem {
             Self::OutsideRoot { path, root } => {
                 format!("{path} is outside {root}. Give a path under it.")
             }
+            Self::Refused(reason) => reason.clone(),
         }
     }
 }
@@ -116,6 +121,44 @@ pub(crate) fn parse_target(root: &Root, text: &str) -> Result<FetchTarget, PathP
     })
 }
 
+/// `text` as an absolute path on the host, for a host that serves any
+/// path: a trailing `:line[:col]` split off, `.` segments dropped and the
+/// path written in its host's separators. `None` when the path is
+/// relative.
+///
+/// # Errors
+/// The [`PathProblem`] that refuses it: an empty path or a `..` segment.
+pub(crate) fn parse_host_target(text: &str) -> Option<Result<FetchTarget, PathProblem>> {
+    let position = split_path_position(text.trim());
+    let path = position.path.trim();
+    if path.is_empty() {
+        return Some(Err(PathProblem::Empty));
+    }
+    if path.split(['/', '\\']).any(|segment| segment == "..") {
+        return Some(Err(PathProblem::ParentSegment));
+    }
+    let absolute = fetch_link::absolute_host_path(path)?;
+    // A path the fetch would refuse (a filesystem root, a bare share) is
+    // refused here with the fetch's own words.
+    if let Err(reason) = host_download_path(Path::new(""), "host", &absolute) {
+        return Some(Err(PathProblem::Refused(reason)));
+    }
+    Some(Ok(FetchTarget {
+        rel_path: absolute,
+        line: position.line,
+        column: position.column,
+    }))
+}
+
+/// A typed path read for the dialog's fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reading {
+    /// Under the chosen root.
+    Root(Root, FetchTarget),
+    /// An absolute path on a host that serves any path.
+    Host(FetchTarget),
+}
+
 /// Where the dialog's fetch is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Phase {
@@ -137,6 +180,9 @@ pub(crate) struct FetchForm {
     focus: FetchControl,
     phase: Phase,
     error: Option<String>,
+    /// Whether the host serves any absolute path, so a path outside every
+    /// root is fetched by its host path instead of refused.
+    host_paths: bool,
 }
 
 impl FetchForm {
@@ -150,7 +196,49 @@ impl FetchForm {
             focus: FetchControl::Path,
             phase: Phase::Editing,
             error: None,
+            host_paths: false,
         }
+    }
+
+    /// This dialog on a host that serves any absolute path (`on`), where
+    /// an absolute path outside the chosen root, or with no root at all,
+    /// is fetched by its host path.
+    #[must_use]
+    pub(crate) fn with_host_paths(mut self, on: bool) -> Self {
+        self.host_paths = on;
+        self
+    }
+
+    /// `text` read for a fetch: under the chosen root, or, on a host that
+    /// serves any path, as an absolute host path outside it. `None` when
+    /// there is nothing to read it against.
+    fn read(&self, text: &str) -> Option<Result<Reading, PathProblem>> {
+        let Some(root) = self.scope() else {
+            return self
+                .host_paths
+                .then(|| parse_host_target(text))
+                .flatten()
+                .map(|read| read.map(Reading::Host));
+        };
+        match parse_target(root, text) {
+            Err(PathProblem::OutsideRoot { .. }) if self.host_paths => {
+                if let Some(read) = self.read_in_other_root(text) {
+                    return Some(Ok(read));
+                }
+                parse_host_target(text).map(|read| read.map(Reading::Host))
+            }
+            read => Some(read.map(|target| Reading::Root(root.clone(), target))),
+        }
+    }
+
+    /// `text`, an absolute path outside the chosen root, read against the
+    /// first other root strictly holding it; `None` when no root does.
+    fn read_in_other_root(&self, text: &str) -> Option<Reading> {
+        self.roots.iter().find_map(|root| {
+            parse_target(root, text)
+                .ok()
+                .map(|target| Reading::Root(root.clone(), target))
+        })
     }
 
     pub(crate) fn roots(&self) -> &[Root] {
@@ -186,10 +274,7 @@ impl FetchForm {
 
     /// Whether Fetch can go with the field holding `text`.
     pub(crate) fn can_submit(&self, text: &str) -> bool {
-        self.phase == Phase::Editing
-            && self
-                .scope()
-                .is_some_and(|root| parse_target(root, text).is_ok())
+        self.phase == Phase::Editing && matches!(self.read(text), Some(Ok(_)))
     }
 
     /// The focusable controls, in the order they are drawn: the scope row
@@ -238,26 +323,35 @@ impl FetchForm {
         }
     }
 
-    /// Fetch: the request for `text` under the chosen root, once, which
-    /// starts the fetch. A path that cannot be fetched says why under the
-    /// field instead; `None` then, with no root, and while a fetch is on.
+    /// Fetch: the request for `text` under the chosen root, or by its host
+    /// path on a host that serves any path, once, which starts the fetch. A
+    /// path that cannot be fetched says why under the field instead; `None`
+    /// then, with nothing to read the path against, and while a fetch is
+    /// on.
     pub(crate) fn submit(&mut self, host: &HostKey, text: &str) -> Option<FetchRequest> {
         if self.phase != Phase::Editing {
             return None;
         }
-        let root = self.scope()?;
-        let target = match parse_target(root, text) {
-            Ok(target) => target,
+        let reading = match self.read(text)? {
+            Ok(reading) => reading,
             Err(problem) => {
                 self.error = Some(problem.message());
                 return None;
             }
         };
+        let (root, target) = match reading {
+            Reading::Root(root, target) => (Some(root), target),
+            Reading::Host(target) => (None, target),
+        };
         let request = FetchRequest {
             host: host.clone(),
-            repo_id: root.repo_id.clone(),
-            repo_name: root.repo_name.clone(),
-            worktree_path: Some(root.path.clone()),
+            repo_id: root.as_ref().map(|r| r.repo_id.clone()).unwrap_or_default(),
+            repo_name: root
+                .as_ref()
+                .map(|r| r.repo_name.clone())
+                .unwrap_or_default(),
+            worktree_path: root.as_ref().map(|r| r.path.clone()),
+            host_path: root.is_none(),
             rel_path: target.rel_path,
             line: target.line,
             column: target.column,
@@ -669,6 +763,90 @@ mod tests {
         assert_eq!(
             progress_text(0, None, "box.tail1234.ts.net"),
             "Waiting for box.tail1234.ts.net…"
+        );
+    }
+
+    #[test]
+    fn a_host_serving_any_path_accepts_a_path_outside_the_root() {
+        let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None).with_host_paths(true);
+        assert!(form.can_submit(r"D:\logs\run.log:7"));
+        let request = form
+            .submit(&HostKey::Local, r"D:\logs\.\run.log:7")
+            .expect("an outside path is fetched");
+        assert!(request.host_path);
+        assert_eq!(request.rel_path, r"D:\logs\run.log");
+        assert_eq!(request.line, Some(7));
+        assert_eq!(request.repo_id, "");
+        assert_eq!(request.worktree_path, None);
+        assert_eq!(form.error(), None);
+    }
+
+    #[test]
+    fn a_host_serving_any_path_still_reads_a_path_under_the_root_against_it() {
+        let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None).with_host_paths(true);
+        let request = form
+            .submit(&HostKey::Local, r"C:\wt\x\src\a.rs")
+            .expect("a path under the root");
+        assert!(!request.host_path);
+        assert_eq!(request.repo_id, "r1");
+        assert_eq!(request.rel_path, "src/a.rs");
+    }
+
+    #[test]
+    fn a_host_serving_any_path_takes_an_absolute_path_with_no_root() {
+        let mut form = FetchForm::new(Vec::new(), None).with_host_paths(true);
+        assert!(form.can_submit("/etc/hosts"));
+        assert!(!form.can_submit("hosts"), "a relative path has no root");
+        assert!(
+            !form.can_submit("/etc/../hosts"),
+            "a parent segment is refused"
+        );
+        let request = form
+            .submit(&HostKey::Local, "/etc/hosts")
+            .expect("an absolute path is fetched");
+        assert!(request.host_path);
+        assert_eq!(request.rel_path, "/etc/hosts");
+    }
+
+    #[test]
+    fn a_path_inside_another_root_is_read_against_that_root() {
+        let roots = vec![root("r1", "C:/wt/x"), root("r2", "C:/wt/y")];
+        let mut form = FetchForm::new(roots, Some("C:/wt/x")).with_host_paths(true);
+        assert_eq!(form.scope().map(|r| r.repo_id.as_str()), Some("r1"));
+        let request = form
+            .submit(&HostKey::Local, r"C:\wt\y\src\lib.rs")
+            .expect("a path under another root");
+        assert!(!request.host_path, "never by host path: {request:?}");
+        assert_eq!(request.repo_id, "r2");
+        assert_eq!(request.worktree_path.as_deref(), Some("C:/wt/y"));
+        assert_eq!(request.rel_path, "src/lib.rs");
+    }
+
+    #[test]
+    fn a_bare_filesystem_root_is_refused_on_a_host_serving_any_path() {
+        for (text, refusal) in [
+            ("C:", r"C:\ is a filesystem root"),
+            ("/", "/ is a filesystem root"),
+            (
+                r"\\srv\share",
+                r"\\srv\share names no file below a network share",
+            ),
+        ] {
+            let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None).with_host_paths(true);
+            assert!(!form.can_submit(text), "{text:?} cannot be fetched");
+            assert_eq!(form.submit(&HostKey::Local, text), None, "{text:?}");
+            assert_eq!(form.error(), Some(refusal), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_host_without_host_paths_still_refuses_an_outside_path() {
+        let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None);
+        assert!(!form.can_submit(r"D:\logs\run.log"));
+        assert_eq!(form.submit(&HostKey::Local, r"D:\logs\run.log"), None);
+        assert_eq!(
+            form.error(),
+            Some(r"D:\logs\run.log is outside C:/wt/x. Give a path under it.")
         );
     }
 
