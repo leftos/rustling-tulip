@@ -25,7 +25,8 @@ use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
     ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_DRAFT,
-    FEATURE_FILE_TAIL, GridNode, SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
+    FEATURE_FILE_TAIL, GridNode, ScriptFacts, SplitDirection, ToolKind, ToolOutcome, WorkShell,
+    WorkSubagent,
 };
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::target::Target;
@@ -257,6 +258,39 @@ fn kinded(id: &str, name: &str, kind: ToolKind, done: bool) -> ChatEntry {
     }
 }
 
+/// Call `entry` with its `parent_id` set to `parent`, and, when `facts` is
+/// given, made a Code Mode script call carrying them.
+fn scripted(entry: ChatEntry, facts: Option<ScriptFacts>, parent: Option<&str>) -> ChatEntry {
+    let ChatEntry::Tool {
+        id,
+        name,
+        summary,
+        input,
+        result,
+        tail_paths,
+        kind,
+        ..
+    } = entry
+    else {
+        return entry;
+    };
+    ChatEntry::Tool {
+        id,
+        name,
+        summary,
+        input,
+        result,
+        parent_id: parent.map(str::to_owned),
+        tail_paths,
+        kind: if facts.is_some() {
+            ToolKind::Script
+        } else {
+            kind
+        },
+        script: facts,
+    }
+}
+
 fn display_rows(h: &mut Harness<'_>) -> Vec<RowShape> {
     h.root(|root, _| root.chat_display_rows("s1"))
 }
@@ -273,6 +307,152 @@ fn saved_chat_mode(dir: &TestDir) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
     let file: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
     file["chat_mode"].clone()
+}
+
+#[gpui::test]
+fn a_code_mode_script_draws_as_one_line_under_its_run_and_opens_to_its_cards(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    let facts = |eval: u32, ms: Option<u64>, error: Option<&str>| ScriptFacts {
+        description: "Read the footer".to_owned(),
+        eval: Some(eval),
+        ms,
+        error: error.map(str::to_owned),
+    };
+    let mut failed = scripted(
+        kinded("s2", "REPL", ToolKind::Script, true),
+        Some(facts(4, Some(300), Some("TypeError: x is undefined"))),
+        None,
+    );
+    if let ChatEntry::Tool {
+        result: Some(outcome),
+        ..
+    } = &mut failed
+    {
+        outcome.is_error = true;
+    }
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            scripted(
+                kinded("s1", "REPL", ToolKind::Script, true),
+                Some(facts(3, Some(1200), None)),
+                None,
+            ),
+            scripted(kinded("i1", "Read", ToolKind::Read, true), None, Some("s1")),
+            scripted(kinded("i2", "Read", ToolKind::Read, true), None, Some("s1")),
+            failed,
+            scripted(
+                kinded("s3", "REPL", ToolKind::Script, false),
+                Some(facts(5, None, None)),
+                None,
+            ),
+        ],
+    ));
+    // Compact folds the three scripts into one run line, which draws each
+    // script's own line under it while closed, and still does open.
+    for selector in [
+        "chat-run-p1-s1",
+        "chat-script-p1-s1",
+        "chat-script-p1-s2",
+        "chat-script-p1-s3",
+    ] {
+        assert!(
+            painted(&mut h, selector),
+            "{selector} is drawn, the run closed"
+        );
+    }
+    h.click_on("chat-run-p1-s1");
+    for selector in [
+        "chat-script-p1-s1",
+        "chat-script-done-p1-s1",
+        "chat-script-meta-p1-s1",
+        "chat-script-chip-p1-s1-0",
+        "chat-script-failed-p1-s2",
+        "chat-script-error-p1-s2",
+        "chat-script-running-p1-s3",
+    ] {
+        assert!(painted(&mut h, selector), "{selector} is drawn");
+    }
+    assert!(
+        !drawn_now(&mut h, "chat-row-p1-i1"),
+        "a closed script draws no inner card"
+    );
+    h.click_on("chat-script-p1-s1");
+    assert!(painted(&mut h, "chat-row-p1-s1"), "the script's own card");
+    assert!(painted(&mut h, "chat-row-p1-i1"), "its inner call's card");
+    h.click_on("chat-script-p1-s1");
+    assert!(
+        !drawn_now(&mut h, "chat-row-p1-i1"),
+        "a second click closes it"
+    );
+}
+
+/// A done script call `id`, with a description but no number or time.
+fn done_script(id: &str) -> ChatEntry {
+    scripted(
+        kinded(id, "REPL", ToolKind::Script, true),
+        Some(ScriptFacts {
+            description: format!("script {id}"),
+            ..ScriptFacts::default()
+        }),
+        None,
+    )
+}
+
+#[gpui::test]
+fn a_standing_script_draws_as_its_line_in_comfortable(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.click_on("chat-compact-p1");
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Comfortable);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            done_script("s1"),
+            scripted(kinded("i1", "Read", ToolKind::Read, true), None, Some("s1")),
+        ],
+    ));
+    assert!(painted(&mut h, "chat-script-p1-s1"), "the script's line");
+    assert!(
+        !drawn_now(&mut h, "chat-row-p1-i1"),
+        "a closed script draws no inner card"
+    );
+    h.click_on("chat-script-p1-s1");
+    assert!(painted(&mut h, "chat-row-p1-s1"), "the script's own card");
+    assert!(painted(&mut h, "chat-row-p1-i1"), "its inner call's card");
+}
+
+#[gpui::test]
+fn a_closed_script_keeps_its_tailing_inner_calls_card_in_sight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    let mut tailing = scripted(kinded("b1", "Bash", ToolKind::Run, true), None, Some("s1"));
+    if let ChatEntry::Tool { tail_paths, .. } = &mut tailing {
+        tail_paths.push("build.log".to_owned());
+    }
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            done_script("s1"),
+            tailing,
+            scripted(kinded("r1", "Read", ToolKind::Read, true), None, Some("s1")),
+        ],
+    ));
+    assert!(painted(&mut h, "chat-script-p1-s1"), "the script's line");
+    assert!(
+        painted(&mut h, "chat-row-p1-b1"),
+        "the tailing call's card stays in sight"
+    );
+    assert!(
+        !drawn_now(&mut h, "chat-row-p1-r1"),
+        "the other inner call's card waits for the script to open"
+    );
 }
 
 #[gpui::test]

@@ -137,7 +137,7 @@ The views:
 - `update-host-breaks`: the same dialog for a release that ends sessions and breaks the protocol: the sessions warning and the protocol warning above the buttons.
 - `update-notes`: the What's new window over a ready 0.99.0.
 - `chat`: a session pane in Chat mode with its chat drawn over a two-question prompt card whose options carry descriptions and an open Tail box on the running Bash card.
-- `chat-compact`: the chat in Compact mode at its bottom, showing a collapsed run line of a read, a search and a run call.
+- `chat-compact`: the chat in Compact mode at its bottom, waiting for the run whose first id is `x1` and showing its collapsed run line of a read, a search and a run call, with both of the fixture's script lines under it.
 - `summary`: one in Summary mode with a line open under a pinned permission card.
 - `themes`: the Themes modal over Settings, on the row after the theme in use, with a user theme, a broken file and a file named after a built-in.
 - `themes-edit`: the theme editor on a duplicate of Nord.

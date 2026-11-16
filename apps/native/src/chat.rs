@@ -15,7 +15,7 @@ use crate::stretchtext;
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, ToolKind, WorkShell, WorkSubagent,
+    ComposerState, ScriptFacts, ToolKind, WorkShell, WorkSubagent,
 };
 
 /// How many rows the client keeps: a load reply carries the newest this
@@ -466,6 +466,18 @@ impl ScriptRow<'_> {
     }
 }
 
+impl<'a> ScriptRow<'a> {
+    /// The inner calls whose cards draw under the script's line: every one
+    /// while the script call's card is `open`; closed, only those that name
+    /// files to tail, so their Tail buttons and boxes stay in sight.
+    pub fn shown_inner(&self, open: bool) -> impl Iterator<Item = &'a ChatEntry> + '_ {
+        self.inner
+            .iter()
+            .copied()
+            .filter(move |call| open || tails_files(call))
+    }
+}
+
 /// One item of a Compact run: an entry (a read, search or run call, or a
 /// thinking row between them), or a script with its inner calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,6 +568,191 @@ pub enum RowShape {
         line: String,
         running: bool,
     },
+}
+
+/// Where a script stands on its line: still running, done, or failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptState {
+    Running,
+    Done,
+    Failed,
+}
+
+/// One chip of a script's line: a count of its finished inner calls of one
+/// kind and outcome, and whether they failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptChip {
+    pub text: String,
+    pub failed: bool,
+}
+
+/// What a script's one line draws: its state, its description, its number
+/// and time when known, its inner calls as chips, and a failed script's
+/// error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptLine {
+    pub state: ScriptState,
+    pub description: String,
+    pub meta: Option<String>,
+    pub chips: Vec<ScriptChip>,
+    pub error: Option<String>,
+}
+
+/// The line `row` draws: running while it runs, else failed when its result
+/// is an error or its facts carry one, else done; the first non-empty line
+/// of its description, else its one-liner, else its tool's name; `#<eval>`
+/// and (once it has stopped) its time, joined by a middle dot; one chip per
+/// unbroken run of finished inner calls of one word and outcome; and the
+/// facts' error text when it failed.
+#[must_use]
+pub fn script_line(row: &ScriptRow<'_>) -> ScriptLine {
+    let chips = script_chips(&row.inner);
+    let ChatEntry::Tool {
+        name,
+        summary,
+        result,
+        script,
+        ..
+    } = row.call
+    else {
+        let state = if row.running {
+            ScriptState::Running
+        } else {
+            ScriptState::Done
+        };
+        return ScriptLine {
+            state,
+            description: String::new(),
+            meta: None,
+            chips,
+            error: None,
+        };
+    };
+    let facts = script.as_ref();
+    let failed = result.as_ref().is_some_and(|outcome| outcome.is_error)
+        || facts.is_some_and(|facts| facts.error.is_some());
+    let state = if row.running {
+        ScriptState::Running
+    } else if failed {
+        ScriptState::Failed
+    } else {
+        ScriptState::Done
+    };
+    let description = facts
+        .and_then(|facts| {
+            facts
+                .description
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+        })
+        .map_or_else(
+            || {
+                let one_liner = tool_one_liner(summary, name);
+                if one_liner.is_empty() {
+                    name.clone()
+                } else {
+                    one_liner
+                }
+            },
+            ToOwned::to_owned,
+        );
+    let error = facts
+        .and_then(|facts| facts.error.clone())
+        .filter(|_| state == ScriptState::Failed);
+    ScriptLine {
+        state,
+        description,
+        meta: script_meta(facts, row.running),
+        chips,
+        error,
+    }
+}
+
+/// A script's number and, once it has stopped, its time, joined by a middle
+/// dot; either alone when only one is known; `None` when neither is.
+fn script_meta(facts: Option<&ScriptFacts>, running: bool) -> Option<String> {
+    let facts = facts?;
+    let number = facts.eval.map(|eval| format!("#{eval}"));
+    let time = facts.ms.filter(|_| !running).map(format_ms);
+    match (number, time) {
+        (Some(number), Some(time)) => Some(format!("{number} \u{b7} {time}")),
+        (number, time) => number.or(time),
+    }
+}
+
+/// A run of a script's finished inner calls one chip counts: their word,
+/// whether it is a tool's name, and whether they failed.
+struct ChipRun<'a> {
+    word: &'a str,
+    named: bool,
+    failed: bool,
+    count: usize,
+}
+
+impl ChipRun<'_> {
+    fn chip(&self) -> ScriptChip {
+        let (count, word) = (self.count, self.word);
+        let text = match (self.failed, self.named) {
+            (false, _) => format!("{count} {word}"),
+            (true, false) => format!("{count} failed"),
+            (true, true) => format!("{count} {word} failed"),
+        };
+        ScriptChip {
+            text,
+            failed: self.failed,
+        }
+    }
+}
+
+/// The chips of a script's inner calls: one per unbroken run, in order, of
+/// finished calls with the same word and outcome; a call still running
+/// makes no chip and breaks no run.
+fn script_chips(inner: &[&ChatEntry]) -> Vec<ScriptChip> {
+    let mut runs: Vec<ChipRun<'_>> = Vec::new();
+    for entry in inner {
+        let ChatEntry::Tool {
+            name,
+            kind,
+            result: Some(outcome),
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let (word, named) = match kind {
+            ToolKind::Read => ("read", false),
+            ToolKind::Search => ("searched", false),
+            ToolKind::Run => ("ran", false),
+            ToolKind::Script | ToolKind::Other | ToolKind::Unknown => (name.as_str(), true),
+        };
+        let failed = outcome.is_error;
+        match runs.last_mut() {
+            Some(last) if last.word == word && last.named == named && last.failed == failed => {
+                last.count += 1;
+            }
+            _ => runs.push(ChipRun {
+                word,
+                named,
+                failed,
+                count: 1,
+            }),
+        }
+    }
+    runs.iter().map(ChipRun::chip).collect()
+}
+
+/// A script's run time as ui-themes writes it: tenths of a second (floored)
+/// under 10 s, whole seconds under a minute, else minutes and seconds.
+#[must_use]
+pub fn format_ms(ms: u64) -> String {
+    if ms < 10_000 {
+        format!("{}.{}s", ms / 1000, (ms / 100) % 10)
+    } else if ms < 60_000 {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
 }
 
 /// Each script call's inner calls, by the script's id. Only calls of the
@@ -3588,9 +3785,216 @@ mod run_tests {
     use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
 
     use super::{
-        ChatLog, ChatMode, DisplayRow, RowShape, RunItem, RunSummary, display_rows,
-        display_rows_folding,
+        ChatLog, ChatMode, DisplayRow, RowShape, RunItem, RunSummary, ScriptChip, ScriptLine,
+        ScriptRow, ScriptState, display_rows, display_rows_folding, format_ms, script_line,
     };
+
+    /// Script call `id` with `summary`, carrying `facts`, with no result
+    /// yet (`None`) or a result that failed or not.
+    fn script_call(
+        id: &str,
+        summary: &str,
+        facts: Option<ScriptFacts>,
+        failed: Option<bool>,
+    ) -> ChatEntry {
+        ChatEntry::Tool {
+            id: id.to_owned(),
+            name: "REPL".to_owned(),
+            summary: summary.to_owned(),
+            input: "{}".to_owned(),
+            result: failed.map(|is_error| ToolOutcome {
+                text: "out".to_owned(),
+                is_error,
+            }),
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind: ToolKind::Script,
+            script: facts,
+        }
+    }
+
+    fn facts(description: &str, eval: Option<u32>, ms: Option<u64>) -> ScriptFacts {
+        ScriptFacts {
+            description: description.to_owned(),
+            eval,
+            ms,
+            error: None,
+        }
+    }
+
+    fn chip(text: &str, failed: bool) -> ScriptChip {
+        ScriptChip {
+            text: text.to_owned(),
+            failed,
+        }
+    }
+
+    /// The line of script `call` running `inner`, still running or not.
+    fn line_of(call: &ChatEntry, inner: &[ChatEntry], running: bool) -> ScriptLine {
+        script_line(&ScriptRow {
+            call,
+            inner: inner.iter().collect(),
+            running,
+        })
+    }
+
+    #[test]
+    fn script_line_of_a_done_script_with_eval_time_and_chips() {
+        let script = script_call(
+            "s1",
+            "REPL s1",
+            Some(facts(
+                "\n  Read the footer and its spec  \nthen sum them",
+                Some(12),
+                Some(3249),
+            )),
+            Some(false),
+        );
+        let inner = [
+            call("r1", "Read", ToolKind::Read),
+            call("r2", "Read", ToolKind::Read),
+            call("b1", "Bash", ToolKind::Run),
+            with_result("r3", "Read", ToolKind::Read, Some(true)),
+        ];
+        assert_eq!(
+            line_of(&script, &inner, false),
+            ScriptLine {
+                state: ScriptState::Done,
+                description: "Read the footer and its spec".to_owned(),
+                meta: Some("#12 \u{b7} 3.2s".to_owned()),
+                chips: vec![
+                    chip("2 read", false),
+                    chip("1 ran", false),
+                    chip("1 failed", true)
+                ],
+                error: None,
+            }
+        );
+    }
+
+    #[test]
+    fn script_line_of_a_running_script_has_no_time() {
+        let script = script_call("s1", "", Some(facts("Sum", Some(4), Some(800))), None);
+        let inner = [
+            call("r1", "Read", ToolKind::Read),
+            with_result("r2", "Read", ToolKind::Read, None),
+            call("r3", "Read", ToolKind::Read),
+            with_result("b1", "Bash", ToolKind::Run, None),
+        ];
+        let line = line_of(&script, &inner, true);
+        assert_eq!(line.state, ScriptState::Running);
+        assert_eq!(line.meta.as_deref(), Some("#4"));
+        assert_eq!(line.chips, [chip("2 read", false)]);
+        assert_eq!(line.error, None);
+    }
+
+    #[test]
+    fn script_line_of_a_failed_script_carries_its_error() {
+        let failing = ScriptFacts {
+            error: Some("TypeError: x is undefined".to_owned()),
+            ..facts("Sum", Some(5), Some(900))
+        };
+        let by_facts = script_call("s1", "", Some(failing.clone()), Some(false));
+        let line = line_of(&by_facts, &[], false);
+        assert_eq!(line.state, ScriptState::Failed);
+        assert_eq!(line.error.as_deref(), Some("TypeError: x is undefined"));
+        assert_eq!(line.meta.as_deref(), Some("#5 \u{b7} 0.9s"));
+        let by_result = script_call("s2", "REPL s2", None, Some(true));
+        let line = line_of(&by_result, &[], false);
+        assert_eq!(line.state, ScriptState::Failed);
+        assert_eq!(line.error, None, "no facts, no error row");
+        let still_running = script_call("s3", "", Some(failing), None);
+        let line = line_of(&still_running, &[], true);
+        assert_eq!(line.state, ScriptState::Running);
+        assert_eq!(line.error, None, "a running script draws no error row");
+    }
+
+    #[test]
+    fn script_line_without_facts_uses_the_one_liner_then_the_name() {
+        let summarised = script_call("s1", "sum the sizes\nmore", None, Some(false));
+        let line = line_of(&summarised, &[], false);
+        assert_eq!(line.description, "sum the sizes");
+        assert_eq!(line.meta, None);
+        let blank = script_call("s2", "", Some(facts("  \n ", None, None)), Some(false));
+        assert_eq!(line_of(&blank, &[], false).description, "REPL");
+        let named = script_call("s3", "REPL", None, Some(false));
+        assert_eq!(line_of(&named, &[], false).description, "REPL");
+    }
+
+    #[test]
+    fn script_line_with_only_a_time_has_no_number() {
+        let timed = script_call("s1", "", Some(facts("Sum", None, Some(61_000))), None);
+        let line = line_of(&timed, &[], false);
+        assert_eq!(
+            line.state,
+            ScriptState::Done,
+            "not running, no result, no error"
+        );
+        assert_eq!(line.meta.as_deref(), Some("1m 1s"));
+        let numbered = script_call("s2", "", Some(facts("Sum", Some(7), None)), Some(false));
+        assert_eq!(line_of(&numbered, &[], false).meta.as_deref(), Some("#7"));
+        let neither = script_call("s3", "", Some(facts("Sum", None, None)), Some(false));
+        assert_eq!(line_of(&neither, &[], false).meta, None);
+    }
+
+    #[test]
+    fn script_line_chips_name_other_tools() {
+        let script = script_call("s1", "", Some(facts("Fetch", None, None)), Some(false));
+        let inner = [
+            call("w1", "WebFetch", ToolKind::Other),
+            with_result("w2", "WebFetch", ToolKind::Other, Some(true)),
+            call("r1", "Read", ToolKind::Read),
+            call("w3", "WebFetch", ToolKind::Unknown),
+        ];
+        assert_eq!(
+            line_of(&script, &inner, false).chips,
+            [
+                chip("1 WebFetch", false),
+                chip("1 WebFetch failed", true),
+                chip("1 read", false),
+                chip("1 WebFetch", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn script_line_shows_only_tailing_inner_calls_while_closed() {
+        let script = script_call("s1", "", Some(facts("Build", None, None)), Some(false));
+        let mut tailing = call("b1", "Bash", ToolKind::Run);
+        if let ChatEntry::Tool { tail_paths, .. } = &mut tailing {
+            tail_paths.push("build.log".to_owned());
+        }
+        let inner = [
+            call("r1", "Read", ToolKind::Read),
+            tailing,
+            call("r2", "Read", ToolKind::Read),
+        ];
+        let row = ScriptRow {
+            call: &script,
+            inner: inner.iter().collect(),
+            running: false,
+        };
+        let ids = |open: bool| -> Vec<&str> {
+            row.shown_inner(open).filter_map(super::entry_id).collect()
+        };
+        assert_eq!(ids(false), ["b1"], "closed: the tailing call only");
+        assert_eq!(ids(true), ["r1", "b1", "r2"], "open: every inner call");
+    }
+
+    #[test]
+    fn format_ms_matches_ui_themes() {
+        for (ms, text) in [
+            (0, "0.0s"),
+            (3249, "3.2s"),
+            (9999, "9.9s"),
+            (10_000, "10s"),
+            (59_999, "59s"),
+            (60_000, "1m 0s"),
+            (61_000, "1m 1s"),
+        ] {
+            assert_eq!(format_ms(ms), text, "{ms} ms");
+        }
+    }
 
     fn answer(id: &str) -> ChatEntry {
         ChatEntry::Answer {

@@ -3286,12 +3286,7 @@ fn chat_column(
     for row in chat::display_rows_folding(chat.log.entries(), look.mode, look.min_run) {
         let drawn = match row {
             DisplayRow::Single(entry) => chat_row(look, chat, entry, CHAT_ROW, cx),
-            DisplayRow::Script(script) => div()
-                .flex()
-                .flex_col()
-                .gap(px(ROW_GAP))
-                .children(script_cards(look, chat, &script, cx))
-                .into_any_element(),
+            DisplayRow::Script(script) => script_row(look, chat, &script, cx),
             DisplayRow::Run { entries, summary } => run_row(look, chat, &entries, &summary, cx),
         };
         rows.push(drawn);
@@ -3400,24 +3395,153 @@ pub(crate) fn compact_toggle(
         .into_any_element()
 }
 
-/// A script's cards: the script call's card, then each inner call's card,
-/// in order.
+/// A script's cards under its line: open, the script call's card, then each
+/// inner call's card, in order; closed, only the cards of its inner calls
+/// that tail files (`ScriptRow::shown_inner`).
 fn script_cards(
     look: &RowLook<'_>,
     chat: &SessionChat,
     script: &ScriptRow<'_>,
+    open: bool,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
-    std::iter::once(script.call)
-        .chain(script.inner.iter().copied())
+    open.then_some(script.call)
+        .into_iter()
+        .chain(script.shown_inner(open))
         .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx))
         .collect()
 }
 
+/// A Code Mode script as one line (tagged `chat-script-<pane>-<id>`), a
+/// failed script's error text under it, and its cards (`script_cards`, all
+/// of them while the script call's card is open) under those, all in a
+/// column tagged `chat-script-row-<pane>-<id>`. A click on the line opens
+/// or closes it.
+fn script_row(
+    look: &RowLook<'_>,
+    chat: &SessionChat,
+    script: &ScriptRow<'_>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let Some(id) = chat::entry_id(script.call) else {
+        return div().into_any_element();
+    };
+    let mut line = chat::script_line(script);
+    let error = line.error.take().map(|text| script_error(look, id, text));
+    let cards = script_cards(look, chat, script, chat.log.is_expanded(id), cx);
+    let name = format!("chat-script-row-{}-{id}", look.pane_id);
+    div()
+        .driver_id(|| name)
+        .flex()
+        .flex_col()
+        .gap(px(ROW_GAP))
+        .child(script_line_row(look, id, line, cx))
+        .children(error)
+        .children(cards)
+        .into_any_element()
+}
+
+/// A script's line: the λ mark, its state mark (tagged
+/// `chat-script-<running|done|failed>-<pane>-<id>`), its description, its
+/// number and time (tagged `chat-script-meta-<pane>-<id>`) and its chips;
+/// a click toggles the script call's card open.
+fn script_line_row(
+    look: &RowLook<'_>,
+    id: &str,
+    line: chat::ScriptLine,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = &look.theme;
+    let pane = look.pane_id;
+    let hover_text = t.text;
+    let (state, mark, color) = match line.state {
+        chat::ScriptState::Running => ("running", "\u{2026}", t.working),
+        chat::ScriptState::Done => ("done", "\u{2713}", t.waiting),
+        chat::ScriptState::Failed => ("failed", "\u{2715}", t.danger),
+    };
+    let name = format!("chat-script-{pane}-{id}");
+    let mark_name = format!("chat-script-{state}-{pane}-{id}");
+    let meta = line.meta.map(|text| {
+        let meta_name = format!("chat-script-meta-{pane}-{id}");
+        div().driver_id(|| meta_name).flex_none().child(text)
+    });
+    let chips: Vec<Div> = line
+        .chips
+        .into_iter()
+        .enumerate()
+        .map(|(n, chip)| script_chip(look, id, n, chip))
+        .collect();
+    let (session_id, call_id) = (look.session_id.to_owned(), id.to_owned());
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .driver_id(|| name)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_color(gpui::rgb(t.muted))
+        .cursor_pointer()
+        .hover(move |style| style.text_color(gpui::rgb(hover_text)))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.toggle_chat_card(&session_id, &call_id, cx);
+        }))
+        .child(
+            div()
+                .flex_none()
+                .text_color(gpui::rgb(t.lilac))
+                .child("\u{3bb}"),
+        )
+        .child(
+            div()
+                .driver_id(|| mark_name)
+                .flex_none()
+                .text_color(gpui::rgb(color))
+                .child(mark),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .text_color(gpui::rgb(t.text))
+                .child(line.description),
+        )
+        .children(meta)
+        .children(chips)
+        .into_any_element()
+}
+
+/// Chip `n` of a script's line (tagged `chat-script-chip-<pane>-<id>-<n>`):
+/// its count on the chip background, in danger when its calls failed.
+fn script_chip(look: &RowLook<'_>, id: &str, n: usize, chip: chat::ScriptChip) -> Div {
+    let t = &look.theme;
+    let name = format!("chat-script-chip-{}-{id}-{n}", look.pane_id);
+    div()
+        .driver_id(|| name)
+        .flex_none()
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .bg(gpui::rgb(t.chip))
+        .when(chip.failed, |chip_box| {
+            chip_box.text_color(gpui::rgb(t.danger))
+        })
+        .child(chip.text)
+}
+
+/// A failed script's error text under its line (tagged
+/// `chat-script-error-<pane>-<id>`), indented and wrapping, in danger.
+fn script_error(look: &RowLook<'_>, id: &str, text: String) -> Div {
+    let name = format!("chat-script-error-{}-{id}", look.pane_id);
+    div()
+        .driver_id(|| name)
+        .pl(px(16.0))
+        .min_w(px(0.0))
+        .text_color(gpui::rgb(look.theme.danger))
+        .child(text)
+}
+
 /// A Compact run of read, search, run and script calls: one line tagged
 /// `chat-run-<pane>-<first id>` saying what they did, with the running mark
-/// (tagged `chat-run-running-<pane>-<first id>`) while one runs; a click
-/// opens it to the calls' cards as Comfortable draws them, under the line.
+/// (tagged `chat-run-running-<pane>-<first id>`) while one runs, and each of
+/// its scripts' lines under it; a click opens it to the calls' cards as
+/// Comfortable draws them (scripts as their lines), under the line.
 fn run_row(
     look: &RowLook<'_>,
     chat: &SessionChat,
@@ -3460,18 +3584,16 @@ fn run_row(
         )
         .child(div().flex_1().min_w(px(0.0)).child(summary.text()))
         .children(running);
-    let cards: Vec<AnyElement> = if open {
-        let mut cards = Vec::new();
-        for item in entries {
-            match item {
-                RunItem::Entry(entry) => cards.push(chat_row(look, chat, entry, CHAT_ROW, cx)),
-                RunItem::Script(script) => cards.extend(script_cards(look, chat, script, cx)),
-            }
+    // Closed, the run draws only its scripts' lines under its own; open,
+    // every item in place.
+    let mut cards: Vec<AnyElement> = Vec::new();
+    for item in entries {
+        match item {
+            RunItem::Entry(entry) if open => cards.push(chat_row(look, chat, entry, CHAT_ROW, cx)),
+            RunItem::Entry(_) => {}
+            RunItem::Script(script) => cards.push(script_row(look, chat, script, cx)),
         }
-        cards
-    } else {
-        Vec::new()
-    };
+    }
     div()
         .flex()
         .flex_col()

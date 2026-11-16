@@ -105,8 +105,9 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
-    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, PaneFollow, SessionSnapshot,
-    SplitDirection, StretchLine, SummarySource, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, PaneFollow, ScriptFacts,
+    SessionSnapshot, SplitDirection, StretchLine, SummarySource, ToolKind, ToolOutcome, WorkShell,
+    WorkSubagent,
 };
 use rustling_tulip_native::builtin_themes::DRACULA;
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
@@ -645,13 +646,14 @@ impl View {
                         .chat_tail_lines("s-petal", FOOTER_LOG)
                         .is_some_and(|lines| lines.len() > 1)
             }
-            // The run of read, search and run calls near the chat's end,
-            // drawn as one Compact line at its bottom.
+            // The run of two scripts and then read, search and run calls
+            // near the chat's end, drawn as one Compact line at its bottom
+            // with the scripts' lines under it.
             Self::ChatCompact => {
                 root.pane_shows_chat("p1")
                     && root.chat_mode() == ChatMode::Compact
                     && root.chat_display_rows("s-petal").iter().any(
-                        |row| matches!(row, RowShape::Run { ids, .. } if ids.first().is_some_and(|id| id == "t4")),
+                        |row| matches!(row, RowShape::Run { ids, .. } if ids.first().is_some_and(|id| id == "x1")),
                     )
             }
             Self::Summary => {
@@ -4043,8 +4045,81 @@ fn chat_tool(
     }
 }
 
-/// The `chat` shot's run of read, search and run calls, a thinking row
-/// between two of them, which Compact draws as one line.
+/// Script call `id` of the `chat` shot carrying `facts`, its result failed
+/// or not.
+fn chat_script(id: &str, facts: ScriptFacts, failed: bool) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "REPL".to_owned(),
+        summary: facts.description.clone(),
+        input: "{\"code\": \"await read(footer)\"}".to_owned(),
+        result: Some(ToolOutcome {
+            text: if failed { "error" } else { "ok" }.to_owned(),
+            is_error: failed,
+        }),
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind: ToolKind::Script,
+        script: Some(facts),
+    }
+}
+
+/// Call `entry` as one the script `parent` ran.
+fn ran_by(mut entry: ChatEntry, parent: &str) -> ChatEntry {
+    if let ChatEntry::Tool { parent_id, .. } = &mut entry {
+        *parent_id = Some(parent.to_owned());
+    }
+    entry
+}
+
+/// The `chat` shot's two Code Mode scripts: a done one that read two files
+/// and ran a command, and a failed one with its error.
+fn chat_scripts() -> Vec<ChatEntry> {
+    let done = ScriptFacts {
+        description: "Read the footer and its spec".to_owned(),
+        eval: Some(12),
+        ms: Some(3200),
+        error: None,
+    };
+    let failed = ScriptFacts {
+        description: "Sum the pill widths".to_owned(),
+        eval: Some(13),
+        ms: Some(900),
+        error: Some("TypeError: undefined is not an object".to_owned()),
+    };
+    vec![
+        chat_script("x1", done, false),
+        ran_by(
+            chat_tool("x1r1", "Read", ToolKind::Read, DIFF_PATH, Some("412 lines")),
+            "x1",
+        ),
+        ran_by(
+            chat_tool(
+                "x1r2",
+                "Read",
+                ToolKind::Read,
+                "footer_spec.rs",
+                Some("88 lines"),
+            ),
+            "x1",
+        ),
+        ran_by(
+            chat_tool(
+                "x1b1",
+                "Bash",
+                ToolKind::Run,
+                "git diff --stat",
+                Some("1 file"),
+            ),
+            "x1",
+        ),
+        chat_script("x2", failed, true),
+    ]
+}
+
+/// The `chat` shot's read, search and run calls, a thinking row between two
+/// of them, which follow `chat_scripts` and Compact draws with them as one
+/// line.
 fn footer_run() -> Vec<ChatEntry> {
     vec![
         chat_tool(
@@ -4143,8 +4218,9 @@ fn phone_chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessa
 }
 
 /// The `chat` shot's conversation: a row of each kind, a tool card done and
-/// one still running, a run of read, search and run calls with a thinking
-/// row between two (one Compact line), a message not yet in the
+/// one still running, a run of two Code Mode scripts (one done, one failed)
+/// and read, search and run calls with a thinking row between two (one
+/// Compact line, the scripts' lines under it), a message not yet in the
 /// transcript, and a live answer, under `screen`.
 fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) -> DaemonMessage {
     let tool = chat_tool;
@@ -4207,6 +4283,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             script: None,
         },
     ];
+    entries.extend(chat_scripts());
     entries.extend(footer_run());
     entries.push(ChatEntry::Answer {
         id: "live:m2".to_owned(),

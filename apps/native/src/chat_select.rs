@@ -76,10 +76,12 @@ impl Units {
     /// The selectable texts of `rows`, in drawing order: a user message's
     /// text; an answer's Markdown rows (its raw text without a parsed
     /// document); a tool card's one-liner, plus its statements, input and
-    /// result while the card is open; nothing for a folded run or a muted
-    /// row, though an open run lists each of its cards' texts as a single
-    /// row's; empty texts left out except an answer's empty code line, which
-    /// a copy keeps. `doc_of` and `is_open` take an entry id, `is_run_open`
+    /// result while the card is open; nothing for a muted row; a script's
+    /// line adds nothing, and under it an open script lists its call's and
+    /// inner calls' cards, a closed one only its inner calls' cards that tail
+    /// files; a closed run lists only its scripts (as standing ones), an open
+    /// run each of its cards' texts as a single row's; empty texts left out
+    /// except an answer's empty code line, which a copy keeps. `doc_of` and `is_open` take an entry id, `is_run_open`
     /// a run's first entry id.
     pub(crate) fn build<'a>(
         rows: &[DisplayRow<'a>],
@@ -97,15 +99,14 @@ impl Units {
                         .first()
                         .and_then(RunItem::id)
                         .is_some_and(&is_run_open);
-                    if open {
-                        for item in entries {
-                            match item {
-                                RunItem::Entry(entry) => {
-                                    push_entry(&mut units, entry, &doc_of, &is_open);
-                                }
-                                RunItem::Script(script) => {
-                                    push_script(&mut units, script, &doc_of, &is_open);
-                                }
+                    for item in entries {
+                        match item {
+                            RunItem::Entry(entry) if open => {
+                                push_entry(&mut units, entry, &doc_of, &is_open);
+                            }
+                            RunItem::Entry(_) => {}
+                            RunItem::Script(script) => {
+                                push_script(&mut units, script, &doc_of, &is_open);
                             }
                         }
                     }
@@ -247,21 +248,28 @@ impl Units {
     }
 }
 
-/// Pushes onto `units` the selectable texts of `entry`, numbered within it,
-/// empty ones left out except an answer's rows.
-/// Pushes the units of a script's cards in drawing order: the script
-/// call's, then each inner call's, as each card gave them on its own.
+/// Pushes the units of the cards a script draws under its line, in drawing
+/// order, as each card gave them on its own: open, the script call's and
+/// each inner call's; closed, only the inner calls that tail files
+/// (`ScriptRow::shown_inner`).
 fn push_script<'a>(
     units: &mut Vec<Unit>,
     script: &ScriptRow<'_>,
     doc_of: &impl Fn(&str) -> Option<&'a MdDoc>,
     is_open: &impl Fn(&str) -> bool,
 ) {
-    for entry in std::iter::once(script.call).chain(script.inner.iter().copied()) {
+    let open = chat::entry_id(script.call).is_some_and(is_open);
+    let cards = open
+        .then_some(script.call)
+        .into_iter()
+        .chain(script.shown_inner(open));
+    for entry in cards {
         push_entry(units, entry, doc_of, is_open);
     }
 }
 
+/// Pushes onto `units` the selectable texts of `entry`, numbered within it,
+/// empty ones left out except an answer's rows.
 fn push_entry<'a>(
     units: &mut Vec<Unit>,
     entry: &ChatEntry,
@@ -963,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_script_and_its_inner_call_contribute_their_cards_units() {
+    fn a_script_contributes_its_cards_units_only_while_open() {
         let entries = [
             tool("s1", "REPL", "run a script", "{}", Some("done")),
             tool("r1", "Read", "read a", "", Some("text")),
@@ -977,15 +985,55 @@ mod tests {
         };
         let standing = vec![DisplayRow::Script(script.clone())];
         let units = Units::build(&standing, |_| None, |_| true, |_| false);
-        assert_eq!(shape(&units), shape(&before), "a script standing alone");
+        assert_eq!(
+            shape(&units),
+            shape(&before),
+            "an open script standing alone"
+        );
+        let closed = Units::build(&standing, |_| None, |id| id != "s1", |_| false);
+        assert!(
+            closed.units.is_empty(),
+            "a closed script: {:?}",
+            closed.units
+        );
         let in_run = vec![DisplayRow::Run {
             entries: vec![RunItem::Script(script)],
             summary: RunSummary::default(),
         }];
         let open = Units::build(&in_run, |_| None, |_| true, |id| id == "s1");
         assert_eq!(shape(&open), shape(&before), "a script in an open run");
-        let closed = Units::build(&in_run, |_| None, |_| true, |_| false);
+        let closed_run = Units::build(&in_run, |_| None, |_| true, |_| false);
+        assert_eq!(
+            shape(&closed_run),
+            shape(&before),
+            "an open script under a closed run's line"
+        );
+        let closed = Units::build(&in_run, |_| None, |id| id != "s1", |_| false);
         assert!(closed.units.is_empty(), "{:?}", closed.units);
+    }
+
+    #[test]
+    fn a_closed_run_of_a_script_pushes_its_tailing_inner_calls_units_only() {
+        let mut entries = [
+            tool("s1", "REPL", "run a script", "{}", Some("done")),
+            tool("r1", "Read", "read a", "", Some("text")),
+            tool("b1", "Bash", "build it", "", Some("built")),
+        ];
+        if let ChatEntry::Tool { tail_paths, .. } = &mut entries[2] {
+            tail_paths.push("build.log".to_owned());
+        }
+        let tailing = Units::build(&single_rows(&entries[2..]), |_| None, |_| false, |_| false);
+        assert_ne!(tailing.units, Vec::new());
+        let in_run = vec![DisplayRow::Run {
+            entries: vec![RunItem::Script(ScriptRow {
+                call: &entries[0],
+                inner: vec![&entries[1], &entries[2]],
+                running: false,
+            })],
+            summary: RunSummary::default(),
+        }];
+        let units = Units::build(&in_run, |_| None, |_| false, |_| false);
+        assert_eq!(shape(&units), shape(&tailing));
     }
 
     #[test]
