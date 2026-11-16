@@ -3,7 +3,7 @@
 //! feature must refuse a driven run too.
 
 use daemon_client::isolation::{
-    DISPATCH_DIR_VAR, REMOTE_FILES_DIR_VAR, check_isolated, check_isolated_var,
+    DISPATCH_DIR_VAR, GATES_DIR_VAR, REMOTE_FILES_DIR_VAR, check_isolated, check_isolated_var,
 };
 
 use crate::offscreen::OFFSCREEN_ENV;
@@ -45,8 +45,10 @@ pub enum GateDecision {
 /// and `override_vars` names each registered agent's binary override.
 ///
 /// A driven run (`RUSTLING_TULIP_DRIVER=1`) needs the driver built in, a
-/// cloaked window, isolated folders and every agent override set; any one
-/// missing refuses it.
+/// cloaked window, isolated folders (the config, binaries and worktrees dirs,
+/// the remote-files dir, the dispatch live-run dir and the gates dir, each
+/// absolute and under `.tmp`) and every agent override set; any one missing
+/// refuses it.
 pub fn decide(
     get: impl Fn(&str) -> Option<String>,
     built_with_driver: bool,
@@ -84,6 +86,9 @@ pub fn decide(
     {
         return GateDecision::Refuse(err.to_string());
     }
+    if let Err(err) = check_isolated_var(GATES_DIR_VAR, |variable| get(variable).map(Into::into)) {
+        return GateDecision::Refuse(err.to_string());
+    }
     if let Some(unset) = override_vars.iter().find(|variable| !set(variable)) {
         return GateDecision::Refuse(format!(
             "{DRIVER_ENV}=1 needs {unset} set, so a driven run never starts a real agent CLI"
@@ -97,7 +102,9 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use daemon_client::isolation::{DISPATCH_DIR_VAR, ISOLATED_DIR_VARS, REMOTE_FILES_DIR_VAR};
+    use daemon_client::isolation::{
+        DISPATCH_DIR_VAR, GATES_DIR_VAR, ISOLATED_DIR_VARS, REMOTE_FILES_DIR_VAR,
+    };
 
     use super::{
         DRIVER_ENV, DRIVER_TOASTS_ENV, GateDecision, OFFSCREEN_ENV, decide, driver_toasts_wanted,
@@ -130,6 +137,10 @@ mod tests {
         vars.insert(
             DISPATCH_DIR_VAR.to_owned(),
             absolute(&["repo", ".tmp", "drive", "dispatch-live"]),
+        );
+        vars.insert(
+            GATES_DIR_VAR.to_owned(),
+            absolute(&["repo", ".tmp", "drive", "gates"]),
         );
         vars.insert(DRIVER_ENV.to_owned(), "1".to_owned());
         vars.insert(OFFSCREEN_ENV.to_owned(), "1".to_owned());
@@ -247,6 +258,21 @@ mod tests {
         let outside = absolute(&["Users", "me", "AppData", "dispatch", "live"]);
         let reason = refusal(gate(&env(&[(DISPATCH_DIR_VAR, Some(&outside))]), true));
         assert!(reason.contains(DISPATCH_DIR_VAR), "{reason}");
+        assert!(reason.contains("is not under a .tmp folder"), "{reason}");
+    }
+
+    #[test]
+    fn a_driven_run_refuses_an_unset_gates_folder() {
+        let reason = refusal(gate(&env(&[(GATES_DIR_VAR, None)]), true));
+        assert!(reason.contains(GATES_DIR_VAR), "{reason}");
+        assert!(reason.contains("is not set"), "{reason}");
+    }
+
+    #[test]
+    fn a_driven_run_refuses_a_gates_folder_outside_tmp() {
+        let outside = absolute(&["Users", "me", "AppData", "Local"]);
+        let reason = refusal(gate(&env(&[(GATES_DIR_VAR, Some(&outside))]), true));
+        assert!(reason.contains(GATES_DIR_VAR), "{reason}");
         assert!(reason.contains("is not under a .tmp folder"), "{reason}");
     }
 

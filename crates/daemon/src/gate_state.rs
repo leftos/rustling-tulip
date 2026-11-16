@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{Notify, broadcast, watch};
 use tracing::warn;
 
+use crate::paths::GatesRoot;
 use crate::server::StateEvent;
 
 /// A count as the wire carries it, saturating at `u32::MAX`.
@@ -282,8 +283,9 @@ pub(crate) fn to_wire(
 
 /// Reads the gate's state from the given inputs and probes, or `None` when the gate's state folder is not there.
 ///
-/// The signal is the `gate` folder under the per-user local application data folder, which the gate's installer and
-/// every gate run create before anything is written; a failed check also reads as no state, and is logged.
+/// The signal is the `gate` folder under the inputs' local application data folder (the per-user one, or the gates
+/// override that stands in for it), which the gate's installer and every gate run create before anything is written; a
+/// failed check also reads as no state, and is logged.
 pub(crate) fn read_once(
     inputs: &::gate_state::StateInputs,
     processes: &dyn ::proc_table::ProcessTable,
@@ -351,20 +353,83 @@ fn gate_installed(env: impl Fn(&str) -> Option<OsString>, present: impl Fn(&Path
         || local_gate(&env).is_some_and(|exe| present(&exe))
 }
 
-/// Reads this host's live gate state, naming each live gate's repo from `repos`, or `None` when the gate is not
-/// installed here, the gate's inputs cannot be read, or the gate's state folder is not there.
+/// Whether the gate is set up under `root`: on the machine, [`gate_installed`] over `env` and `present`; under an
+/// override, whether its `gate` folder is a directory, the machine's installs never consulted; never under an unusable
+/// root.
+fn installed_under(
+    root: &GatesRoot,
+    env: impl Fn(&str) -> Option<OsString>,
+    present: impl Fn(&Path) -> bool,
+) -> bool {
+    match root {
+        GatesRoot::Machine => gate_installed(env, present),
+        GatesRoot::Override(dir) => dir.join("gate").is_dir(),
+        GatesRoot::Unusable => false,
+    }
+}
+
+/// The state inputs under `root`: the machine's as `machine` gives them; under an override, the machine's with the
+/// override as the local application data folder and the generation detected again against it; none under an unusable
+/// root, where `machine` is not called.
+fn inputs_under(
+    root: &GatesRoot,
+    machine: impl FnOnce() -> Option<::gate_state::StateInputs>,
+) -> Option<::gate_state::StateInputs> {
+    match root {
+        GatesRoot::Machine => machine(),
+        GatesRoot::Override(dir) => machine().and_then(|inputs| rooted_at(dir, inputs)),
+        GatesRoot::Unusable => None,
+    }
+}
+
+/// `inputs` with `dir` as the local application data folder and the generation its cutover flag gives, or `None`
+/// when whether the flag exists cannot be told, which is logged.
+fn rooted_at(
+    dir: &Path,
+    mut inputs: ::gate_state::StateInputs,
+) -> Option<::gate_state::StateInputs> {
+    match ::gate_state::Generation::detect(dir) {
+        Ok(generation) => {
+            inputs.local_app_data = dir.to_path_buf();
+            inputs.generation = generation;
+            Some(inputs)
+        }
+        Err(error) => {
+            let flag = ::gate_state::Generation::cutover_flag(dir);
+            warn!(%error, path = %flag.display(), "gate state: whether the gates folder's cutover flag exists could not be told");
+            None
+        }
+    }
+}
+
+/// The gate's counts file under `root`, from the inputs [`inputs_under`] gives, or `None` when there are none.
+fn counts_path_under(
+    root: &GatesRoot,
+    machine: impl FnOnce() -> Option<::gate_state::StateInputs>,
+) -> Option<PathBuf> {
+    inputs_under(root, machine).map(|inputs| ::gate_state::slot_count_path(&inputs))
+}
+
+/// The machine's live gate inputs, or `None` when they cannot be read, logged with `what` the read was for.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) fn read_live(repos: &RepoFolders) -> Option<protocol::GateState> {
-    if !gate_installed(process_env, gate_program_present) {
+fn machine_inputs(what: &'static str) -> Option<::gate_state::StateInputs> {
+    match ::gate_state::live_inputs() {
+        Ok(inputs) => Some(inputs),
+        Err(error) => {
+            warn!(%error, "gate state: the gate's inputs could not be read{what}");
+            None
+        }
+    }
+}
+
+/// Reads this host's live gate state under `root`, naming each live gate's repo from `repos`, or `None` when the gate
+/// is not installed there, the gate's inputs cannot be read, or the gate's state folder is not there.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) fn read_live(root: &GatesRoot, repos: &RepoFolders) -> Option<protocol::GateState> {
+    if !installed_under(root, process_env, gate_program_present) {
         return None;
     }
-    let inputs = match ::gate_state::live_inputs() {
-        Ok(inputs) => inputs,
-        Err(error) => {
-            warn!(%error, "gate state: the gate's inputs could not be read");
-            return None;
-        }
-    };
+    let inputs = inputs_under(root, || machine_inputs(""))?;
     read_once(
         &inputs,
         &::proc_table::Win32ProcessTable,
@@ -397,34 +462,31 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// closure in tests. It blocks, so the poll calls it on a blocking thread.
 pub(crate) type GateReader = Arc<dyn Fn(&RepoFolders) -> Option<protocol::GateState> + Send + Sync>;
 
+/// A live reader of the gate's state under a root.
+pub(crate) type LiveReader = fn(&GatesRoot, &RepoFolders) -> Option<protocol::GateState>;
+
 /// The reader the daemon's poll runs: [`read_live`] on 64-bit Windows, the one platform with live gate inputs, and
 /// `None` elsewhere, where the hub holds no gate state and starts no poll.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) const LIVE_READER: Option<fn(&RepoFolders) -> Option<protocol::GateState>> =
-    Some(read_live);
+pub(crate) const LIVE_READER: Option<LiveReader> = Some(read_live);
 /// The reader the daemon's poll runs: none off 64-bit Windows, where the hub holds no gate state and starts no poll.
 #[cfg(not(all(windows, target_pointer_width = "64")))]
-pub(crate) const LIVE_READER: Option<fn(&RepoFolders) -> Option<protocol::GateState>> = None;
+pub(crate) const LIVE_READER: Option<LiveReader> = None;
 
 /// Where the gate's counts file is, looked up at each slot-count write: the live inputs' path in the daemon, a temp
 /// file in tests; `None` when it cannot be found. It may block, so a write calls it on a blocking thread.
 pub(crate) type CountsPath = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
 
-/// This host's gate counts file, read from the gate's live inputs, or `None` when they cannot be read.
+/// This host's gate counts file under `root`, read from the gate's live inputs, or `None` when they cannot be read or
+/// the root is unusable.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) fn live_counts_path() -> Option<PathBuf> {
-    match ::gate_state::live_inputs() {
-        Ok(inputs) => Some(::gate_state::slot_count_path(&inputs)),
-        Err(error) => {
-            warn!(%error, "gate state: the gate's inputs could not be read for its counts file");
-            None
-        }
-    }
+pub(crate) fn live_counts_path(root: &GatesRoot) -> Option<PathBuf> {
+    counts_path_under(root, || machine_inputs(" for its counts file"))
 }
 
 /// This host's gate counts file: none off 64-bit Windows, where the hub holds no gate state.
 #[cfg(not(all(windows, target_pointer_width = "64")))]
-pub(crate) fn live_counts_path() -> Option<PathBuf> {
+pub(crate) fn live_counts_path(_root: &GatesRoot) -> Option<PathBuf> {
     None
 }
 
@@ -586,16 +648,23 @@ fn worktree_repo(folder: &str) -> Option<String> {
 /// It blocks, so the request calls it on a blocking thread.
 pub(crate) type HistorySource = Arc<dyn Fn(RepoFolders) -> Option<HistoryLists> + Send + Sync>;
 
-/// The daemon's history source: a closure owning the one journal cache, which it locks only while it reads, after a
-/// process snapshot for the journal's liveness check. A failed read is logged and shows no history.
+/// The daemon's history source under `root`: a closure owning the one journal cache, which it locks only while it
+/// reads, after a process snapshot for the journal's liveness check. A failed read is logged and shows no history, and
+/// an unusable root shows none.
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub(crate) fn live_history_source() -> HistorySource {
+pub(crate) fn live_history_source(root: GatesRoot) -> HistorySource {
     use ::proc_table::ProcessTable as _;
     let cache = Arc::new(std::sync::Mutex::new(::gate_state::JournalCache::default()));
     Arc::new(move |repos: RepoFolders| {
+        let repo_of = |folder: &str| repos.repo_of(folder);
         let processes = ::proc_table::Win32ProcessTable.snapshot();
         let mut cache = crate::sync::lock(&cache);
-        match ::gate_state::live_history(&mut cache, &processes, |folder| repos.repo_of(folder)) {
+        let read = match &root {
+            GatesRoot::Machine => ::gate_state::live_history(&mut cache, &processes, repo_of),
+            GatesRoot::Override(dir) => history_in(dir, &mut cache, &processes, repo_of),
+            GatesRoot::Unusable => return None,
+        };
+        match read {
             Ok(history) => Some(history_to_wire(&history)),
             Err(error) => {
                 warn!(%error, "gate state: the gate's journal could not be read; no history shown");
@@ -605,9 +674,61 @@ pub(crate) fn live_history_source() -> HistorySource {
     })
 }
 
+/// The gate journal's history under the override `dir`, as [`::gate_state::live_history`] reads the machine's: the
+/// state folder of the generation `dir`'s cutover flag gives, with the live inputs' prefix and moment.
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn history_in(
+    dir: &Path,
+    cache: &mut ::gate_state::JournalCache,
+    processes: &[::proc_table::ProcessInfo],
+    repo_of: impl Fn(&str) -> Option<String>,
+) -> Result<::gate_state::History, ::gate_state::LiveHistoryError> {
+    let inputs = ::gate_state::live_inputs()?;
+    let generation = ::gate_state::Generation::detect(dir).map_err(|source| {
+        ::gate_state::LiveInputsError::CutoverFlag {
+            path: ::gate_state::Generation::cutover_flag(dir),
+            source,
+        }
+    })?;
+    let state_dir = generation.state_dir(dir);
+    let is_live = |pid: u32, process_start: &str| process_is_live(processes, pid, process_start);
+    cache
+        .read(
+            &state_dir,
+            &inputs.slot_prefix,
+            inputs.now,
+            is_live,
+            repo_of,
+        )
+        .map_err(|source| ::gate_state::LiveHistoryError::Journal {
+            dir: state_dir,
+            source,
+        })
+}
+
+/// How far apart a gate's recorded process start and its process's creation may be for the two to be the same gate.
+#[cfg(all(windows, target_pointer_width = "64"))]
+const CLAIM_START_TOLERANCE_NANOS: i128 = 2_000_000_000;
+
+/// Whether an open run's gate is live: its `pid` is in `processes` and started within 2 s of the `process_start` the
+/// journal records.
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn process_is_live(processes: &[::proc_table::ProcessInfo], pid: u32, process_start: &str) -> bool {
+    let Ok(recorded) = process_start.parse::<jiff::Timestamp>() else {
+        return false;
+    };
+    processes
+        .iter()
+        .rfind(|process| process.pid == pid)
+        .and_then(|process| process.created)
+        .is_some_and(|created| {
+            (created.as_nanosecond() - recorded.as_nanosecond()).abs() < CLAIM_START_TOLERANCE_NANOS
+        })
+}
+
 /// The daemon's history source: none off 64-bit Windows, where the hub holds no gate state.
 #[cfg(not(all(windows, target_pointer_width = "64")))]
-pub(crate) fn live_history_source() -> HistorySource {
+pub(crate) fn live_history_source(_root: GatesRoot) -> HistorySource {
     Arc::new(|_: RepoFolders| None)
 }
 
@@ -624,20 +745,49 @@ pub(crate) struct GateHub {
     counts_path: CountsPath,
     history: HistorySource,
     installed: InstalledCheck,
+    root: Arc<GatesRoot>,
     repoll: Arc<Notify>,
 }
 
 impl GateHub {
     /// A hub gate state that holds no state yet, writing slot counts to the file `counts_path` names and reading the
-    /// run history from `history`.
+    /// run history from `history`, on the machine's own gate; tests build their hubs with it.
+    #[cfg(test)]
     pub(crate) fn new(counts_path: CountsPath, history: HistorySource) -> Self {
+        Self::rooted(counts_path, history, GatesRoot::Machine)
+    }
+
+    /// The daemon's hub gate state under `root`, the root resolved once at start: its counts file, run history and
+    /// install check all read under it.
+    pub(crate) fn live(root: GatesRoot) -> Self {
+        let counts_root = root.clone();
+        Self::rooted(
+            Arc::new(move || live_counts_path(&counts_root)),
+            live_history_source(root.clone()),
+            root,
+        )
+    }
+
+    /// A hub gate state as [`GateHub::new`] makes it, with its install check under `root`.
+    fn rooted(counts_path: CountsPath, history: HistorySource, root: GatesRoot) -> Self {
+        let root = Arc::new(root);
+        let installed_root = Arc::clone(&root);
         Self {
             current: Arc::new(watch::Sender::new(None)),
             counts_path,
             history,
-            installed: Arc::new(|| gate_installed(process_env, gate_program_present)),
+            installed: Arc::new(move || {
+                installed_under(&installed_root, process_env, gate_program_present)
+            }),
+            root,
             repoll: Arc::new(Notify::new()),
         }
+    }
+
+    /// The poll's reader: `read` under the root this hub reads its gate state from.
+    pub(crate) fn reader(&self, read: LiveReader) -> GateReader {
+        let root = Arc::clone(&self.root);
+        Arc::new(move |repos: &RepoFolders| read(&root, repos))
     }
 
     /// Whether this host is set up to run gates, asked before a slot-count write or a history read.
@@ -784,14 +934,14 @@ mod tests {
 
     use protocol::{AppearanceOverrides, RepoEntry};
 
-    use crate::paths::Dirs;
+    use crate::paths::{Dirs, GatesRoot};
     use crate::server::StateEvent;
     use crate::state::AppState;
 
     use super::{
-        GateHub, GateReader, POLL_INTERVAL, RepoFolders, command_key, gate_installed,
-        history_to_wire, inner_command, read_once, same_state, spawn_poll, ticket_of, to_wire,
-        waiting_of,
+        GateHub, GateReader, POLL_INTERVAL, RepoFolders, command_key, counts_path_under,
+        gate_installed, history_to_wire, inner_command, inputs_under, installed_under, read_once,
+        same_state, spawn_poll, ticket_of, to_wire, waiting_of,
     };
 
     /// The moment a test describes.
@@ -1378,6 +1528,118 @@ mod tests {
         assert_eq!(state.pools.len(), 2);
         assert_eq!(state.pools[0].kind, GateSlotKind::Heavy);
         assert_eq!(state.pools[1].kind, GateSlotKind::Light);
+    }
+
+    /// The machine's inputs as a test stands them in: a folder that holds a gate state, never the override's.
+    fn machine_with_a_gate(test: &str) -> StateInputs {
+        let machine = fresh_dir(test);
+        fs::create_dir_all(machine.join("gate").join("slots"))
+            .expect("the machine's gate folder is created");
+        inputs(&machine)
+    }
+
+    /// A machine environment whose user and admin installs both hold a gate program.
+    fn machine_with_an_install() -> (impl Fn(&str) -> Option<OsString>, impl Fn(&Path) -> bool) {
+        (
+            env_of(&[
+                ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+                ("ProgramFiles", r"C:\Program Files"),
+            ]),
+            |_: &Path| true,
+        )
+    }
+
+    #[test]
+    fn an_override_without_a_gate_folder_has_no_state_and_no_gate() {
+        let dir = fresh_dir("an_override_without_a_gate_folder_has_no_state_and_no_gate");
+        let machine = machine_with_a_gate("an_override_without_a_gate_folder_machine");
+        let root = GatesRoot::Override(dir.clone());
+
+        let rooted =
+            inputs_under(&root, || Some(machine)).expect("the override keeps the machine's inputs");
+        let (env, present) = machine_with_an_install();
+
+        assert_eq!(rooted.local_app_data, dir);
+        assert_eq!(
+            read_once(&rooted, &EmptyTable, &QuietProbe, &QuietProbe, &no_repos()),
+            None
+        );
+        assert!(
+            !installed_under(&root, env, present),
+            "the machine's install is not consulted"
+        );
+    }
+
+    #[test]
+    fn an_override_with_an_empty_gate_folder_has_a_state_with_no_slots() {
+        let dir = fresh_dir("an_override_with_an_empty_gate_folder_has_a_state_with_no_slots");
+        fs::create_dir_all(dir.join("gate")).expect("the override's gate folder is created");
+        let machine = machine_with_a_gate("an_override_with_an_empty_gate_folder_machine");
+        let root = GatesRoot::Override(dir.clone());
+
+        let rooted =
+            inputs_under(&root, || Some(machine)).expect("the override keeps the machine's inputs");
+        let state = read_once(&rooted, &EmptyTable, &QuietProbe, &QuietProbe, &no_repos())
+            .expect("an empty gate folder reports a state");
+
+        assert!(
+            state
+                .pools
+                .iter()
+                .all(|pool| pool.slots.iter().all(|slot| slot.claim.is_none())),
+            "{:?}",
+            state.pools
+        );
+        assert!(installed_under(&root, env_of(&[]), |_: &Path| false));
+    }
+
+    #[test]
+    fn an_override_with_a_cutover_flag_reads_its_v1_folder() {
+        let dir = fresh_dir("an_override_with_a_cutover_flag_reads_its_v1_folder");
+        fs::create_dir_all(dir.join("gate")).expect("the override's gate folder is created");
+        fs::write(dir.join("gate").join("cutover.flag"), "").expect("the cutover flag is written");
+        let machine = machine_with_a_gate("an_override_with_a_cutover_flag_machine");
+        assert_eq!(machine.generation, Generation::PowerShell);
+
+        let rooted = inputs_under(&GatesRoot::Override(dir.clone()), || Some(machine))
+            .expect("the override keeps the machine's inputs");
+
+        assert_eq!(rooted.generation, Generation::V1);
+        assert_eq!(
+            rooted.generation.state_dir(&rooted.local_app_data),
+            dir.join("gate").join("v1")
+        );
+    }
+
+    #[test]
+    fn an_overrides_counts_file_lies_under_it() {
+        let dir = fresh_dir("an_overrides_counts_file_lies_under_it");
+        let machine = machine_with_a_gate("an_overrides_counts_file_machine");
+
+        let path = counts_path_under(&GatesRoot::Override(dir.clone()), || Some(machine))
+            .expect("an override has a counts file");
+
+        assert!(path.starts_with(&dir), "{}", path.display());
+    }
+
+    #[test]
+    fn an_unusable_root_has_no_state_no_gate_and_no_counts_file() {
+        let root = GatesRoot::Unusable;
+        let (env, present) = machine_with_an_install();
+
+        assert_eq!(
+            inputs_under(&root, || Some(machine_with_a_gate(
+                "an_unusable_root_state"
+            ))),
+            None
+        );
+        assert!(!installed_under(&root, env, present));
+        assert_eq!(
+            counts_path_under(&root, || Some(machine_with_a_gate(
+                "an_unusable_root_counts"
+            ))),
+            None
+        );
     }
 
     /// The change comparison ignores the moment and the ages it computes, and sees any other difference.

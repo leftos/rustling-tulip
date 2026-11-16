@@ -2,7 +2,7 @@
 
 use anyhow::Context as _;
 use daemon_client::profile::{self, Overrides, Profile};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -288,6 +288,43 @@ mod tests {
     fn dispatch_dir_is_none_without_either() {
         assert_eq!(dispatch_live_dir_from(None, [None]), None);
     }
+
+    #[test]
+    fn gates_root_unset_is_the_machine() {
+        assert_eq!(gates_root_from(None), GatesRoot::Machine);
+    }
+
+    #[test]
+    fn gates_root_empty_var_counts_as_unset() {
+        assert_eq!(gates_root_from(Some(OsString::new())), GatesRoot::Machine);
+    }
+
+    #[test]
+    fn gates_root_absolute_override_stays() {
+        let root = if cfg!(windows) { r"C:\gates" } else { "/gates" };
+        assert_eq!(
+            gates_root_from(Some(root.into())),
+            GatesRoot::Override(PathBuf::from(root))
+        );
+    }
+
+    #[test]
+    fn gates_root_relative_override_is_made_absolute() {
+        let root = gates_root_from(Some("gates".into()));
+        assert!(
+            matches!(&root, GatesRoot::Override(dir) if dir.is_absolute() && dir.ends_with("gates")),
+            "{root:?}"
+        );
+    }
+
+    #[test]
+    fn gates_root_that_cannot_be_made_absolute_is_unusable_never_the_machine() {
+        let failed = Err(std::io::Error::other("no current dir"));
+        assert_eq!(
+            gates_root_of(OsStr::new("gates"), failed),
+            GatesRoot::Unusable
+        );
+    }
 }
 
 impl Dirs {
@@ -467,6 +504,50 @@ fn dispatch_live_dir_from(
             }
         },
         None => plugin_dirs.into_iter().flatten().next(),
+    }
+}
+
+/// Where the daemon reads the gate's state from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatesRoot {
+    /// The machine's own gate, under `%LOCALAPPDATA%`.
+    Machine,
+    /// A stand-in for the local application data folder: the state is read from `<dir>\gate`, or `<dir>\gate\v1`
+    /// once `<dir>\gate\cutover.flag` exists.
+    Override(PathBuf),
+    /// An override that cannot be used: no gate state at all, never the machine's.
+    Unusable,
+}
+
+/// The gate state's root: `RUSTLING_TULIP_GATES_DIR` when set and not empty (made absolute against the current dir),
+/// else the machine's own. An override that cannot be made absolute answers [`GatesRoot::Unusable`] rather than the
+/// machine's, so an isolated run never reads the owner's real gate state. Nothing is created here.
+#[must_use]
+pub(crate) fn resolve_gates_root() -> GatesRoot {
+    gates_root_from(std::env::var_os(daemon_client::isolation::GATES_DIR_VAR))
+}
+
+/// [`resolve_gates_root`] over an explicit override `var`.
+fn gates_root_from(var: Option<OsString>) -> GatesRoot {
+    match var.filter(|value| !value.is_empty()) {
+        Some(dir) => gates_root_of(&dir, std::path::absolute(Path::new(&dir))),
+        None => GatesRoot::Machine,
+    }
+}
+
+/// The root a set override `value` gives, by what making it absolute answered.
+fn gates_root_of(value: &OsStr, absolute: std::io::Result<PathBuf>) -> GatesRoot {
+    match absolute {
+        Ok(dir) => GatesRoot::Override(dir),
+        Err(err) => {
+            warn!(
+                %err,
+                variable = daemon_client::isolation::GATES_DIR_VAR,
+                value = %value.to_string_lossy(),
+                "gates dir override could not be made absolute; reading no gate state"
+            );
+            GatesRoot::Unusable
+        }
     }
 }
 

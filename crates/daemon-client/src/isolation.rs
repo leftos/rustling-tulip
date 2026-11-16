@@ -24,6 +24,11 @@ pub const REMOTE_FILES_DIR_VAR: &str = "RUSTLING_TULIP_REMOTE_FILES_DIR";
 /// of [`ISOLATED_DIR_VARS`], which the update sandbox and the bench tools also check.
 pub const DISPATCH_DIR_VAR: &str = "RUSTLING_TULIP_DISPATCH_DIR";
 
+/// The variable naming the folder a daemon reads the gate's state from in place of the machine's local application
+/// data folder. A driven run isolates it too, so a test daemon never reads or writes the owner's real gate state; it
+/// stays out of [`ISOLATED_DIR_VARS`], which the update sandbox and the bench tools also check.
+pub const GATES_DIR_VAR: &str = "RUSTLING_TULIP_GATES_DIR";
+
 /// The folder name a driven run's folders must sit under.
 const TMP_FOLDER: &str = ".tmp";
 
@@ -253,6 +258,29 @@ mod tests {
         assert_eq!(err.reason, Reason::NotUnderTmp(outside));
 
         let under_tmp = absolute(&["repo", ".tmp", "drive", "remote-files"]);
+        assert_eq!(one(Some(under_tmp.into_os_string())), Ok(()));
+    }
+
+    #[test]
+    fn the_gates_folder_is_checked_like_the_others() {
+        assert!(!ISOLATED_DIR_VARS.contains(&GATES_DIR_VAR));
+        let one = |value: Option<OsString>| check_isolated_var(GATES_DIR_VAR, |_| value.clone());
+
+        let err = one(None).expect_err("an unset gates folder is refused");
+        assert_eq!(err.variable, GATES_DIR_VAR);
+        assert_eq!(err.reason, Reason::Unset);
+
+        let relative = PathBuf::from(".tmp").join("drive").join("gates");
+        let err = one(Some(relative.clone().into_os_string()))
+            .expect_err("a relative gates folder is refused");
+        assert_eq!(err.reason, Reason::Relative(relative));
+
+        let outside = absolute(&["Users", "me", "AppData", "Local"]);
+        let err = one(Some(outside.clone().into_os_string()))
+            .expect_err("a gates folder outside .tmp is refused");
+        assert_eq!(err.reason, Reason::NotUnderTmp(outside));
+
+        let under_tmp = absolute(&["repo", ".tmp", "drive", "gates"]);
         assert_eq!(one(Some(under_tmp.into_os_string())), Ok(()));
     }
 

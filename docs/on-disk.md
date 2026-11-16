@@ -203,6 +203,14 @@ A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and r
 
 A fetched `.html` or `.htm` page that opens when done brings the relative media it names with it, saved at the same `<host>/<repo-name>/<rel-path>` place (never outside the repo root) and each fetched again if already on disk (`apps/native/src/html_media.rs`, `docs/native-client.md` "Fetched files").
 
+## The gate state folder
+
+The Gates view reads the gate's state from the gate's own folder, not one the app owns: `gate` under `%LOCALAPPDATA%` on the machine, or `gate\v1` once `gate\cutover.flag` exists. The daemon reads it with the `gate-state` crate (`crates/daemon/src/gate_state.rs`) and writes only slot-count changes, into the counts file there.
+
+`RUSTLING_TULIP_GATES_DIR`, when set and not empty, stands in for `%LOCALAPPDATA%` (`resolve_gates_root` in `crates/daemon/src/paths.rs`): the state is read from `<dir>\gate`, or `<dir>\gate\v1` once `<dir>\gate\cutover.flag` exists, and slot counts are written under it. The gate counts as set up when `<dir>\gate` exists, not by an installed gate program. The value is made absolute against the current dir; one that cannot be made absolute means no gate state, never the machine's, and logs `gates dir override could not be made absolute; reading no gate state` (warn, `variable`, `value`). When whether the cutover flag exists cannot be told, the daemon logs `gate state: whether the gates folder's cutover flag exists could not be told` and reads no state.
+
+An isolated daemon gets `{scratch}/gates`, an empty folder with no `gate` inside, so its Gates pill and rail item stay hidden until a spec seeds `gate`. The daemon creates nothing there on resolving it.
+
 ## The dispatch live-run folder
 
 The daemon follows the dispatch tool's runs from one folder, resolved by `resolve_dispatch_live_dir` in `crates/daemon/src/paths.rs`: `RUSTLING_TULIP_DISPATCH_DIR` when set and not empty (made absolute; one that cannot be made absolute means none), else the first folder a registered agent names (the Claude plugin's `live_runs_dir`: `live` under `DISPATCH_LOG_DIR_VAR`, else `~/.claude/dispatch/live`), else none.

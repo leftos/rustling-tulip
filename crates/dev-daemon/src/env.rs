@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use agent_api::{AgentPlugin, FakeCli};
-use daemon_client::isolation::{DISPATCH_DIR_VAR, check_isolated};
+use daemon_client::isolation::{DISPATCH_DIR_VAR, GATES_DIR_VAR, check_isolated};
 use protocol::AgentId;
 
 use crate::{DaemonSpec, LaunchError, TestShell};
@@ -13,8 +13,9 @@ use crate::{DaemonSpec, LaunchError, TestShell};
 /// What a `PATH` stub prints before its arguments.
 pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
 
-/// The daemon's directories under the scratch root.
-const SCRATCH_DIRS: [&str; 9] = [
+/// The daemon's directories under the scratch root. `gates` is made empty, with no `gate` folder in it, so an
+/// isolated daemon has no gate state until a spec seeds one.
+const SCRATCH_DIRS: [&str; 10] = [
     "config",
     "binaries",
     "worktrees",
@@ -24,6 +25,7 @@ const SCRATCH_DIRS: [&str; 9] = [
     "ui",
     "fake-bin",
     "dispatch-live",
+    "gates",
 ];
 
 /// The variables that isolate a daemon to `spec`'s scratch root, with
@@ -83,6 +85,8 @@ pub(crate) fn isolated_envs(
             DISPATCH_DIR_VAR,
             root.join("dispatch-live").into_os_string(),
         ),
+        // The gate state's root: the live tier never reads the owner's real gate state or writes their slot counts.
+        (GATES_DIR_VAR, root.join("gates").into_os_string()),
         // The account store: never the user's saved logins. The store
         // creates the folder itself, owner-only, when it first opens it.
         (
@@ -258,7 +262,9 @@ fn path_with_stub(root: &Path) -> Result<OsString, LaunchError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{SCRATCH_DIRS, env_value, isolated_envs};
+    use daemon_client::isolation::GATES_DIR_VAR;
+
+    use super::{SCRATCH_DIRS, env_value, isolated_envs, make_scratch_dirs};
     use crate::{DaemonSpec, TestShell};
 
     fn spec(scratch_root: PathBuf) -> DaemonSpec {
@@ -325,5 +331,34 @@ mod tests {
             Some(root.join("dispatch-live").into_os_string()),
             "the live tier never reads or stops the owner's real dispatch runs"
         );
+    }
+
+    #[test]
+    fn the_gates_dir_is_isolated_under_the_scratch_root_and_holds_no_gate_state() {
+        let root = repo_root_tmp().join(format!("gates-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env_value(&envs, GATES_DIR_VAR),
+            Some(root.join("gates").into_os_string()),
+            "the live tier never reads or writes the owner's real gate state"
+        );
+
+        make_scratch_dirs(&root).expect("the scratch folders are made");
+        assert!(root.join("gates").is_dir(), "the gates folder is made");
+        assert!(
+            !root.join("gates").join("gate").exists(),
+            "an isolated daemon has no gate state until a spec seeds one"
+        );
+    }
+
+    /// A `.tmp` folder of this crate's checkout for a test's scratch root.
+    fn repo_root_tmp() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".tmp")
+            .join("dev-daemon-unit")
     }
 }

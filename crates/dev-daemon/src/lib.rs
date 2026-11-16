@@ -412,7 +412,7 @@ impl Drop for IsolatedDaemon {
     reason = "tests assert preconditions with expect and panic; failure messages aid debugging"
 )]
 mod tests {
-    use daemon_client::isolation::ISOLATED_DIR_VARS;
+    use daemon_client::isolation::{GATES_DIR_VAR, ISOLATED_DIR_VARS, check_isolated_var};
 
     use super::*;
 
@@ -529,6 +529,9 @@ mod tests {
                 value.display(),
                 scratch.display()
             );
+        }
+        if let Err(err) = check_isolated_var(GATES_DIR_VAR, get) {
+            panic!("the built environment's gates folder is not isolated: {err}");
         }
     }
 

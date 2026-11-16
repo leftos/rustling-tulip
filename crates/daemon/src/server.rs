@@ -686,12 +686,8 @@ pub async fn run(
         integrity,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         accounts: accounts::start_service(&login_hub),
-        gate_state: crate::gate_state::LIVE_READER.map(|_| {
-            crate::gate_state::GateHub::new(
-                Arc::new(crate::gate_state::live_counts_path),
-                crate::gate_state::live_history_source(),
-            )
-        }),
+        gate_state: crate::gate_state::LIVE_READER
+            .map(|_| crate::gate_state::GateHub::live(crate::paths::resolve_gates_root())),
         dispatch_runs,
         subagent_tails,
         perf: crate::perf::Perf::new(crate::perf::os::machine_source()),
@@ -1422,7 +1418,7 @@ fn start_hub_tasks(
     // broadcasts only a changed state.
     if let (Some(gate), Some(read)) = (&hub.gate_state, crate::gate_state::LIVE_READER) {
         crate::gate_state::spawn_poll(
-            Arc::new(read),
+            gate.reader(read),
             gate.clone(),
             Arc::clone(&hub.state),
             hub.state_events.clone(),
