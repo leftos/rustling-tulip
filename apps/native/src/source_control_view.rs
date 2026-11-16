@@ -24,7 +24,7 @@ use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
 use crate::source_control::{
-    Part, ScKey, ScModel, Section, pin_entry, pin_parts, sections, stored_key,
+    Part, ScKey, ScModel, Section, Subject, pin_entry, pin_parts, sections, stored_key, subject,
 };
 use crate::stash_view::{ScStashes, stashes_part};
 use crate::stashes::StashModel;
@@ -124,6 +124,24 @@ pub struct ScPickerRow {
     pub checked: bool,
 }
 
+/// What the source-control panel shows, and the host it lives on.
+#[derive(Debug, Clone)]
+pub(crate) enum ScSubject<'a> {
+    /// The focused session's spawn members.
+    Members(HostKey, &'a [SessionMember]),
+    /// The repo the focused session's working directory has followed into.
+    Followed(HostKey, &'a RepoEntry),
+    /// No focused session decides it: the pin, else the first repo.
+    Browse,
+}
+
+impl ScSubject<'_> {
+    /// Whether a focused session decides what the panel shows.
+    pub(crate) fn decides(&self) -> bool {
+        !matches!(self, Self::Browse)
+    }
+}
+
 impl RootView {
     /// The session whose trees the source-control panel reads: the active
     /// terminal tab's focused pane, or the session focused last while a
@@ -139,21 +157,22 @@ impl RootView {
         self.last_focused_session.clone()
     }
 
-    /// The panel's session and its host, when it names any repos.
-    fn sc_session_members(&self) -> Option<(HostKey, &[SessionMember])> {
-        let id = self.sc_session()?;
-        self.sidebar
-            .find_session(&id)
-            .map(|(host, session)| (host, session.members.as_slice()))
-            .filter(|(_, members)| !members.is_empty())
-    }
-
-    /// The members of the panel's session, when it has any and its host is
-    /// the one the panel shows.
-    pub(crate) fn sc_focused_members(&self) -> Option<&[SessionMember]> {
-        self.sc_session_members()
-            .filter(|(host, _)| *host == self.sc_shown)
-            .map(|(_, members)| members)
+    /// The panel's subject: the focused session's spawn members, the repo its
+    /// working directory has followed into, or Browse, with the host that
+    /// subject lives on. The session is resolved against its own host's
+    /// repos, whether or not it carries members.
+    pub(crate) fn sc_subject(&self) -> ScSubject<'_> {
+        let Some(id) = self.sc_session() else {
+            return ScSubject::Browse;
+        };
+        let Some((host, session)) = self.sidebar.find_session(&id) else {
+            return ScSubject::Browse;
+        };
+        match subject(Some(session), self.sidebar.repos_of(&host)) {
+            Subject::Members(members) => ScSubject::Members(host, members),
+            Subject::Followed(repo) => ScSubject::Followed(host, repo),
+            Subject::Browse => ScSubject::Browse,
+        }
     }
 
     /// The pinned repo's id, when its host is the one the panel shows.
@@ -182,7 +201,13 @@ impl RootView {
 
     pub(crate) fn sc_sections(&self) -> Vec<Section> {
         let repos: Vec<RepoEntry> = self.sc_git_repos().cloned().collect();
-        sections(&repos, self.sc_focused_members(), self.sc_pin_on_shown())
+        match self.sc_subject() {
+            ScSubject::Members(_, members) => {
+                sections(&repos, Some(members), self.sc_pin_on_shown())
+            }
+            ScSubject::Followed(_, repo) => sections(&repos, None, Some(repo.id.as_str())),
+            ScSubject::Browse => sections(&repos, None, self.sc_pin_on_shown()),
+        }
     }
 
     /// `key` as the persisted collapse and height entries name it on the
@@ -191,20 +216,21 @@ impl RootView {
         stored_key(&self.sc_shown, key)
     }
 
-    /// The host the panel should show: the focused session's when it names
-    /// repos, else the pinned repo's while the window holds its host, else
+    /// The host the panel should show: the one the focused session's subject
+    /// lives on, else the pinned repo's while the window holds its host, else
     /// This PC.
     fn sc_wanted_host(&self) -> HostKey {
-        if let Some((host, _)) = self.sc_session_members() {
-            return host;
+        match self.sc_subject() {
+            ScSubject::Members(host, _) | ScSubject::Followed(host, _) => host,
+            ScSubject::Browse => self
+                .sidebar
+                .source_control()
+                .pinned_repo
+                .as_deref()
+                .map(|entry| pin_parts(entry).0)
+                .filter(|host| self.conn_of(host).is_some())
+                .unwrap_or(HostKey::Local),
         }
-        self.sidebar
-            .source_control()
-            .pinned_repo
-            .as_deref()
-            .map(|entry| pin_parts(entry).0)
-            .filter(|host| self.conn_of(host).is_some())
-            .unwrap_or(HostKey::Local)
     }
 
     /// Makes `host`'s source-control models the live ones, parking the
@@ -268,11 +294,11 @@ impl RootView {
     }
 
     /// The rail's badge: the distinct changed paths of the focused session's
-    /// trees, or of every registered repo's main tree when it has no
-    /// members.
+    /// trees, or of every registered repo's main tree when no focused session
+    /// decides the panel.
     #[must_use]
     pub fn sc_badge(&self) -> usize {
-        if self.sc_focused_members().is_some() {
+        if self.sc_subject().decides() {
             let keys: Vec<ScKey> = self
                 .sc_sections()
                 .into_iter()
@@ -297,12 +323,12 @@ impl RootView {
     }
 
     /// Whether the picker's button shows: the source-control panel is up,
-    /// the focused session names no repos, and two or more git repos are
-    /// registered.
+    /// no focused session decides what it shows, and two or more git repos
+    /// are registered.
     fn sc_picker_offered(&self) -> bool {
         self.sidebar.activity() == Activity::SourceControl
             && !self.sidebar.is_collapsed()
-            && self.sc_focused_members().is_none()
+            && !self.sc_subject().decides()
             && self
                 .sidebar
                 .all_repos()
@@ -362,7 +388,7 @@ impl RootView {
                 empty_hint: Some(NO_REPOS_HINT),
             };
         }
-        let members = self.sc_focused_members();
+        let subject = self.sc_subject();
         let sections = self.sc_sections();
         if sections.is_empty() {
             // A focused session whose members are plain folders has nothing
@@ -385,7 +411,7 @@ impl RootView {
         ScPanel {
             refresh: true,
             picker,
-            context: self.sc_context(members.map(|_| sections.len()), &sections),
+            context: self.sc_context(&subject, &sections),
             sections: sections
                 .iter()
                 .map(|section| self.sc_row(section))
@@ -396,13 +422,14 @@ impl RootView {
 
     /// The context line: the focused session and the number of git sections
     /// it shows, else the shown repo and whether it is pinned.
-    fn sc_context(&self, git_sections: Option<usize>, sections: &[Section]) -> Option<ScContext> {
-        if let Some(count) = git_sections {
+    fn sc_context(&self, subject: &ScSubject<'_>, sections: &[Section]) -> Option<ScContext> {
+        if subject.decides() {
             let session = self.focused_session()?;
             let label = self
                 .sidebar
                 .session(&session)
                 .map(|s| display_label(s, self.sidebar.label_agents(&self.sc_shown)))?;
+            let count = sections.len();
             let plural = if count == 1 { "" } else { "s" };
             return Some(ScContext {
                 text: format!("{label} · {count} repo{plural}"),

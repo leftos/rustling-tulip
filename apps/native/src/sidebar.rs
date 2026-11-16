@@ -4568,16 +4568,7 @@ pub fn find_container_for_cwd(
     workspaces: &[WorkspaceEntry],
     members: &HashSet<&str>,
 ) -> CwdHome {
-    let best =
-        repos
-            .iter()
-            .filter(|r| path_contains(&r.path, cwd))
-            .fold(None::<&RepoEntry>, |best, r| match best {
-                Some(b) if normalize_fs_path(&r.path).len() <= normalize_fs_path(&b.path).len() => {
-                    Some(b)
-                }
-                _ => Some(r),
-            });
+    let best = deepest_repo_for_cwd(cwd, repos);
     if let Some(repo) = best {
         if let Some(w) = workspaces
             .iter()
@@ -4590,6 +4581,23 @@ pub fn find_container_for_cwd(
         }
     }
     CwdHome::Dir(normalize_fs_path(cwd))
+}
+
+/// The registered repo whose path holds `cwd` most deeply, by
+/// [`path_contains`]; of two repos whose paths are the same length, the first
+/// of them wins.
+pub(crate) fn deepest_repo_for_cwd<'r>(cwd: &str, repos: &'r [RepoEntry]) -> Option<&'r RepoEntry> {
+    repos
+        .iter()
+        .filter(|repo| path_contains(&repo.path, cwd))
+        .fold(None::<&RepoEntry>, |best, repo| match best {
+            Some(best)
+                if normalize_fs_path(&repo.path).len() <= normalize_fs_path(&best.path).len() =>
+            {
+                Some(best)
+            }
+            _ => Some(repo),
+        })
 }
 
 fn path_contains(parent: &str, child: &str) -> bool {

@@ -37,10 +37,9 @@ const BUTTON_HEIGHT: f32 = 18.0;
 const AUTHOR_WIDTH: f32 = 90.0;
 
 impl RootView {
-    /// The panel's sections, and whether they are a focused session's
-    /// members.
+    /// The panel's sections, and whether a focused session decides them.
     fn history_sections(&self) -> (Vec<Section>, bool) {
-        (self.sc_sections(), self.sc_focused_members().is_some())
+        (self.sc_sections(), self.sc_subject().decides())
     }
 
     fn history_expanded(&self, key: &ScKey, session_focused: bool) -> bool {

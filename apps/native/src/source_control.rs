@@ -6,7 +6,9 @@
 //! Plain Rust, so every rule is unit-tested; the panel view renders it and
 //! requests the statuses [`ScModel::wanted_missing`] names.
 
-use protocol::{DaemonMessage, GitFileChange, RepoEntry, SessionMember};
+use protocol::{
+    DaemonMessage, GitFileChange, RepoEntry, SessionMember, SessionMode, SessionSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -114,6 +116,70 @@ pub fn sections(
                 branch: None,
             }]
         })
+}
+
+/// The registered repo a plain shell has followed into by its working
+/// directory: the deepest repo whose path holds the session's `current_cwd`,
+/// compared as [`crate::sidebar::find_container_for_cwd`] compares it.
+///
+/// A session that already carries that repo as a member follows nothing: its
+/// own worktree and branch are what it was spawned for. So do an agent
+/// session, a session without a cwd, a cwd outside every registered repo, and
+/// a deepest entry that is a plain folder rather than a git repo, which has no
+/// git surface to show.
+#[must_use]
+pub fn followed_repo<'r>(
+    session: &SessionSnapshot,
+    repos: &'r [RepoEntry],
+) -> Option<&'r RepoEntry> {
+    if session.mode != SessionMode::PlainShell {
+        return None;
+    }
+    let cwd = session
+        .current_cwd
+        .as_deref()
+        .filter(|cwd| !cwd.is_empty())?;
+    let repo = crate::sidebar::deepest_repo_for_cwd(cwd, repos)?;
+    if !repo.is_git {
+        return None;
+    }
+    if session
+        .members
+        .iter()
+        .any(|member| member.repo_id == repo.id)
+    {
+        return None;
+    }
+    Some(repo)
+}
+
+/// What decides the source-control panel's content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subject<'r> {
+    /// The focused session's spawn members.
+    Members(&'r [SessionMember]),
+    /// The repo the focused session's working directory has followed into.
+    Followed(&'r RepoEntry),
+    /// No focused session decides it: the pin, else the first repo.
+    Browse,
+}
+
+/// The subject `session` shows among `repos`, the registered repos of the
+/// host that lists it: the repo its cwd has followed into, else its spawn
+/// members, else [`Subject::Browse`] when it has none.
+#[must_use]
+pub fn subject<'r>(session: Option<&'r SessionSnapshot>, repos: &'r [RepoEntry]) -> Subject<'r> {
+    let Some(session) = session else {
+        return Subject::Browse;
+    };
+    if let Some(repo) = followed_repo(session, repos) {
+        return Subject::Followed(repo);
+    }
+    if session.members.is_empty() {
+        Subject::Browse
+    } else {
+        Subject::Members(&session.members)
+    }
 }
 
 /// What the daemon last reported for one key.
@@ -666,6 +732,46 @@ mod tests {
         .expect("status fixture")
     }
 
+    fn session_in(mode: &str, cwd: Option<&str>, members: &[(&str, &str)]) -> SessionSnapshot {
+        let members: Vec<SessionMember> = members
+            .iter()
+            .map(|(repo_id, worktree_path)| member(repo_id, worktree_path))
+            .collect();
+        serde_json::from_value(json!({
+            "id": "s1",
+            "label": "s1",
+            "kind": "standalone",
+            "members": members,
+            "status": "idle",
+            "mode": mode,
+            "current_cwd": cwd,
+            "started_at": "2026-01-01T00:00:00Z",
+            "exit_code": null,
+            "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
+            "recent_actions": [],
+            "agent": null,
+        }))
+        .expect("session fixture")
+    }
+
+    fn followed_id<'r>(session: &SessionSnapshot, repos: &'r [RepoEntry]) -> Option<&'r str> {
+        followed_repo(session, repos).map(|repo| repo.id.as_str())
+    }
+
+    fn plain_repo(id: &str, path: &str) -> RepoEntry {
+        let mut repo = repo(id, path);
+        repo.is_git = false;
+        repo
+    }
+
+    /// The repo `subject` shows for `session` when it is a followed one.
+    fn subject_repo<'r>(session: &'r SessionSnapshot, repos: &'r [RepoEntry]) -> Option<&'r str> {
+        match subject(Some(session), repos) {
+            Subject::Followed(repo) => Some(repo.id.as_str()),
+            _ => None,
+        }
+    }
+
     fn main_tree(repo_id: &str) -> ScKey {
         ScKey {
             repo_id: repo_id.to_owned(),
@@ -761,6 +867,118 @@ mod tests {
             sections(&[], None, Some("r1")),
             [] as [crate::source_control::Section; 0]
         );
+    }
+
+    #[test]
+    fn a_plain_shell_follows_the_repo_its_cwd_entered() {
+        let repos = vec![repo("r1", "D:\\src\\r1"), repo("r2", "D:\\src\\r2")];
+        let session = session_in("plain_shell", Some("D:\\src\\r2\\sub"), &[]);
+        assert_eq!(followed_id(&session, &repos), Some("r2"));
+    }
+
+    #[test]
+    fn a_shell_with_another_member_follows_the_repo_it_entered() {
+        let repos = vec![repo("r1", "D:\\src\\r1"), repo("r2", "D:\\src\\r2")];
+        let session = session_in("plain_shell", Some("D:\\src\\r2"), &[("r1", "D:\\src\\r1")]);
+        assert_eq!(followed_id(&session, &repos), Some("r2"));
+    }
+
+    #[test]
+    fn a_shell_inside_its_own_member_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1")];
+        let session = session_in("plain_shell", Some("D:\\src\\r1"), &[("r1", "D:\\src\\r1")]);
+        assert_eq!(followed_id(&session, &repos), None);
+    }
+
+    #[test]
+    fn a_cwd_outside_every_repo_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1")];
+        let session = session_in("plain_shell", Some("D:\\scratch"), &[]);
+        assert_eq!(followed_id(&session, &repos), None);
+    }
+
+    #[test]
+    fn an_agent_session_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1")];
+        let session = session_in("interactive", Some("D:\\src\\r1\\sub"), &[]);
+        assert_eq!(followed_id(&session, &repos), None);
+    }
+
+    #[test]
+    fn a_shell_with_no_cwd_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1")];
+        for cwd in [None, Some("")] {
+            let session = session_in("plain_shell", cwd, &[]);
+            assert_eq!(followed_id(&session, &repos), None, "{cwd:?}");
+        }
+    }
+
+    #[test]
+    fn the_deepest_of_nested_repos_wins() {
+        let repos = vec![repo("r1", "D:\\dev"), repo("r2", "D:\\dev\\app")];
+        let session = session_in("plain_shell", Some("D:\\dev\\app\\src"), &[]);
+        assert_eq!(followed_id(&session, &repos), Some("r2"));
+    }
+
+    #[test]
+    fn a_sibling_path_sharing_a_prefix_is_not_inside() {
+        let repos = vec![repo("r1", "C:\\dev\\app")];
+        let exact = session_in("plain_shell", Some("C:\\dev\\app"), &[]);
+        assert_eq!(
+            followed_id(&exact, &repos),
+            Some("r1"),
+            "a repo's own path is inside it"
+        );
+        let sibling = session_in("plain_shell", Some("C:\\dev\\app2"), &[]);
+        assert_eq!(
+            followed_id(&sibling, &repos),
+            None,
+            "a sibling sharing the prefix is not"
+        );
+    }
+
+    #[test]
+    fn a_shell_following_into_a_non_git_folder_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1"), plain_repo("notes", "D:\\notes")];
+        let session = session_in("plain_shell", Some("D:\\notes\\a"), &[]);
+        assert_eq!(followed_id(&session, &repos), None);
+    }
+
+    #[test]
+    fn a_shell_with_members_following_into_a_non_git_folder_follows_nothing() {
+        let repos = vec![repo("r1", "D:\\src\\r1"), plain_repo("notes", "D:\\notes")];
+        let session = session_in(
+            "plain_shell",
+            Some("D:\\notes\\a"),
+            &[("r1", "D:\\src\\r1")],
+        );
+        assert_eq!(followed_id(&session, &repos), None);
+    }
+
+    #[test]
+    fn a_session_without_members_browses_and_with_members_it_shows_them() {
+        let repos = vec![repo("r1", "D:\\src\\r1")];
+        let bare = session_in("interactive", Some("D:\\src\\r1"), &[]);
+        assert_eq!(subject(Some(&bare), &repos), Subject::Browse);
+        let membered = session_in("interactive", Some("D:\\src\\r1"), &[("r1", "D:\\src\\r1")]);
+        assert!(
+            matches!(subject(Some(&membered), &repos), Subject::Members(members) if members.len() == 1),
+            "a session with members shows them when it follows nothing"
+        );
+        assert_eq!(
+            subject(None, &repos),
+            Subject::Browse,
+            "no focused session browses"
+        );
+    }
+
+    #[test]
+    fn a_following_shell_shows_the_repo_it_entered_over_its_members() {
+        let repos = vec![repo("r1", "D:\\src\\r1"), repo("r2", "D:\\src\\r2")];
+        let membered = session_in("plain_shell", Some("D:\\src\\r2"), &[("r1", "D:\\src\\r1")]);
+        assert_eq!(subject_repo(&membered, &repos), Some("r2"));
+        let bare = session_in("plain_shell", Some("D:\\src\\r2"), &[]);
+        assert_eq!(subject_repo(&bare, &repos), Some("r2"));
     }
 
     #[test]

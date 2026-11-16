@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Select text in a subagent or dispatch run pane by dragging or double- or triple-clicking, and copy it with Ctrl+C.
 - Ctrl+click a path or URL in a subagent or dispatch run pane to open it, or Ctrl+Shift+click for the link menu, as in a terminal.
 - On a host that supports it, Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
+- Source Control and a shell pane's repo chip follow a plain shell that changes folder into another registered repo.
 
 ### Fixed
 

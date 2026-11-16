@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use gpui::{Modifiers, MouseButton, MouseExitEvent, Pixels, Point, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage};
-use rustling_tulip_native::{Activity, ScContext, ScPanel};
+use rustling_tulip_native::target::Target;
+use rustling_tulip_native::{Activity, HeaderChip, HeaderChipKind, ScContext, ScPanel};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, repo, session};
+use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
 const AUTO: &str = "Auto · follow active pane";
 const NO_ACTIVE_PANE_TIP: &str = "No pane is focused right now — falling back to the first registered repo. Pick a session in the sidebar to follow it, or pin a repo from the picker above.";
@@ -98,6 +99,23 @@ fn plain_repo(id: &str, path: &str) -> protocol::RepoEntry {
     let mut repo = repo(id, path);
     repo.is_git = false;
     repo
+}
+
+/// The pane header's chips.
+fn header_chips(h: &mut Harness<'_>, pane_id: &str) -> Vec<HeaderChip> {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_header_parts(&pane_id))
+        .expect("the pane shows a session")
+        .chips
+}
+
+fn branch_chip(text: &str, tip: &str) -> HeaderChip {
+    HeaderChip {
+        kind: HeaderChipKind::Branch,
+        text: text.to_owned(),
+        tip: tip.to_owned(),
+        icon: None,
+    }
 }
 
 #[gpui::test]
@@ -382,6 +400,195 @@ fn a_focused_worktree_session_requests_its_worktree_status(cx: &mut TestAppConte
     assert_eq!(
         (sections[0].repo.as_str(), sections[0].branch.as_deref()),
         ("r1", Some("wt/x"))
+    );
+}
+
+#[gpui::test]
+fn a_shell_following_its_cwd_shows_the_repo_it_entered(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(
+        session("s1")
+            .members(&[("r1", "main", "D:/src/r1")])
+            .shell("D:/src/r2/sub")
+            .build(),
+    );
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+
+    let followed = panel(&mut h).sections;
+    assert_eq!(
+        followed.len(),
+        1,
+        "the repo the shell entered alone, not its member"
+    );
+    assert_eq!(followed[0].id, "r2::");
+    assert_eq!(followed[0].repo, "r2");
+    assert_eq!(
+        header_chips(&mut h, "p1"),
+        [branch_chip("r2", "D:/src/r2")],
+        "the header names the repo the shell is in, with no branch it does not own"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1")
+            .members(&[("r1", "main", "D:/src/r1")])
+            .shell("D:/scratch")
+            .build(),
+        request_id: None,
+    });
+    let back = panel(&mut h).sections;
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        back[0].id, "r1::",
+        "a cwd outside every repo leaves its own member"
+    );
+    assert_eq!(back[0].branch.as_deref(), Some("main"));
+    assert_eq!(
+        header_chips(&mut h, "p1"),
+        [branch_chip("r1:main", "r1:main\nD:/src/r1")],
+        "and the header its member back"
+    );
+}
+
+/// The tailnet host the remote specs connect beside This PC.
+const REMOTE: &str = "box.rt1815.ts.net";
+
+fn remote() -> Target {
+    Target::tailnet(REMOTE, None)
+}
+
+#[gpui::test]
+fn member_less_shell_following_a_repo_shows_it_without_the_picker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").shell("D:/scratch").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+    h.click_on("sc-picker");
+    h.click_on("sc-picker-r1");
+    let pinned = panel(&mut h);
+    assert_eq!(pinned.sections[0].id, "r1::");
+    assert_eq!(
+        pinned.context.as_ref().map(|context| context.text.as_str()),
+        Some("r1 · pinned"),
+        "a shell outside every repo browses the pin"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").shell("D:/src/r2/sub").build(),
+        request_id: None,
+    });
+    let followed = panel(&mut h);
+    assert_eq!(
+        followed.sections[0].id, "r2::",
+        "the repo the shell entered, not the pin"
+    );
+    assert_eq!(
+        followed
+            .context
+            .as_ref()
+            .map(|context| context.text.as_str()),
+        Some("sub · 1 repo"),
+        "the context line reads as a one-repo session's, not a pin's"
+    );
+    assert_eq!(
+        followed.context.as_ref().and_then(|c| c.tooltip),
+        None,
+        "no falling-back tooltip when nothing falls back"
+    );
+    assert_eq!(
+        followed.picker, None,
+        "picking a repo would change nothing on screen"
+    );
+}
+
+#[gpui::test]
+fn shell_entering_a_non_git_folder_keeps_its_member_section(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(
+        session("s1")
+            .members(&[("app", "main", "D:/src/app")])
+            .shell("D:/src/app")
+            .build(),
+    );
+    fixture.repos = vec![
+        repo("r2", "D:/src/r2"),
+        repo("app", "D:/src/app"),
+        plain_repo("notes", "D:/notes"),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+    assert_eq!(panel(&mut h).sections[0].id, "app::");
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1")
+            .members(&[("app", "main", "D:/src/app")])
+            .shell("D:/notes/x")
+            .build(),
+        request_id: None,
+    });
+    let sections = panel(&mut h).sections;
+    assert_eq!(
+        sections.len(),
+        1,
+        "a plain folder has no git surface to follow"
+    );
+    assert_eq!(sections[0].id, "app::", "its own member stays");
+    assert_eq!(sections[0].repo, "app");
+    assert_eq!(
+        panel(&mut h).picker,
+        None,
+        "a member's session still hides the picker"
+    );
+}
+
+#[gpui::test]
+fn remote_member_less_shell_follows_its_hosts_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![session("a1").in_repo("r1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("a1"))),
+            tab("t2", &pane("p2", Some("b1"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r9", "D:/remote/r9")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").shell("D:/remote/r9/src").build()],
+    });
+    h.click_on("activity-source-control");
+    assert_eq!(
+        panel(&mut h).sections[0].id,
+        "r1::",
+        "This PC's session shows This PC's tree"
+    );
+
+    h.click_on("tab-t2");
+    let sections = panel(&mut h).sections;
+    assert_eq!(
+        sections[0].id, "r9::",
+        "the remote shell follows its own host's repo"
+    );
+    assert_eq!(
+        panel(&mut h)
+            .context
+            .as_ref()
+            .map(|context| context.text.as_str()),
+        Some("src · 1 repo"),
+        "the remote session is the subject, on its host"
+    );
+    assert_eq!(
+        panel(&mut h).picker,
+        None,
+        "two git repos across the hosts, and still nothing to pick"
     );
 }
 

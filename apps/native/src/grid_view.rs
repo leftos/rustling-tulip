@@ -15,8 +15,8 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px, relative, svg,
 };
 use protocol::{
-    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, PaneFollow, SessionMember, SessionMode,
-    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
+    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, PaneFollow, RepoEntry, SessionMember,
+    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
@@ -41,6 +41,7 @@ use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
+use crate::source_control::followed_repo;
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -3307,12 +3308,13 @@ impl RootView {
     /// when it is a remote one.
     fn session_header_parts(&self, host: &HostKey, session: &SessionSnapshot) -> PaneHeaderParts {
         let label_agents = self.sidebar.label_agents(host);
-        let host = self.host_chip_label(host);
+        let host_label = self.host_chip_label(host);
         header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
             label_agents,
-            host.as_ref(),
+            self.sidebar.repos_of(host),
+            host_label.as_ref(),
         )
     }
 
@@ -3544,11 +3546,13 @@ impl HeaderChip {
 }
 
 /// What a pane header shows of `session`; `host` labels the remote host it
-/// runs on, `None` for This PC.
+/// runs on, `None` for This PC, and `repos` are that host's registered repos,
+/// which a plain shell that `cd`s into one follows.
 fn header_parts(
     session: &SessionSnapshot,
     unseen: bool,
     label_agents: &[AgentDescriptor],
+    repos: &[RepoEntry],
     host: Option<&HostLabel>,
 ) -> PaneHeaderParts {
     let mut chips: Vec<HeaderChip> = host
@@ -3567,7 +3571,14 @@ fn header_parts(
             chip_tip(agent_chip).to_owned(),
         )
     }));
-    chips.extend(member_chips(&session.members));
+    match followed_repo(session, repos) {
+        Some(repo) => chips.push(HeaderChip::new(
+            HeaderChipKind::Branch,
+            repo.name.clone(),
+            repo.path.clone(),
+        )),
+        None => chips.extend(member_chips(&session.members)),
+    }
     PaneHeaderParts {
         status: session.status,
         mode: session.mode,
@@ -4994,6 +5005,7 @@ mod tests {
             &session_with("claude", &deepseek),
             false,
             &[claude_descriptor()],
+            &[],
             None,
         );
         assert_eq!(
@@ -5011,6 +5023,7 @@ mod tests {
             &session_with("claude", &json!([])),
             false,
             &[claude_descriptor()],
+            &[],
             None,
         );
         assert_eq!(parts.chips, [runtime("claude")]);
@@ -5022,6 +5035,7 @@ mod tests {
             &session_with("claude", &json!([{ "text": "mistral", "tip": null }])),
             false,
             &[claude_descriptor()],
+            &[],
             None,
         );
         assert_eq!(
@@ -5039,7 +5053,7 @@ mod tests {
         shell.mode = SessionMode::PlainShell;
         shell.program_name = Some("pwsh".to_owned());
         assert_eq!(
-            header_parts(&shell, false, &[claude_descriptor()], None).chips,
+            header_parts(&shell, false, &[claude_descriptor()], &[], None).chips,
             [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")
                 .with_icon(Some(RuntimeIcon::Pwsh))],
             "a plain shell says no provider and wears its shell's icon"
