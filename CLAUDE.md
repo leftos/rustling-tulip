@@ -91,7 +91,7 @@ pwsh -NoProfile -File tools/ios/build.ps1 [-Target sim|device] [-Release] [-Sign
 pwsh -NoProfile -File tools/ios/testflight.ps1 [-NoUpload]   # on this PC: read the iOS signing set from Private Config on G: into this process only, then build the signed phone app and its notification extension and upload them to App Store Connect (TestFlight) on builder@mac-mini as one pinned heavy gate run (log .tmp\ios-testflight.log; -NoUpload stops after the signed build) (tools/installer/README.md "iOS signing")
 pwsh -NoProfile -File tools/rt-driver-mcp/install.ps1   # build and install the rt-driver MCP server that .mcp.json starts (release build through the gate)
 pwsh -NoProfile -File tools/rt-driver-mcp/set-driver-token.ps1   # once, by hand: store the driver token (from `claude setup-token`) in Credential Manager, which a real-Claude driven launch logs in with (docs/native-client.md "Driver MCP server")
-pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy (docs/testing.md)
+pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy, which routes it to a builder's hidden desktop (docs/testing.md)
 ```
 
 Raw cargo equivalents when you need them:
@@ -134,7 +134,7 @@ Four rules keep agents' gate runs routable:
 - An environment variable a test needs goes with `--env NAME=value`, which carries it to a routed run, never `--local`.
 - `GATE_BOX_JOB` is the gate's to set: setting it by hand makes `rt.ps1` (`Test-UnderGate`) skip its own gating.
 
-`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window, and `rt.ps1 native-drive-check`, which reads the desktop's foreground window and cursor), only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault) or a hidden desktop of their own (`hidden`: `rt.ps1 native-smoke`, whose cloaked window never needs the logged-on one); the PC consents to each in the gate's `remote.json`.
+`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window, and `rt.ps1 native-drive-check`, which reads the desktop's foreground window and cursor), only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault) or a hidden desktop of their own (`hidden`: `rt.ps1 native-smoke`, whose cloaked window never needs the logged-on one, and `tools/rt-driver-mcp/live-check.ps1`, whose driven client opens cloaked); the PC consents to each in the gate's `remote.json`.
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`, Read the PNG it writes to `.tmp\shots\`, and show the user before and after shots for any visual choice.
 
