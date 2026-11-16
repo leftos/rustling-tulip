@@ -2007,6 +2007,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    /// A `state.json` holding one layout of `tabs`, a JSON array's text.
+    fn state_json_with_tabs(tabs: &str) -> String {
+        format!(
+            r#"{{"repos": [], "workspaces": [], "layouts": {{"client-1": {{"name": "desk", "tabs": {tabs}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_state_file_holding_a_follow_tab_restores_it() {
+        let dirs = scratch_dirs("follow-tab");
+        let json = state_json_with_tabs(
+            r#"[{"id": "f1", "name": "build.log", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "follow", "host": "ssh:devbox",
+                    "source": {"kind": "file", "session_id": "s1", "path": "logs/build.log"}}},
+               {"id": "f2", "name": "a.log", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "follow",
+                    "source": {"kind": "file", "session_id": "s2", "path": "a.log"}}}]"#,
+        );
+        std::fs::write(&dirs.state_file, json).expect("write the state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the state.json loads");
+        assert!(!state.state_file_corrupt());
+        let contents: Vec<TabContent> = state
+            .client_layout("client-1")
+            .into_iter()
+            .map(|tab| tab.content)
+            .collect();
+        assert_eq!(
+            contents,
+            vec![
+                TabContent::Follow {
+                    source: protocol::FollowSource::File {
+                        session_id: "s1".to_owned(),
+                        path: "logs/build.log".to_owned(),
+                    },
+                    host: Some("ssh:devbox".to_owned()),
+                },
+                TabContent::Follow {
+                    source: protocol::FollowSource::File {
+                        session_id: "s2".to_owned(),
+                        path: "a.log".to_owned(),
+                    },
+                    host: None,
+                },
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A follow of a source a newer build wrote keeps its tab, as a tab kind
+    /// this build does not know is kept; it reads as an unknown source.
+    #[test]
+    fn a_state_file_holding_a_follow_tab_of_an_unknown_source_keeps_it_as_unknown() {
+        let dirs = scratch_dirs("follow-tab-unknown");
+        let json = state_json_with_tabs(
+            r#"[{"id": "f1", "name": "gate", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "follow", "source": {"kind": "gate_run", "run_id": "r1"}}}]"#,
+        );
+        std::fs::write(&dirs.state_file, json).expect("write the state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the state.json loads");
+        assert!(!state.state_file_corrupt());
+        let layout = state.client_layout("client-1");
+        assert_eq!(layout.len(), 1, "{layout:?}");
+        assert_eq!(
+            layout[0].content,
+            TabContent::Follow {
+                source: protocol::FollowSource::Unknown,
+                host: None,
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A `state.json` in the shape today's releases write, with no follow
+    /// tab, loads every tab as it was.
+    #[test]
+    fn a_state_file_of_the_released_tab_kinds_loads_unchanged() {
+        let dirs = scratch_dirs("released-tab-kinds");
+        let json = state_json_with_tabs(
+            r#"[{"id": "g", "name": "Grid", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "grid", "grid": {"kind": "pane", "pane_id": "p1", "session_id": "s1"}}},
+               {"id": "d", "name": "a.rs (changes)", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "diff", "repo_id": "r1", "path": "src/a.rs", "against": null}},
+               {"id": "v", "name": "a.md", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "viewer", "path": "C:\\notes\\a.md"}},
+               {"id": "h", "name": "Dashboard", "created_at": "2026-01-02T03:04:05Z",
+                "content": {"kind": "dashboard"}}]"#,
+        );
+        std::fs::write(&dirs.state_file, json).expect("write the state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the state.json loads");
+        assert!(!state.state_file_corrupt());
+        let layout = state.client_layout("client-1");
+        let ids: Vec<&str> = layout.iter().map(|tab| tab.id.as_str()).collect();
+        assert_eq!(ids, ["g", "d", "v", "h"]);
+        assert!(
+            matches!(
+                &layout[0].content,
+                TabContent::Grid { grid: GridNode::Pane { pane_id, .. } } if pane_id == "p1"
+            ),
+            "{layout:?}"
+        );
+        assert_eq!(
+            layout[1].content,
+            TabContent::Diff {
+                repo_id: "r1".to_owned(),
+                path: "src/a.rs".to_owned(),
+                against: None,
+                worktree_path: None,
+                host: None,
+            }
+        );
+        assert_eq!(
+            layout[2].content,
+            TabContent::Viewer {
+                path: "C:\\notes\\a.md".to_owned(),
+            }
+        );
+        assert_eq!(layout[3].content, TabContent::Dashboard);
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     #[test]
     fn try_mutate_ok_commits_and_writes() {
         let dirs = scratch_dirs("try-ok");

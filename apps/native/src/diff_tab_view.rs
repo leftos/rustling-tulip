@@ -733,6 +733,7 @@ impl RootView {
                 )),
                 TabContent::Grid { .. }
                 | TabContent::Viewer { .. }
+                | TabContent::Follow { .. }
                 | TabContent::Dashboard
                 | TabContent::Unknown => None,
             })

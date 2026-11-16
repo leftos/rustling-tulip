@@ -2649,9 +2649,10 @@ pub enum RearrangeLayout {
     Unknown,
 }
 
-/// What a tab is rendering: one of four kinds. `Grid` holds a pane/split
+/// What a tab is rendering: one of five kinds. `Grid` holds a pane/split
 /// tree of terminal sessions, `Diff` a read-only file diff, `Viewer` a
-/// read-only file view and `Dashboard` the sessions overview. The non-grid
+/// read-only file view, `Follow` a followed file and `Dashboard` the
+/// sessions overview. The non-grid
 /// kinds hang off this enum without
 /// reshaping the tab list or invalidating pane-level operations, which
 /// only apply to `Grid` tabs.
@@ -2693,9 +2694,32 @@ pub enum TabContent {
     Viewer {
         path: String,
     },
+    /// A tab that follows what `source` names as it grows. Identified by
+    /// (`source`, `host`), so opening the same follow twice focuses the
+    /// existing tab.
+    Follow {
+        source: FollowSource,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        /// Part of the tab's identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
     /// The Dashboard: an overview of every session, with no fields of its own.
     Dashboard,
     /// Forward-compat fallback: a tab kind the current build does not know.
+    /// Its fields are dropped, so it re-serializes as `{"kind":"unknown"}`.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a [`TabContent::Follow`] tab follows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FollowSource {
+    /// A session's file. `path` is the path as the session's daemon resolves
+    /// it, the same path [`ClientMessage::TailFile`] takes.
+    File { session_id: String, path: String },
+    /// Forward-compat fallback: a source the current build does not know.
     /// Its fields are dropped, so it re-serializes as `{"kind":"unknown"}`.
     #[serde(other)]
     Unknown,
@@ -2725,6 +2749,7 @@ impl TabEntry {
             TabContent::Grid { grid } => Some(grid),
             TabContent::Diff { .. }
             | TabContent::Viewer { .. }
+            | TabContent::Follow { .. }
             | TabContent::Dashboard
             | TabContent::Unknown => None,
         }
@@ -2736,6 +2761,7 @@ impl TabEntry {
             TabContent::Grid { grid } => Some(grid),
             TabContent::Diff { .. }
             | TabContent::Viewer { .. }
+            | TabContent::Follow { .. }
             | TabContent::Dashboard
             | TabContent::Unknown => None,
         }
@@ -5233,6 +5259,24 @@ pub enum ClientMessage {
         id: String,
         path: String,
     },
+    /// Open (or focus, if one already exists) a follow tab for `source` on
+    /// `host`. The daemon broadcasts a `TabUpdated` when a new tab is
+    /// created, then replies with [`DaemonMessage::FollowTabOpened`] so the
+    /// requesting client knows which tab id to activate. A source this build
+    /// does not know, or a file source with an empty or blank session id or
+    /// path, is refused: whether the file exists is the follow's business.
+    OpenFollowTab {
+        /// Client-assigned request id, echoed back on
+        /// [`DaemonMessage::FollowTabOpened`] and on a refusal's
+        /// `request_id`.
+        id: String,
+        source: FollowSource,
+        /// The host key of the session's daemon; `None` is this daemon. A
+        /// foreign follow tab is stored without checking the session, since
+        /// the session lives on that other daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
     /// Open (or focus, if one already exists) the Dashboard tab. The daemon
     /// replies with [`DaemonMessage::DashboardTabOpened`].
     OpenDashboardTab {
@@ -7142,6 +7186,12 @@ pub enum DaemonMessage {
     /// Response to [`ClientMessage::OpenViewerTab`]. Carries the tab id (new
     /// or pre-existing) so the requesting client can activate it.
     ViewerTabOpened {
+        id: String,
+        tab_id: String,
+    },
+    /// Response to [`ClientMessage::OpenFollowTab`]. Carries the tab id (new
+    /// or pre-existing) so the requesting client can activate it.
+    FollowTabOpened {
         id: String,
         tab_id: String,
     },
@@ -12911,6 +12961,84 @@ mod tests {
         };
         assert_eq!(id, "open-1");
         assert_eq!(tab_id, "tab-v");
+    }
+
+    fn file_source() -> FollowSource {
+        FollowSource::File {
+            session_id: "s1".to_string(),
+            path: "logs/build.log".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_follow_tab_round_trips_with_and_without_a_host() {
+        for host in [None, Some("ssh:devbox".to_string())] {
+            let tab = TabEntry {
+                id: "tab-f".to_string(),
+                name: "build.log".to_string(),
+                content: TabContent::Follow {
+                    source: file_source(),
+                    host: host.clone(),
+                },
+                created_at: Utc::now(),
+                picked_layout: None,
+            };
+            let json = serde_json::to_string(&tab).expect("serialize");
+            assert!(json.contains(r#""kind":"follow""#), "{json}");
+            assert!(json.contains(r#""source":{"kind":"file""#), "{json}");
+            assert_eq!(json.contains(r#""host""#), host.is_some(), "{json}");
+            let mut back: TabEntry = serde_json::from_str(&json).expect("round-trips");
+            assert_eq!(back, tab);
+            assert!(back.grid().is_none(), "a follow tab has no grid");
+            assert!(back.grid_mut().is_none(), "a follow tab has no grid");
+        }
+    }
+
+    #[test]
+    fn a_follow_source_this_build_does_not_know_decodes_as_unknown() {
+        let json = r#"{"type":"tab_updated","tab":{"id":"tab-f","name":"gate","content":{"kind":"follow","source":{"kind":"gate_run","run_id":"r1"},"host":"ssh:devbox"},"created_at":"2026-01-01T00:00:00Z"}}"#;
+        let msg: DaemonMessage = serde_json::from_str(json).expect("the message still decodes");
+        let DaemonMessage::TabUpdated { tab } = msg else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(
+            tab.content,
+            TabContent::Follow {
+                source: FollowSource::Unknown,
+                host: Some("ssh:devbox".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn open_follow_tab_and_follow_tab_opened_round_trip() {
+        let open = ClientMessage::OpenFollowTab {
+            id: "open-f".to_string(),
+            source: file_source(),
+            host: Some("ssh:devbox".to_string()),
+        };
+        let json = serde_json::to_string(&open).expect("serialize");
+        assert!(json.contains(r#""type":"open_follow_tab""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::OpenFollowTab { id, source, host } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-f");
+        assert_eq!(source, file_source());
+        assert_eq!(host.as_deref(), Some("ssh:devbox"));
+
+        let opened = DaemonMessage::FollowTabOpened {
+            id: "open-f".to_string(),
+            tab_id: "tab-f".to_string(),
+        };
+        let json = serde_json::to_string(&opened).expect("serialize");
+        assert!(json.contains(r#""type":"follow_tab_opened""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::FollowTabOpened { id, tab_id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-f");
+        assert_eq!(tab_id, "tab-f");
     }
 
     #[test]

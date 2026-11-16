@@ -10,7 +10,8 @@ use gpui::{
     StyledText, Subscription, Window, anchored, deferred, div, prelude::*, px, svg,
 };
 use protocol::{
-    ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
+    ClientMessage, FollowSource, MergeLayout, RearrangeLayout, SessionMode, SessionStatus,
+    TabContent, TabEntry,
 };
 
 use crate::activity_bar::badge_text;
@@ -1064,7 +1065,7 @@ impl RootView {
         let renames = self.tabs.tab(tab_id).is_some_and(|tab| {
             !matches!(
                 tab.content,
-                TabContent::Viewer { .. } | TabContent::Dashboard
+                TabContent::Viewer { .. } | TabContent::Follow { .. } | TabContent::Dashboard
             )
         });
         if kind == PillClick::Plain && event.click_count() >= 2 && renames {
@@ -1393,12 +1394,22 @@ impl PillLook {
 
 /// A tab's pill text from `name`, the name it shows
 /// (`SidebarModel::tab_display_name`); a diff tab's is marked Δ, and a
-/// viewer tab's is its file's name.
+/// viewer tab's, and a follow tab's of a file, is its file's name.
 pub(crate) fn pill_label(tab: &TabEntry, name: &str) -> String {
     match &tab.content {
         TabContent::Diff { .. } => format!("Δ {name}"),
-        TabContent::Viewer { path } => display_name(path).to_owned(),
-        TabContent::Grid { .. } | TabContent::Dashboard | TabContent::Unknown => name.to_owned(),
+        TabContent::Viewer { path }
+        | TabContent::Follow {
+            source: FollowSource::File { path, .. },
+            ..
+        } => display_name(path).to_owned(),
+        TabContent::Grid { .. }
+        | TabContent::Follow {
+            source: FollowSource::Unknown,
+            ..
+        }
+        | TabContent::Dashboard
+        | TabContent::Unknown => name.to_owned(),
     }
 }
 

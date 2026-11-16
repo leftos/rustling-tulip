@@ -75,6 +75,7 @@ pub mod file_fetch;
 mod file_fetch_view;
 mod folder_picker;
 mod folder_unpack;
+mod follow_tab_view;
 pub mod fonts;
 mod footer;
 mod fuzzy;
@@ -1414,6 +1415,8 @@ pub struct RootView {
     viewer_tabs: HashMap<String, viewer_tab::ViewerTab>,
     /// The viewer opens out, and the tab one waits to activate.
     viewer_opens: viewer_tab::ViewerOpens,
+    /// The follow tab opens out, and the tab one waits to activate.
+    follow_opens: follow_tab_view::FollowOpens,
     /// The keyboard of the viewer tab shown.
     viewer_focus: FocusHandle,
     /// The Dashboard opens out, and the tab one waits to activate.
@@ -1949,6 +1952,7 @@ impl RootView {
             diff_opens: diff_tab::DiffOpens::default(),
             viewer_tabs: HashMap::new(),
             viewer_opens: viewer_tab::ViewerOpens::default(),
+            follow_opens: follow_tab_view::FollowOpens::default(),
             viewer_focus: cx.focus_handle(),
             dashboard_opens: dashboard_tab::DashboardOpens::default(),
             dashboard_answers: dashboard_tab::DashboardAnswers::default(),
@@ -2159,7 +2163,7 @@ impl RootView {
             PopoutKey::Tab { tab_id } => self.tabs.tab(tab_id).is_some_and(|tab| {
                 !matches!(
                     tab.content,
-                    TabContent::Viewer { .. } | TabContent::Dashboard
+                    TabContent::Viewer { .. } | TabContent::Follow { .. } | TabContent::Dashboard
                 )
             }),
         };
@@ -4539,7 +4543,7 @@ impl RootView {
     /// closing it focuses the tab's pane), the spawn dialog's Open in
     /// follows the tabs and the active tab is saved. The session the last
     /// terminal tab focused is remembered before a diff tab takes over. A
-    /// diff, viewer or Dashboard tab an open waited for is activated, a diff
+    /// diff, viewer, follow or Dashboard tab an open waited for is activated, a diff
     /// or viewer tab that becomes active takes the keyboard, and the
     /// Dashboard is watched while it is the active tab.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4548,6 +4552,7 @@ impl RootView {
         self.activate_pending_diff_tab();
         self.reconcile_viewer_tabs(cx);
         self.activate_pending_viewer_tab();
+        self.activate_pending_follow_tab();
         self.activate_pending_dashboard_tab();
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(cx);
@@ -5129,7 +5134,7 @@ impl RootView {
         self.on_spawn_host_connection(host, window, cx);
     }
 
-    /// Folds a message in to the file fetches, the diff, viewer and
+    /// Folds a message in to the file fetches, the diff, viewer, follow and
     /// Dashboard tabs and the source-control panel's parts; returns whether
     /// nothing else is owed it.
     fn on_panel_message(
@@ -5142,6 +5147,7 @@ impl RootView {
         self.on_fetch_message(host, msg, window, cx)
             || self.on_diff_message(host, msg, window, cx)
             || self.on_viewer_message(host, msg, window, cx)
+            || self.on_follow_message(host, msg, window, cx)
             || self.on_dashboard_message(host, msg, window, cx)
             || self.on_sc_panel_message(host, msg, window, cx)
             || self.on_upload_message(host, msg, cx)

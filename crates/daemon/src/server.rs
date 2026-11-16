@@ -1064,6 +1064,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::LoadScrollback { .. }) => sessions::handle(hub, m, ctx).await?,
         m @ (ClientMessage::OpenDiffTab { .. }
         | ClientMessage::OpenViewerTab { .. }
+        | ClientMessage::OpenFollowTab { .. }
         | ClientMessage::OpenDashboardTab { .. }
         | ClientMessage::ListTabs
         | ClientMessage::CreateTab { .. }

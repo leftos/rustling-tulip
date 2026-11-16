@@ -1,12 +1,12 @@
-//! Tabs and pane layouts: the tab and layout messages, diff and viewer tabs, and keeping layouts in step with sessions.
+//! Tabs and pane layouts: the tab and layout messages, diff, viewer and follow tabs, and keeping layouts in step with sessions.
 use super::connection::ConnCtx;
 use super::git::repo_path_or_err;
 use super::{Hub, StateEvent, TabEvent};
 use crate::registry::{reorder_containers, set_session_order};
 use chrono::Utc;
 use protocol::{
-    ClientMessage, DaemonMessage, HostArrangement, HostLayout, HostRebind, InitLayoutKind,
-    TabContent, TabEntry,
+    ClientMessage, DaemonMessage, FollowSource, HostArrangement, HostLayout, HostRebind,
+    InitLayoutKind, TabContent, TabEntry,
 };
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -80,6 +80,26 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 }
             }
         }
+        ClientMessage::OpenFollowTab { id, source, host } => {
+            match open_follow_tab(hub, client_id, source, host) {
+                Ok(outcome) => {
+                    if let Some(new_tab) = outcome.created {
+                        hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+                    }
+                    let _ = out_tx.send(DaemonMessage::FollowTabOpened {
+                        id,
+                        tab_id: outcome.tab_id,
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: format!("open follow tab failed: {err:#}"),
+                        request_id: Some(id),
+                        code: Some(protocol::error_codes::OPEN_FAILED.to_owned()),
+                    });
+                }
+            }
+        }
         ClientMessage::OpenDashboardTab { id } => match open_dashboard_tab(hub, client_id) {
             Ok(outcome) => {
                 if let Some(new_tab) = outcome.created {
@@ -137,7 +157,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             }
         }
         ClientMessage::RestoreTab { tab, .. } | ClientMessage::RestoreTabSnapshot { tab }
-            if tab.content == TabContent::Unknown =>
+            if is_unknown_kind(&tab.content) =>
         {
             warn!(tab_id = %tab.id, "refusing to restore a tab of a kind this build does not know");
             let _ = out_tx.send(DaemonMessage::Error {
@@ -665,6 +685,66 @@ fn open_viewer_tab(hub: &Hub, client_id: &str, path: &str) -> anyhow::Result<Ope
             })
         })?;
     outcome
+}
+
+/// Find or create a follow tab keyed on (`source`, `host`). Returns the tab
+/// id either way so the client can activate it. A source this build does not
+/// know, or a file source with a blank session id or path, is refused; a
+/// foreign follow (`host` set) names a session of another daemon, which this
+/// one cannot check, and a local one is not checked either: whether the
+/// session and its file are there is the follow's business.
+fn open_follow_tab(
+    hub: &Hub,
+    client_id: &str,
+    source: FollowSource,
+    host: Option<String>,
+) -> anyhow::Result<OpenTabOutcome> {
+    let name = match &source {
+        FollowSource::File { session_id, path } => {
+            anyhow::ensure!(!session_id.trim().is_empty(), "the session id is empty");
+            anyhow::ensure!(!path.trim().is_empty(), "the path is empty");
+            viewer_tab_name(path)
+        }
+        FollowSource::Unknown => anyhow::bail!("the follow source is unknown"),
+    };
+    let content = TabContent::Follow { source, host };
+    let outcome: anyhow::Result<OpenTabOutcome> =
+        hub.state.mutate_client_layout(client_id, |tabs| {
+            if let Some(existing) = tabs.iter().find(|t| t.content == content) {
+                return Ok(OpenTabOutcome {
+                    tab_id: existing.id.clone(),
+                    created: None,
+                });
+            }
+            let new_tab = TabEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                name,
+                content,
+                created_at: Utc::now(),
+                picked_layout: None,
+            };
+            let id = new_tab.id.clone();
+            tabs.push(new_tab.clone());
+            Ok(OpenTabOutcome {
+                tab_id: id,
+                created: Some(new_tab),
+            })
+        })?;
+    outcome
+}
+
+/// Whether `content` is of a kind this build does not know, or a follow of
+/// a source it does not know: such a tab is never restored, since undo would
+/// otherwise store the fields it dropped as gone.
+fn is_unknown_kind(content: &TabContent) -> bool {
+    matches!(
+        content,
+        TabContent::Unknown
+            | TabContent::Follow {
+                source: FollowSource::Unknown,
+                ..
+            }
+    )
 }
 
 /// Whether restoring `tab` would give the layout `tabs` a second Dashboard:
@@ -1648,6 +1728,155 @@ mod tests {
                 .expect("the answered tab is in the layout");
             assert_eq!(tab.name, name, "{path}");
         }
+    }
+
+    fn follow_source(path: &str) -> FollowSource {
+        FollowSource::File {
+            session_id: "s1".to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    fn open_follow(id: &str, source: FollowSource, host: Option<&str>) -> ClientMessage {
+        ClientMessage::OpenFollowTab {
+            id: id.to_string(),
+            source,
+            host: host.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_a_follow_tab_adds_it_and_the_same_follow_focuses_it() {
+        let (hub, _scratch) = test_hub("open-follow-twice");
+        let mut events = hub.tab_events.subscribe();
+        let source = follow_source("logs/build.log");
+
+        let first = dispatch_one(&hub, open_follow("f1", source.clone(), Some("ssh:devbox"))).await;
+        let (id, tab_id) = match first {
+            DaemonMessage::FollowTabOpened { id, tab_id } => (id, tab_id),
+            other => unreachable!("the first open answers with its tab id: {other:?}"),
+        };
+        assert_eq!(id, "f1");
+        assert_eq!(
+            take_tab_events(&mut events).len(),
+            1,
+            "the created tab is broadcast once"
+        );
+        let layout = hub.state.client_layout("c1");
+        assert_eq!(layout.len(), 1, "{layout:?}");
+        assert_eq!(layout[0].id, tab_id);
+        assert_eq!(layout[0].name, "build.log", "named after the file");
+        assert_eq!(
+            layout[0].content,
+            TabContent::Follow {
+                source: source.clone(),
+                host: Some("ssh:devbox".to_string()),
+            }
+        );
+
+        let second =
+            dispatch_one(&hub, open_follow("f2", source.clone(), Some("ssh:devbox"))).await;
+        assert!(
+            matches!(&second, DaemonMessage::FollowTabOpened { id, tab_id: same } if id == "f2" && *same == tab_id),
+            "the same follow focuses the existing tab: {second:?}"
+        );
+        assert!(
+            take_tab_events(&mut events).is_empty(),
+            "focusing broadcasts nothing"
+        );
+        assert_eq!(hub.state.client_layout("c1").len(), 1);
+
+        let here = dispatch_one(&hub, open_follow("f3", source, None)).await;
+        assert!(
+            matches!(&here, DaemonMessage::FollowTabOpened { tab_id: other, .. } if *other != tab_id),
+            "the same file on another host is another tab: {here:?}"
+        );
+        assert_eq!(hub.state.client_layout("c1").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_follow_tab_of_a_blank_path_or_an_unknown_source_is_refused() {
+        let (hub, _scratch) = test_hub("open-follow-refused");
+        for (source, why) in [
+            (follow_source("  "), "the path is empty"),
+            (FollowSource::Unknown, "the follow source is unknown"),
+        ] {
+            let msg = dispatch_one(&hub, open_follow("f1", source, None)).await;
+            assert!(
+                matches!(
+                    &msg,
+                    DaemonMessage::Error { message, request_id: Some(id), .. }
+                        if id == "f1" && *message == format!("open follow tab failed: {why}")
+                ),
+                "{msg:?}"
+            );
+        }
+        assert!(
+            hub.state.client_layout("c1").is_empty(),
+            "a refused follow stores no tab"
+        );
+    }
+
+    /// A follow of a source this build does not know is never restored, as
+    /// a tab of a kind it does not know is not.
+    #[tokio::test]
+    async fn restoring_a_follow_tab_of_an_unknown_source_is_refused() {
+        let (hub, _scratch) = test_hub("restore-follow-unknown");
+        seed_two_pane_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let unknown = TabEntry {
+            id: "closed-follow".to_owned(),
+            name: "gate".to_owned(),
+            content: TabContent::Follow {
+                source: FollowSource::Unknown,
+                host: None,
+            },
+            created_at: Utc::now(),
+            picked_layout: None,
+        };
+        for msg in [
+            ClientMessage::RestoreTab {
+                tab: unknown.clone(),
+                index: 0,
+            },
+            ClientMessage::RestoreTabSnapshot { tab: unknown },
+        ] {
+            let reply = dispatch_one(&hub, msg).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, request_id: None, .. }
+                        if message == "can't restore a tab this app does not understand"
+                ),
+                "{reply:?}"
+            );
+            assert_eq!(hub.state.client_layout("c1"), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn restoring_a_follow_tab_puts_it_back() {
+        let (hub, _scratch) = test_hub("restore-follow");
+        let closed = TabEntry {
+            id: "closed-follow".to_owned(),
+            name: "build.log".to_owned(),
+            content: TabContent::Follow {
+                source: follow_source("logs/build.log"),
+                host: Some("ssh:devbox".to_owned()),
+            },
+            created_at: Utc::now(),
+            picked_layout: None,
+        };
+        let replies = dispatch_all(
+            &hub,
+            ClientMessage::RestoreTab {
+                tab: closed.clone(),
+                index: 0,
+            },
+        )
+        .await;
+        assert!(replies.is_empty(), "nothing to answer: {replies:?}");
+        assert_eq!(hub.state.client_layout("c1"), vec![closed]);
     }
 
     /// A cross-tab move extracts from the source before it discovers the

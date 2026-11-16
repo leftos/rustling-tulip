@@ -1969,9 +1969,10 @@ export type RearrangeLayout =
   | { kind: "grid"; cols: number; aspect?: number | null };
 
 /**
- * What a tab is rendering: one of four kinds. `Grid` holds a pane/split
+ * What a tab is rendering: one of five kinds. `Grid` holds a pane/split
  * tree of terminal sessions, `Diff` a read-only file diff, `Viewer` a
- * read-only file view and `Dashboard` the sessions overview. The non-grid
+ * read-only file view, `Follow` a followed file and `Dashboard` the
+ * sessions overview. The non-grid
  * kinds hang off this enum without
  * reshaping the tab list or invalidating pane-level operations, which
  * only apply to `Grid` tabs.
@@ -2007,8 +2008,25 @@ export type TabContent =
    * layout and never reads the file itself.
    */
   | { kind: "viewer"; path: string }
+  /**
+   * A tab that follows what `source` names as it grows. Identified by
+   * (`source`, `host`), so opening the same follow twice focuses the
+   * existing tab.
+   *
+   * `host`: The host key of a session on another daemon; `None` is this daemon.
+   * Part of the tab's identity.
+   */
+  | { kind: "follow"; source: FollowSource; host?: string | null }
   /** The Dashboard: an overview of every session, with no fields of its own. */
   | { kind: "dashboard" };
+
+/** What a [`TabContent::Follow`] tab follows. */
+export type FollowSource =
+  /**
+   * A session's file. `path` is the path as the session's daemon resolves
+   * it, the same path [`ClientMessage::TailFile`] takes.
+   */
+  | { kind: "file"; session_id: string; path: string };
 
 export interface TabEntry {
   id: string;
@@ -4065,6 +4083,23 @@ export type ClientMessage =
    */
   | { type: "open_viewer_tab"; id: string; path: string }
   /**
+   * Open (or focus, if one already exists) a follow tab for `source` on
+   * `host`. The daemon broadcasts a `TabUpdated` when a new tab is
+   * created, then replies with [`DaemonMessage::FollowTabOpened`] so the
+   * requesting client knows which tab id to activate. A source this build
+   * does not know, or a file source with an empty or blank session id or
+   * path, is refused: whether the file exists is the follow's business.
+   *
+   * `id`: Client-assigned request id, echoed back on
+   * [`DaemonMessage::FollowTabOpened`] and on a refusal's
+   * `request_id`.
+   *
+   * `host`: The host key of the session's daemon; `None` is this daemon. A
+   * foreign follow tab is stored without checking the session, since
+   * the session lives on that other daemon.
+   */
+  | { type: "open_follow_tab"; id: string; source: FollowSource; host?: string | null }
+  /**
    * Open (or focus, if one already exists) the Dashboard tab. The daemon
    * replies with [`DaemonMessage::DashboardTabOpened`].
    *
@@ -5679,6 +5714,11 @@ export type DaemonMessage =
    * or pre-existing) so the requesting client can activate it.
    */
   | { type: "viewer_tab_opened"; id: string; tab_id: string }
+  /**
+   * Response to [`ClientMessage::OpenFollowTab`]. Carries the tab id (new
+   * or pre-existing) so the requesting client can activate it.
+   */
+  | { type: "follow_tab_opened"; id: string; tab_id: string }
   /**
    * Response to [`ClientMessage::OpenDashboardTab`]. Carries the tab id
    * (new or pre-existing) so the requesting client can activate it.

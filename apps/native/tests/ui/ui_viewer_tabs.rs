@@ -1,6 +1,7 @@
 //! Viewer tab specs: the pill, an open the daemon answers in either
 //! order, a refused open, the merge menu, undoing the close of a file that
-//! is open again, and a target switch.
+//! is open again, and a target switch; and a follow tab's pill, body and
+//! open.
 
 #![expect(
     clippy::expect_used,
@@ -10,7 +11,8 @@
 use crate::support;
 
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonMessage, TabEntry};
+use protocol::{ClientMessage, DaemonMessage, FollowSource, TabEntry};
+use rustling_tulip_native::target::HostKey;
 use rustling_tulip_native::{ToastKind, VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, session};
@@ -314,5 +316,135 @@ fn a_viewer_tab_offers_no_rename(cx: &mut TestAppContext) {
     assert!(
         !h.in_model("tab-menu-rename"),
         "a viewer tab's pill shows its file name, so a rename would show nothing"
+    );
+}
+
+/// A file a session on another host writes, as that host's daemon names it.
+const FOLLOWED: &str = "/work/logs/build.log";
+
+/// A follow tab of [`FOLLOWED`] in session `s1` of `ssh:devbox`, which the
+/// daemon named `name`.
+fn follow_tab(id: &str, name: &str) -> TabEntry {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": name,
+        "content": {
+            "kind": "follow",
+            "source": { "kind": "file", "session_id": "s1", "path": FOLLOWED },
+            "host": "ssh:devbox",
+        },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("follow tab fixture")
+}
+
+#[gpui::test]
+fn a_follow_tab_shows_its_file_name_on_the_pill_and_what_it_follows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_tabs(&[]));
+    h.send(updated(&follow_tab("f1", "renamed")));
+    assert_eq!(
+        h.root(|root, _| root.tab_pill_label("f1")).as_deref(),
+        Some("build.log"),
+        "the file name, as a viewer tab's pill"
+    );
+
+    h.click_on("tab-f1");
+    assert!(drawn(&mut h, "follow-tab-f1"), "the body is drawn");
+    assert_eq!(
+        h.root(|root, _| root.follow_tab_note("f1")).as_deref(),
+        Some("Following /work/logs/build.log")
+    );
+}
+
+#[gpui::test]
+fn opening_a_follow_of_a_remote_session_asks_this_pc_naming_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_tabs(&[]));
+    h.sent();
+    h.root_update(|root, _, _| {
+        root.open_follow_tab(&HostKey::Remote("ssh:devbox".to_owned()), "s1", FOLLOWED);
+    });
+    let mut opens: Vec<(String, FollowSource, Option<String>)> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenFollowTab { id, source, host } => Some((id, source, host)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opens.len(), 1, "one open, to This PC: {opens:?}");
+    let (id, source, host) = opens.remove(0);
+    assert_eq!(
+        source,
+        FollowSource::File {
+            session_id: "s1".to_owned(),
+            path: FOLLOWED.to_owned(),
+        }
+    );
+    assert_eq!(
+        host.as_deref(),
+        Some("ssh:devbox"),
+        "it names the session's host"
+    );
+
+    h.send(updated(&follow_tab("f1", "build.log")));
+    h.send(DaemonMessage::FollowTabOpened {
+        id,
+        tab_id: "f1".to_owned(),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("f1"),
+        "the opened tab is shown"
+    );
+}
+
+/// The one `OpenFollowTab` the client sent, after asking for a follow of
+/// [`FOLLOWED`]: its id.
+fn open_follow(h: &mut Harness<'_>) -> String {
+    h.sent();
+    h.root_update(|root, _, _| {
+        root.open_follow_tab(&HostKey::Remote("ssh:devbox".to_owned()), "s1", FOLLOWED);
+    });
+    let mut ids: Vec<String> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenFollowTab { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one open: {ids:?}");
+    ids.remove(0)
+}
+
+#[gpui::test]
+fn opening_a_new_follow_tab_shows_it_when_its_reply_comes_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_tabs(&[]));
+    let id = open_follow(&mut h);
+    h.send(DaemonMessage::FollowTabOpened {
+        id,
+        tab_id: "f1".to_owned(),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "f1 is not listed yet"
+    );
+    h.send(updated(&follow_tab("f1", "build.log")));
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("f1"),
+        "the tab is shown once it is listed"
+    );
+
+    h.click_on("tab-t1");
+    h.send(updated(&follow_tab("f1", "build.log")));
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "the open activated its tab once"
     );
 }

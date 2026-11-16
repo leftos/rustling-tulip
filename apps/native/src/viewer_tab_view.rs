@@ -350,6 +350,7 @@ impl RootView {
                 TabContent::Viewer { path } => Some((tab.id.clone(), path.clone())),
                 TabContent::Grid { .. }
                 | TabContent::Diff { .. }
+                | TabContent::Follow { .. }
                 | TabContent::Dashboard
                 | TabContent::Unknown => None,
             })

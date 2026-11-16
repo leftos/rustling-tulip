@@ -528,6 +528,7 @@ pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
                 // verbatim.
                 other @ (TabContent::Diff { .. }
                 | TabContent::Viewer { .. }
+                | TabContent::Follow { .. }
                 | TabContent::Dashboard
                 | TabContent::Unknown) => other.clone(),
             };

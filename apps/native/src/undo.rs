@@ -210,7 +210,8 @@ pub fn take_open_viewers(
 }
 
 /// The live tab that stands in for `tab`, a tab that is gone: for a viewer
-/// tab, a viewer tab of the same file; for a Dashboard tab, the Dashboard
+/// tab, a viewer tab of the same file; for a follow tab of a known source, a
+/// follow tab of the same source on the same host; for a Dashboard tab, the Dashboard
 /// tab, of which a client has one.
 fn open_twin_of<'a>(
     tab: &TabEntry,
@@ -222,6 +223,16 @@ fn open_twin_of<'a>(
     }
     let stands_in = |other: &TabEntry| match (&tab.content, &other.content) {
         (TabContent::Viewer { path }, TabContent::Viewer { path: open }) => open == path,
+        // An unknown source may be any follow, so it is no tab's twin: its
+        // restore goes to the daemon, which refuses it.
+        (
+            TabContent::Follow {
+                source: protocol::FollowSource::Unknown,
+                ..
+            },
+            _,
+        ) => false,
+        (follow @ TabContent::Follow { .. }, open @ TabContent::Follow { .. }) => open == follow,
         (TabContent::Dashboard, TabContent::Dashboard) => true,
         _ => false,
     };
@@ -317,6 +328,39 @@ mod tests {
         assert_eq!(
             stopped_tab_message("work", 3),
             "Closed tab \"work\" and stopped 3 sessions"
+        );
+    }
+
+    /// A follow tab `id` of `source` on This PC.
+    fn follow_of(id: &str, source: protocol::FollowSource) -> TabEntry {
+        TabEntry {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            content: TabContent::Follow { source, host: None },
+            created_at: chrono::Utc::now(),
+            picked_layout: None,
+        }
+    }
+
+    #[test]
+    fn a_follow_tab_of_the_same_file_stands_in_and_one_of_an_unknown_source_never_does() {
+        let file = || protocol::FollowSource::File {
+            session_id: "s1".to_owned(),
+            path: "a.log".to_owned(),
+        };
+        let open = [follow_of("open", file())];
+        assert_eq!(
+            open_twin_of(&follow_of("closed", file()), &open, &ids(&["open"])),
+            Some("open"),
+            "the same file on the same host is the open tab"
+        );
+
+        let unknown = || protocol::FollowSource::Unknown;
+        let open = [follow_of("open", unknown())];
+        assert_eq!(
+            open_twin_of(&follow_of("closed", unknown()), &open, &ids(&["open"])),
+            None,
+            "two unknown sources may be different follows"
         );
     }
 
