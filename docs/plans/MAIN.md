@@ -172,6 +172,10 @@
 - [!] RT-1688 Let russh take patch releases and check advisories on a schedule · release vNext
 - [ ] RT-1699 Map apps/native/src/ssh_inproc.rs in the test map so -Validate passes
 - [ ] RT-1722 Make rt.ps1 refuse a routable verb run inside an outer local gate
+- [ ] RT-1821 Run the ui_driver specs in rt.ps1 test's driver pass, and fix its stale method list
+- [ ] RT-1822 Make the tail tests for a file that appears later see it missing first
+- [ ] RT-1830 Let a driven run reach a second isolated daemon as an SSH host, to smoke remote features
+- [ ] RT-1832 Keep a driven run's Gates pill off the machine's real gate state
 
 ## Elevated daemon and security
 
@@ -471,6 +475,8 @@
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
 - [ ] RT-1366 Rename, delete and make folders on a host from the file manager
 - [ ] RT-1367 Upload files from this machine to a host folder in the file manager
+- [ ] RT-1823 Fetch or stat any file or folder the host can read from a Ctrl+click, not only session folders and worktrees · release vNext
+- [ ] RT-1826 Split file_fetch_view's after_write under the complexity limit
 
 ## Phone app
 
@@ -506,8 +512,8 @@
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
-- [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext+1
-- [ ] RT-1756 Arrange the phone's Keys in a grid in Settings, with multi-key keys like Ctrl+B · release vNext+1
+- [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext
+- [ ] RT-1756 Arrange the phone's Keys in a grid in Settings, with multi-key keys like Ctrl+B · release vNext
 - [ ] RT-1765 Draw the phone tray's read-only options without a pressed state
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
 - [ ] RT-1768 Let a tap on the phone terminal's command gutter toggle the keyboard
@@ -597,7 +603,7 @@
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1291 Take the worktree size walk off the connection's reader
 - [ ] RT-1711 Run the daemon's read-only git calls with --no-optional-locks
-- [ ] RT-1815 Follow a shell's cd into another registered repo or workspace · release vNext+1
+- [ ] RT-1815 Follow a shell's cd into another registered repo or workspace · release vNext
 
 ## Agents and subagents
 
@@ -760,6 +766,11 @@
 ## No project
 
 - [ ] RT-1816 Groom the plan: 22 commits since the hygiene stamp
+- [ ] RT-1820 Keep the sidebar header one row tall when the fold-all button appears
+- [ ] RT-1827 Assert the iOS text-input notifications in TextInput specs through the gpui test window
+- [ ] RT-1828 Let backspace work in a masked iPhone field that holds an emoji
+- [ ] RT-1829 Keep an iPhone IME composition when iOS replaces text before it
+- [ ] RT-1831 Keep a follow tab's first line clear of its header border
 
 ## Design files
 
