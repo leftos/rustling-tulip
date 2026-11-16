@@ -9,9 +9,6 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The Rebind dialog can bind only a host's sessions that have no pane yet, leaving the tabs you arranged as they are.
 - Each Claude account in the accounts panel and Settings › Accounts shows its extra-usage spend and its prepaid credit balance.
 - Settings › Accounts can let an account spend its prepaid credits once every account's usage is used up.
-
-### Added
-
 - Select text in a subagent or dispatch run pane by dragging or double- or triple-clicking, and copy it with Ctrl+C.
 
 ### Fixed
