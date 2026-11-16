@@ -1204,6 +1204,26 @@ pub fn send_message(session_id: &str, text: &str, request_id: String) -> Option<
     })
 }
 
+/// The message that pulls session `session_id`'s terminal prompt-box draft
+/// into the chat.
+#[must_use]
+pub fn pull_draft_message(session_id: &str, request_id: String) -> ClientMessage {
+    ClientMessage::ChatPullDraft {
+        session_id: session_id.to_owned(),
+        request_id: Some(request_id),
+    }
+}
+
+/// The message that sends session `session_id`'s terminal prompt-box
+/// draft as it stands.
+#[must_use]
+pub fn send_draft_message(session_id: &str, request_id: String) -> ClientMessage {
+    ClientMessage::ChatSendDraft {
+        session_id: session_id.to_owned(),
+        request_id: Some(request_id),
+    }
+}
+
 /// The text a send carried, as the daemon's pending entry shows it.
 fn sent_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_owned()
@@ -1266,6 +1286,20 @@ impl SendTracker {
             entry_arrived: false,
             at: now,
         });
+    }
+
+    /// The prompt box's draft was sent as it stands under `request_id`: a
+    /// send with no text of ours, whose draft is already on screen, so it
+    /// settles once the composer leaves that draft or the turn starts, and
+    /// a refusal gives nothing back.
+    pub fn sent_draft(&mut self, request_id: String, now: Instant) {
+        self.sent(request_id, String::new(), now);
+        if let Some(send) = self.in_flight.as_mut() {
+            send.saw_draft = true;
+        }
+        if let Some(owner) = self.owner.as_mut() {
+            owner.saw_draft = true;
+        }
     }
 
     /// Whether the prompt box's draft may still be the send's own paste:
@@ -1370,10 +1404,13 @@ impl SendTracker {
 pub const SEND_BACKSTOP: Duration = Duration::from_secs(10);
 
 /// The composer's text after a refusal gives `refused` back while it holds
-/// `current`: the refused text alone, or before what was typed since.
+/// `current`: the refused text alone, or before what was typed since. An
+/// empty `refused` (a draft sent as it stands) leaves `current` as it is.
 #[must_use]
 pub fn restored_text(refused: &str, current: &str) -> String {
-    if current.is_empty() {
+    if refused.is_empty() {
+        current.to_owned()
+    } else if current.is_empty() {
         refused.to_owned()
     } else {
         format!("{refused}\n{current}")
@@ -1444,6 +1481,131 @@ pub fn composer_note(
         ComposerState::Unknown => Some(ComposerNote::Unknown),
         _ => None,
     }
+}
+
+/// What the composer's note row says over a draft on a host that can pull
+/// or send it, beside its Pull and Send buttons.
+pub const DRAFT_ACTIONS_NOTE: &str = "The prompt box has a draft.";
+/// What the note row says while a pull of the draft is awaited.
+pub const PULLING_NOTE: &str = "Pulling the draft\u{2026}";
+/// What the composer says when a pull left some of the draft in the box.
+pub const PULL_PARTIAL: &str =
+    "Pulled, but the terminal's prompt box still holds some of the draft.";
+
+/// The composer's note row as drawn: a plain note, or the draft's line
+/// with its Pull and Send buttons, or the line a pending pull shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerLine {
+    /// A note, drawn as [`ComposerNote::text`].
+    Note(ComposerNote),
+    /// The draft's line with its Pull and Send buttons.
+    DraftActions,
+    /// A pull of the draft is awaited; no buttons.
+    Pulling,
+}
+
+impl ComposerLine {
+    /// What the row says.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Note(note) => note.text(),
+            Self::DraftActions => DRAFT_ACTIONS_NOTE.to_owned(),
+            Self::Pulling => PULLING_NOTE.to_owned(),
+        }
+    }
+
+    /// Whether the row draws the draft's Pull and Send buttons.
+    #[must_use]
+    pub fn has_draft_actions(&self) -> bool {
+        matches!(self, Self::DraftActions)
+    }
+}
+
+/// The note row for `note`: a draft note on a host that can pull or send
+/// the draft (`draft_actions`) gets the draft's buttons, or the pulling
+/// line while a pull is awaited (`pulling`); any other note stays as it is.
+#[must_use]
+pub fn composer_line(
+    note: Option<ComposerNote>,
+    draft_actions: bool,
+    pulling: bool,
+) -> Option<ComposerLine> {
+    match note? {
+        ComposerNote::Draft if draft_actions && pulling => Some(ComposerLine::Pulling),
+        ComposerNote::Draft if draft_actions => Some(ComposerLine::DraftActions),
+        note => Some(ComposerLine::Note(note)),
+    }
+}
+
+/// A session's pull of its prompt-box draft awaiting its answer: the pull's
+/// request id, from the Pull click until a `ChatDraft` or a refusal with
+/// that id ends it.
+#[derive(Debug, Default)]
+pub struct DraftPull {
+    pending: Option<String>,
+}
+
+impl DraftPull {
+    /// A pull went out under `request_id`.
+    pub fn sent(&mut self, request_id: String) {
+        self.pending = Some(request_id);
+    }
+
+    /// Whether a pull is awaited.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// An answer or refusal carrying `request_id` arrived: whether it ends
+    /// the pending pull, which it then does. Anything else is not ours.
+    pub fn answered(&mut self, request_id: Option<&str>) -> bool {
+        let ours = request_id.is_some() && self.pending.as_deref() == request_id;
+        if ours {
+            self.pending = None;
+        }
+        ours
+    }
+}
+
+/// What the composer says after a pull answered with `cleared`: none when
+/// the box was cleared, else that some of the draft stayed in it.
+#[must_use]
+pub fn pulled_error(cleared: bool) -> Option<String> {
+    (!cleared).then(|| PULL_PARTIAL.to_owned())
+}
+
+/// Whether a suggested next prompt was cut short on screen: it ends in an
+/// ellipsis, so sending or pulling it would take half a prompt.
+#[must_use]
+pub fn suggestion_is_cut(text: &str) -> bool {
+    text.ends_with('\u{2026}')
+}
+
+/// The suggestion chip above the composer: the suggested prompt, and
+/// whether its Send and Pull buttons show (not for a cut suggestion).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionChip<'a> {
+    pub text: &'a str,
+    pub actions: bool,
+}
+
+/// The chip the composer draws for `state`: one for a suggestion, while no
+/// card is up (`card_up`) and no send is in flight (`sending`).
+#[must_use]
+pub fn suggestion_chip(
+    state: Option<&ComposerState>,
+    card_up: bool,
+    sending: bool,
+) -> Option<SuggestionChip<'_>> {
+    let Some(ComposerState::Suggestion { text }) = state else {
+        return None;
+    };
+    (!card_up && !sending).then(|| SuggestionChip {
+        text,
+        actions: !suggestion_is_cut(text),
+    })
 }
 
 #[cfg(test)]
@@ -2810,6 +2972,158 @@ mod strip_tests {
     fn refused_text_goes_back_before_what_was_typed_since() {
         assert_eq!(super::restored_text("hello", ""), "hello");
         assert_eq!(super::restored_text("hello", "more"), "hello\nmore");
+    }
+
+    #[test]
+    fn giving_back_nothing_leaves_the_composer_as_it_is() {
+        assert_eq!(super::restored_text("", "more"), "more");
+        assert_eq!(super::restored_text("", ""), "");
+    }
+
+    #[test]
+    fn a_refused_draft_send_gives_nothing_back() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent_draft("r1".to_owned(), at);
+        assert!(sends.in_flight(at));
+        assert_eq!(sends.refused("r1").as_deref(), Some(""));
+        assert_eq!(super::restored_text("", "typed"), "typed");
+    }
+
+    #[test]
+    fn a_draft_send_settles_when_the_composer_leaves_the_draft() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent_draft("r1".to_owned(), at);
+        sends.on_composer(&ComposerState::Draft);
+        assert!(sends.in_flight(at), "the draft still on screen");
+        sends.on_composer(&ComposerState::Ready);
+        assert!(!sends.in_flight(at));
+        assert!(!sends.owns_draft(at));
+    }
+
+    #[test]
+    fn the_note_row_offers_the_drafts_actions_on_a_host_that_has_them() {
+        use super::{ComposerLine, ComposerNote, composer_line};
+        assert_eq!(
+            composer_line(Some(ComposerNote::Draft), false, false),
+            Some(ComposerLine::Note(ComposerNote::Draft)),
+            "a host without the feature keeps the old note"
+        );
+        let actions = composer_line(Some(ComposerNote::Draft), true, false);
+        assert_eq!(actions, Some(ComposerLine::DraftActions));
+        assert_eq!(
+            actions.as_ref().map(ComposerLine::text).as_deref(),
+            Some("The prompt box has a draft.")
+        );
+        assert!(actions.is_some_and(|line| line.has_draft_actions()));
+        let pulling = composer_line(Some(ComposerNote::Draft), true, true);
+        assert_eq!(pulling, Some(ComposerLine::Pulling));
+        assert_eq!(
+            pulling.as_ref().map(ComposerLine::text).as_deref(),
+            Some("Pulling the draft\u{2026}")
+        );
+        assert!(!pulling.is_some_and(|line| line.has_draft_actions()));
+        assert_eq!(
+            composer_line(Some(ComposerNote::Sending), true, false),
+            Some(ComposerLine::Note(ComposerNote::Sending)),
+            "our send in flight shows Sending, no buttons"
+        );
+        assert_eq!(
+            composer_line(None, true, false),
+            None,
+            "a draft our settled send owns shows no note"
+        );
+    }
+
+    #[test]
+    fn a_pull_waits_for_its_own_answer() {
+        let mut pull = super::DraftPull::default();
+        assert!(!pull.is_pending());
+        assert!(!pull.answered(Some("r1")), "no pull asked for");
+        pull.sent("r1".to_owned());
+        assert!(pull.is_pending());
+        assert!(!pull.answered(None));
+        assert!(!pull.answered(Some("r2")), "another request's answer");
+        assert!(pull.is_pending());
+        assert!(pull.answered(Some("r1")));
+        assert!(!pull.is_pending());
+        assert!(!pull.answered(Some("r1")), "answered once");
+    }
+
+    #[test]
+    fn a_partial_pull_says_so() {
+        assert_eq!(super::pulled_error(true), None);
+        assert_eq!(
+            super::pulled_error(false).as_deref(),
+            Some("Pulled, but the terminal's prompt box still holds some of the draft.")
+        );
+    }
+
+    #[test]
+    fn a_suggestion_ending_in_an_ellipsis_is_cut() {
+        assert!(super::suggestion_is_cut("write a long sugg\u{2026}"));
+        assert!(!super::suggestion_is_cut("write todo.py"));
+        assert!(!super::suggestion_is_cut(""));
+        assert!(
+            !super::suggestion_is_cut("wait..."),
+            "three dots are unmeasured"
+        );
+    }
+
+    #[test]
+    fn the_suggestion_chip_shows_while_the_composer_can_send() {
+        use super::{SuggestionChip, suggestion_chip};
+        let whole = ComposerState::Suggestion {
+            text: "write todo.py".to_owned(),
+        };
+        assert_eq!(
+            suggestion_chip(Some(&whole), false, false),
+            Some(SuggestionChip {
+                text: "write todo.py",
+                actions: true
+            })
+        );
+        assert_eq!(
+            suggestion_chip(Some(&whole), true, false),
+            None,
+            "a card is up"
+        );
+        assert_eq!(
+            suggestion_chip(Some(&whole), false, true),
+            None,
+            "a send is in flight"
+        );
+        let cut = ComposerState::Suggestion {
+            text: "write a long sugg\u{2026}".to_owned(),
+        };
+        assert_eq!(
+            suggestion_chip(Some(&cut), false, false),
+            Some(SuggestionChip {
+                text: "write a long sugg\u{2026}",
+                actions: false
+            })
+        );
+        assert_eq!(
+            suggestion_chip(Some(&ComposerState::Ready), false, false),
+            None
+        );
+        assert_eq!(suggestion_chip(None, false, false), None);
+    }
+
+    #[test]
+    fn the_draft_messages_carry_their_request_id() {
+        use protocol::ClientMessage;
+        assert!(matches!(
+            super::pull_draft_message("s1", "r1".to_owned()),
+            ClientMessage::ChatPullDraft { session_id, request_id }
+                if session_id == "s1" && request_id.as_deref() == Some("r1")
+        ));
+        assert!(matches!(
+            super::send_draft_message("s1", "r2".to_owned()),
+            ClientMessage::ChatSendDraft { session_id, request_id }
+                if session_id == "s1" && request_id.as_deref() == Some("r2")
+        ));
     }
 
     #[test]

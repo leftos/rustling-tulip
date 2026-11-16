@@ -16,6 +16,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - `rustling-tulipd push-fallback` sends each paired iPhone a push it cannot open, to check that its fallback alert shows.
 - A button beside the sidebar's Sessions title collapses or expands every session's subagent and dispatch-run rows at once.
 - On the iPhone, a host shown as Offline has a Retry button that tries it again at once, instead of waiting for it to redial.
+- A draft left in the terminal's prompt box can be pulled into Chat's message box for editing, or sent as it stands, from desktop Chat.
+- Desktop Chat shows Claude's suggested next prompt above the message box, to send with one click or pull in to edit.
 
 ### Fixed
 

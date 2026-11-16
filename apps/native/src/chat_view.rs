@@ -29,15 +29,16 @@ use gpui::{
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
     AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_FILE_TAIL, SessionMode, SessionSnapshot,
-    ToolOutcome,
+    ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL,
+    SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
-    self, ChatLoads, ChatLog, ChatMode, ComposerNote, DisplayRow, PaneView, PaneViews, PromptStack,
-    RowShape, RunSummary, RunningWork, SendTracker, Strip, ViewKey,
+    self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftPull,
+    PaneView, PaneViews, PromptStack, RowShape, RunSummary, RunningWork, SendTracker, Strip,
+    SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -171,12 +172,32 @@ pub(crate) struct SessionChat {
     card_box: Option<CardBox>,
     /// The chat send in flight.
     sends: SendTracker,
+    /// The pull of the prompt box's draft awaiting its answer.
+    pull: DraftPull,
     /// The composer, made once the chat has loaded.
     composer: Option<Composer>,
     /// The daemon's reason for refusing the last send.
     send_error: Option<String>,
     /// The phone's selection of the chat's text; it goes with the chat.
     selection: Option<Selection>,
+}
+
+/// What one daemon refusal ended in a chat: the text of a send it refused
+/// (empty for a draft sent as it stands), the box text a card answer took
+/// and where it goes back, the refused answer's card, and whether it ended
+/// the pending draft pull.
+struct ChatRefusal {
+    text: Option<String>,
+    boxed: Option<(String, GiveBack)>,
+    card: Option<crate::chat_cards::AnswerRefusal>,
+    pull: bool,
+}
+
+impl ChatRefusal {
+    /// Whether the refusal ended anything of the chat's.
+    fn is_ours(&self) -> bool {
+        self.text.is_some() || self.boxed.is_some() || self.card.is_some() || self.pull
+    }
 }
 
 /// An answer's parsed document, with the text length, live flag and open
@@ -239,6 +260,42 @@ impl SessionChat {
     fn give_back(&self, text: &str, cx: &mut App) {
         let current = self.composer_text(cx);
         self.set_composer_text(&chat::restored_text(text, &current), cx);
+    }
+
+    /// The daemon refused `request_id` with `message`: what it ends of this
+    /// chat's sends, card answers and draft pull; none when it ends none.
+    fn take_refusal(&mut self, request_id: &str, message: &str) -> Option<ChatRefusal> {
+        let refusal = ChatRefusal {
+            text: self.sends.refused(request_id),
+            boxed: self.boxes.refused(request_id),
+            card: self.cards.refused(request_id, message),
+            pull: self.pull.answered(Some(request_id)),
+        };
+        refusal.is_ours().then_some(refusal)
+    }
+
+    /// Settles `refusal`: box text a card answer took goes back to the card
+    /// box while its card is up, and sent text goes back to the composer
+    /// before what was typed since, with `message` under it. A draft sent
+    /// as it stands gives back no text, so the composer and its caret stay
+    /// as they are; it and a refused pull still show `message`.
+    fn settle_refusal(&mut self, refusal: ChatRefusal, message: &str, cx: &mut App) {
+        let mut text = refusal.text;
+        match refusal.boxed {
+            Some((taken, GiveBack::CardBox)) => {
+                let current = self.card_box_text(cx);
+                self.set_card_box_text(&restored_box_text(&taken, &current), cx);
+            }
+            Some((taken, GiveBack::Composer)) => text = Some(taken),
+            None => {}
+        }
+        let shows_reason = text.is_some() || refusal.pull;
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            self.give_back(&text, cx);
+        }
+        if shows_reason {
+            self.send_error = Some(message.to_owned());
+        }
     }
 
     /// The card box's text, empty while the card has no box.
@@ -1442,6 +1499,15 @@ impl RootView {
         self.chat.phone_text.borrow().painted_ranges.clone()
     }
 
+    /// Spec hook: the byte range the composer of session `session_id`
+    /// selects, its caret when empty; none without a composer.
+    #[must_use]
+    pub fn chat_composer_selection(&self, session_id: &str, cx: &App) -> Option<Range<usize>> {
+        let chat = self.chat.sessions.get(session_id)?;
+        let composer = chat.composer.as_ref()?;
+        Some(composer.input.read(cx).selected_range())
+    }
+
     /// Spec hook: the text session `session_id`'s chat selection copies, as
     /// the phone draws the chat; empty without a selection.
     #[must_use]
@@ -1571,6 +1637,7 @@ impl RootView {
             | DaemonMessage::ChatAppend { .. }
             | DaemonMessage::ChatScreenChanged { .. }
             | DaemonMessage::ChatWork { .. } => self.on_chat_message(msg, cx),
+            msg @ DaemonMessage::ChatDraft { .. } => self.on_chat_draft(msg, cx),
             DaemonMessage::Summary {
                 session_id,
                 lines,
@@ -1611,6 +1678,39 @@ impl RootView {
         } else {
             tracing::debug!(%session_id, "summary message for a summary no pane shows, or for an older load: dropped");
         }
+    }
+
+    /// A `ChatDraft` answering its session's pending pull: the draft goes into
+    /// the composer ahead of what was typed there, with a note when the
+    /// terminal's box still holds some of it. One no pull awaits is
+    /// dropped.
+    fn on_chat_draft(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::ChatDraft {
+            session_id,
+            request_id,
+            text,
+            cleared,
+        } = msg
+        else {
+            return;
+        };
+        let Some(chat) = self
+            .chat
+            .sessions
+            .get_mut(&session_id)
+            .filter(|chat| chat.pull.is_pending())
+        else {
+            tracing::debug!(%session_id, "draft for a chat that awaits no pull: dropped");
+            return;
+        };
+        if !chat.pull.answered(request_id.as_deref()) {
+            tracing::debug!(%session_id, "draft answering another pull: dropped");
+            return;
+        }
+        tracing::info!(%session_id, cleared, "pulled the prompt box's draft into the composer");
+        chat.give_back(&text, cx);
+        chat.send_error = chat::pulled_error(cleared);
+        cx.notify();
     }
 
     /// A `Chat`, `ChatAppend`, `ChatScreenChanged` or `ChatWork`: it
@@ -1778,25 +1878,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         for (session_id, chat) in &mut self.chat.sessions {
-            let mut text = chat.sends.refused(request_id);
-            let boxed = chat.boxes.refused(request_id);
-            let card = chat.cards.refused(request_id, message);
-            if text.is_none() && boxed.is_none() && card.is_none() {
+            let Some(refusal) = chat.take_refusal(request_id, message) else {
                 continue;
-            }
-            tracing::info!(%session_id, message, ?card, "the daemon refused a chat send or card answer");
-            match boxed {
-                Some((taken, GiveBack::CardBox)) => {
-                    let current = chat.card_box_text(cx);
-                    chat.set_card_box_text(&restored_box_text(&taken, &current), cx);
-                }
-                Some((taken, GiveBack::Composer)) => text = Some(taken),
-                None => {}
-            }
-            if let Some(text) = text {
-                chat.give_back(&text, cx);
-                chat.send_error = Some(message.to_owned());
-            }
+            };
+            tracing::info!(%session_id, message, card = ?refusal.card, pull = refusal.pull, "the daemon refused a chat send, card answer or draft pull");
+            chat.settle_refusal(refusal, message, cx);
             cx.notify();
             return true;
         }
@@ -2133,6 +2219,75 @@ impl RootView {
         cx.notify();
     }
 
+    /// Asks session `session_id`'s host for the terminal prompt box's draft,
+    /// which lands in the composer when it answers. Nothing happens while
+    /// a pull is awaited.
+    pub(crate) fn pull_draft(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let request_id = new_request_id();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        if chat.pull.is_pending() {
+            return;
+        }
+        chat.pull.sent(request_id.clone());
+        chat.send_error = None;
+        let host = self.chat.host_of(session_id);
+        self.send_to(&host, chat::pull_draft_message(session_id, request_id));
+        cx.notify();
+    }
+
+    /// Sends session `session_id`'s terminal prompt-box draft as it stands,
+    /// tracked as a send with no text of ours. Nothing happens while a
+    /// send is in flight.
+    pub(crate) fn send_draft(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let request_id = new_request_id();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        if chat.sends.in_flight(now) {
+            return;
+        }
+        chat.sends.sent_draft(request_id.clone(), now);
+        chat.send_error = None;
+        let host = self.chat.host_of(session_id);
+        self.send_to(&host, chat::send_draft_message(session_id, request_id));
+        cx.notify();
+    }
+
+    /// Sends the agent's suggested next prompt `text` for session
+    /// `session_id`, as the composer sends its own text but leaving that
+    /// text alone. Nothing happens while a send is in flight.
+    pub(crate) fn send_suggestion(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let request_id = new_request_id();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        if chat.sends.in_flight(now) {
+            return;
+        }
+        let Some(msg) = chat::send_message(session_id, text, request_id.clone()) else {
+            return;
+        };
+        chat.sends.sent(request_id, text.to_owned(), now);
+        chat.send_error = None;
+        let host = self.chat.host_of(session_id);
+        self.send_to(&host, msg);
+        cx.notify();
+    }
+
+    /// Puts the agent's suggested next prompt `text` into session
+    /// `session_id`'s composer ahead of what is typed there, to edit; the
+    /// daemon is not told.
+    pub(crate) fn pull_suggestion(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chat.sessions.get(session_id) {
+            chat.give_back(text, cx);
+            cx.notify();
+        }
+    }
+
     /// Types `bytes` into session `session_id` through its host, as the
     /// phone's Quick and Keys buttons do.
     pub(crate) fn send_phone_input(&mut self, session_id: &str, bytes: &[u8]) {
@@ -2170,6 +2325,19 @@ impl RootView {
             chat.composer_state.as_ref(),
             chat.sends.in_flight((self.now)()),
             chat.sends.owns_draft((self.now)()),
+        )
+    }
+
+    /// The note row `chat`'s composer draws: its note, with the draft's
+    /// Pull and Send on a host that offers them.
+    fn composer_line_of(&self, session_id: &str, chat: &SessionChat) -> Option<ComposerLine> {
+        let draft_actions = self
+            .conn_of(&self.chat.host_of(session_id))
+            .is_some_and(|conn| conn.supports(FEATURE_CHAT_DRAFT));
+        chat::composer_line(
+            self.composer_note_of(session_id, chat),
+            draft_actions,
+            chat.pull.is_pending(),
         )
     }
 
@@ -2233,8 +2401,8 @@ impl RootView {
     #[must_use]
     pub fn chat_composer_note(&self, session_id: &str) -> Option<String> {
         let chat = self.chat.sessions.get(session_id)?;
-        self.composer_note_of(session_id, chat)
-            .map(|note| note.text())
+        self.composer_line_of(session_id, chat)
+            .map(|line| line.text())
     }
 
     /// The daemon's reason for refusing session `session_id`'s last send.
@@ -2720,11 +2888,12 @@ impl RootView {
     }
 
     /// Session `session_id`'s composer row: the note saying why it cannot
-    /// send, the input (tagged `chat-composer`) with Send (`chat-send`),
-    /// disabled while a card is up since a card's typed answers go in its
-    /// own box, and the daemon's reason for refusing the last send
-    /// (`chat-composer-error`). Without a connection the input is
-    /// disabled.
+    /// send (with the draft's Pull and Send where the host offers them),
+    /// the agent's suggested next prompt as a chip, the input (tagged
+    /// `chat-composer`) with Send (`chat-send`), disabled while a card is
+    /// up since a card's typed answers go in its own box, and the daemon's
+    /// reason for refusing the last send (`chat-composer-error`). Without
+    /// a connection the input is disabled.
     pub(crate) fn composer_row(
         &self,
         session_id: &str,
@@ -2733,8 +2902,15 @@ impl RootView {
     ) -> Option<AnyElement> {
         let composer = chat.composer.as_ref()?;
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
-        let note = self.composer_note_of(session_id, chat);
-        let disabled = note.as_ref().is_some_and(ComposerNote::disables);
+        let line = self.composer_line_of(session_id, chat);
+        let disabled = matches!(&line, Some(ComposerLine::Note(note)) if note.disables());
+        let note = line.map(|line| Self::composer_note_row(session_id, &line, cx));
+        let chip = chat::suggestion_chip(
+            chat.composer_state.as_ref(),
+            chat.stack.current().is_some(),
+            chat.sends.in_flight((self.now)()),
+        )
+        .map(|chip| Self::suggestion_chip_row(session_id, &chip, !disabled, cx));
         let text = composer.input.read(cx).text().to_owned();
         let field = field_frame(false, Layer::Base, &t)
             .driver_id(|| "chat-composer".to_owned())
@@ -2770,10 +2946,8 @@ impl RootView {
                 .pt(px(6.0))
                 .pb(px(BODY_PAD_Y))
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
-                .children(note.map(|note| {
-                    muted_line(offset, note.text(), &t)
-                        .driver_id(|| "chat-composer-note".to_owned())
-                }))
+                .children(note)
+                .children(chip)
                 .child(
                     div()
                         .flex()
@@ -2791,6 +2965,110 @@ impl RootView {
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// The composer's note row (`chat-composer-note`): `line`'s text, and
+    /// for a draft the host can pull or send, Pull (`chat-draft-pull`) and
+    /// Send (`chat-draft-send`) beside it.
+    fn composer_note_row(
+        session_id: &str,
+        line: &ComposerLine,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
+        let note =
+            muted_line(offset, line.text(), &t).driver_id(|| "chat-composer-note".to_owned());
+        if !line.has_draft_actions() {
+            return note.into_any_element();
+        }
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let (pull_id, send_id) = (session_id.to_owned(), session_id.to_owned());
+        let pull = outlined_button(
+            offset,
+            shift,
+            "chat-draft-pull",
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &t,
+        )
+        .child("Pull")
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.pull_draft(&pull_id, cx);
+        }));
+        let send = outlined_button(
+            offset,
+            shift,
+            "chat-draft-send",
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &t,
+        )
+        .child("Send")
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.send_draft(&send_id, cx);
+        }));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(note.flex_1().min_w(px(0.0)))
+            .child(pull)
+            .child(send)
+            .into_any_element()
+    }
+
+    /// The agent's suggested next prompt above the composer
+    /// (`chat-suggestion`): its text, and unless it was cut, Send
+    /// (`chat-suggestion-send`) and Pull (`chat-suggestion-pull`), live
+    /// while `enabled`.
+    fn suggestion_chip_row(
+        session_id: &str,
+        chip: &SuggestionChip<'_>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let text = muted_line(offset, chip.text.to_owned(), &t)
+            .flex_1()
+            .min_w(px(0.0));
+        let row = field_frame(false, Layer::Base, &t)
+            .driver_id(|| "chat-suggestion".to_owned())
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .py(px(4.0))
+            .child(text);
+        if !chip.actions {
+            return row.into_any_element();
+        }
+        let button = |selector: &str, label: &'static str| {
+            outlined_button(
+                offset,
+                shift,
+                selector,
+                ButtonSize::Compact,
+                enabled,
+                Layer::Base,
+                &t,
+            )
+            .child(label)
+        };
+        let (send_id, pull_id) = (session_id.to_owned(), session_id.to_owned());
+        let (send_text, pull_text) = (chip.text.to_owned(), chip.text.to_owned());
+        let send = button("chat-suggestion-send", "Send").when(enabled, |send| {
+            send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.send_suggestion(&send_id, &send_text, cx);
+            }))
+        });
+        let pull = button("chat-suggestion-pull", "Pull").when(enabled, |pull| {
+            pull.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.pull_suggestion(&pull_id, &pull_text, cx);
+            }))
+        });
+        row.child(send).child(pull).into_any_element()
     }
 }
 

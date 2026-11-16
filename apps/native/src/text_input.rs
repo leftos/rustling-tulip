@@ -343,6 +343,12 @@ impl TextInput {
         &self.content
     }
 
+    /// The byte range the input selects, its caret when empty.
+    #[must_use]
+    pub fn selected_range(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
     /// The text as drawn: the text itself, or while masked a [`MASK`] for
     /// each character but a line break.
     fn shown(&self) -> SharedString {

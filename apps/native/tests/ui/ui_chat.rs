@@ -24,8 +24,8 @@ use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, poin
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL,
-    GridNode, SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
+    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_DRAFT,
+    FEATURE_FILE_TAIL, GridNode, SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::target::Target;
@@ -2273,9 +2273,254 @@ fn a_draft_composer_shows_why_it_cannot_send(cx: &mut TestAppContext) {
     show_screen(&mut h, ComposerState::Draft, None);
     assert_eq!(
         note(&mut h).as_deref(),
-        Some("The prompt box has a draft. Send or clear it in the terminal first.")
+        Some("The prompt box has a draft. Send or clear it in the terminal first."),
+        "a host without chat_draft keeps the old note"
     );
     assert!(painted(&mut h, "chat-composer-note"));
+    assert!(!painted(&mut h, "chat-draft-pull"));
+    assert!(!painted(&mut h, "chat-draft-send"));
+}
+
+/// `s1`'s chat loaded on a daemon listing `chat_draft`, everything sent so
+/// far drained.
+fn loaded_on_a_draft_host<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture::single(session("s1").build());
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.reconnect_with_features(&[FEATURE_CHAT_DRAFT]);
+    h.load(&fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat");
+    h.send(reply(Some(&id), vec![]));
+    h.sent();
+    h
+}
+
+/// The request ids of the `ChatPullDraft`s for `s1` sent since the last
+/// drain.
+fn pulls(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatPullDraft {
+                session_id,
+                request_id,
+            } if session_id == "s1" => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The daemon answers a pull with `text`, the box `cleared` or not.
+fn pulled(h: &mut Harness<'_>, request_id: Option<String>, text: &str, cleared: bool) {
+    h.send(DaemonMessage::ChatDraft {
+        session_id: "s1".to_owned(),
+        request_id,
+        text: text.to_owned(),
+        cleared,
+    });
+}
+
+fn composer_error(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_composer_error("s1"))
+}
+
+/// Whether anything sent since the last drain asks the chat to send or
+/// pull.
+fn sent_chat_work(h: &mut Harness<'_>) -> bool {
+    h.sent().iter().any(|msg| {
+        matches!(
+            msg,
+            ClientMessage::ChatSend { .. }
+                | ClientMessage::ChatPullDraft { .. }
+                | ClientMessage::ChatSendDraft { .. }
+        )
+    })
+}
+
+#[gpui::test]
+fn a_draft_on_a_chat_draft_host_offers_pull_and_send(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    assert_eq!(note(&mut h).as_deref(), Some("The prompt box has a draft."));
+    assert!(painted(&mut h, "chat-composer-note"));
+    assert!(painted(&mut h, "chat-draft-pull"));
+    assert!(painted(&mut h, "chat-draft-send"));
+}
+
+#[gpui::test]
+fn pull_sends_a_pull_and_lands_the_draft_ahead_of_typed_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.click_on("chat-composer");
+    type_text(&mut h, "and test");
+    h.click_on("chat-draft-pull");
+    let sent = pulls(&mut h);
+    assert_eq!(sent.len(), 1, "one pull goes out");
+    assert!(sent[0].is_some(), "under a request id");
+    assert_eq!(note(&mut h).as_deref(), Some("Pulling the draft\u{2026}"));
+    assert!(
+        !drawn_now(&mut h, "chat-draft-pull"),
+        "no buttons while pulling"
+    );
+    pulled(&mut h, sent[0].clone(), "fix the bug", true);
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("fix the bug\nand test")
+    );
+    assert_eq!(composer_error(&mut h), None);
+    assert_eq!(note(&mut h).as_deref(), Some("The prompt box has a draft."));
+}
+
+#[gpui::test]
+fn a_partial_pull_says_the_box_still_holds_some(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.click_on("chat-draft-pull");
+    let sent = pulls(&mut h);
+    pulled(&mut h, sent[0].clone(), "fix the bug", false);
+    assert_eq!(composer_text(&mut h).as_deref(), Some("fix the bug"));
+    assert_eq!(
+        composer_error(&mut h).as_deref(),
+        Some("Pulled, but the terminal's prompt box still holds some of the draft.")
+    );
+}
+
+#[gpui::test]
+fn a_refused_pull_shows_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.click_on("chat-composer");
+    type_text(&mut h, "mine");
+    h.click_on("chat-draft-pull");
+    let sent = pulls(&mut h);
+    refused(&mut h, sent[0].clone(), "the draft holds pasted text");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("mine"));
+    assert_eq!(
+        composer_error(&mut h).as_deref(),
+        Some("the draft holds pasted text")
+    );
+    assert!(painted(&mut h, "chat-composer-error"));
+    assert_eq!(note(&mut h).as_deref(), Some("The prompt box has a draft."));
+    assert!(drawn_now(&mut h, "chat-draft-pull"), "the buttons are back");
+}
+
+#[gpui::test]
+fn send_as_is_sends_a_send_draft(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.click_on("chat-draft-send");
+    let sent: Vec<Option<String>> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSendDraft {
+                session_id,
+                request_id,
+            } if session_id == "s1" => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1, "one send-draft goes out");
+    assert!(sent[0].is_some(), "under a request id");
+    assert_eq!(note(&mut h).as_deref(), Some("Sending\u{2026}"));
+}
+
+#[gpui::test]
+fn a_refused_send_as_is_keeps_the_caret(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_on_a_draft_host(cx, &dir);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.click_on("chat-composer");
+    type_text(&mut h, "abcd");
+    h.keys("left left");
+    h.click_on("chat-draft-send");
+    let sent: Vec<Option<String>> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSendDraft { request_id, .. } => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1, "one send-draft goes out");
+    refused(&mut h, sent[0].clone(), "the prompt box is busy");
+    assert_eq!(
+        composer_error(&mut h).as_deref(),
+        Some("the prompt box is busy")
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some("abcd"));
+    assert_eq!(
+        h.root(|root, cx| root.chat_composer_selection("s1", cx)),
+        Some(2..2),
+        "the caret stays where it was"
+    );
+}
+
+#[gpui::test]
+fn a_suggestion_shows_a_chip_that_sends_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "mine");
+    show_screen(
+        &mut h,
+        ComposerState::Suggestion {
+            text: "write todo.py".to_owned(),
+        },
+        None,
+    );
+    assert!(painted(&mut h, "chat-suggestion"));
+    assert_eq!(note(&mut h), None);
+    h.click_on("chat-suggestion-send");
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "write todo.py");
+    assert!(sent[0].1.is_some(), "under a request id");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("mine"),
+        "the composer keeps its own text"
+    );
+}
+
+#[gpui::test]
+fn a_suggestion_chip_pulls_into_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(
+        &mut h,
+        ComposerState::Suggestion {
+            text: "write todo.py".to_owned(),
+        },
+        None,
+    );
+    h.click_on("chat-suggestion-pull");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("write todo.py"));
+    assert!(!sent_chat_work(&mut h), "nothing is sent");
+}
+
+#[gpui::test]
+fn a_cut_suggestion_has_no_actions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(
+        &mut h,
+        ComposerState::Suggestion {
+            text: "write a long sugg\u{2026}".to_owned(),
+        },
+        None,
+    );
+    assert!(painted(&mut h, "chat-suggestion"));
+    assert!(!painted(&mut h, "chat-suggestion-send"));
+    assert!(!painted(&mut h, "chat-suggestion-pull"));
 }
 
 #[gpui::test]
