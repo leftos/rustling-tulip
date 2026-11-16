@@ -727,6 +727,9 @@ pub struct FetchEntry {
     /// The connection closed while this fetch was finishing: it still
     /// saves, but nothing more is asked of the host for it.
     connection_lost: bool,
+    /// The saved file a folder fetch reveals once it is saved, when a link's
+    /// Open containing folder started it.
+    reveal_on_done: Option<PathBuf>,
 }
 
 /// What a fetch brings over.
@@ -790,7 +793,21 @@ impl FetchEntry {
             parent: None,
             batch: None,
             connection_lost: false,
+            reveal_on_done: None,
         }
+    }
+
+    /// Notes that this folder fetch, once saved, reveals the file at `file`
+    /// in Explorer rather than nothing.
+    pub fn reveal_when_done(&mut self, file: PathBuf) {
+        self.reveal_on_done = Some(file);
+    }
+
+    /// The file this folder fetch reveals once saved, when Open containing
+    /// folder started it.
+    #[must_use]
+    pub fn reveal_on_done(&self) -> Option<&Path> {
+        self.reveal_on_done.as_deref()
     }
 
     /// Whether the connection closed while this fetch was finishing.
@@ -1306,6 +1323,15 @@ impl FetchRegistry {
         let id = format!("fetch-{}-{}", self.launch, self.next_id);
         self.entries.insert(id.clone(), entry);
         Ok(id)
+    }
+
+    /// The folder fetch in flight that `entry` clashes with, if any: one
+    /// whose target holds `entry`'s or lies inside it.
+    #[must_use]
+    pub fn folder_overlapping(&self, entry: &FetchEntry) -> Option<&FetchEntry> {
+        self.entries
+            .values()
+            .find(|other| other.is_folder() && other.overlaps(entry))
     }
 
     #[must_use]

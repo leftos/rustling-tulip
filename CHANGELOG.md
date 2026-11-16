@@ -29,6 +29,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Open containing folder on another computer's file now fetches that file's whole folder and shows the file in it.
 - Chat's Tail boxes show a log that only grows, instead of staying on "No output yet" until the file is rewritten.
 - Ctrl+click on a web address written without `https://`, such as a `claude.ai/…` link, now opens it in the browser instead of looking for a file.
 - Rebinding a machine's sessions, or opening them from the first-connect layout chooser, now fits each session to its new pane at once.

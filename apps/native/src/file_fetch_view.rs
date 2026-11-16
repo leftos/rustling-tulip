@@ -771,11 +771,19 @@ impl RootView {
         if popup {
             entry = entry.for_popup();
         }
+        let folder = self
+            .fetches
+            .folder_overlapping(&entry)
+            .map(|folder| folder.file_name().to_owned());
         let Ok(id) = self.fetches.insert(entry) else {
-            tracing::info!(rel = %rel_path, "the file is already being fetched");
+            tracing::info!(rel = %rel_path, ?folder, "the file is already being fetched");
+            let title = folder.map_or_else(
+                || format!("Already fetching {name}"),
+                |folder| format!("Already fetching folder {folder}"),
+            );
             return Err(Refusal {
                 kind: ToastKind::Info,
-                title: format!("Already fetching {name}"),
+                title,
                 detail: None,
             });
         };
@@ -1450,10 +1458,7 @@ impl RootView {
             WriteOutcome::Saved(path)
                 if self.fetches.get(id).is_some_and(FetchEntry::is_folder) =>
             {
-                tracing::info!(id, path = %path.display(), "fetched a folder");
-                if let Some(entry) = self.fetches.remove(id) {
-                    self.push_folder_fetched(id, &entry, path, cx);
-                }
+                self.after_folder_saved(id, path, window, cx);
             }
             WriteOutcome::Saved(path) => {
                 tracing::info!(id, path = %path.display(), "fetched a file");
@@ -1462,11 +1467,7 @@ impl RootView {
                 if self.fetch_dialog_follows(id) {
                     self.close_fetch_dialog(window, cx);
                 }
-                let waits_on_media = self.fetches.get(id).is_some_and(|entry| {
-                    entry.request().open_when_done
-                        && html_media::is_html_page(&entry.request().rel_path)
-                });
-                if waits_on_media {
+                if self.waits_on_media(id) {
                     if self
                         .fetches
                         .get(id)
@@ -1486,15 +1487,113 @@ impl RootView {
                     self.after_child_saved(page_id.to_owned(), rel, path, window, cx);
                     return;
                 }
-                if !entry.reports_to_popup() && self.host_sends_folders(entry.host_key()) {
-                    self.push_file_fetched(id, &entry, cx);
-                }
-                if entry.request().open_when_done {
-                    self.open_fetched(path, entry.request(), window, cx);
-                }
+                self.after_file_saved(id, &entry, path, window, cx);
             }
             WriteOutcome::Failed(reason) => self.end_fetch(id, &reason, true, window, cx),
             WriteOutcome::Aborted => {}
+        }
+    }
+
+    /// Whether the saved file fetch `id` is a page that opens once its
+    /// media are fetched. Open containing folder on a host that sends
+    /// folders fetches the page's whole folder instead, which brings them.
+    fn waits_on_media(&self, id: &str) -> bool {
+        self.fetches.get(id).is_some_and(|entry| {
+            let request = entry.request();
+            let folder_brings_media =
+                request.action == LinkAction::Folder && self.host_sends_folders(entry.host_key());
+            request.open_when_done
+                && html_media::is_html_page(&request.rel_path)
+                && !folder_brings_media
+        })
+    }
+
+    /// Reveals the saved file a failed folder fetch of `entry` noted, when
+    /// Open containing folder started it: the copy outlives the failure.
+    fn reveal_noted_copy(
+        &mut self,
+        entry: &FetchEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(file) = entry.reveal_on_done() {
+            let job = OpenJob::Reveal(file.to_path_buf());
+            self.open_fetched_job(job, Then::Nothing, window, cx);
+        }
+    }
+
+    /// The folder fetch `id` is saved at `path`: its done toast shows, and
+    /// when Open containing folder started it, the file it noted shows in
+    /// Explorer, or the folder when that file did not come.
+    fn after_folder_saved(
+        &mut self,
+        id: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(id, path = %path.display(), "fetched a folder");
+        let Some(entry) = self.fetches.remove(id) else {
+            return;
+        };
+        let reveal = entry.reveal_on_done().map(Path::to_path_buf);
+        self.push_folder_fetched(id, &entry, path.clone(), cx);
+        if let Some(file) = reveal {
+            let shown = if file.exists() { file } else { path };
+            self.open_fetched_job(OpenJob::Reveal(shown), Then::Nothing, window, cx);
+        }
+    }
+
+    /// The plain file fetch `id` of `entry` is saved at `path`: its done
+    /// toast shows when its host sends folders, and it opens as its request
+    /// asks. Open containing folder on such a host fetches the file's whole
+    /// folder first ([`Self::reveal_after_folder`]).
+    fn after_file_saved(
+        &mut self,
+        id: &str,
+        entry: &FetchEntry,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = entry.request();
+        let sends_folders = self.host_sends_folders(entry.host_key());
+        if request.open_when_done && request.action == LinkAction::Folder && sends_folders {
+            self.reveal_after_folder(id, entry, path, window, cx);
+            return;
+        }
+        if !entry.reports_to_popup() && sends_folders {
+            self.push_file_fetched(id, entry, cx);
+        }
+        if request.open_when_done {
+            self.open_fetched(path, request, window, cx);
+        }
+    }
+
+    /// Open containing folder on the file fetch `id` of `entry`, saved at
+    /// `path`: its Fetching toast goes and its whole folder is fetched,
+    /// which reveals the file once saved; when that fetch is refused, the
+    /// refusal shows and the saved copy is revealed now.
+    fn reveal_after_folder(
+        &mut self,
+        id: &str,
+        entry: &FetchEntry,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_toast_key(&fetching_toast_key(id, entry.group()), cx);
+        let folder = file_fetch::parent_folder_request(entry.request());
+        match self.try_start_folder_fetch(folder, cx) {
+            Ok(folder_id) => {
+                if let Some(folder) = self.fetches.get_mut(&folder_id) {
+                    folder.reveal_when_done(path);
+                }
+            }
+            Err(refusal) => {
+                self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+                self.open_fetched(path, entry.request(), window, cx);
+            }
         }
     }
 
@@ -1579,6 +1678,7 @@ impl RootView {
             Some(detail),
             cx,
         );
+        self.reveal_noted_copy(&entry, window, cx);
     }
 
     /// `host`'s connection closed or moved to another daemon: every fetch
@@ -1626,6 +1726,7 @@ impl RootView {
                 Some(failure_detail(&entry, &reason)),
                 cx,
             );
+            self.reveal_noted_copy(&entry, window, cx);
         }
     }
 

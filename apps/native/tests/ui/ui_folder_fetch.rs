@@ -1396,3 +1396,209 @@ fn a_fetched_folder_reveals_in_explorer(cx: &mut TestAppContext) {
         "the toast stays until it times out"
     );
 }
+
+/// Writes `text` to `s1`'s pane `p2`, opens the link menu on column `col`
+/// of its first row with Ctrl+Shift+click, and picks Open containing folder.
+fn pick_containing_folder(h: &mut Harness<'_>, text: &str, col: usize) {
+    h.host(&saved_remote()).pty("s1", text.as_bytes());
+    let on = h.cell_center("p2", col, 0);
+    h.click(
+        on,
+        Modifiers {
+            shift: true,
+            ..support::secondary_key()
+        },
+    );
+    h.click_on("link-menu-folder");
+}
+
+/// Picks Open containing folder on the file link `docs/notes.txt` (text
+/// `text`, column 6), answers its stat as a file and streams `notes` for it.
+fn contain_notes(h: &mut Harness<'_>, text: &str) {
+    pick_containing_folder(h, text, 6);
+    let stat_id = one_stat(h, "docs/notes.txt");
+    stat(h, &stat_id, PathKind::File);
+    let id = one_file_fetch(h, "docs/notes.txt");
+    stream_file(h, &id, b"notes");
+}
+
+#[gpui::test]
+fn open_containing_folder_on_a_remote_file_fetches_its_folder_then_reveals_the_file(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    contain_notes(&mut h, "see C:/wt/x/docs/notes.txt");
+    settle_until(&mut h, "the file's folder to be asked for", |h| {
+        shows(h, &format!("Fetching folder docs from {HOST}"))
+    });
+    let folder = one_folder_fetch(&mut h, "docs");
+    assert!(
+        h.opened().is_empty(),
+        "nothing opens before the folder comes"
+    );
+    assert!(
+        !shows(&mut h, "Fetched notes.txt"),
+        "the file's done toast does not show: {:?}",
+        toasts(&mut h)
+    );
+    stream_folder(
+        &mut h,
+        &folder,
+        &[("notes.txt", b"notes"), ("other.md", b"# other\n")],
+    );
+    settle_until(&mut h, "the fetched file to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    let saved = repo_folder(&root).join("docs").join("notes.txt");
+    assert_eq!(h.opened(), [Opened::Reveal(saved.clone())]);
+    assert!(
+        saved.with_file_name("other.md").is_file(),
+        "the rest of the folder lands beside the file"
+    );
+}
+
+#[gpui::test]
+fn open_containing_folder_reveals_the_copy_when_the_folder_is_already_fetching(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    // A folder inside docs is fetching, which the file does not overlap
+    // but the fetch of its whole folder does.
+    fetch_folder(&mut h, "see C:/wt/x/docs/sub", 6, "docs/sub");
+
+    contain_notes(&mut h, "\rsee C:/wt/x/docs/notes.txt");
+    settle_until(&mut h, "the fetched file to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    assert!(
+        fetch_messages(&mut h).is_empty(),
+        "the folder is not asked for"
+    );
+    assert_eq!(titled(&mut h, "Already fetching docs"), 1);
+    let saved = repo_folder(&root).join("docs").join("notes.txt");
+    assert_eq!(h.opened(), [Opened::Reveal(saved)]);
+}
+
+/// [`contain_notes`] on `see C:/wt/x/docs/notes.txt`, then waits for the
+/// fetch of its folder `docs` and returns that fetch's id.
+fn contain_notes_folder(h: &mut Harness<'_>) -> String {
+    contain_notes(h, "see C:/wt/x/docs/notes.txt");
+    settle_until(h, "the file's folder to be asked for", |h| {
+        shows(h, &format!("Fetching folder docs from {HOST}"))
+    });
+    one_folder_fetch(h, "docs")
+}
+
+#[gpui::test]
+fn open_containing_folder_reveals_the_copy_when_the_folder_fetch_fails(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    let folder = contain_notes_folder(&mut h);
+    h.host(&saved_remote()).send(DaemonMessage::FileFetchError {
+        id: folder,
+        error: "the folder has more than 20000 files".to_owned(),
+    });
+    h.cx.run_until_parked();
+
+    assert!(
+        shows(&mut h, "Couldn't fetch docs"),
+        "the folder's failure shows: {:?}",
+        toasts(&mut h)
+    );
+    let saved = repo_folder(&root).join("docs").join("notes.txt");
+    assert_eq!(
+        h.opened(),
+        [Opened::Reveal(saved)],
+        "the saved copy is revealed"
+    );
+}
+
+#[gpui::test]
+fn open_containing_folder_reveals_nothing_when_the_folder_fetch_is_cancelled(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    let folder = contain_notes_folder(&mut h);
+    let toast = toast_keyed(&mut h, &folder).expect("the folder's toast shows");
+    h.click_on(&toast_action_selector(toast, "cancel"));
+    h.cx.run_until_parked();
+
+    let sent = fetch_messages(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CancelFetch { id }] if *id == folder),
+        "the host is told to stop: {sent:?}"
+    );
+    assert!(h.opened().is_empty(), "nothing is revealed");
+}
+
+#[gpui::test]
+fn open_containing_folder_reveals_the_folder_when_the_file_is_not_in_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    let folder = contain_notes_folder(&mut h);
+    stream_folder(&mut h, &folder, &[("other.md", b"# other\n")]);
+    settle_until(&mut h, "the folder to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    assert_eq!(
+        h.opened(),
+        [Opened::Reveal(repo_folder(&root).join("docs"))]
+    );
+}
+
+#[gpui::test]
+fn open_containing_folder_on_a_remote_page_fetches_its_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    let page: &[u8] = b"<html><img src=\"a.png\"></html>";
+
+    pick_containing_folder(&mut h, "see C:/wt/x/docs/report.html", 6);
+    let stat_id = one_stat(&mut h, "docs/report.html");
+    stat(&mut h, &stat_id, PathKind::File);
+    let id = one_file_fetch(&mut h, "docs/report.html");
+    stream_file(&mut h, &id, page);
+    settle_until(&mut h, "the page's folder to be asked for", |h| {
+        shows(h, &format!("Fetching folder docs from {HOST}"))
+    });
+    // One FetchFolder and no media fetch.
+    let folder = one_folder_fetch(&mut h, "docs");
+    stream_folder(&mut h, &folder, &[("report.html", page), ("a.png", b"png")]);
+    settle_until(&mut h, "the page to be revealed", |h| {
+        !h.opened().is_empty()
+    });
+
+    let saved = repo_folder(&root).join("docs").join("report.html");
+    assert_eq!(h.opened(), [Opened::Reveal(saved)]);
+}
+
+#[gpui::test]
+fn a_fetch_inside_a_folder_being_fetched_names_the_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    contain_notes_folder(&mut h);
+
+    click_link(&mut h, "\x1b[2K\rsee C:/wt/x/docs/other.md", 6);
+    let stat_id = one_stat(&mut h, "docs/other.md");
+    stat(&mut h, &stat_id, PathKind::File);
+
+    assert!(
+        fetch_messages(&mut h).is_empty(),
+        "the file is not asked for"
+    );
+    assert_eq!(
+        titled(&mut h, "Already fetching folder docs"),
+        1,
+        "the refusal names the folder: {:?}",
+        toasts(&mut h)
+    );
+}
