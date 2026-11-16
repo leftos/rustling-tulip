@@ -2,7 +2,8 @@
 //! names its gestures; Ctrl+click opens a URL in the browser and a path in
 //! VS Code at its line or its default app, through a recording opener;
 //! Ctrl+Shift+click on a path opens the link menu, whose entries open it in
-//! its app, in the viewer, or in its folder.
+//! its app, in the viewer, or in its folder. A file link in a chat answer
+//! opens the same menu on Shift, else its default app.
 
 #![expect(
     clippy::expect_used,
@@ -15,11 +16,13 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL, FollowSource, SessionSnapshot,
-    SplitDirection,
+    ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS,
+    FEATURE_FILE_TAIL, FollowSource, SessionSnapshot, SplitDirection,
 };
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey, ToastKind};
+use rustling_tulip_native::{
+    ChatFileLink, Connection, NetEvent, OpenOutcome, PopoutKey, ToastKind,
+};
 use serde_json::{Value, json};
 use support::{Fixture, Harness, Opened, TestDir, pane, saved_remote, session, split, tab};
 
@@ -1346,4 +1349,170 @@ fn a_ui_save_keeps_hand_added_unc_hosts(cx: &mut TestAppContext) {
     let saved = ui_file(&dir);
     assert_eq!(saved["sidebar_collapsed"], json!(false), "{saved}");
     assert_eq!(saved["unc_hosts"], json!(["nas", "files"]), "{saved}");
+}
+
+/// The request id of the `LoadChat` for `s1` among `sent`.
+fn chat_load_request(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "s1" => request_id.clone(),
+        _ => None,
+    })
+}
+
+/// Agent session `s1` in `cwd`, alone in pane `p1` switched to its chat,
+/// over a daemon that follows files when `file_tail` is set, with answer
+/// `a1` reading `text` loaded.
+fn chat_in<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    cwd: &Path,
+    file_tail: bool,
+    text: &str,
+) -> Harness<'a> {
+    let s1 = session("s1").cwd(&cwd.to_string_lossy()).build();
+    let mut h = Harness::with(cx, dir, &Fixture::single(s1));
+    h.answer_scrollback("s1", b"");
+    if file_tail {
+        file_tail_daemon(&mut h);
+    }
+    h.sent();
+    h.click_on("pane-view-chat-p1");
+    let request_id = chat_load_request(&h.sent()).expect("the toggle asks for the chat");
+    h.send(DaemonMessage::Chat {
+        session_id: "s1".to_owned(),
+        entries: vec![ChatEntry::Answer {
+            id: "a1".to_owned(),
+            text: text.to_owned(),
+            live: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: Some(request_id),
+    });
+    h
+}
+
+const CHAT_LOG: &str = "See [the log](logs/app.log) and [docs](https://example.com).";
+
+/// Clicks a file link to `path` (with `anchor`) in `s1`'s chat, as a
+/// Shift+click when `menu` is set.
+fn chat_link_click(h: &mut Harness<'_>, path: &str, anchor: Option<&str>, menu: bool) {
+    let (path, anchor) = (path.to_owned(), anchor.map(str::to_owned));
+    h.root_update(move |root, window, cx| {
+        let link = ChatFileLink {
+            path: Path::new(&path),
+            anchor: anchor.as_deref(),
+            menu,
+        };
+        root.chat_file_link("s1", link, window, cx);
+    });
+}
+
+#[gpui::test]
+fn a_chat_file_link_is_drawn_as_a_link(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_in(cx, &dir, dir.path(), false, CHAT_LOG);
+    let links = h.root(|root, _| root.chat_answer_file_links("s1", "a1"));
+    assert_eq!(links, [("logs/app.log".to_owned(), None)]);
+}
+
+#[gpui::test]
+fn a_chat_link_with_a_line_anchor_opens_vscode_at_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "src/main.rs");
+    let mut h = chat_in(cx, &dir, dir.path(), false, "See [main](src/main.rs#L7).");
+    let links = h.root(|root, _| root.chat_answer_file_links("s1", "a1"));
+    assert_eq!(links.len(), 1, "one file link: {links:?}");
+    let (path, anchor) = links.first().cloned().expect("the file link");
+    chat_link_click(&mut h, &path, anchor.as_deref(), false);
+    assert!(!h.root(|root, _| root.link_menu_open()), "no menu");
+    assert_eq!(
+        h.opened(),
+        [Opened::VsCode {
+            path: file,
+            line: 7,
+            column: 1,
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_shift_click_on_a_chat_file_link_opens_the_link_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "logs/app.log");
+    let mut h = chat_in(cx, &dir, dir.path(), true, CHAT_LOG);
+    chat_link_click(&mut h, "logs/app.log", None, true);
+    assert!(h.root(|root, _| root.link_menu_open()), "the menu opens");
+    for id in FOUR_ROWS {
+        assert!(h.in_model(id), "{id} is in the menu");
+    }
+    assert_eq!(
+        row_label(&mut h, "link-menu-default"),
+        Some("Open in default app")
+    );
+    assert_eq!(
+        row_label(&mut h, "link-menu-viewer"),
+        Some("Open in viewer")
+    );
+    assert_eq!(row_label(&mut h, "link-menu-follow"), Some("Follow in tab"));
+    assert_eq!(
+        row_label(&mut h, "link-menu-folder"),
+        Some("Open containing folder")
+    );
+    h.click_on("link-menu-follow");
+    let path = dir
+        .path()
+        .join("logs/app.log")
+        .to_string_lossy()
+        .into_owned();
+    let sent = h.sent();
+    assert_eq!(
+        follow_opens(&sent),
+        [(s1_file(&path), None)],
+        "the session folder joined with the link's path: {sent:?}"
+    );
+    assert_eq!(h.opened(), [], "no default app");
+}
+
+#[gpui::test]
+fn a_chat_file_link_menu_on_a_host_without_file_tail_has_no_follow_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "logs/app.log");
+    let mut h = chat_in(cx, &dir, dir.path(), false, CHAT_LOG);
+    chat_link_click(&mut h, "logs/app.log", None, true);
+    assert!(h.root(|root, _| root.link_menu_open()), "the menu opens");
+    for id in ["link-menu-default", "link-menu-viewer", "link-menu-folder"] {
+        assert!(h.in_model(id), "{id} is in the menu");
+    }
+    assert!(!h.in_model("link-menu-follow"), "no follow row");
+    assert_eq!(row_label(&mut h, "link-menu-follow"), None);
+}
+
+#[gpui::test]
+fn a_plain_click_on_a_chat_file_link_opens_the_default_app(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "logs/app.log");
+    let mut h = chat_in(cx, &dir, dir.path(), true, CHAT_LOG);
+    chat_link_click(&mut h, "logs/app.log", None, false);
+    assert!(!h.root(|root, _| root.link_menu_open()), "no menu");
+    assert_eq!(h.opened(), [Opened::DefaultApp(file.clone())]);
+    chat_link_click(&mut h, "logs/app.log", Some("L7"), false);
+    assert!(!h.root(|root, _| root.link_menu_open()), "no menu");
+    assert_eq!(
+        h.opened(),
+        [
+            Opened::DefaultApp(file.clone()),
+            Opened::VsCode {
+                path: file,
+                line: 7,
+                column: 1,
+            },
+        ]
+    );
 }

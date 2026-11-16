@@ -23,6 +23,7 @@ use crate::chat_select::UnitSource;
 use crate::chat_view::SelectDraw;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, ui_px_at};
+use crate::link_menu_view::ChatFileLink;
 use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
@@ -147,6 +148,23 @@ impl MdDoc {
         units
     }
 
+    /// Each file link the document draws as a link under
+    /// [`LinkRoute::Chat`], in order: its path and its `#fragment`, as a
+    /// click on it passes them.
+    pub(crate) fn file_links(&self) -> Vec<(String, Option<String>)> {
+        self.rows
+            .iter()
+            .flat_map(Row::span_lists)
+            .flat_map(|spans| link_ranges(spans, LinkRoute::Chat))
+            .filter_map(|(_, target)| match target {
+                LinkTarget::File { path, anchor } => {
+                    Some((path.to_string_lossy().into_owned(), anchor))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Each stretchtext link the document draws, in order: its drawn text
     /// and the key of the stretch it opens or closes.
     pub(crate) fn stretchtext_links(&self) -> Vec<(String, String)> {
@@ -170,6 +188,9 @@ pub(crate) enum LinkRoute {
     /// A chat answer's: a web link, opened in the browser, and a stretch,
     /// opened or closed in place; any other link is plain text.
     WebOnly,
+    /// A desktop chat answer's: what [`Self::WebOnly`] follows, and a file
+    /// link, opened in its default app, or its link menu on Shift.
+    Chat,
 }
 
 impl LinkRoute {
@@ -178,7 +199,86 @@ impl LinkRoute {
         match self {
             Self::ViewerTab => true,
             Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
+            Self::Chat => matches!(
+                target,
+                LinkTarget::Url(_) | LinkTarget::Stretchtext { .. } | LinkTarget::File { .. }
+            ),
         }
+    }
+}
+
+/// What a click on a rendered document's link is followed by, besides its
+/// target: the document's id, the links its route follows, and the chat
+/// answer it is, if it is one.
+#[derive(Clone)]
+struct LinkClick {
+    tab_id: String,
+    route: LinkRoute,
+    stretchtext: Option<(String, String)>,
+}
+
+impl LinkClick {
+    /// Follows a click on a link to `target` as the route asks.
+    fn follow(
+        &self,
+        root: &mut RootView,
+        target: LinkTarget,
+        window: &mut Window,
+        cx: &mut Context<RootView>,
+    ) {
+        match (self.route, target) {
+            (_, LinkTarget::Stretchtext { key }) => {
+                if let Some((session_id, answer_id)) = &self.stretchtext {
+                    root.toggle_stretchtext(session_id, answer_id, &key, cx);
+                } else {
+                    tracing::debug!("a stretchtext link outside a chat answer");
+                }
+            }
+            (LinkRoute::ViewerTab, target) => {
+                let prefer_viewer = prefers_viewer(window.modifiers());
+                root.follow_md_link(&self.tab_id, target, prefer_viewer, window, cx);
+            }
+            (LinkRoute::WebOnly | LinkRoute::Chat, LinkTarget::Url(url)) => {
+                root.dispatch_open(
+                    &crate::target::HostKey::Local,
+                    OpenJob::Url(url),
+                    Then::Nothing,
+                    window,
+                    cx,
+                );
+            }
+            (LinkRoute::Chat, LinkTarget::File { path, anchor }) => {
+                self.chat_file(root, &path, anchor.as_deref(), window, cx);
+            }
+            (LinkRoute::WebOnly, _) => {
+                tracing::debug!("a chat answer follows only web links");
+            }
+            (LinkRoute::Chat, _) => {
+                tracing::debug!("a chat answer follows only web and file links");
+            }
+        }
+    }
+
+    /// Opens a chat answer's file link at `path`: its link menu when Shift
+    /// is held, else in its default app.
+    fn chat_file(
+        &self,
+        root: &mut RootView,
+        path: &Path,
+        anchor: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<RootView>,
+    ) {
+        let Some((session_id, _)) = &self.stretchtext else {
+            tracing::debug!("a file link outside a chat answer");
+            return;
+        };
+        let link = ChatFileLink {
+            path,
+            anchor,
+            menu: window.modifiers().shift,
+        };
+        root.chat_file_link(session_id, link, window, cx);
     }
 }
 
@@ -802,8 +902,11 @@ impl Painter {
             return text.into_any_element();
         }
         let (bounds, targets): (Vec<Range<usize>>, Vec<LinkTarget>) = links.into_iter().unzip();
-        let (tab_id, route) = (self.tab_id.clone(), self.route);
-        let stretchtext = self.stretchtext.clone();
+        let click = LinkClick {
+            tab_id: self.tab_id.clone(),
+            route: self.route,
+            stretchtext: self.stretchtext.clone(),
+        };
         text.on_click(bounds, move |index, window, cx| {
             let Some(target) = targets.get(index).cloned() else {
                 tracing::debug!(index, "a Markdown link click outside every link");
@@ -813,31 +916,7 @@ impl Painter {
                 tracing::debug!("a Markdown link click in a window without the root view");
                 return;
             };
-            let prefer_viewer = prefers_viewer(window.modifiers());
-            root.update(cx, |root, cx| match (route, target) {
-                (_, LinkTarget::Stretchtext { key }) => {
-                    if let Some((session_id, answer_id)) = &stretchtext {
-                        root.toggle_stretchtext(session_id, answer_id, &key, cx);
-                    } else {
-                        tracing::debug!("a stretchtext link outside a chat answer");
-                    }
-                }
-                (LinkRoute::ViewerTab, target) => {
-                    root.follow_md_link(&tab_id, target, prefer_viewer, window, cx);
-                }
-                (LinkRoute::WebOnly, LinkTarget::Url(url)) => {
-                    root.dispatch_open(
-                        &crate::target::HostKey::Local,
-                        OpenJob::Url(url),
-                        Then::Nothing,
-                        window,
-                        cx,
-                    );
-                }
-                (LinkRoute::WebOnly, _) => {
-                    tracing::debug!("a chat answer follows only web links");
-                }
-            });
+            root.update(cx, |root, cx| click.follow(root, target, window, cx));
         })
         .into_any_element()
     }
@@ -1410,6 +1489,48 @@ mod tests {
             );
         }
         assert_eq!(link_ranges(&spans, LinkRoute::ViewerTab).len(), 3);
+    }
+
+    #[test]
+    fn the_chat_route_follows_web_stretch_and_file_links() {
+        let targets = [
+            LinkTarget::Url("https://example.com".to_owned()),
+            LinkTarget::Stretchtext {
+                key: "k".to_owned(),
+            },
+            LinkTarget::File {
+                path: PathBuf::from("logs/app.log"),
+                anchor: None,
+            },
+            LinkTarget::Anchor("top".to_owned()),
+            LinkTarget::Refused,
+        ];
+        let follows = |route: LinkRoute| -> Vec<bool> {
+            targets.iter().map(|target| route.follows(target)).collect()
+        };
+        assert_eq!(follows(LinkRoute::Chat), [true, true, true, false, false]);
+        assert_eq!(
+            follows(LinkRoute::WebOnly),
+            [true, true, false, false, false]
+        );
+    }
+
+    #[test]
+    fn a_chat_answer_follows_its_file_links_and_not_its_anchors() {
+        let spans = spans_of("[log](logs/app.log) [top](#top)\n");
+        let (text, _) = inline_text(&spans);
+        let links = link_ranges(&spans, LinkRoute::Chat);
+        let [(log, target)] = links.as_slice() else {
+            panic!("only the file link is clickable, got {links:?}");
+        };
+        assert_eq!(&text[log.clone()], "log");
+        assert_eq!(
+            *target,
+            LinkTarget::File {
+                path: Path::new("notes").join("logs/app.log"),
+                anchor: None,
+            }
+        );
     }
 
     #[test]

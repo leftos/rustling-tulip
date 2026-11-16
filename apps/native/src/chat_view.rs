@@ -869,7 +869,7 @@ impl ChatPanes {
     }
 
     /// The host whose connection session `session_id`'s chat requests take.
-    fn host_of(&self, session_id: &str) -> HostKey {
+    pub(crate) fn host_of(&self, session_id: &str) -> HostKey {
         self.hosts
             .get(session_id)
             .cloned()
@@ -980,6 +980,9 @@ pub(crate) struct RowLook<'a> {
     /// How the rows' selectable texts are drawn and registered; only the
     /// phone's chat has it.
     pub(crate) select: Option<&'a SelectDraw>,
+    /// The links an answer follows: web, stretch and file links on the
+    /// desktop, web and stretch links on the phone.
+    pub(crate) link_route: LinkRoute,
 }
 
 /// The parts of a tool call a card draws.
@@ -2736,6 +2739,20 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// The file links answer `answer_id` of session `session_id`'s desktop
+    /// chat draws as links, in order: each one's path as the answer wrote it
+    /// and its `#fragment` (lowercased, as a click passes it).
+    #[must_use]
+    pub fn chat_answer_file_links(
+        &self,
+        session_id: &str,
+        answer_id: &str,
+    ) -> Vec<(String, Option<String>)> {
+        self.answer_doc(session_id, answer_id)
+            .map(MdDoc::file_links)
+            .unwrap_or_default()
+    }
+
     fn answer_doc(&self, session_id: &str, answer_id: &str) -> Option<&MdDoc> {
         let chat = self.chat.sessions.get(session_id)?;
         chat.docs.get(answer_id).map(|answer| answer.doc.as_ref())
@@ -2871,6 +2888,7 @@ impl RootView {
             finals: BTreeSet::new(),
             min_run: PHONE_MIN_RUN,
             select: select.as_ref(),
+            link_route: LinkRoute::WebOnly,
             ..self.row_look(PHONE_PANE, session_id, cx)
         };
         let (main, strip) = match &self.chat.phone_refused {
@@ -2989,6 +3007,7 @@ impl RootView {
             finals: BTreeSet::new(),
             min_run: 1,
             select: None,
+            link_route: LinkRoute::Chat,
         }
     }
 
@@ -3723,7 +3742,7 @@ fn answer_row(
             let painter = Painter::new(
                 look.text_offset,
                 format!("chat-{id}"),
-                LinkRoute::WebOnly,
+                look.link_route,
                 (look.mono_family, look.mono_size),
                 &look.theme,
             )

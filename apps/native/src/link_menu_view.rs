@@ -3,6 +3,7 @@
 //! follow tab or in its folder, and Up, Down, Enter, Esc and a click outside
 //! drive it.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{
@@ -12,11 +13,12 @@ use gpui::{
 use protocol::FEATURE_FILE_TAIL;
 
 use crate::link_menu::{self, LinkMenu, RowPick};
-use crate::open;
+use crate::links;
+use crate::open::{self, LinkAction};
 use crate::open_view::LinkSource;
 use crate::overlay_owner::Overlay;
 use crate::remote_mode::Capabilities;
-use crate::session_menu::{menu_frame, menu_item};
+use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::{RootView, fonts};
@@ -24,7 +26,73 @@ use crate::{RootView, fonts};
 /// The link menu's selector.
 const LINK_MENU: &str = "link-menu";
 
+/// A click on a file link in a chat answer: the path the link names (relative
+/// paths resolve against the session's folders), its `#fragment`, and
+/// whether the click asks for the link menu rather than the default app.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatFileLink<'a> {
+    pub path: &'a Path,
+    pub anchor: Option<&'a str>,
+    pub menu: bool,
+}
+
 impl RootView {
+    /// Opens a file link clicked in session `session_id`'s chat: the link
+    /// menu at the mouse when `link.menu` asks for it, else the file in its
+    /// default app (VS Code at the line an `#L<n>` anchor names), as a
+    /// terminal Ctrl+click opens it, so a remote host's file is fetched.
+    pub fn chat_file_link(
+        &mut self,
+        session_id: &str,
+        link: ChatFileLink<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The chat's own host: a session id another host also lists must
+        // never resolve the path against that host's folders.
+        let host = self.chat.host_of(session_id);
+        let Some(snapshot) = self
+            .sidebar
+            .sessions_of(&host)
+            .iter()
+            .find(|s| s.id == session_id)
+        else {
+            tracing::debug!(%session_id, "a chat file link of a session its host does not list; not opened");
+            return;
+        };
+        let base_dirs = open::base_dirs(snapshot);
+        let path = link.path.to_string_lossy();
+        let (path, suffix_line, column) = links::split_line_suffix(&path);
+        // An `#L<n>` anchor's line wins over a `:line:column` suffix, and
+        // takes no column from it.
+        let (line, column) = match link.anchor.and_then(links::anchor_line) {
+            Some(line) => (Some(line), None),
+            None => (suffix_line, column),
+        };
+        let terminal = links::path_link(path, line, column);
+        if link.menu {
+            let follow = self.link_menu_follows(&host, Some(session_id));
+            let menu = LinkMenu {
+                link: terminal,
+                base_dirs,
+                session: Some(session_id.to_owned()),
+                host,
+                follow,
+                at: window.mouse_position(),
+                selected: 0,
+                max_height: window.viewport_size().height * MENU_MAX_SHARE,
+            };
+            self.open_link_menu(menu, window, cx);
+            return;
+        }
+        let source = LinkSource {
+            host: &host,
+            session: Some(session_id),
+            action: LinkAction::DefaultApp,
+        };
+        self.open_link(&terminal, base_dirs, &source, window, cx);
+    }
+
     /// Whether the link menu is open, in any window.
     #[must_use]
     pub fn link_menu_open(&self) -> bool {

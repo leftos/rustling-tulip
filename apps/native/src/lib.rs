@@ -352,6 +352,7 @@ pub use crate::history::{
     MoreRow,
 };
 pub use crate::host_update_dialog::{HostUpdateDialogView, HostUpdateSession};
+pub use crate::link_menu_view::ChatFileLink;
 pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,

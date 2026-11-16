@@ -1401,6 +1401,78 @@ fn overlaps_existing_link(start_index: usize, end_index: usize, links: &[Termina
         .any(|link| start_index < link.end_index && end_index > link.start_index)
 }
 
+/// A path link to `path` at `line` and `column`, as a link that came from no
+/// grid (a chat answer's file link): one reading, no cells.
+#[must_use]
+pub(crate) fn path_link(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalLink {
+    TerminalLink {
+        kind: LinkKind::Path,
+        text: path.to_owned(),
+        target: path.to_owned(),
+        line,
+        column,
+        candidates: vec![TerminalLinkCandidate {
+            path: path.to_owned(),
+            line,
+            column,
+            suffix: None,
+        }],
+        start_index: 0,
+        end_index: 0,
+        start_row: 0,
+        start_column: 0,
+        end_row: 0,
+        end_column: 0,
+        segments: Vec::new(),
+        spaced: Vec::new(),
+        hyperlink: false,
+    }
+}
+
+/// The line a link's `#L<digits>` anchor names (`L12` is line 12, and so is
+/// `l12`, since a Markdown link's fragment arrives lowercased); `None` for
+/// any other anchor, and for line 0, since lines count from 1.
+#[must_use]
+pub(crate) fn anchor_line(anchor: &str) -> Option<u32> {
+    let digits = anchor
+        .strip_prefix('L')
+        .or_else(|| anchor.strip_prefix('l'))?;
+    positive_number(digits)
+}
+
+/// `text` as a number from 1 up, when it is only ASCII digits.
+fn positive_number(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|number| *number > 0)
+}
+
+/// `path` with a trailing `:<line>` or `:<line>:<column>` (each from 1 up)
+/// split off its last component, and the line and column it named; `path`
+/// whole, with neither, when it ends in no such suffix.
+#[must_use]
+pub(crate) fn split_line_suffix(path: &str) -> (&str, Option<u32>, Option<u32>) {
+    let names_a_file = |head: &str| !head.is_empty() && !head.ends_with(['/', '\\']);
+    let Some((rest, last)) = path.rsplit_once(':') else {
+        return (path, None, None);
+    };
+    let Some(last) = positive_number(last) else {
+        return (path, None, None);
+    };
+    if let Some((head, middle)) = rest.rsplit_once(':')
+        && let Some(line) = positive_number(middle)
+        && names_a_file(head)
+    {
+        return (head, Some(line), Some(last));
+    }
+    if names_a_file(rest) {
+        (rest, Some(last), None)
+    } else {
+        (path, None, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -2659,6 +2731,66 @@ mod tests {
             "www.example.1a/x",
         ] {
             assert!(!web_address(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn path_link_is_one_path_candidate() {
+        let link = super::path_link("logs/app.log", Some(12), Some(3));
+        assert_eq!(
+            link,
+            TerminalLink {
+                kind: LinkKind::Path,
+                text: "logs/app.log".to_owned(),
+                target: "logs/app.log".to_owned(),
+                line: Some(12),
+                column: Some(3),
+                candidates: vec![TerminalLinkCandidate {
+                    path: "logs/app.log".to_owned(),
+                    line: Some(12),
+                    column: Some(3),
+                    suffix: None,
+                }],
+                start_index: 0,
+                end_index: 0,
+                start_row: 0,
+                start_column: 0,
+                end_row: 0,
+                end_column: 0,
+                segments: Vec::new(),
+                spaced: Vec::new(),
+                hyperlink: false,
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_line_reads_only_l_numbers() {
+        assert_eq!(super::anchor_line("L12"), Some(12));
+        assert_eq!(super::anchor_line("l12"), Some(12));
+        for anchor in ["L", "l", "L1x", "heading", "L0", ""] {
+            assert_eq!(super::anchor_line(anchor), None, "{anchor}");
+        }
+    }
+
+    #[test]
+    fn split_line_suffix_reads_a_trailing_line_and_column() {
+        let split = super::split_line_suffix;
+        assert_eq!(split("src/main.rs:42"), ("src/main.rs", Some(42), None));
+        assert_eq!(
+            split("src/main.rs:42:5"),
+            ("src/main.rs", Some(42), Some(5))
+        );
+        assert_eq!(split(r"C:\x\a.rs:3"), (r"C:\x\a.rs", Some(3), None));
+        for whole in [
+            r"C:\x\a.rs",
+            "a.rs:0",
+            "a.rs:x",
+            "a.rs",
+            "a.rs:42:0",
+            "dir:3/a.rs",
+        ] {
+            assert_eq!(split(whole), (whole, None, None), "{whole}");
         }
     }
 }
