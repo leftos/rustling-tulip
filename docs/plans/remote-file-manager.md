@@ -14,20 +14,19 @@ A file manager in the native client that browses each machine's own file system 
 
 - **Native paths from the host.** The client learns each host's path style from a new additive reply carrying the host's OS, its home folder and its roots (drives on Windows, `/` elsewhere), since `Welcome` has no OS today. The location bar parses a path by the host's style, never by this machine's: on a Windows host `\` and `/` are both separators and drive letters and UNC prefixes are accepted; on a POSIX host only `/`. A path that cannot be that host's shows an inline error. The text shown is the host's own canonical path (`\\?\` stripped for display), case-insensitive on Windows.
 - **Listing:** a new paged message family, `ListDir { host path, cursor, limit }` answered with entries `{ name, kind, size, modified, link, hidden }` and a cursor, at most a few thousand entries per reply, under per-connection bounds like the fetch messages'. Links are listed as links and followed only inside what the reach allows.
-- **Fetch by absolute path:** the existing file and folder fetch (`FileChunk` streaming, the folder archive, the client's fetch-and-open sinks) gains an absolute-host-path form under the same reach rule; copies land under the remote-files folder keyed by host and path.
+- **Fetch by absolute path:** the host-path messages (`fetch_host_file`, `fetch_host_folder`, `stat_host_path`; RT-1823) reuse the `FileChunk` streaming, the folder archive and the client's fetch-and-open sinks; copies land under the remote-files folder keyed by host and path.
 - **This PC uses the same file manager**, reading its own disk directly behind the same listing seam, so the tab and the panel never care which machine they show.
 - **Ctrl+click** gains a fourth item, `Open in file manager`: a folder opens as itself, a file opens its containing folder with the file selected, on the host the path belongs to.
 
 ## Steps
 
-- [ ] Host info and paged listing: the reply with OS, home and roots; `ListDir`; the reach rule with the host-only whole-machine setting (daemon, `Settings` switch on the host); `docs/wire-protocol.md`.
-- [ ] Fetch by absolute path under the reach rule, reusing the streaming and archive paths.
+- [ ] Host info and paged listing: the reply with OS, home and roots; `ListDir` under the reach ruling above; `docs/wire-protocol.md`.
+- [x] Fetch by absolute path, reusing the streaming and archive paths (RT-1823).
 - [ ] The file-manager tab: `TabContent` variant (additive; `Unknown` absorbs it in older clients), location bar, listing view, the read-only actions; This PC behind the same seam.
 - [ ] The sidebar panel: a docked file tree per machine over the same listing.
 - [ ] `Open in file manager` in the Ctrl+click menu.
 
 ## Related
 
-- RT-115 (Host-approved extra roots for file fetch) supplies the approved extra folders.
 - RT-106 (PW.12: Phone files) can share the listing message for the phone's worktree tree.
-- RT-889, RT-891, RT-893, RT-895: fetch hardening that the absolute-path fetch builds on.
+- RT-889, RT-891, RT-893, RT-895: fetch hardening that the host-path fetch shares.

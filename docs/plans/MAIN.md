@@ -177,11 +177,11 @@
 - [ ] RT-1861 Refuse a driven run whose RUSTLING_TULIP_SSH is not the fake ssh, or whose fake ssh state is outside .tmp
 - [ ] RT-1863 Keep a seeded gates override off the machine's slot locks and cutover flag
 - [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
-- [ ] RT-1887 Let the driver find a fetch card's Reveal and Fetch whole folder buttons
-- [ ] RT-1888 Add a native-shot view that draws Settings › Accounts' account rows
-- [ ] RT-1889 Give each rt.ps1 native-shot run its own gate log
-- [ ] RT-1890 Keep a driven run's account login off Anthropic's real endpoints
-- [ ] RT-1891 Check the sidebar header's title fits on the real text system
+- [ ] RT-1887 Let the driver find a fetch card's Reveal and Fetch whole folder buttons · release vNext
+- [ ] RT-1888 Add a native-shot view that draws Settings › Accounts' account rows · release vNext
+- [ ] RT-1889 Give each rt.ps1 native-shot run its own gate log · release vNext
+- [ ] RT-1890 Keep a driven run's account login off Anthropic's real endpoints · release vNext
+- [ ] RT-1891 Check the sidebar header's title fits on the real text system · release vNext
 
 ## Elevated daemon and security
 
@@ -200,7 +200,7 @@
 
 ## Chat mirror
 
-- [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
+- [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
@@ -254,6 +254,11 @@
 - [ ] RT-310 Lay out the Quit dialog's buttons in tidy rows
 - [ ] RT-308 Show the focused session's name without its UUID in the status bar
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
+- [ ] RT-1882 Polish found by the v0.16.0-alpha smoke run · release vNext
+  - [ ] RT-1884 Say "1 file", not "1 files", on a fetched folder's card · release vNext
+  - [ ] RT-1885 Keep the accounts popover's header on screen in a short window · release vNext
+  - [ ] RT-1886 Give the phone key editor's label field a placeholder · release vNext
+  - [ ] RT-1883 Draw a failed account login's message after the login's own output · release vNext
 - [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
@@ -475,7 +480,6 @@
 - [ ] RT-1297 Tidy the fetch toasts: git's raw error, a folder link's missing name
 - [ ] RT-1360 Browse each machine's files in its own paths with a built-in file manager
   - [ ] RT-1361 Tell clients each host's OS and roots, and list a host folder by its native path
-  - [ ] RT-1362 Fetch a file or folder by its absolute host path
   - [ ] RT-1363 Open a file-manager tab on any machine
   - [ ] RT-1364 Dock a file tree for each machine in the sidebar
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
@@ -557,15 +561,15 @@
   - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
-- [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app
-  - [ ] RT-134 LL.1: Linear protocol messages
-  - [ ] RT-135 LL.2: daemon Linear client (key, team keys, batched issue query, cache)
-  - [ ] RT-136 LL.3: daemon Linear wiring (title scan, 5-min refresh, hover requests)
-  - [ ] RT-137 LL.4: detect Linear identifiers in the terminal, Ctrl+click to open
-  - [ ] RT-138 LL.5: open Linear issues in the app, with the web as fallback
-  - [ ] RT-139 LL.6: Linear hover card over terminal identifiers
-  - [ ] RT-140 LL.7: Linear state chips in session titles
-  - [ ] RT-141 LL.8: document Linear issue links and retire their design
+- [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app · release vNext
+  - [ ] RT-134 LL.1: Linear protocol messages · release vNext
+  - [ ] RT-135 LL.2: daemon Linear client (key, team keys, batched issue query, cache) · release vNext
+  - [ ] RT-136 LL.3: daemon Linear wiring (title scan, 5-min refresh, hover requests) · release vNext
+  - [ ] RT-137 LL.4: detect Linear identifiers in the terminal, Ctrl+click to open · release vNext
+  - [ ] RT-138 LL.5: open Linear issues in the app, with the web as fallback · release vNext
+  - [ ] RT-139 LL.6: Linear hover card over terminal identifiers · release vNext
+  - [ ] RT-140 LL.7: Linear state chips in session titles · release vNext
+  - [ ] RT-141 LL.8: document Linear issue links and retire their design · release vNext
 - [ ] RT-464 Absorb all of ops-tower's functionality so ops-tower can be retired
   - [ ] RT-479 Add a Costs tab with ops-tower's subscription-share model
   - [ ] RT-480 Retire ops-tower once its views ship in rustling-tulip
@@ -777,14 +781,6 @@
 - [ ] RT-1850 Split grid_view's pane_body under the complexity limit
 - [ ] RT-1852 Split the accounts row builder under the complexity limit
 
-## No project
-
-- [ ] RT-1882 Polish
-  - [ ] RT-1884 Say "1 file", not "1 files", on a fetched folder's card
-  - [ ] RT-1885 Keep the accounts popover's header on screen in a short window
-  - [ ] RT-1886 Give the phone key editor's label field a placeholder
-- [ ] RT-1883 Draw
-
 ## Design files
 
 - [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1117
@@ -809,7 +805,7 @@
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [push-relay.md](push-relay.md) — RT-1519
 - [remote-access.md](remote-access.md) — Remote hosts and connections
-- [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1362, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
+- [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
