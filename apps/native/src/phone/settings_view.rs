@@ -5,13 +5,14 @@
 //! renders and forwards taps.
 
 use gpui::{
-    BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div,
-    prelude::*, px,
+    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::keys_view::key_sub_page_stands;
 use super::quick_replies::ReplySet;
 use super::quick_replies_view::sub_page_stands;
 use super::session;
@@ -71,6 +72,8 @@ impl PhoneRoot {
         tracing::debug!("phone: opening Settings");
         self.forget_pending_open();
         self.settings = Some(Settings::default());
+        self.keep_reply_editor();
+        self.keep_key_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         cx.notify();
@@ -82,6 +85,8 @@ impl PhoneRoot {
         if let Some(settings) = self.settings.as_mut() {
             settings.open(page);
         }
+        self.keep_reply_editor();
+        self.keep_key_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         cx.notify();
@@ -93,6 +98,8 @@ impl PhoneRoot {
         let mut settings = Settings::default();
         settings.open(page);
         self.settings = Some(settings);
+        self.keep_reply_editor();
+        self.keep_key_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         cx.notify();
@@ -108,19 +115,36 @@ impl PhoneRoot {
     /// item is gone closes with the step.
     pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
-        let agent = self.reply_counts(ReplySet::Agent, cx);
-        let shell = self.reply_counts(ReplySet::Shell, cx);
         let step = self.settings.as_mut().map(Settings::back);
-        if let Some(settings) = self.settings.as_mut() {
-            settings.retain_valid(|sub| sub_page_stands(sub, &agent, &shell));
-        }
+        self.retain_sub_pages(cx);
         if step == Some(BackStep::Close) {
             self.settings = None;
         }
-        self.keep_reply_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         cx.notify();
+    }
+
+    /// Drops the sub-pages whose item is gone, the editors of ones that left,
+    /// and the picker of a press that left.
+    pub(super) fn retain_sub_pages(&mut self, cx: &App) {
+        let agent = self.reply_counts(ReplySet::Agent, cx);
+        let shell = self.reply_counts(ReplySet::Shell, cx);
+        let keys = self.key_count(cx);
+        let steps = self
+            .key_editor
+            .as_ref()
+            .map(super::keys_view::KeyEditor::step_count);
+        if let Some(settings) = self.settings.as_mut() {
+            settings.retain_valid(|sub| match sub {
+                SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => {
+                    key_sub_page_stands(sub, keys, steps)
+                }
+                _ => sub_page_stands(sub, &agent, &shell),
+            });
+        }
+        self.keep_reply_editor();
+        self.keep_key_editor();
     }
 
     /// A back gesture over the window while a session or Settings shows:
@@ -161,6 +185,9 @@ impl PhoneRoot {
             Some(SubPage::ReplyGroup { set, group }) => self.reply_group_page(set, group, &t, cx),
             Some(SubPage::GroupTitle { .. } | SubPage::Reply { .. }) => {
                 self.reply_editor_page(&t, cx)
+            }
+            Some(SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. }) => {
+                self.key_editor_page(&t, cx)
             }
             None => match settings.page {
                 None => Self::category_list(&t, cx),

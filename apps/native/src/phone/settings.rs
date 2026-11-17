@@ -67,6 +67,10 @@ pub(crate) enum SubPage {
         group: usize,
         reply: Option<usize>,
     },
+    /// One key in its editor; `None` is a key being added.
+    KeyEditor { key: Option<usize> },
+    /// The picker choosing the key of press `step` of the open key editor.
+    KeyPicker { step: usize },
 }
 
 impl SubPage {
@@ -76,6 +80,8 @@ impl SubPage {
             Self::ReplyGroup { .. } => "Group",
             Self::GroupTitle { .. } => "Group title",
             Self::Reply { .. } => "Reply",
+            Self::KeyEditor { .. } => "Key",
+            Self::KeyPicker { .. } => "Choose a key",
         }
     }
 }
@@ -279,6 +285,12 @@ mod tests {
             reply: Some(1),
         });
         assert_eq!(settings.title(), "Reply");
+
+        settings.push(SubPage::KeyEditor { key: Some(0) });
+        assert_eq!(settings.title(), "Key");
+
+        settings.push(SubPage::KeyPicker { step: 0 });
+        assert_eq!(settings.title(), "Choose a key");
     }
 
     #[test]
@@ -298,6 +310,7 @@ mod tests {
         settings.retain_valid(|sub| match sub {
             SubPage::GroupTitle { group, .. } => group.is_none_or(|group| group == 0),
             SubPage::ReplyGroup { group, .. } | SubPage::Reply { group, .. } => group == 0,
+            SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => true,
         });
 
         assert_eq!(
@@ -323,6 +336,7 @@ mod tests {
         settings.retain_valid(|sub| match sub {
             SubPage::GroupTitle { group, .. } => group.is_none_or(|group| group == 0),
             SubPage::ReplyGroup { group, .. } | SubPage::Reply { group, .. } => group == 0,
+            SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => true,
         });
 
         assert_eq!(

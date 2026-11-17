@@ -133,6 +133,65 @@ impl NamedKey {
         }
     }
 
+    /// Every named key the picker offers, in the order it draws them.
+    pub(crate) const ALL: [Self; 24] = [
+        Self::Esc,
+        Self::Tab,
+        Self::Enter,
+        Self::Backspace,
+        Self::Up,
+        Self::Down,
+        Self::Left,
+        Self::Right,
+        Self::Home,
+        Self::End,
+        Self::PageUp,
+        Self::PageDown,
+        Self::F1,
+        Self::F2,
+        Self::F3,
+        Self::F4,
+        Self::F5,
+        Self::F6,
+        Self::F7,
+        Self::F8,
+        Self::F9,
+        Self::F10,
+        Self::F11,
+        Self::F12,
+    ];
+
+    /// The tail of the picker row's driver id.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Esc => "esc",
+            Self::Tab => "tab",
+            Self::Enter => "enter",
+            Self::Backspace => "backspace",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Home => "home",
+            Self::End => "end",
+            Self::PageUp => "pageup",
+            Self::PageDown => "pagedown",
+            Self::F1 => "f1",
+            Self::F2 => "f2",
+            Self::F3 => "f3",
+            Self::F4 => "f4",
+            Self::F5 => "f5",
+            Self::F6 => "f6",
+            Self::F7 => "f7",
+            Self::F8 => "f8",
+            Self::F9 => "f9",
+            Self::F10 => "f10",
+            Self::F11 => "f11",
+            Self::F12 => "f12",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// The gpui key name its press builds its bytes from.
     fn key_name(self) -> Option<&'static str> {
         Some(match self {
@@ -173,6 +232,171 @@ impl StepKey {
             Self::Named { name } => name == NamedKey::Unknown,
             Self::Unknown => true,
         }
+    }
+}
+
+/// What the key editor has built so far: its presses, each still missing
+/// its key while the picker has not chosen one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeyDraft {
+    pub(crate) steps: Vec<DraftStep>,
+}
+
+/// One press as the key editor holds it: the modifiers held, and the key
+/// while one is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DraftStep {
+    pub(crate) ctrl: bool,
+    pub(crate) alt: bool,
+    pub(crate) shift: bool,
+    pub(crate) key: Option<StepKey>,
+}
+
+impl KeyDraft {
+    /// The draft of `key`: its presses, or none for a key that sends none.
+    pub(crate) fn of(key: &GridKey) -> Self {
+        let steps = match &key.action {
+            KeyAction::Send { steps } => steps.iter().map(DraftStep::of).collect(),
+            KeyAction::Ctrl | KeyAction::Paste | KeyAction::Quick | KeyAction::Unknown => {
+                Vec::new()
+            }
+        };
+        Self { steps }
+    }
+
+    /// The label the presses that have a key make, as the label field's
+    /// placeholder shows it.
+    pub(crate) fn derived_label(&self) -> String {
+        let steps: Vec<Step> = self.steps.iter().filter_map(|step| step.step()).collect();
+        derived_label(&steps)
+    }
+}
+
+impl DraftStep {
+    /// The draft press of `step`.
+    fn of(step: &Step) -> Self {
+        Self {
+            ctrl: step.ctrl,
+            alt: step.alt,
+            shift: step.shift,
+            key: Some(step.key),
+        }
+    }
+
+    /// The press it builds, or `None` while it has no key.
+    fn step(self) -> Option<Step> {
+        Some(Step {
+            ctrl: self.ctrl,
+            alt: self.alt,
+            shift: self.shift,
+            key: self.key?,
+        })
+    }
+}
+
+/// Why the key editor refused a save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DraftError {
+    /// The key has no press at all.
+    NoPresses,
+    /// The press at this number, counted from 1, has no key.
+    NoKey(usize),
+    /// The press at this number types nothing, as this label shows.
+    TypesNothing(usize, String),
+}
+
+impl DraftError {
+    /// The message the editor shows.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::NoPresses => "Add at least one press.".to_owned(),
+            Self::NoKey(press) => format!("Press {press} has no key."),
+            Self::TypesNothing(press, label) => {
+                format!("Press {press} ({label}) types nothing in a terminal.")
+            }
+        }
+    }
+}
+
+/// The modes a draft's presses are checked in: what the surface that sends
+/// them reads is decided at send time, so only "types nothing" is asked.
+const CHECK_MODES: KeyModes = KeyModes {
+    app_cursor: false,
+    shift_enter: ShiftEnter::BackslashCr,
+};
+
+/// The label and presses a draft saves as, or why it cannot: a label that
+/// is blank takes the label its presses make (P18), and a press that types
+/// nothing is refused (P4).
+pub(crate) fn check_draft(
+    label: &str,
+    draft: &KeyDraft,
+) -> Result<(String, Vec<Step>), DraftError> {
+    if draft.steps.is_empty() {
+        return Err(DraftError::NoPresses);
+    }
+    let mut steps = Vec::with_capacity(draft.steps.len());
+    for (index, draft_step) in draft.steps.iter().enumerate() {
+        let Some(step) = draft_step.step() else {
+            return Err(DraftError::NoKey(index + 1));
+        };
+        steps.push(step);
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if step_bytes(step, CHECK_MODES).is_none() {
+            let label = derived_label(std::slice::from_ref(step));
+            return Err(DraftError::TypesNothing(index + 1, label));
+        }
+    }
+    let typed = label.trim();
+    let label = if typed.is_empty() {
+        derived_label(&steps)
+    } else {
+        typed.to_owned()
+    };
+    Ok((label, steps))
+}
+
+/// One change the key editor and the Keys page make to the grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyEdit {
+    /// Appends a key.
+    Add(GridKey),
+    /// Replaces the key at this index, keeping its place.
+    Replace(usize, GridKey),
+    /// Drops the key at this index.
+    Remove(usize),
+}
+
+/// The grid with `edit` made; `None`, changing nothing, while an index
+/// names nothing or a protected key would go.
+pub(crate) fn apply_key_edit(keys: &[GridKey], edit: KeyEdit) -> Option<Vec<GridKey>> {
+    let mut keys = keys.to_vec();
+    match edit {
+        KeyEdit::Add(key) => keys.push(key),
+        KeyEdit::Replace(index, key) => *keys.get_mut(index)? = key,
+        KeyEdit::Remove(index) => {
+            if is_protected(keys.get(index)?) {
+                return None;
+            }
+            keys.remove(index);
+        }
+    }
+    Some(keys)
+}
+
+/// The name a press's key button draws: the character itself (its upper
+/// case while Shift is held), a named key's label, or nothing while it is
+/// a key this build does not know.
+pub(crate) fn press_key_label(key: StepKey, shift: bool) -> String {
+    match key {
+        StepKey::Char { value: ' ' } => "Space".to_owned(),
+        StepKey::Char { value } => match shift.then(|| upper_char(value)).flatten() {
+            Some(upper) => upper.to_string(),
+            None => value.to_string(),
+        },
+        StepKey::Named { name } => name.label().to_owned(),
+        StepKey::Unknown => String::new(),
     }
 }
 
@@ -1254,5 +1478,194 @@ mod tests {
         keys.push(id_key("key-x"));
 
         assert_eq!(next_id(&keys), "key-1");
+    }
+
+    /// A press the key editor holds, one key still missing while `key` is
+    /// `None`.
+    fn draft_step(ctrl: bool, key: Option<StepKey>) -> DraftStep {
+        DraftStep {
+            ctrl,
+            alt: false,
+            shift: false,
+            key,
+        }
+    }
+
+    /// The draft of `steps`.
+    fn draft(steps: Vec<DraftStep>) -> KeyDraft {
+        KeyDraft { steps }
+    }
+
+    #[test]
+    fn check_draft_blank_label_takes_the_derived_label() {
+        let draft = draft(vec![draft_step(true, Some(char_step('b')))]);
+
+        assert_eq!(
+            check_draft("", &draft),
+            Ok((
+                "Ctrl+B".to_owned(),
+                vec![held_step(true, false, false, char_step('b'))]
+            ))
+        );
+    }
+
+    #[test]
+    fn check_draft_trims_the_label() {
+        let draft = draft(vec![draft_step(true, Some(char_step('b')))]);
+
+        assert_eq!(
+            check_draft("  tmux ", &draft),
+            Ok((
+                "tmux".to_owned(),
+                vec![held_step(true, false, false, char_step('b'))]
+            ))
+        );
+    }
+
+    #[test]
+    fn check_draft_refuses_no_presses() {
+        assert_eq!(
+            check_draft("x", &KeyDraft::default()),
+            Err(DraftError::NoPresses)
+        );
+        assert_eq!(DraftError::NoPresses.message(), "Add at least one press.");
+    }
+
+    #[test]
+    fn check_draft_refuses_a_press_with_no_key() {
+        let draft = draft(vec![
+            draft_step(false, Some(named_step(NamedKey::Esc))),
+            draft_step(false, None),
+        ]);
+
+        assert_eq!(check_draft("x", &draft), Err(DraftError::NoKey(2)));
+        assert_eq!(DraftError::NoKey(2).message(), "Press 2 has no key.");
+    }
+
+    #[test]
+    fn check_draft_refuses_a_press_that_types_nothing() {
+        let draft = draft(vec![draft_step(true, Some(char_step('1')))]);
+
+        assert_eq!(
+            check_draft("x", &draft),
+            Err(DraftError::TypesNothing(1, "Ctrl+1".to_owned()))
+        );
+        assert_eq!(
+            DraftError::TypesNothing(1, "Ctrl+1".to_owned()).message(),
+            "Press 1 (Ctrl+1) types nothing in a terminal."
+        );
+    }
+
+    #[test]
+    fn check_draft_takes_a_sequence() {
+        let draft = draft(vec![
+            draft_step(false, Some(named_step(NamedKey::Esc))),
+            draft_step(false, Some(char_step(':'))),
+            draft_step(false, Some(char_step('w'))),
+            draft_step(false, Some(named_step(NamedKey::Enter))),
+        ]);
+
+        let (label, steps) = check_draft("vim save", &draft).expect("the sequence saves");
+
+        assert_eq!(label, "vim save");
+        assert_eq!(
+            key_bytes(&steps, false, off()).as_deref(),
+            Some(&b"\x1b:w\r"[..])
+        );
+    }
+
+    #[test]
+    fn draft_of_a_key_holds_its_presses() {
+        assert_eq!(
+            KeyDraft::of(&key_of("ctrl-c")),
+            draft(vec![draft_step(true, Some(char_step('c')))])
+        );
+        assert!(
+            KeyDraft::of(&key_of("ctrl")).steps.is_empty(),
+            "a key that sends no press starts with none"
+        );
+    }
+
+    #[test]
+    fn apply_key_edit_add_appends() {
+        let added = key_of_step("one", plain_step(char_step('1')));
+        let mut expected = defaults();
+        expected.push(added.clone());
+
+        assert_eq!(
+            apply_key_edit(&defaults(), KeyEdit::Add(added)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn apply_key_edit_replace_keeps_the_place() {
+        let esc = key_of("esc");
+
+        let keys = apply_key_edit(&defaults(), KeyEdit::Replace(11, esc.clone()))
+            .expect("index 11 names a key");
+
+        assert_eq!(keys[11], esc);
+        assert_eq!(keys.len(), defaults().len());
+    }
+
+    #[test]
+    fn apply_key_edit_remove_drops_a_key() {
+        let mut expected = defaults();
+        expected.remove(0);
+
+        assert_eq!(
+            apply_key_edit(&defaults(), KeyEdit::Remove(0)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn apply_key_edit_refuses_removing_a_protected_key() {
+        assert_eq!(
+            apply_key_edit(&defaults(), KeyEdit::Remove(7)),
+            None,
+            "Paste cannot go"
+        );
+        assert_eq!(
+            apply_key_edit(&defaults(), KeyEdit::Remove(40)),
+            None,
+            "past the grid"
+        );
+    }
+
+    #[test]
+    fn named_key_ids_are_the_picker_ids() {
+        let ids: Vec<&str> = NamedKey::ALL.iter().map(|name| name.id()).collect();
+
+        assert_eq!(
+            ids,
+            [
+                "esc",
+                "tab",
+                "enter",
+                "backspace",
+                "up",
+                "down",
+                "left",
+                "right",
+                "home",
+                "end",
+                "pageup",
+                "pagedown",
+                "f1",
+                "f2",
+                "f3",
+                "f4",
+                "f5",
+                "f6",
+                "f7",
+                "f8",
+                "f9",
+                "f10",
+                "f11",
+                "f12"
+            ]
+        );
     }
 }

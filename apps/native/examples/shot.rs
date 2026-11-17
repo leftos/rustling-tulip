@@ -79,6 +79,12 @@
 //! `phone-settings-appearance` shows Settings' Appearance page: its header
 //! with Back and the title `Appearance`, the theme list with the one in use
 //! marked, and the text-size row under them.
+//! `phone-settings-keys` shows Settings' Keys page: the hint, the key grid
+//! in four columns a row over Add key, and Restore defaults under them.
+//! `phone-settings-key-edit` shows that page with the Ctrl+C key's editor
+//! open: the header's title `Key` over the label field, the `Presses` label
+//! and the key's one press (Ctrl lit, key `c`, Remove), Add press and Save,
+//! and Remove key.
 //! `phone-settings-replies` shows Settings' Quick replies page: each set's
 //! name over a row per group, its title over its reply count and a chevron.
 //! `phone-settings-reply-group` shows the agent set's `common` group open:
@@ -325,12 +331,14 @@ enum View {
     PhoneTerminal,
     PhoneSettings,
     PhoneSettingsAppearance,
+    PhoneSettingsKeys,
+    PhoneSettingsKeyEdit,
     PhoneSettingsReplies,
     PhoneSettingsReplyGroup,
 }
 
 impl View {
-    const ALL: [Self; 58] = [
+    const ALL: [Self; 60] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -387,6 +395,8 @@ impl View {
         Self::PhoneTerminal,
         Self::PhoneSettings,
         Self::PhoneSettingsAppearance,
+        Self::PhoneSettingsKeys,
+        Self::PhoneSettingsKeyEdit,
         Self::PhoneSettingsReplies,
         Self::PhoneSettingsReplyGroup,
     ];
@@ -402,6 +412,8 @@ impl View {
                 | Self::PhoneTerminal
                 | Self::PhoneSettings
                 | Self::PhoneSettingsAppearance
+                | Self::PhoneSettingsKeys
+                | Self::PhoneSettingsKeyEdit
                 | Self::PhoneSettingsReplies
                 | Self::PhoneSettingsReplyGroup
         )
@@ -465,6 +477,8 @@ impl View {
             Self::PhoneTerminal => "phone-terminal",
             Self::PhoneSettings => "phone-settings",
             Self::PhoneSettingsAppearance => "phone-settings-appearance",
+            Self::PhoneSettingsKeys => "phone-settings-keys",
+            Self::PhoneSettingsKeyEdit => "phone-settings-key-edit",
             Self::PhoneSettingsReplies => "phone-settings-replies",
             Self::PhoneSettingsReplyGroup => "phone-settings-reply-group",
         }
@@ -519,6 +533,8 @@ impl View {
             | Self::PhoneTerminal
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
+            | Self::PhoneSettingsKeys
+            | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
             | Self::PhoneSettingsReplyGroup => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
@@ -567,6 +583,8 @@ impl View {
             | Self::PhoneTerminal
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
+            | Self::PhoneSettingsKeys
+            | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
             | Self::PhoneSettingsReplyGroup => true,
             // The popover open over the fake daemon's accounts.
@@ -776,20 +794,9 @@ impl Shot {
         Ok(Self { view, out, ui_dir })
     }
 
-    /// Creates the output folders and clears the layout an earlier run saved,
-    /// so every run starts from the same state; a `main-compact` shot then
-    /// seeds the sidebar's compact leaf density, which no keystroke in a
-    /// cloaked window can reach.
-    fn prepare(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.ui_dir)
-            .with_context(|| format!("creating {}", self.ui_dir.display()))?;
-        let saved = self.ui_dir.join("native-ui.json");
-        if let Err(err) = std::fs::remove_file(&saved)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(err).with_context(|| format!("clearing {}", saved.display()));
-        }
-        let sample_text = match self.view {
+    /// The sample file the view needs in place before it draws, if any.
+    fn sample_text(&self) -> Option<&'static str> {
+        match self.view {
             View::Viewer => Some(FOOTER_OLD),
             View::ViewerMd => Some(README_MD),
             View::Main
@@ -845,10 +852,28 @@ impl Shot {
             | View::PhoneTerminal
             | View::PhoneSettings
             | View::PhoneSettingsAppearance
+            | View::PhoneSettingsKeys
+            | View::PhoneSettingsKeyEdit
             | View::PhoneSettingsReplies
             | View::PhoneSettingsReplyGroup
             | View::Toast => None,
-        };
+        }
+    }
+
+    /// Creates the output folders and clears the layout an earlier run saved,
+    /// so every run starts from the same state; a `main-compact` shot then
+    /// seeds the sidebar's compact leaf density, which no keystroke in a
+    /// cloaked window can reach.
+    fn prepare(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.ui_dir)
+            .with_context(|| format!("creating {}", self.ui_dir.display()))?;
+        let saved = self.ui_dir.join("native-ui.json");
+        if let Err(err) = std::fs::remove_file(&saved)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err).with_context(|| format!("clearing {}", saved.display()));
+        }
+        let sample_text = self.sample_text();
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
             return std::fs::write(&sample, text)
@@ -1663,6 +1688,19 @@ async fn open_phone_screen(
             cx.background_executor().timer(DRIVE_WAIT).await;
             Ok(())
         }
+        View::PhoneSettingsKeys => {
+            handle.update(cx, |phone, _, cx| phone.open_settings_keys(cx))?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
+        View::PhoneSettingsKeyEdit => {
+            // The default grid's Ctrl+C, the twelfth key.
+            handle.update(cx, |phone, window, cx| {
+                phone.open_settings_key_editor(Some(11), window, cx);
+            })?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
         View::PhoneSettingsReplies => {
             handle.update(cx, |phone, _, cx| phone.open_settings_replies(cx))?;
             cx.background_executor().timer(DRIVE_WAIT).await;
@@ -1836,6 +1874,8 @@ fn drive(
         | View::PhoneTerminal
         | View::PhoneSettings
         | View::PhoneSettingsAppearance
+        | View::PhoneSettingsKeys
+        | View::PhoneSettingsKeyEdit
         | View::PhoneSettingsReplies
         | View::PhoneSettingsReplyGroup => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),

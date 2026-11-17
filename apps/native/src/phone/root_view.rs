@@ -71,6 +71,8 @@ pub struct PhoneRoot {
     /// The Quick replies title or reply editor over the open editor
     /// sub-page, while it is open.
     pub(super) reply_editor: Option<super::quick_replies_view::TextEditor>,
+    /// The key editor and the picker over it, while one is open.
+    pub(super) key_editor: Option<super::keys_view::KeyEditor>,
     /// The reply set whose Restore defaults asks for confirmation.
     pub(super) restore_confirm: Option<ReplySet>,
     /// What the Keys page's Restore defaults draws.
@@ -172,6 +174,7 @@ impl PhoneRoot {
             sheet: None,
             settings: None,
             reply_editor: None,
+            key_editor: None,
             restore_confirm: None,
             keys_restore: super::keys_view::KeysRestore::Idle,
             reorder_drag: None,
@@ -286,6 +289,7 @@ impl PhoneRoot {
                 }
                 self.settings = None;
                 self.keep_reply_editor();
+                self.keep_key_editor();
                 self.keep_restore_confirm();
                 self.keep_keys_restore_confirm();
                 self.open_note = Some(note);
@@ -377,6 +381,7 @@ impl PhoneRoot {
         self.forget_pending_open();
         self.settings = None;
         self.keep_reply_editor();
+        self.keep_key_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         self.page = Some(SessionPage::opened(

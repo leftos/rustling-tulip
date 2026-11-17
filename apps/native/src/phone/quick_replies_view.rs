@@ -154,6 +154,7 @@ pub(super) fn sub_page_stands(sub: SubPage, agent: &[usize], shell: &[usize]) ->
                 |reply| counts.get(group).is_some_and(|replies| reply < *replies),
             )
         }
+        SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => false,
     }
 }
 
@@ -336,7 +337,9 @@ impl PhoneRoot {
         let text = editor.input.read(cx).text().to_owned();
         let set = match sub {
             SubPage::GroupTitle { set, .. } | SubPage::Reply { set, .. } => set,
-            SubPage::ReplyGroup { .. } => return,
+            SubPage::ReplyGroup { .. } | SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => {
+                return;
+            }
         };
         let groups = self.saved_groups(set, cx);
         let Some(outcome) = Self::checked_edit(sub, &groups, &text) else {
@@ -392,7 +395,9 @@ impl PhoneRoot {
                     None => ReplyEdit::AddReply { group, text },
                 }))
             }
-            SubPage::ReplyGroup { .. } => None,
+            SubPage::ReplyGroup { .. } | SubPage::KeyEditor { .. } | SubPage::KeyPicker { .. } => {
+                None
+            }
         }
     }
 

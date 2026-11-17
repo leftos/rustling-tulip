@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{Pixels, TestAppContext, px};
-use protocol::{DaemonMessage, SessionSnapshot};
+use gpui::{Modifiers, Pixels, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
+use protocol::{ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot};
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use rustling_tulip_native::target::HostKey;
 use serde_json::{Value, json};
@@ -115,6 +115,101 @@ fn phone_open<'a>(cx: &'a mut TestAppContext, dir: &TestDir, ui: &Value) -> Harn
 /// The index of the last key in [`key_grid::defaults`].
 fn last_default_cell() -> usize {
     20
+}
+
+/// Types `text` key by key into the focused field.
+fn type_text(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| match c {
+            ' ' => "space".to_owned(),
+            other => other.to_string(),
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+}
+
+/// Takes Settings' two Back steps from the Keys page: to the list, then out.
+fn close_settings(h: &mut Harness<'_>) {
+    for _ in 0..2 {
+        h.click_on("phone-settings-back");
+    }
+}
+
+/// Adds a key with one empty press, through Add key and Add press.
+fn add_key_with_a_press(h: &mut Harness<'_>) {
+    h.click_on("phone-keys-add");
+    h.click_on("phone-key-editor-add-step");
+}
+
+/// Sets press `step`'s key to the character `value` through the picker.
+fn pick_char(h: &mut Harness<'_>, step: usize, value: &str) {
+    h.click_on(&format!("phone-key-editor-step-{step}-key"));
+    type_text(h, value);
+    h.click_on("phone-key-picker-char-use");
+}
+
+/// Sets press `step`'s key to the named key `name` through the picker.
+fn pick_named(h: &mut Harness<'_>, step: usize, name: &str) {
+    h.click_on(&format!("phone-key-editor-step-{step}-key"));
+    h.click_on(&format!("phone-key-picker-{name}"));
+}
+
+/// Scrolls the key bar until `selector` shows whole inside it.
+fn scroll_bar_to(h: &mut Harness<'_>, selector: &str) {
+    let at = h.center("phone-key-bar-scroll");
+    for _ in 0..50 {
+        let (outer, inner) = (h.bounds("phone-key-bar-scroll"), h.bounds(selector));
+        let dx = if inner.right() > outer.right() {
+            outer.right() - inner.right()
+        } else if inner.left() < outer.left() {
+            outer.left() - inner.left()
+        } else {
+            return;
+        };
+        h.cx.simulate_event(ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(dx, px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
+        });
+        h.cx.run_until_parked();
+    }
+}
+
+/// Opens the shell session `n`'s Terminal page, everything sent drained.
+fn on_terminal(h: &mut Harness<'_>) {
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).pty("n", b"");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+}
+
+/// Session `a`'s Chat page with its chat loaded, the Keys dock open.
+fn dock_open(h: &mut Harness<'_>) {
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = sent.iter().rev().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "a" => Some(request_id.clone()),
+        _ => None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request.flatten(),
+    });
+    h.cx.run_until_parked();
+    h.click_on("phone-composer-keys");
+    h.host(&saved_remote()).sent();
 }
 
 #[gpui::test]
@@ -294,5 +389,332 @@ fn restore_confirm_is_dropped_on_leaving_the_keys_page(cx: &mut TestAppContext) 
         saved_ui(&dir)["phone_keys"][0]["id"],
         json!("esc"),
         "nothing was restored"
+    );
+}
+
+#[gpui::test]
+fn adding_a_ctrl_b_key_appends_it_to_the_bar_and_the_dock(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_open(cx, &dir, &json!({}));
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-add");
+    h.click_on("phone-key-editor-add-step");
+    h.click_on("phone-key-editor-step-0-ctrl");
+    pick_char(&mut h, 0, "b");
+    h.click_on("phone-key-editor-save");
+
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["phone_keys"][21]["id"], json!("key-1"));
+    assert_eq!(saved["phone_keys"][21]["label"], json!("Ctrl+B"));
+    assert!(!drawn(&mut h, "phone-key-editor-label"), "the editor pops");
+
+    close_settings(&mut h);
+    assert!(!drawn(&mut h, "phone-settings"), "Settings closes");
+
+    on_terminal(&mut h);
+    scroll_bar_to(&mut h, "phone-bar-key-1");
+    h.click_on("phone-bar-key-1");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        [0x02],
+        "the bar sends Ctrl+B"
+    );
+
+    h.click_on("phone-session-back");
+    dock_open(&mut h);
+    h.click_on("phone-key-21");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        [0x02],
+        "the dock sends Ctrl+B"
+    );
+}
+
+#[gpui::test]
+fn a_key_with_no_presses_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-add");
+    h.click_on("phone-key-editor-save");
+
+    assert!(drawn(&mut h, "phone-key-editor-error"), "the refusal shows");
+    assert!(
+        drawn(&mut h, "phone-key-editor-label"),
+        "the editor stays open"
+    );
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "nothing was saved"
+    );
+}
+
+#[gpui::test]
+fn a_press_with_no_key_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-save");
+
+    assert!(
+        drawn(&mut h, "phone-key-editor-error"),
+        "a press with no key is refused"
+    );
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "nothing was saved"
+    );
+}
+
+#[gpui::test]
+fn ctrl_and_a_digit_is_refused_as_typing_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-ctrl");
+    pick_char(&mut h, 0, "1");
+    h.click_on("phone-key-editor-save");
+
+    assert!(
+        drawn(&mut h, "phone-key-editor-error"),
+        "Ctrl+1 types nothing, so the key is refused"
+    );
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "nothing was saved"
+    );
+}
+
+#[gpui::test]
+fn a_blank_label_saves_the_derived_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-ctrl");
+    pick_char(&mut h, 0, "b");
+    h.click_on("phone-key-editor-save");
+
+    assert_eq!(
+        saved_ui(&dir)["phone_keys"][21]["label"],
+        json!("Ctrl+B"),
+        "the blank label takes the label its presses make"
+    );
+}
+
+#[gpui::test]
+fn a_sequence_sends_each_press_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_open(cx, &dir, &json!({}));
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-add");
+    h.click_on("phone-key-editor-add-step");
+    pick_named(&mut h, 0, "esc");
+    h.click_on("phone-key-editor-add-step");
+    pick_char(&mut h, 1, ":");
+    h.click_on("phone-key-editor-add-step");
+    pick_char(&mut h, 2, "w");
+    h.click_on("phone-key-editor-add-step");
+    pick_named(&mut h, 3, "enter");
+    h.click_on("phone-key-editor-save");
+
+    close_settings(&mut h);
+    on_terminal(&mut h);
+    scroll_bar_to(&mut h, "phone-bar-key-1");
+    h.click_on("phone-bar-key-1");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\x1b:w\r",
+        "each press sends in order"
+    );
+}
+
+#[gpui::test]
+fn editing_a_key_keeps_its_place_and_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        named_key("tab", "Tab", "tab"),
+        named_key("enter", "Enter", "enter"),
+    ] });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-cell-1");
+    assert!(
+        drawn(&mut h, "phone-key-editor-label"),
+        "Tab opens its editor"
+    );
+    pick_named(&mut h, 0, "enter");
+    h.click_on("phone-key-editor-save");
+
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["phone_keys"][1]["id"], json!("tab"), "the id stays");
+    assert_eq!(
+        saved["phone_keys"][1]["action"]["steps"][0]["key"]["name"],
+        json!("enter"),
+        "the edit lands in place"
+    );
+    assert_eq!(
+        saved["phone_keys"].as_array().map(Vec::len),
+        Some(6),
+        "no key was added or dropped"
+    );
+}
+
+#[gpui::test]
+fn removing_a_key_drops_it_from_the_bar(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        named_key("tab", "Tab", "tab"),
+        named_key("enter", "Enter", "enter"),
+    ] });
+    let mut h = phone_open(cx, &dir, &ui);
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-cell-2");
+    h.click_on("phone-key-editor-remove");
+
+    assert!(
+        !drawn(&mut h, "phone-key-editor-label"),
+        "the editor closes"
+    );
+    assert_eq!(
+        saved_ui(&dir)["phone_keys"].as_array().map(Vec::len),
+        Some(5),
+        "the key is gone"
+    );
+
+    close_settings(&mut h);
+    on_terminal(&mut h);
+
+    assert!(!drawn(&mut h, "phone-bar-enter"), "the bar drops it");
+    assert!(drawn(&mut h, "phone-bar-tab"), "the keys beside it stay");
+}
+
+#[gpui::test]
+fn paste_quick_and_ctrl_open_no_editor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    for index in [2, 7, 8] {
+        h.click_on(&format!("phone-keys-cell-{index}"));
+        assert!(
+            !drawn(&mut h, "phone-key-editor-label"),
+            "cell {index} opens no editor"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_picker_sets_a_named_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    pick_named(&mut h, 0, "esc");
+
+    assert!(
+        drawn(&mut h, "phone-key-editor-label"),
+        "the picker pops back to the editor"
+    );
+    assert!(
+        !drawn(&mut h, "phone-key-picker-char"),
+        "the picker is gone"
+    );
+
+    h.click_on("phone-key-editor-save");
+
+    let saved = saved_ui(&dir);
+    assert_eq!(
+        saved["phone_keys"][21]["action"]["steps"][0]["key"]["name"],
+        json!("esc")
+    );
+    assert_eq!(
+        saved["phone_keys"][21]["label"],
+        json!("Esc"),
+        "the blank label takes the named key's label"
+    );
+}
+
+#[gpui::test]
+fn the_picker_refuses_two_characters(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-key");
+    type_text(&mut h, "ab");
+    h.click_on("phone-key-picker-char-use");
+
+    assert!(
+        drawn(&mut h, "phone-key-picker-error"),
+        "two characters are refused"
+    );
+    assert!(
+        drawn(&mut h, "phone-key-picker-char"),
+        "the picker stays open"
+    );
+}
+
+#[gpui::test]
+fn back_from_the_picker_keeps_the_draft(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-ctrl");
+    h.click_on("phone-key-editor-step-0-key");
+    h.click_on("phone-settings-back");
+
+    assert!(!drawn(&mut h, "phone-key-picker-char"), "the picker closes");
+    assert!(drawn(&mut h, "phone-key-editor-label"), "the editor stays");
+    assert!(
+        drawn(&mut h, "phone-key-editor-step-0-ctrl"),
+        "the press the picker was over stays"
+    );
+
+    pick_char(&mut h, 0, "b");
+    h.click_on("phone-key-editor-save");
+
+    assert_eq!(
+        saved_ui(&dir)["phone_keys"][21]["action"]["steps"][0]["ctrl"],
+        json!(true),
+        "the Ctrl set before the picker stayed"
+    );
+}
+
+#[gpui::test]
+fn back_from_the_editor_discards_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    h.click_on("phone-keys-add");
+    type_text(&mut h, "tmux");
+    h.click_on("phone-settings-back");
+
+    assert!(
+        !drawn(&mut h, "phone-key-editor-label"),
+        "the editor closes"
+    );
+    assert!(drawn(&mut h, "phone-keys-grid"), "the grid shows again");
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "the draft was discarded"
     );
 }

@@ -1151,6 +1151,12 @@ A long press on a group's row or on a reply row lifts it, and dragging moves it 
 
 The Keys page (`phone/keys_view.rs`) draws a hint, then the key grid in as many equal columns as the window fits (`key_grid::grid_columns`, four at 390 pt), each cell a touch target carrying the key's label, an inert key dimmed, and Restore defaults under the grid. Restore defaults is dimmed and takes no tap while the built-in grid already shows; tapped, it turns into "Replace these with the defaults?" with Restore and Cancel, and Restore clears `native-ui.json`'s `phone_keys`, so the built-in grid shows again.
 
+Add key, and a tap on a send or inert cell, open that key's editor over the page (`SubPage::KeyEditor`, held as `PhoneRoot.key_editor`): the label field, a `Presses` row a press with its Ctrl, Alt and Shift toggles (Primary while held), its key button and its Remove, Add press, the refusal and Save, and Remove key for a saved key. A tap on Paste, Quick or Ctrl opens no editor.
+
+Save runs `key_grid::check_draft`: a key with no press, a press with no key, or one that types nothing (Ctrl+1) is refused in place with a message naming the press, and a blank label saves the derived one. A saved key keeps its place and id, a new one takes `key_grid::next_id`, and Save pops the editor while Back discards the draft; an editor whose key is gone refuses with "That item no longer exists.".
+
+The key button opens the picker (`SubPage::KeyPicker`): a one-character field with Use, refusing anything but one character ("Type one character."), then a row per `NamedKey::ALL`; either way it pops back to the editor with the press's key set.
+
 Each page draws one drag area (`long_press_drag_area`) over its body, and each list records its box and row count each frame for the press to hit-test (`phone/reorder.rs`: `list_slot`, `reordered` over `drag::reorder`). The area claims only a press on a drawn row, so a plain tap still opens the row it lands on, and a hold off the rows (a button, a label) still taps or pans the page; a cancelled touch drops the drag and saves nothing.
 
 The data rules: a group's title is non-blank and unique within its set (titles feed the reply driver ids), and a reply's text is non-blank and one line, since a reply is typed then Return. A refusal is drawn under the field as "A group needs a title.", "Another group is already called “common”.", "A reply needs some text." or "A reply is one line: it is typed, then Return.", and the editor stays open with the typed text.
