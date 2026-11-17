@@ -564,6 +564,8 @@ The `typed` tests in `key_bar.rs` (`armed_ctrl_turns_a_typed_letter_into_its_ctr
 | the defaults plus `key-1`, `key-3` | `key-4` | `next_id_follows_the_highest` |
 | the defaults plus `key-x` | `key-1` | `next_id_ignores_a_non_number` |
 
+Orchestrator decisions, beside this table (B3): a character with any modifier held takes its upper case in a derived label (`Ctrl+B`, `Shift+B`, `Alt+B`), a character with no case keeps itself, and a plain character keeps its own case (`b`); Backspace's label is `Bksp` and PageDown's is `PgDn`, both in the one named-key label function (`NamedKey::label`, B6) that `derived_label` and the key picker share.
+
 `grid_columns` (B5):
 
 | Input | Expected | Test |

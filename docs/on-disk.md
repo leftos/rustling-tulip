@@ -99,6 +99,16 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   A value that is not a list loads as absent, and a group that does not decode is dropped with a warning; a loaded list is normalised: titles trimmed, a blank title named "Group", a repeated title numbered " 2", " 3" and so on, and a reply that is blank or holds a line break dropped.
 
+  It holds the phone's key grid (`phone_keys`), in grid order: a list of `{"id", "label", "action"}` keys.
+
+  An action is `{"kind": "send", "steps": [...]}`, each step `{"ctrl", "alt", "shift", "key"}` with a key of `{"kind": "char", "value": "b"}` or `{"kind": "named", "name": "page_up"}` — the named keys' own names, as in `esc`, `page_up`, `page_down` and `f1`.
+
+  The other actions are `{"kind": "ctrl"}`, `{"kind": "paste"}` and `{"kind": "quick"}`; absent or null means the built-in grid (Esc, Tab, Ctrl, the arrows, Paste, Quick, Shift+Tab, Enter, Ctrl+C and the digits 1 to 9), and an empty list is Ctrl, Paste and Quick alone.
+
+  A value that is not a list loads as absent, and a key that does not decode is dropped with a warning; an action, press key or named key a later release added loads as `unknown`, which draws dimmed and sends nothing.
+
+  A loaded grid is normalised: Ctrl, Paste and Quick each appear once (a missing one is appended, a repeat dropped), an id that is not lower-case letters, digits and `-`, or that repeats an earlier key's, becomes `key-{n}` (one past the highest `n` in use), and a send key's blank label becomes the label its presses make ("Ctrl+B", "Esc : w Enter").
+
   It also holds the shared list of recent custom colours, per-tab font sizes, the activity rail's view (`activity`: `sessions`, `needs_you`, `source_control` or `gates`; a value a build does not know loads as `sessions`, and a saved `gates` is shown as Sessions while This PC has no gate state), and the source-control panel's pinned repo, collapsed sections and split heights. For a remote host's repo the pinned repo is `{host key}::{repo id}` and a section's `collapsed` key and `history_list_height` key carry the same prefix.
 
   It holds the diff tabs' include-whitespace and highlight toggles, whether a Markdown viewer tab opens rendered (`viewer_markdown_rendered`, default true; a missing key loads as true), and the per-host remote session counts (`host_session_counts`, `{"<lower-cased MagicDNS name>": <count>}`, or `"ssh:<host string>"` for an SSH host, only for hosts in `saved_hosts`; kept from each saved remote host's own session list, for a switched-off host's "N sessions last time").

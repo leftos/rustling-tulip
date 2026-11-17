@@ -19,6 +19,7 @@ use crate::chat::{ChatMode, PaneView};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
+use crate::phone::key_grid::{self, GridKey};
 use crate::phone::quick_replies::{self, ReplyGroup, ReplySet};
 use crate::popouts::{PopoutKey, SavedPopout};
 use crate::runtime_icon::{RuntimeIcon, runtime_icon};
@@ -591,6 +592,16 @@ pub struct UiState {
         skip_serializing_if = "Option::is_none"
     )]
     pub phone_shell_replies: Option<Vec<ReplyGroup>>,
+    /// The phone's key grid, in grid order; `None` is the built-in grid
+    /// (`phone::key_grid::defaults`). A value that is not a list reads as
+    /// `None`, a key that does not decode is dropped, and the grid loads
+    /// normalised.
+    #[serde(
+        default,
+        deserialize_with = "decodable_grid_keys",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub phone_keys: Option<Vec<GridKey>>,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -1107,6 +1118,36 @@ fn decodable_reply_groups<'de, D: Deserializer<'de>>(
     Ok(Some(quick_replies::normalized(groups)))
 }
 
+/// Reads the phone's key grid, never failing the file: `null` or a value that
+/// is not a list loads as absent, each key that does not decode is dropped
+/// with a warning, and the grid reads normalised.
+fn decodable_grid_keys<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<GridKey>>, D::Error> {
+    let entries = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::Array(entries) => entries,
+        other => {
+            tracing::warn!(
+                "the saved phone key grid is {}, not a list; the built-in keys show",
+                json_type(&other)
+            );
+            return Ok(None);
+        }
+    };
+    let keys = entries
+        .iter()
+        .filter_map(|entry| match GridKey::deserialize(entry) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                tracing::warn!("saved phone key {entry} does not decode ({err}); dropped");
+                None
+            }
+        })
+        .collect();
+    Ok(Some(key_grid::normalized(keys)))
+}
+
 /// The Trusted launch choice older releases saved, read so each host's
 /// agent Settings take it as the agent's bypass choice; written back while
 /// it is owed.
@@ -1501,6 +1542,7 @@ impl Default for UiState {
             theme: None,
             phone_agent_replies: None,
             phone_shell_replies: None,
+            phone_keys: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -2794,6 +2836,11 @@ impl SidebarModel {
             ReplySet::Agent => self.ui.phone_agent_replies = groups,
             ReplySet::Shell => self.ui.phone_shell_replies = groups,
         }
+    }
+
+    /// Saves the phone's key grid; `None` restores the built-in grid.
+    pub fn set_phone_keys(&mut self, keys: Option<Vec<GridKey>>) {
+        self.ui.phone_keys = keys;
     }
 
     /// The look the interface draws in now: the six appearance fields.
@@ -5038,6 +5085,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::agent_options::test_selection as agent_selection;
+    use crate::phone::key_grid::{GridKey, KeyAction, NamedKey, Step, StepKey};
     use crate::phone::quick_replies::ReplyGroup;
     use crate::tabs::tests::{follow_pane, pane, tab};
     use protocol::{
@@ -7062,6 +7110,229 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every named key this build's key grid knows, in the picker's order.
+    const EVERY_NAMED: [NamedKey; 24] = [
+        NamedKey::Esc,
+        NamedKey::Tab,
+        NamedKey::Enter,
+        NamedKey::Backspace,
+        NamedKey::Up,
+        NamedKey::Down,
+        NamedKey::Left,
+        NamedKey::Right,
+        NamedKey::Home,
+        NamedKey::End,
+        NamedKey::PageUp,
+        NamedKey::PageDown,
+        NamedKey::F1,
+        NamedKey::F2,
+        NamedKey::F3,
+        NamedKey::F4,
+        NamedKey::F5,
+        NamedKey::F6,
+        NamedKey::F7,
+        NamedKey::F8,
+        NamedKey::F9,
+        NamedKey::F10,
+        NamedKey::F11,
+        NamedKey::F12,
+    ];
+
+    /// The grid the phone key tests save: a chord, a sequence, every named
+    /// key, and the three protected kinds.
+    fn phone_keys_fixture() -> Vec<GridKey> {
+        let press = |key: StepKey| Step {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key,
+        };
+        let sequence = EVERY_NAMED
+            .iter()
+            .map(|name| press(StepKey::Named { name: *name }))
+            .collect();
+        vec![
+            GridKey {
+                id: "ctrl-b".to_owned(),
+                label: "Ctrl+B".to_owned(),
+                action: KeyAction::Send {
+                    steps: vec![Step {
+                        ctrl: true,
+                        alt: false,
+                        shift: false,
+                        key: StepKey::Char { value: 'b' },
+                    }],
+                },
+            },
+            GridKey {
+                id: "vim-save".to_owned(),
+                label: "vim save".to_owned(),
+                action: KeyAction::Send {
+                    steps: vec![
+                        press(StepKey::Named {
+                            name: NamedKey::Esc,
+                        }),
+                        press(StepKey::Char { value: ':' }),
+                        press(StepKey::Char { value: 'w' }),
+                        press(StepKey::Named {
+                            name: NamedKey::Enter,
+                        }),
+                    ],
+                },
+            },
+            GridKey {
+                id: "all-named".to_owned(),
+                label: "All".to_owned(),
+                action: KeyAction::Send { steps: sequence },
+            },
+            GridKey {
+                id: "ctrl".to_owned(),
+                label: "Ctrl".to_owned(),
+                action: KeyAction::Ctrl,
+            },
+            GridKey {
+                id: "paste".to_owned(),
+                label: "Paste".to_owned(),
+                action: KeyAction::Paste,
+            },
+            GridKey {
+                id: "quick".to_owned(),
+                label: "Quick".to_owned(),
+                action: KeyAction::Quick,
+            },
+        ]
+    }
+
+    /// The steps one press of `key` can make of a save the tests load.
+    fn loaded_step(key: StepKey) -> Step {
+        Step {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key,
+        }
+    }
+
+    #[test]
+    fn phone_keys_absent_from_a_v0_5_1_alpha_file_load_as_defaults() {
+        let dir = TestDir::new("phone-keys-absent");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+
+        assert_eq!(ui.phone_keys, None, "absent: the built-in grid shows");
+    }
+
+    #[test]
+    fn phone_keys_round_trip() {
+        let dir = TestDir::new("phone-keys-round-trip");
+        let state = UiState {
+            phone_keys: Some(phone_keys_fixture()),
+            ..UiState::default()
+        };
+
+        save_ui_state(&dir.0, &state).expect("save");
+
+        assert_eq!(load_ui_state(&dir.0), state);
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["phone_keys"][0]["id"], "ctrl-b");
+        assert_eq!(saved["phone_keys"][0]["action"]["kind"], "send");
+        assert_eq!(saved["phone_keys"][3]["action"]["kind"], "ctrl");
+        assert_eq!(saved["phone_keys"][5]["action"]["kind"], "quick");
+    }
+
+    #[test]
+    fn phone_keys_with_an_unknown_kind_load_as_unknown() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_keys": [
+                { "id": "macro", "label": "Macro", "action": { "kind": "macro" } },
+                { "id": "mouse", "label": "Mouse", "action": { "kind": "send", "steps": [
+                    { "ctrl": false, "alt": false, "shift": false, "key": { "kind": "mouse" } }
+                ] } },
+                { "id": "f13", "label": "F13", "action": { "kind": "send", "steps": [
+                    { "ctrl": false, "alt": false, "shift": false, "key": { "kind": "named", "name": "f13" } }
+                ] } },
+            ],
+        }))
+        .expect("a key kind never fails the file");
+        let keys = state.phone_keys.expect("the grid loads");
+
+        assert_eq!(keys[0].action, KeyAction::Unknown);
+        assert_eq!(keys[0].label, "Macro", "kept, drawn dimmed");
+        assert_eq!(
+            keys[1].action,
+            KeyAction::Send {
+                steps: vec![loaded_step(StepKey::Unknown)]
+            }
+        );
+        assert_eq!(
+            keys[2].action,
+            KeyAction::Send {
+                steps: vec![loaded_step(StepKey::Named {
+                    name: NamedKey::Unknown
+                })]
+            }
+        );
+        assert_eq!(keys.len(), 6, "Ctrl, Paste and Quick join them");
+    }
+
+    #[test]
+    fn phone_keys_that_are_not_a_list_load_as_absent() {
+        for bad in [json!(5), json!("esc"), json!(true), json!({ "id": "esc" })] {
+            let state: UiState = serde_json::from_value(json!({
+                "sidebar_collapsed": true,
+                "phone_keys": bad,
+            }))
+            .expect("a key grid never fails the file");
+
+            assert_eq!(state.phone_keys, None, "{bad}");
+            assert!(state.sidebar_collapsed, "{bad}: the rest of the file loads");
+        }
+    }
+
+    #[test]
+    fn phone_key_that_does_not_decode_is_dropped() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_keys": [
+                { "id": "esc", "label": "Esc", "action": { "kind": "send", "steps": [
+                    { "ctrl": false, "alt": false, "shift": false, "key": { "kind": "char", "value": "ab" } }
+                ] } },
+                { "id": "tab", "label": "Tab", "action": { "kind": "send", "steps": [
+                    { "ctrl": false, "alt": false, "shift": false, "key": { "kind": "named", "name": "tab" } }
+                ] } },
+                { "label": "No action" },
+            ],
+        }))
+        .expect("a key never fails the file");
+
+        let keys = state.phone_keys.expect("the grid loads");
+        assert_eq!(keys[0].id, "tab", "only the key that decodes stays");
+    }
+
+    #[test]
+    fn phone_keys_load_normalised() {
+        let state: UiState = serde_json::from_value(json!({
+            "phone_keys": [
+                { "id": "esc", "label": " ", "action": { "kind": "send", "steps": [
+                    { "ctrl": true, "alt": false, "shift": false, "key": { "kind": "char", "value": "b" } }
+                ] } },
+                { "id": "Bad Id", "label": "Bad", "action": { "kind": "unknown" } },
+                { "id": "esc", "label": "Again", "action": { "kind": "unknown" } },
+                { "id": "paste", "label": "Paste", "action": { "kind": "paste" } },
+                { "id": "paste-2", "label": "Paste again", "action": { "kind": "paste" } },
+            ],
+        }))
+        .expect("a key grid loads");
+
+        let keys = state.phone_keys.expect("the grid loads");
+        let ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
+        assert_eq!(ids, ["esc", "key-1", "key-2", "paste", "ctrl", "quick"]);
+        assert_eq!(
+            keys[0].label, "Ctrl+B",
+            "a blank label takes the derived one"
+        );
+        assert_eq!(keys[3].action, KeyAction::Paste, "the first Paste stays");
+    }
+
     #[test]
     fn ui_state_round_trips() {
         let dir = TestDir::new("round-trip");
@@ -7088,6 +7359,7 @@ pub(crate) mod tests {
             theme: Some("my-theme".to_owned()),
             phone_agent_replies: None,
             phone_shell_replies: None,
+            phone_keys: None,
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),

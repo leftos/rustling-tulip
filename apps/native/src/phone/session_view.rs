@@ -768,16 +768,21 @@ impl PhoneRoot {
             .flex()
             .flex_wrap()
             .gap(px(COMPOSER_GAP));
-        for (index, key) in key_grid::defaults().iter().enumerate() {
+        let saved = self.root.read(cx).sidebar.ui_state().phone_keys.clone();
+        for (index, key) in key_grid::resolved(saved.as_deref()).iter().enumerate() {
             let kind = if armed && key.action == KeyAction::Ctrl {
                 ButtonKind::Primary
             } else {
                 ButtonKind::Outlined
             };
+            let dimmed = key_grid::is_inert(key);
             dock = dock.child(
                 phone_button(&format!("phone-key-{index}"), kind, cx)
                     .min_h(px(TOUCH_TARGET))
                     .child(key.label.clone())
+                    .when(dimmed, |button| {
+                        button.opacity(crate::spawn_view::DISABLED_OPACITY)
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.press_grid_key(index, KeySurface::Dock, window, cx);
                     })),
@@ -799,10 +804,14 @@ impl PhoneRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let keys = key_grid::defaults();
+        let saved = self.root.read(cx).sidebar.ui_state().phone_keys.clone();
+        let keys = key_grid::resolved(saved.as_deref());
         let Some(key) = keys.get(index) else {
             return;
         };
+        if key_grid::is_inert(key) {
+            return;
+        }
         match &key.action {
             KeyAction::Ctrl => self.key_bar.borrow_mut().toggle_ctrl(),
             KeyAction::Paste => match surface {

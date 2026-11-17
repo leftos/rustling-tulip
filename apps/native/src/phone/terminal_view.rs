@@ -168,12 +168,14 @@ impl PhoneRoot {
             .flex_1()
             .min_w_0()
             .overflow_x_scroll();
-        for (index, key) in key_grid::defaults().iter().enumerate() {
+        let saved = self.root.read(cx).sidebar.ui_state().phone_keys.clone();
+        for (index, key) in key_grid::resolved(saved.as_deref()).iter().enumerate() {
             let kind = if key.action == KeyAction::Ctrl && armed {
                 ButtonKind::Primary
             } else {
                 ButtonKind::Outlined
             };
+            let dimmed = key_grid::is_inert(key);
             scroll = scroll.child(
                 phone_button(&format!("phone-bar-{}", key.id), kind, cx)
                     .flex_none()
@@ -183,6 +185,9 @@ impl PhoneRoot {
                     .px(px(BAR_KEY_PAD))
                     .truncate()
                     .child(key.label.clone())
+                    .when(dimmed, |button| {
+                        button.opacity(crate::spawn_view::DISABLED_OPACITY)
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.press_grid_key(index, KeySurface::Terminal, window, cx);
                     })),

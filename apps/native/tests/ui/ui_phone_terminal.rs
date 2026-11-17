@@ -850,6 +850,158 @@ fn a_second_ctrl_tap_disarms(cx: &mut TestAppContext) {
     assert_eq!(h.host(&saved_remote()).sent_input("n"), b"c");
 }
 
+/// A key as `native-ui.json` stores it.
+fn grid_key(id: &str, label: &str, action: &serde_json::Value) -> serde_json::Value {
+    json!({ "id": id, "label": label, "action": action })
+}
+
+/// A send action of one press of `key` with the modifiers given.
+fn press(ctrl: bool, alt: bool, shift: bool, key: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "kind": "send",
+        "steps": [{ "ctrl": ctrl, "alt": alt, "shift": shift, "key": key }],
+    })
+}
+
+/// A key of one press of the named key `name`.
+fn named_key(id: &str, label: &str, name: &str) -> serde_json::Value {
+    grid_key(
+        id,
+        label,
+        &press(
+            false,
+            false,
+            false,
+            &json!({ "kind": "named", "name": name }),
+        ),
+    )
+}
+
+/// A phone showing session `n`'s Terminal page over `ui` saved beside its
+/// host, everything sent so far drained.
+fn on_terminal_saved<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &serde_json::Value,
+) -> Harness<'a> {
+    let mut file = ui.as_object().cloned().unwrap_or_default();
+    file.insert(
+        "saved_hosts".to_owned(),
+        json!([{ "name": REMOTE, "port": 8787 }]),
+    );
+    seed_ui(dir, &serde_json::Value::Object(file));
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+    h.host(&saved_remote()).sent();
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).pty("n", b"");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+#[gpui::test]
+fn saved_grid_orders_the_bar(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        named_key("enter", "Enter", "enter"),
+        named_key("esc", "Esc", "esc"),
+    ] });
+    let mut h = on_terminal_saved(cx, &dir, &ui);
+    phone_width(&mut h);
+
+    let mut left = px(-1.0);
+    for key in [
+        "phone-bar-enter",
+        "phone-bar-esc",
+        "phone-bar-ctrl",
+        "phone-bar-paste",
+        "phone-bar-quick",
+    ] {
+        let bounds = h.bounds(key);
+        assert!(bounds.size.width > px(0.0), "{key} is drawn: {bounds:?}");
+        assert!(
+            bounds.origin.x > left,
+            "{key} follows the key before it: {bounds:?}"
+        );
+        left = bounds.origin.x;
+    }
+    assert!(
+        !drawn(&mut h, "phone-bar-tab"),
+        "a key the saved grid does not hold is not drawn"
+    );
+}
+
+#[gpui::test]
+fn saved_grid_without_paste_still_draws_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [named_key("esc", "Esc", "esc")] });
+    let mut h = on_terminal_saved(cx, &dir, &ui);
+    phone_width(&mut h);
+
+    assert!(
+        drawn(&mut h, "phone-bar-paste"),
+        "a saved grid with no Paste still draws it"
+    );
+}
+
+#[gpui::test]
+fn saved_grid_unknown_key_sends_nothing_and_keeps_ctrl(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        grid_key("macro", "Macro", &json!({ "kind": "macro" })),
+        named_key("up", "↑", "up"),
+    ] });
+    let mut h = on_terminal_saved(cx, &dir, &ui);
+    phone_width(&mut h);
+
+    assert!(
+        drawn(&mut h, "phone-bar-macro"),
+        "a key of a kind this build does not know is drawn"
+    );
+    h.click_on("phone-bar-ctrl");
+    h.click_on("phone-bar-macro");
+    assert!(
+        h.host(&saved_remote()).sent_input("n").is_empty(),
+        "an inert key sends nothing"
+    );
+    scroll_bar_to(&mut h, "phone-bar-up");
+    h.click_on("phone-bar-up");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\x1b[1;5A",
+        "the armed Ctrl is still armed for the next plain key"
+    );
+}
+
+#[gpui::test]
+fn saved_grid_chord_sends_its_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        grid_key(
+            "ctrl-b",
+            "Ctrl+B",
+            &press(true, false, false, &json!({ "kind": "char", "value": "b" })),
+        ),
+    ] });
+    let mut h = on_terminal_saved(cx, &dir, &ui);
+    phone_width(&mut h);
+
+    h.click_on("phone-bar-ctrl-b");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        [0x02],
+        "Ctrl+B is a chord of its own"
+    );
+}
+
 #[gpui::test]
 fn paste_sends_the_clipboard_text_bracketed_when_asked(cx: &mut TestAppContext) {
     let dir = TestDir::new();

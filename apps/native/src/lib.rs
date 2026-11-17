@@ -281,6 +281,7 @@ use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::SystemNotifier;
 use crate::overlay_owner::{Overlay, OverlayOwners};
+use crate::phone::key_grid::GridKey;
 use crate::phone::quick_replies::{ReplyGroup, ReplySet};
 use crate::popout_view::PopoutView;
 use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
@@ -3200,6 +3201,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.sidebar.set_phone_replies(set, groups);
+        self.save_ui();
+        cx.refresh_windows();
+    }
+
+    /// Saves the phone's key grid: `keys`, or `None` for the built-in grid.
+    /// The open Terminal key bar and Keys dock redraw with it.
+    pub fn set_phone_keys(&mut self, keys: Option<Vec<GridKey>>, cx: &mut Context<Self>) {
+        self.sidebar.set_phone_keys(keys);
         self.save_ui();
         cx.refresh_windows();
     }

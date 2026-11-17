@@ -18,6 +18,9 @@ pub struct GridKey {
     pub action: KeyAction,
 }
 
+/// The driver id of the bar's pinned Hide button, which no key may take.
+const HIDE_ID: &str = "hide";
+
 /// What a tap on a key does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -96,6 +99,38 @@ pub enum NamedKey {
 }
 
 impl NamedKey {
+    /// The name the key draws: its part of a derived label, and its row in
+    /// the key picker.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Esc => "Esc",
+            Self::Tab => "Tab",
+            Self::Enter => "Enter",
+            Self::Backspace => "Bksp",
+            Self::Up => "↑",
+            Self::Down => "↓",
+            Self::Left => "←",
+            Self::Right => "→",
+            Self::Home => "Home",
+            Self::End => "End",
+            Self::PageUp => "PgUp",
+            Self::PageDown => "PgDn",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+            Self::Unknown => "",
+        }
+    }
+
     /// The gpui key name its press builds its bytes from.
     fn key_name(self) -> Option<&'static str> {
         Some(match self {
@@ -269,16 +304,18 @@ fn char_bytes(step: &Step, value: char) -> Option<Vec<u8>> {
 
 /// `value`'s upper case, or `None` when it has none (a digit, a symbol, a
 /// character whose upper case is more than one character).
-fn upper_case(value: char) -> Option<Vec<u8>> {
+fn upper_char(value: char) -> Option<char> {
     if !value.is_lowercase() && !value.is_uppercase() {
         return None;
     }
     let mut upper = value.to_uppercase();
     let first = upper.next()?;
-    if upper.next().is_some() {
-        return None;
-    }
-    Some(first.to_string().into_bytes())
+    upper.next().is_none().then_some(first)
+}
+
+/// `value`'s upper case as its bytes, or `None` when it has none.
+fn upper_case(value: char) -> Option<Vec<u8>> {
+    Some(upper_char(value)?.to_string().into_bytes())
 }
 
 /// A named press's bytes, as `keys::to_bytes` gives its keystroke.
@@ -333,10 +370,6 @@ fn single_plain_press(steps: &[Step]) -> bool {
 }
 
 /// Whether `key` cannot be removed: Ctrl, Paste or Quick.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the specs check the protected keys")
-)]
 pub(crate) fn is_protected(key: &GridKey) -> bool {
     matches!(
         key.action,
@@ -346,16 +379,140 @@ pub(crate) fn is_protected(key: &GridKey) -> bool {
 
 /// Whether `key` draws dimmed and does nothing: an action or a press key a
 /// later release added.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the specs check the inert keys")
-)]
 pub(crate) fn is_inert(key: &GridKey) -> bool {
     match &key.action {
         KeyAction::Send { steps } => steps.iter().any(|step| step.key.is_unknown()),
         KeyAction::Unknown => true,
         KeyAction::Ctrl | KeyAction::Paste | KeyAction::Quick => false,
     }
+}
+
+/// The grid to draw: the saved one, or the built-in grid while nothing is
+/// saved.
+pub(crate) fn resolved(saved: Option<&[GridKey]>) -> Vec<GridKey> {
+    match saved {
+        Some(keys) => keys.to_vec(),
+        None => defaults(),
+    }
+}
+
+/// What a loaded grid reads as (P22): Ctrl, Paste and Quick each exactly
+/// once (a missing one appended at the end, a repeat dropped), an id that is
+/// unfit or repeats an earlier one replaced by the next `key-{n}`, and a
+/// blank label on a send key replaced by its derived label.
+pub(crate) fn normalized(keys: Vec<GridKey>) -> Vec<GridKey> {
+    let fixed = defaults();
+    let reserved: Vec<String> = fixed
+        .iter()
+        .filter(|key| is_protected(key) && !keys.iter().any(|saved| saved.action == key.action))
+        .map(|key| key.id.clone())
+        .collect();
+    let mut kept: Vec<GridKey> = Vec::with_capacity(keys.len() + 3);
+    for mut key in keys {
+        if is_protected(&key) && kept.iter().any(|early| early.action == key.action) {
+            continue;
+        }
+        fit_id(&mut key, &kept, &reserved);
+        fit_label(&mut key);
+        kept.push(key);
+    }
+    for key in fixed.into_iter().filter(is_protected) {
+        if !kept.iter().any(|early| early.action == key.action) {
+            kept.push(key);
+        }
+    }
+    kept
+}
+
+/// Gives `key` a fresh `key-{n}` id when its own is unfit, repeats an
+/// earlier key's, or is one the appended protected keys will take.
+fn fit_id(key: &mut GridKey, kept: &[GridKey], reserved: &[String]) {
+    let repeats = kept.iter().any(|early| early.id == key.id);
+    if fits_id(&key.id) && !repeats && !reserved.contains(&key.id) {
+        return;
+    }
+    key.id = next_id(kept);
+}
+
+/// Whether `id` is lower-case letters, digits and `-`, not empty, and not
+/// the pinned Hide button's.
+fn fits_id(id: &str) -> bool {
+    id != HIDE_ID
+        && !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Makes a send key's blank label its presses' derived one.
+fn fit_label(key: &mut GridKey) {
+    let KeyAction::Send { steps } = &key.action else {
+        return;
+    };
+    if key.label.trim().is_empty() {
+        key.label = derived_label(steps);
+    }
+}
+
+/// The id an added key takes: one past the highest `key-{n}` in use, in a
+/// width that cannot overflow on any stored number.
+pub(crate) fn next_id(keys: &[GridKey]) -> String {
+    let highest = keys
+        .iter()
+        .filter_map(|key| key.id.strip_prefix("key-"))
+        .filter_map(|number| number.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("key-{}", highest + 1)
+}
+
+/// The label a key's presses make (P18): each press's modifiers in Ctrl,
+/// Alt, Shift order and then the key, the presses joined by spaces.
+pub(crate) fn derived_label(steps: &[Step]) -> String {
+    steps
+        .iter()
+        .map(step_label)
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One press's part of the derived label, empty for a press key this build
+/// does not know.
+fn step_label(step: &Step) -> String {
+    if step.key.is_unknown() {
+        return String::new();
+    }
+    let mut label = String::new();
+    for (held, modifier) in [
+        (step.ctrl, "Ctrl+"),
+        (step.alt, "Alt+"),
+        (step.shift, "Shift+"),
+    ] {
+        if held {
+            label.push_str(modifier);
+        }
+    }
+    match step.key {
+        StepKey::Char { value } => label.push_str(&char_label(value, step)),
+        StepKey::Named { name } => label.push_str(name.label()),
+        StepKey::Unknown => {}
+    }
+    label
+}
+
+/// The character a press draws: `Space` for a space, the upper case of a
+/// character with a modifier held (one with no case keeps itself), and the
+/// character itself otherwise.
+fn char_label(value: char, step: &Step) -> String {
+    if value == ' ' {
+        return "Space".to_owned();
+    }
+    let modified = step.ctrl || step.alt || step.shift;
+    if modified && let Some(upper) = upper_char(value) {
+        return upper.to_string();
+    }
+    value.to_string()
 }
 
 #[cfg(test)]
@@ -812,5 +969,224 @@ mod tests {
         let unknown_press = key_of_step("press", held_step(false, false, false, StepKey::Unknown));
         assert!(is_inert(&unknown_press), "a press with an Unknown key");
         assert!(!is_inert(&key_of("esc")), "Esc");
+    }
+
+    /// A key with `id` and the same label, whose action is one this build
+    /// does not know.
+    fn id_key(id: &str) -> GridKey {
+        GridKey {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            action: KeyAction::Unknown,
+        }
+    }
+
+    #[test]
+    fn resolved_absent_is_the_defaults() {
+        assert_eq!(resolved(None), defaults());
+    }
+
+    #[test]
+    fn resolved_saved_is_the_saved_grid() {
+        let saved = vec![key_of("enter"), unknown_key()];
+        assert_eq!(resolved(Some(&saved)), saved);
+    }
+
+    #[test]
+    fn normalized_keeps_the_defaults() {
+        assert_eq!(normalized(defaults()), defaults());
+    }
+
+    #[test]
+    fn normalized_empty_grid_gets_the_protected_keys() {
+        assert_eq!(
+            normalized(Vec::new()),
+            vec![key_of("ctrl"), key_of("paste"), key_of("quick")]
+        );
+    }
+
+    #[test]
+    fn normalized_appends_a_missing_protected_key() {
+        let mut saved = defaults();
+        saved.retain(|key| key.id != "quick");
+        let mut expected = defaults();
+        expected.retain(|key| key.id != "quick");
+        expected.push(key_of("quick"));
+
+        assert_eq!(normalized(saved), expected);
+    }
+
+    #[test]
+    fn normalized_drops_a_repeated_protected_key() {
+        let paste = key_of("paste");
+        let mut again = paste.clone();
+        again.id = "paste-2".to_owned();
+
+        assert_eq!(
+            normalized(vec![paste, key_of("esc"), again]),
+            vec![
+                key_of("paste"),
+                key_of("esc"),
+                key_of("ctrl"),
+                key_of("quick")
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_renames_a_repeated_id() {
+        let esc = key_of("esc");
+        let mut again = esc.clone();
+        again.label = "Another Esc".to_owned();
+
+        let keys = normalized(vec![esc, again]);
+
+        assert_eq!(keys[0].id, "esc");
+        assert_eq!(keys[1].id, "key-1");
+    }
+
+    #[test]
+    fn normalized_replaces_an_unfit_id() {
+        let bad = GridKey {
+            id: "Bad Id".to_owned(),
+            label: "Bad".to_owned(),
+            action: KeyAction::Unknown,
+        };
+
+        assert_eq!(normalized(vec![bad])[0].id, "key-1");
+    }
+
+    #[test]
+    fn normalized_renames_a_key_holding_a_missing_protected_id() {
+        let p = GridKey {
+            id: "paste".to_owned(),
+            label: "P".to_owned(),
+            action: KeyAction::Send {
+                steps: vec![plain_step(char_step('p'))],
+            },
+        };
+
+        let keys = normalized(vec![p]);
+
+        let ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
+        assert_eq!(ids, ["key-1", "ctrl", "paste", "quick"]);
+        assert!(
+            keys.iter()
+                .any(|key| key.id == "paste" && key.action == KeyAction::Paste),
+            "the appended Paste keeps its fixed id"
+        );
+    }
+
+    #[test]
+    fn normalized_renames_a_key_with_the_hide_id() {
+        let hide = GridKey {
+            id: "hide".to_owned(),
+            label: "Hide".to_owned(),
+            action: KeyAction::Send {
+                steps: vec![plain_step(named_step(NamedKey::Esc))],
+            },
+        };
+
+        assert_eq!(normalized(vec![hide])[0].id, "key-1");
+    }
+
+    #[test]
+    fn next_id_past_the_largest_u32() {
+        let mut keys = defaults();
+        keys.push(id_key("key-4294967295"));
+
+        assert_eq!(next_id(&keys), "key-4294967296");
+    }
+
+    #[test]
+    fn normalized_labels_a_blank_key() {
+        let key = GridKey {
+            id: "ctrl-b".to_owned(),
+            label: "  ".to_owned(),
+            action: KeyAction::Send {
+                steps: vec![held_step(true, false, false, char_step('b'))],
+            },
+        };
+
+        assert_eq!(normalized(vec![key])[0].label, "Ctrl+B");
+    }
+
+    #[test]
+    fn normalized_keeps_unknown_keys() {
+        assert_eq!(normalized(vec![unknown_key()])[0], unknown_key());
+    }
+
+    #[test]
+    fn derived_label_of_one_press() {
+        for (step, expected) in [
+            (held_step(true, false, false, char_step('b')), "Ctrl+B"),
+            (held_step(false, false, true, char_step('b')), "Shift+B"),
+            (held_step(false, true, false, char_step('b')), "Alt+B"),
+            (plain_step(char_step('b')), "b"),
+            (plain_step(named_step(NamedKey::Esc)), "Esc"),
+            (plain_step(named_step(NamedKey::Backspace)), "Bksp"),
+            (
+                held_step(false, false, true, named_step(NamedKey::Tab)),
+                "Shift+Tab",
+            ),
+            (
+                held_step(true, true, false, named_step(NamedKey::Up)),
+                "Ctrl+Alt+↑",
+            ),
+        ] {
+            assert_eq!(derived_label(&[step]), expected);
+        }
+    }
+
+    #[test]
+    fn derived_label_of_a_sequence() {
+        let steps = [
+            plain_step(named_step(NamedKey::Esc)),
+            plain_step(char_step(':')),
+            plain_step(char_step('w')),
+            plain_step(named_step(NamedKey::Enter)),
+        ];
+
+        assert_eq!(derived_label(&steps), "Esc : w Enter");
+    }
+
+    #[test]
+    fn derived_label_names_space_and_named_keys() {
+        assert_eq!(derived_label(&[plain_step(char_step(' '))]), "Space");
+        assert_eq!(
+            derived_label(&[plain_step(named_step(NamedKey::F12))]),
+            "F12"
+        );
+        assert_eq!(
+            derived_label(&[plain_step(named_step(NamedKey::PageUp))]),
+            "PgUp"
+        );
+        assert_eq!(
+            derived_label(&[plain_step(named_step(NamedKey::PageDown))]),
+            "PgDn"
+        );
+        assert_eq!(derived_label(&[]), "");
+    }
+
+    #[test]
+    fn next_id_starts_at_one() {
+        assert_eq!(next_id(&defaults()), "key-1");
+    }
+
+    #[test]
+    fn next_id_follows_the_highest() {
+        let mut keys = defaults();
+        keys.push(id_key("key-1"));
+        keys.push(id_key("key-3"));
+
+        assert_eq!(next_id(&keys), "key-4");
+    }
+
+    #[test]
+    fn next_id_ignores_a_non_number() {
+        let mut keys = defaults();
+        keys.push(id_key("key-x"));
+
+        assert_eq!(next_id(&keys), "key-1");
     }
 }
