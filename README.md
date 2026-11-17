@@ -16,11 +16,12 @@ It is alpha software.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead. A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking; looking at one clears it. On macOS, the Dock icon shows how many sessions need you, or how many finished unseen while none do.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
-- Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus, at any of eight spots around the screen's edge; on macOS they always are. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
+- Notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus, at any of eight spots around the screen's edge; on macOS they always are. They show over a full-screen app or game too, held back only by Do Not Disturb and presentation mode. Each kind plays its own sound: a chime from the bundled list, your own .wav or .ogg, or none.
 - Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
 - The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents (each with its model and effort level) and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
-- A session's dispatch runs (DS) and subagents (SA) nest under it in the sidebar, a run's own subagents under the run, and a chevron folds them away; a button beside the Sessions title folds or opens them all at once. Settings chooses whether finished subagents stay, how many and for how long, and whether their rows draw compact. Click one, or drag it onto a pane, to follow its transcript: replies, tool calls and their output, which a click expands. A run's pane adds its cost, tokens and a Stop button, and the Dashboard lists each run under the session that started it.
+- A session's dispatch runs (DS) and subagents (SA) nest under it in the sidebar, a run's own subagents under the run, and a chevron folds them away; a button beside the Sessions title folds or opens them all at once. Settings chooses whether finished subagents stay, how many and for how long, and whether all rows, only finished ones or none draw compact. Click one, or drag it onto a pane, to follow its transcript: replies, tool calls and their output, which a click expands. A run's pane adds its cost, tokens and a Stop button, and the Dashboard lists each run under the session that started it.
+- A subagent or run pane draws its transcript in the terminal's font and size; drag or double- or triple-click to select and Ctrl+C to copy, and Ctrl+click a path or URL to open it, or Ctrl+Shift+click for the link menu.
 - `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Ctrl+Shift+P opens a jump palette: type to find any open pane, tab, session, repo or workspace, and Enter goes straight there. It also opens a shell on any connected computer.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
@@ -58,6 +59,7 @@ It is alpha software.
 
 - Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage, and the account list adds its Fable weekly limit while Fable is in use; click it to switch, turn auto-switch on and see when your accounts run dry.
 - Settings › Accounts lists your saved accounts to switch, rename, reorder, remove (after you confirm) or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
+- Each account shows its extra-usage spend and prepaid credit balance, and Settings › Accounts can let an account spend its prepaid credits once every account's usage is used up.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops.
 
 ![The footer's account popover: each saved account's five-hour and weekly usage with its resets, a Switch button, the account in use, and auto-switch at 85%](docs/images/accounts.png)
@@ -75,7 +77,7 @@ It is alpha software.
 - The sidebar groups sessions by host, each with its own + Shell; remote panes and tabs carry their host's name, one tab can mix panes from several hosts, and an offline host dims until it reconnects.
 - Spawning, shells, Add repo, presets and Settings work on any connected host: the spawn picker groups repos by host, and Settings has a host selector.
 - Connections and Settings show the release each host runs and mark an older one Behind. Update it from Connections, over Tailscale or SSH, and a notice follows it until it is back; a release that ends sessions or breaks the connection is named before you confirm.
-- Unbind every session of one host from Connections, the jump palette or its header: they keep running there. Rebind them into new tabs by grid, side by side, stacked, or following that host's own layout.
+- Unbind every session of one host from Connections, the jump palette or its header: they keep running there. Rebind them into new tabs by grid, side by side, stacked, or following that host's own layout, or bind only the sessions that have no pane yet and leave your tabs as they are.
 - The status bar shows CPU and RAM for This PC and any hosts you pick by right-clicking its pills, and a busy machine turns amber.
 - From This PC's row in Connections, tell every connected client to update: each counts down 10 seconds with Cancel, and phones reload. When another device updates this PC, the app counts down the same way and reopens after the update.
 
@@ -86,7 +88,7 @@ It is alpha software.
 - Turn on remote access in Settings and your other PCs on your tailnet can open this PC's sessions. The daemon serves only your tailnet, over TLS with a Tailscale certificate, and Settings › Remote access tells you when Tailscale is slow to answer while it keeps serving.
 - The host picker lists your tailnet machines and the hosts you saved, and the app connects to every saved host you have switched on when it starts.
 - A new device has to be approved on the host PC with a one-time pairing code. The Devices list shows who is connected and when each device was last seen, and Block cuts a device off until you forget it.
-- Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
+- Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it: any file the host can read, not only those in the session's folders, on a host running this release or later. An HTML page brings its images and stylesheets with it.
 - Ctrl+click a folder path to fetch the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches. A fetched file's notice offers Fetch whole folder, and a fetched folder's offers Reveal.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
 - Paste an image with Ctrl+V, or drop files onto a terminal, in a session on another computer: they are copied there and their paths pasted.
@@ -104,6 +106,7 @@ It is alpha software.
 ### Source control and diffs
 
 - Each worktree's changes, staging, commit, discard, stashes, history and commit details, with a link to the commit on your forge.
+- A plain shell that changes folder into another registered repo takes Source Control and its pane's repo chip with it.
 - Side-by-side diffs with word-level changes, syntax colours, an overview ruler and F7 / Shift+F7 to step through changes.
 - Deleting a worktree deletes its branch only when its commits have already landed; otherwise it asks, branch by branch.
 
@@ -162,131 +165,9 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
-## What's new in v0.15.0-alpha
+## What's changed
 
-- Follow in tab opens a tab that tails a file live, on any host, from a terminal's file path or a Chat file link.
-- Chat can pull a draft from the terminal's prompt box to edit or send it as is, and offers Claude's suggested next prompt.
-- Closing a tab with running sessions asks whether to keep them running or stop them.
-- Chat draws each Code Mode script as one line with its description, time and the calls it ran.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.15.0-alpha).
-
-## What's new in v0.14.0-alpha
-
-- Dispatch runs and subagents nest under their session in the sidebar, and a pane following one shows its full transcript.
-- Unbind every session of one machine, or rebind them into new tabs by a layout.
-- The status bar shows CPU and RAM for this PC and the remote hosts you pick.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.14.0-alpha).
-
-## What's new in v0.13.0-alpha
-
-- Dispatch runs show in the sidebar tagged DS, and a pane can follow one with its cost, tokens, recent actions and a Stop button.
-- The Dashboard lists the dispatch runs a session started under that session.
-- A blue count on the taskbar, the tabs and the Sessions icon shows sessions that finished while you weren't looking.
-- Ctrl+clicking a file path in a terminal opens it in its app at once.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.13.0-alpha).
-
-## What's new in v0.12.1-alpha
-
-- Settings' Install hooks, Accounts, Appearance and the Dashboard's stored key wait for OK or Apply, and Cancel leaves them as they were.
-- With Claude's vim editor mode on, sessions show the right state and Chat answers land as text.
-- Popovers, menus, dialogs and tooltips are wider, so their text fits on fewer lines.
-- A session started with a first prompt on a cmd host, such as the phone's New session, stays open.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.12.1-alpha).
-
-## What's new in v0.12.0-alpha
-
-- Update another computer on an older release from the Connections dialog, over the tailnet or SSH, and tell your connected clients to update.
-- Start sessions from the phone's Home: launch a repo's last launch again, a preset, or `/nextup` in any repo or workspace.
-- Choose Claude's effort level when starting a session, with Fable among Claude's models.
-- Questions, toasts, the Dashboard and Accounts show their whole text, wrapping it, instead of cutting it to one line.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.12.0-alpha).
-
-## What's new in v0.11.0-alpha
-
-- The phone app opens each session as a chat, with a live terminal, a Needs you tray and notifications when a session needs you or finishes.
-- Answer a question or permission prompt in your own words from Chat's cards or a toast.
-- Ctrl+Shift+P opens a jump palette to go straight to any pane, tab, session, repo or workspace.
-- A crash at start-up now says what happened, and the client always opens, closing your tabs only if it crashes twice in a row.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.11.0-alpha).
-
-## What's new in v0.10.0-alpha
-
-- rustling-tulip now runs on Apple silicon Macs, as a signed and notarized .dmg that updates itself.
-- Save several Claude logins, see each one's usage in the footer, and switch accounts by hand or let auto-switch do it.
-- On Windows, a Gates view shows this PC's gate slots, queue and recent runs, and sets each pool's slot count.
-- Pick each host's default shell, and a Claude you start by hand in a shell gets Chat and Summary too.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.10.0-alpha).
-
-## What's new in v0.9.0-alpha
-
-- Ctrl+click a folder path in a remote host's terminal to fetch the whole folder, or fetch a fetched file's whole folder from its notice.
-- Settings has a search box that finds any setting, and OK, Apply and Cancel so changes wait until you confirm them.
-- The chat stays a readable width, sets each final answer apart, and folds runs of tool calls into one line in Compact mode.
-- The installer and the app are signed with a verified publisher, and update notices show what's new since your version.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.9.0-alpha).
-
-## What's new in v0.8.1-alpha
-
-- A newly started Claude session no longer shows as Finished, or raises a Finished toast, before you have used it.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.8.1-alpha).
-
-## What's new in v0.8.0-alpha
-
-- The Dashboard shows every running agent at a glance and answers their questions and permission prompts with one click.
-- On Windows, the app's own toasts answer a prompt or go to its pane without taking focus, with softer chimes.
-- `rustling-tulipd` drives sessions from a shell: list, spawn, send, read, wait and watch.
-- Sessions run as administrator are kept apart: programs without administrator rights can no longer start or reach them.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.8.0-alpha).
-
-## What's new in v0.7.2-alpha
-
-- A Finished toast no longer fires when a Stop hook sends the agent back to work; the session stays Working until its hooks finish.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.2-alpha).
-
-## What's new in v0.7.1-alpha
-
-- Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
-- A Finished toast now waits 5 seconds and is dropped if the session starts working again.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.1-alpha).
-
-## What's new in v0.7.0-alpha
-
-- Tail a log a chat command writes, in a scrolling box under its card that follows the file as it grows.
-- Hear when an agent needs you, and on Windows see the Needs you count as a badge on the taskbar button.
-- Start sessions faster: a Spawn submenu on every repo and workspace, a target dropdown, and a remembered Trusted choice.
-- A quieter app: toasts and banners no longer narrate what you can already see.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.0-alpha).
-
-## What's new in v0.6.1-alpha
-
-- The coloured frame round a session's terminal is 1 px by default, and a Frame width setting sets it from off to 6 px for the app, a repo, a workspace or one session.
-- A Claude session working on a task-list item no longer shows as idle mid-turn or sends a false Finished notification.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.6.1-alpha).
-
-## What's new in v0.6.0-alpha
-
-- Several hosts in one window: this PC and every saved host you switch on connect at once, the sidebar groups sessions by host, and spawning, shells, presets and Settings work on any of them.
-- A chat view and a summary view for Claude sessions, with prompt cards, a message box and a strip of the work still running.
-- Themes: pick a built-in theme or make your own in the Themes window; the default look is now Nord with the Inter font.
-- Interface text size and weight settings, and a terminal weight setting from Regular to Bold.
-- Tab pills and the taskbar badge count the sessions that need you.
-- Sessions running when Windows signs out, restarts or shuts down resume on their own at the next start, and many reliability fixes.
-
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.6.0-alpha).
+Each release's changes are in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/leftos/rustling-tulip/releases).
 
 ## Building from source
 

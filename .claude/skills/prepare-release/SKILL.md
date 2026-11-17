@@ -67,7 +67,7 @@ Every run is isolated from the owner's own daemon and sessions by the isolated d
 
 ## Phase 6: README
 
-Refresh `README.md`'s Features and What's new sections from the release's section (new features in, removed ones out), and re-shoot every screenshot whose view changed with `.\rt.ps1 native-shot <view>` into `docs/images/`. Commit them as `docs: refresh the README for v<version>`.
+Refresh `README.md`'s Features section from the release's section (new features in, removed ones out); the README carries no per-release list, which is the changelog's, and re-shoot every screenshot whose view changed with `.\rt.ps1 native-shot <view>` into `docs/images/`. Commit them as `docs: refresh the README for v<version>`.
 
 **Done when** each README claim holds at `<version>` and every changed view's screenshot is re-shot.
 
