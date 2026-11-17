@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "agent-api"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "chrono",
  "protocol",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "agent-claude"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "agent-api",
  "chrono",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "agent-registry"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "agent-api",
  "agent-claude",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "agent-api",
  "agent-claude",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-client"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "dev-daemon"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "agent-api",
  "agent-registry",
@@ -2563,7 +2563,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "folder-bench"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6045,7 +6045,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -6056,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-ts"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -6099,7 +6099,7 @@ checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
 name = "push-crypto"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6692,7 +6692,7 @@ dependencies = [
 
 [[package]]
 name = "rt-driver-mcp"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6861,7 +6861,7 @@ dependencies = [
 
 [[package]]
 name = "rustling-tulip-ios"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "gpui",
  "gpui_ios",
@@ -6870,7 +6870,7 @@ dependencies = [
 
 [[package]]
 name = "rustling-tulip-ios-notify"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -6885,7 +6885,7 @@ dependencies = [
 
 [[package]]
 name = "rustling-tulip-native"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "agent-api",
  "agent-registry",
@@ -8029,7 +8029,7 @@ dependencies = [
 
 [[package]]
 name = "tailnet"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -8453,7 +8453,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracer"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8475,7 +8475,7 @@ dependencies = [
 
 [[package]]
 name = "tracer-protocol"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -8706,7 +8706,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "update-core"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "reqwest",

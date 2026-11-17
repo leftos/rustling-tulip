@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.16.0-alpha
+
+### Highlights
+
+- Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
+- Subagent and dispatch run panes select and copy text, open links with Ctrl+click, and draw in the terminal's font.
+- Each Claude account shows its extra-usage spend and prepaid balance, and can opt in to spend its credits.
+- The phone app's Settings edits and reorders its Quick replies and arranges its keys, including chords like Ctrl+B.
+
 ### Added
 
 - The Rebind dialog can bind only a host's sessions that have no pane yet, leaving the tabs you arranged as they are.
@@ -14,7 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On a host that supports it, Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
 - Source Control and a shell pane's repo chip follow a plain shell that changes folder into another registered repo.
 - The phone app's Settings › Quick replies edits, removes, restores and reorders the Quick dock's replies and their groups, for agent sessions and shells.
-- The phone app's Settings › Keys arranges the key bar and Keys dock's keys, edits them, and adds keys that send a chord like Ctrl+B or a short sequence.
+- The phone app's Settings › Keys arranges and edits the key bar and Keys dock, and adds keys that send a chord like Ctrl+B.
 
 ### Fixed
 
