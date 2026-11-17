@@ -24,7 +24,9 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
 use crate::target::HostKey;
+use crate::term_input;
 use crate::ui_theme::{UiTheme, theme};
+use protocol::ShiftEnter;
 
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
@@ -842,8 +844,13 @@ impl PhoneRoot {
         let pane = self
             .terminal_pane(cx)
             .filter(|_| surface == KeySurface::Terminal);
+        let shift_enter = match &pane {
+            Some(pane) => pane.read(cx).shift_enter(),
+            None => self.dock_shift_enter(cx),
+        };
         let modes = KeyModes {
             app_cursor: pane.as_ref().is_some_and(|pane| pane.read(cx).app_cursor()),
+            shift_enter,
         };
         let Some(bytes) = key_grid::key_bytes(steps, sticky, modes) else {
             return;
@@ -857,6 +864,21 @@ impl PhoneRoot {
                 }
             }
         }
+    }
+
+    /// What Shift+Enter sends from the Keys dock: the shown session's own
+    /// choice, as the terminal pane reads it, or a shell's `\` + CR when no
+    /// session shows.
+    fn dock_shift_enter(&self, cx: &App) -> ShiftEnter {
+        let root = self.root.read(cx);
+        let Some((host, id)) = self.shown.as_ref() else {
+            return ShiftEnter::BackslashCr;
+        };
+        root.sidebar
+            .session(id)
+            .map_or(ShiftEnter::BackslashCr, |session| {
+                term_input::SessionContext::of(session, root.sidebar.agents(host)).shift_enter
+            })
     }
 
     /// The header: Back, the label over the status word, and the toggle

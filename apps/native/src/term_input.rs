@@ -16,7 +16,7 @@ use crate::sidebar::{agent_up, runtime_label};
 const SHIFT_ENTER: &[u8] = b"\\\r";
 
 /// The bytes Shift+Enter sends to a session that chose `shift_enter`.
-fn shift_enter_bytes(shift_enter: ShiftEnter) -> &'static [u8] {
+pub(crate) fn shift_enter_bytes(shift_enter: ShiftEnter) -> &'static [u8] {
     match shift_enter {
         ShiftEnter::Lf => b"\n",
         ShiftEnter::BackslashCr | ShiftEnter::Unknown => SHIFT_ENTER,

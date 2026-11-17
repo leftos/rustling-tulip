@@ -1101,7 +1101,11 @@ The phone's composer (`composer` in `phone/session_view.rs`) draws the desktop C
 
 The composer's Paste button pastes into the message field, and its Quick and Keys buttons open a dock over its row, one at a time: Quick lists the phone's reply groups (`phone/quick_replies.rs`, `phone-dock-quick`) and Keys the key grid (`phone/key_grid.rs`, `phone-dock-keys`) as wrapping rows, one button per key (`phone-key-{index}`). The grid's built-in keys are the Terminal page's bar keys in their order, then Shift+Tab, Enter, Ctrl+C and the digits 1 to 9.
 
-A tap on a send key types its presses into the session's input (`send_phone_input`), each built as the terminal pane builds a key's bytes (`key_grid::key_bytes` over `keys::to_bytes`), so Ctrl+C interrupts and Ctrl+V reaches the PTY as their control bytes rather than copying or pasting the client's selection or clipboard; the dock holds no terminal, so its arrows send the plain cursor keys. Ctrl arms a sticky Ctrl for the next key of one press, lit while armed and left armed by a chord or a sequence key; Paste pastes the clipboard into the composer's field and Quick switches the dock to the Quick replies. The Keys dock opens with Ctrl unarmed.
+A tap on a send key types its presses into the session's input (`send_phone_input`), each built as the terminal pane builds a key's bytes (`key_grid::key_bytes` over `keys::to_bytes`), so Ctrl+C interrupts and Ctrl+V reaches the PTY as their control bytes rather than copying or pasting the client's selection or clipboard; the dock holds no terminal, so its arrows send the plain cursor keys.
+
+A Shift+Enter press sends the session's own Shift+Enter bytes (`term_input::shift_enter_bytes`), read from the pane's session on the Terminal page and from `SessionContext::of` in the dock, so a shell takes `\` + CR and an agent whose descriptor names `lf` a line feed.
+
+Ctrl arms a sticky Ctrl for the next key of one press, lit while armed and left armed by a chord or a sequence key; Paste pastes the clipboard into the composer's field and Quick switches the dock to the Quick replies. The Keys dock opens with Ctrl unarmed.
 
 The phone's Chat draws its text as selectable units (`chat_select.rs`: `Units::build`, from the entries as Compact shows them; an open compact run's cards are selectable too, a folded run's and a muted row's are not).
 

@@ -4,9 +4,11 @@
 //! Ctrl that a single-stroke key takes.
 
 use gpui::{Keystroke, Modifiers};
+use protocol::ShiftEnter;
 use serde::{Deserialize, Serialize};
 
 use crate::keys;
+use crate::term_input;
 
 /// One key of the grid: what the bar and the dock draw and what a tap does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +181,9 @@ impl StepKey {
 pub(crate) struct KeyModes {
     /// The terminal's DECCKM mode: arrows send `ESC O x` instead of `ESC [ x`.
     pub(crate) app_cursor: bool,
+    /// What Shift+Enter sends: the session's own choice, as its agent's
+    /// descriptor names it.
+    pub(crate) shift_enter: ShiftEnter,
 }
 
 /// The grid a phone with nothing saved draws: the Terminal bar's keys in
@@ -267,7 +272,7 @@ fn plain(key: StepKey) -> Step {
 pub(crate) fn step_bytes(step: &Step, modes: KeyModes) -> Option<Vec<u8>> {
     match step.key {
         StepKey::Char { value } => char_bytes(step, value),
-        StepKey::Named { name } => name_bytes(step, name, modes.app_cursor),
+        StepKey::Named { name } => name_bytes(step, name, modes),
         StepKey::Unknown => None,
     }
 }
@@ -318,8 +323,13 @@ fn upper_case(value: char) -> Option<Vec<u8>> {
     Some(upper_char(value)?.to_string().into_bytes())
 }
 
-/// A named press's bytes, as `keys::to_bytes` gives its keystroke.
-fn name_bytes(step: &Step, name: NamedKey, app_cursor: bool) -> Option<Vec<u8>> {
+/// A named press's bytes, as `keys::to_bytes` gives its keystroke, except
+/// that Shift+Enter sends the session's own Shift+Enter bytes, as the pane's
+/// keyboard does (`term_input::key_action`).
+fn name_bytes(step: &Step, name: NamedKey, modes: KeyModes) -> Option<Vec<u8>> {
+    if name == NamedKey::Enter && step.shift && !step.ctrl {
+        return Some(term_input::shift_enter_bytes(modes.shift_enter).to_vec());
+    }
     let keystroke = Keystroke {
         key: name.key_name()?.to_owned(),
         key_char: None,
@@ -330,7 +340,7 @@ fn name_bytes(step: &Step, name: NamedKey, app_cursor: bool) -> Option<Vec<u8>> 
             ..Modifiers::default()
         },
     };
-    keys::to_bytes(&keystroke, app_cursor)
+    keys::to_bytes(&keystroke, modes.app_cursor)
 }
 
 /// The bytes `steps` send in order, or `None` when one of them types
@@ -552,7 +562,18 @@ mod tests {
     }
 
     fn modes(app_cursor: bool) -> KeyModes {
-        KeyModes { app_cursor }
+        KeyModes {
+            app_cursor,
+            shift_enter: ShiftEnter::BackslashCr,
+        }
+    }
+
+    /// Modes of a session whose agent takes a line feed for Shift+Enter.
+    fn lf_modes() -> KeyModes {
+        KeyModes {
+            app_cursor: false,
+            shift_enter: ShiftEnter::Lf,
+        }
     }
 
     fn off() -> KeyModes {
@@ -863,6 +884,24 @@ mod tests {
             step_bytes(&plain_step(named_step(NamedKey::Unknown)), off()),
             None
         );
+    }
+
+    #[test]
+    fn shift_enter_sends_backslash_return_by_default() {
+        let step = held_step(false, false, true, named_step(NamedKey::Enter));
+        assert_eq!(step_bytes(&step, off()).as_deref(), Some(&b"\\\r"[..]));
+    }
+
+    #[test]
+    fn shift_enter_sends_line_feed_for_an_lf_session() {
+        let step = held_step(false, false, true, named_step(NamedKey::Enter));
+        assert_eq!(step_bytes(&step, lf_modes()).as_deref(), Some(&b"\n"[..]));
+    }
+
+    #[test]
+    fn shift_enter_with_ctrl_is_a_plain_return() {
+        let step = held_step(true, false, true, named_step(NamedKey::Enter));
+        assert_eq!(step_bytes(&step, lf_modes()).as_deref(), Some(&b"\r"[..]));
     }
 
     #[test]

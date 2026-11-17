@@ -21,7 +21,9 @@ use gpui::{
     UnderlineStyle, Window, WindowId, anchored, canvas, deferred, div, fill, font, outline, point,
     prelude::*, px, size,
 };
-use protocol::{AgentDescriptor, ClientMessage, ImagePaste, SessionMode, SessionSnapshot};
+use protocol::{
+    AgentDescriptor, ClientMessage, ImagePaste, SessionMode, SessionSnapshot, ShiftEnter,
+};
 
 use crate::Clock;
 use crate::clipboard_image;
@@ -742,6 +744,13 @@ impl TerminalPane {
     /// which the arrows send `ESC O x` instead of `ESC [ x`.
     pub fn app_cursor(&self) -> bool {
         self.term.app_cursor()
+    }
+
+    /// What Shift+Enter sends to the pane's session: its agent's choice, or
+    /// a shell's `\` + CR.
+    pub fn shift_enter(&self) -> ShiftEnter {
+        self.session
+            .map_or(ShiftEnter::BackslashCr, |session| session.shift_enter)
     }
 
     /// Whether the pane holds a selection of its terminal's text.

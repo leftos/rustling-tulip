@@ -1003,6 +1003,27 @@ fn saved_grid_chord_sends_its_bytes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_shift_enter_key_sends_backslash_return_to_a_shell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        grid_key(
+            "shift-enter",
+            "Shift+Enter",
+            &press(false, false, true, &json!({ "kind": "named", "name": "enter" })),
+        ),
+    ] });
+    let mut h = on_terminal_saved(cx, &dir, &ui);
+    phone_width(&mut h);
+
+    h.click_on("phone-bar-shift-enter");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\\\r",
+        "a shell takes `\\` + CR for Shift+Enter"
+    );
+}
+
+#[gpui::test]
 fn paste_sends_the_clipboard_text_bracketed_when_asked(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_terminal(cx, &dir);
