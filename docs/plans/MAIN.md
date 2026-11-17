@@ -169,7 +169,7 @@
 - [ ] RT-1590 Make the UI harness's in_model fail for a selector it has no model for
 - [ ] RT-1673 Make the settings-dashboard native-shot open its view again
 - [ ] RT-1677 Keep two simulator runs from sharing one iPhone simulator on the Mac mini
-- [!] RT-1688 Let russh take patch releases and check advisories on a schedule · release vNext
+- [!] RT-1688 Let russh take patch releases and check advisories on a schedule
 - [ ] RT-1699 Map apps/native/src/ssh_inproc.rs in the test map so -Validate passes
 - [ ] RT-1722 Make rt.ps1 refuse a routable verb run inside an outer local gate
 - [ ] RT-1853 Map the follow tab and tab close files in the test map
@@ -177,6 +177,11 @@
 - [ ] RT-1861 Refuse a driven run whose RUSTLING_TULIP_SSH is not the fake ssh, or whose fake ssh state is outside .tmp
 - [ ] RT-1863 Keep a seeded gates override off the machine's slot locks and cutover flag
 - [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
+- [ ] RT-1887 Let the driver find a fetch card's Reveal and Fetch whole folder buttons
+- [ ] RT-1888 Add a native-shot view that draws Settings › Accounts' account rows
+- [ ] RT-1889 Give each rt.ps1 native-shot run its own gate log
+- [ ] RT-1890 Keep a driven run's account login off Anthropic's real endpoints
+- [ ] RT-1891 Check the sidebar header's title fits on the real text system
 
 ## Elevated daemon and security
 
@@ -288,7 +293,6 @@
 - [ ] RT-1620 Keep the status bar readable at narrow widths with CPU and RAM pills
 - [ ] RT-1725 Remove the single-variant SidebarChrome enum and its always-true checks
 - [ ] RT-1762 Follow Markdown links and stretches in a popped-out pane window
-- [ ] RT-1866 Show the Sessions header title whole, not as Ses…, at the default sidebar width
 
 ## Terminal, panes and links
 
@@ -772,6 +776,14 @@
 - [ ] RT-1848 Split client_session_until under the 100-line function limit
 - [ ] RT-1850 Split grid_view's pane_body under the complexity limit
 - [ ] RT-1852 Split the accounts row builder under the complexity limit
+
+## No project
+
+- [ ] RT-1882 Polish
+  - [ ] RT-1884 Say "1 file", not "1 files", on a fetched folder's card
+  - [ ] RT-1885 Keep the accounts popover's header on screen in a short window
+  - [ ] RT-1886 Give the phone key editor's label field a placeholder
+- [ ] RT-1883 Draw
 
 ## Design files
 
