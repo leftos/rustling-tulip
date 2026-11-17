@@ -7,6 +7,8 @@ use gpui::{Keystroke, Modifiers};
 use protocol::ShiftEnter;
 use serde::{Deserialize, Serialize};
 
+use super::reorder;
+use crate::drag::Side;
 use crate::keys;
 use crate::term_input;
 
@@ -270,6 +272,12 @@ impl KeyDraft {
         let steps: Vec<Step> = self.steps.iter().filter_map(|step| step.step()).collect();
         derived_label(&steps)
     }
+
+    /// Moves the press at `from` to `side` of the one at `to`; an index that
+    /// names nothing leaves them as they are.
+    pub(crate) fn move_step(&mut self, from: usize, to: usize, side: Side) {
+        self.steps = reorder::reordered(&self.steps, from, to, side);
+    }
 }
 
 impl DraftStep {
@@ -366,6 +374,8 @@ pub(crate) enum KeyEdit {
     Replace(usize, GridKey),
     /// Drops the key at this index.
     Remove(usize),
+    /// Moves the key at this index to `side` of the one at `to`.
+    Move { from: usize, to: usize, side: Side },
 }
 
 /// The grid with `edit` made; `None`, changing nothing, while an index
@@ -380,6 +390,12 @@ pub(crate) fn apply_key_edit(keys: &[GridKey], edit: KeyEdit) -> Option<Vec<Grid
                 return None;
             }
             keys.remove(index);
+        }
+        KeyEdit::Move { from, to, side } => {
+            if from >= keys.len() || to >= keys.len() {
+                return None;
+            }
+            return Some(reorder::reordered(&keys, from, to, side));
         }
     }
     Some(keys)
@@ -1575,6 +1591,26 @@ mod tests {
     }
 
     #[test]
+    fn move_step_moves_a_press() {
+        let mut edited = draft(vec![
+            draft_step(false, Some(named_step(NamedKey::Esc))),
+            draft_step(false, Some(named_step(NamedKey::Tab))),
+            draft_step(false, Some(named_step(NamedKey::Enter))),
+        ]);
+
+        edited.move_step(0, 2, Side::After);
+
+        assert_eq!(
+            edited,
+            draft(vec![
+                draft_step(false, Some(named_step(NamedKey::Tab))),
+                draft_step(false, Some(named_step(NamedKey::Enter))),
+                draft_step(false, Some(named_step(NamedKey::Esc))),
+            ])
+        );
+    }
+
+    #[test]
     fn draft_of_a_key_holds_its_presses() {
         assert_eq!(
             KeyDraft::of(&key_of("ctrl-c")),
@@ -1631,6 +1667,25 @@ mod tests {
             apply_key_edit(&defaults(), KeyEdit::Remove(40)),
             None,
             "past the grid"
+        );
+    }
+
+    #[test]
+    fn apply_key_edit_moves_paste() {
+        let mut expected = defaults();
+        let paste = expected.remove(7);
+        expected.insert(0, paste);
+
+        assert_eq!(
+            apply_key_edit(
+                &defaults(),
+                KeyEdit::Move {
+                    from: 7,
+                    to: 0,
+                    side: Side::Before
+                }
+            ),
+            Some(expected)
         );
     }
 

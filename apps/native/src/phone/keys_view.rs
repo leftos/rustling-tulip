@@ -13,9 +13,11 @@ use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::{field_box, phone_button};
 use super::key_grid::{self, DraftStep, GridKey, KeyAction, KeyDraft, KeyEdit, NamedKey, StepKey};
+use super::reorder::{self, ListId};
 use super::settings::{Page, Settings, SubPage};
 use super::settings_view::section_label;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
+use crate::drag::Side;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -57,6 +59,9 @@ const STALE_ITEM: &str = "That item no longer exists.";
 const CELL_MIN: f32 = 72.0;
 /// The gap between two cells, in points.
 const CELL_GAP: f32 = 8.0;
+/// A cell's horizontal padding, its button's own: an empty place of the last
+/// row takes it too, so every column is one width.
+const CELL_PAD_X: f32 = 16.0;
 
 /// What the Keys page's Restore defaults draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +357,37 @@ impl PhoneRoot {
         true
     }
 
+    /// A drag's lift on the grid: saves the grid with the key at `from`
+    /// moved to `side` of the one at `to`; a move that changes nothing
+    /// writes nothing.
+    pub(super) fn move_key(&mut self, from: usize, to: usize, side: Side, cx: &mut Context<Self>) {
+        let keys = self.resolved_keys(cx);
+        let Some(next) = key_grid::apply_key_edit(&keys, KeyEdit::Move { from, to, side }) else {
+            return;
+        };
+        if next == keys {
+            return;
+        }
+        self.root
+            .update(cx, |root, cx| root.set_phone_keys(Some(next), cx));
+    }
+
+    /// A drag's lift on the editor's presses: the press at `from` moves to
+    /// `side` of the one at `to`, in the draft only.
+    pub(super) fn move_press(
+        &mut self,
+        from: usize,
+        to: usize,
+        side: Side,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.key_editor.as_mut() {
+            editor.draft.move_step(from, to, side);
+        }
+        self.refresh_key_placeholder(cx);
+        cx.notify();
+    }
+
     /// Pops the editor a save just came from, dropping its draft.
     fn close_saved_key_editor(&mut self, cx: &mut Context<Self>) {
         if let Some(settings) = self.settings.as_mut() {
@@ -517,18 +553,21 @@ impl PhoneRoot {
     }
 
     /// The Keys page: the hint, the grid in as many equal columns as the
-    /// window fits, then Add key and Restore defaults.
+    /// window fits, then Add key and Restore defaults, with the page's drag
+    /// area over the grid.
     pub(super) fn keys_page(
         &self,
         window: &mut Window,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.forget_list_boxes();
         let saved = self.saved_keys(cx);
         let keys = key_grid::resolved(saved.as_deref());
         let width = f32::from(window.viewport_size().width) - 2.0 * SIDE_PADDING;
         let columns = key_grid::grid_columns(width, CELL_MIN, CELL_GAP);
         div()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -539,9 +578,10 @@ impl PhoneRoot {
                     .text_color(gpui::rgb(t.muted))
                     .child(HINT),
             )
-            .child(Self::keys_grid(&keys, columns, cx))
+            .child(self.keys_grid(&keys, columns, cx))
             .child(Self::add_key_row(cx))
             .child(self.keys_restore_row(t, cx))
+            .child(reorder::reorder_area(&self.list_boxes, cx))
     }
 
     /// The row that opens a new key's editor.
@@ -555,10 +595,12 @@ impl PhoneRoot {
     }
 
     /// The grid: `columns` equal cells a row, the last row's empty places
-    /// kept so every cell is the same width.
-    fn keys_grid(keys: &[GridKey], columns: usize, cx: &mut Context<Self>) -> Div {
+    /// kept so every cell is the same width, and its box recorded for a
+    /// press to hit-test.
+    fn keys_grid(&self, keys: &[GridKey], columns: usize, cx: &mut Context<Self>) -> Div {
         let mut grid = div()
             .driver_id(|| "phone-keys-grid".to_owned())
+            .relative()
             .flex()
             .flex_col()
             .gap(px(CELL_GAP));
@@ -569,16 +611,33 @@ impl PhoneRoot {
                 line = line.child(Self::key_cell(index, key, cx));
             }
             for _ in chunk.len()..columns {
-                line = line.child(div().flex_1());
+                line = line.child(Self::grid_spacer());
             }
             grid = grid.child(line);
         }
-        grid
+        grid.child(reorder::grid_box_canvas(
+            &self.list_boxes,
+            ListId::KeyGrid,
+            columns,
+            CELL_GAP,
+            keys.len(),
+        ))
     }
 
-    /// One cell: the key's label, dimmed while the key does nothing; a tap
-    /// opens a send or inert key's editor, and Paste, Quick and Ctrl take
-    /// none.
+    /// An empty place of the grid's last row: as wide as a cell and drawing
+    /// nothing, so every column keeps one width.
+    fn grid_spacer() -> Div {
+        div()
+            .flex_1()
+            .min_w_0()
+            .px(px(CELL_PAD_X))
+            .border_1()
+            .border_color(gpui::transparent_black())
+    }
+
+    /// One cell: the key's label on one line, truncated so its row is one
+    /// height, dimmed while the key does nothing; a tap opens a send or inert
+    /// key's editor, and Paste, Quick and Ctrl take none.
     fn key_cell(index: usize, key: &GridKey, cx: &mut Context<Self>) -> Stateful<Div> {
         let dimmed = key_grid::is_inert(key);
         let editable = !key_grid::is_protected(key);
@@ -590,6 +649,7 @@ impl PhoneRoot {
         .flex_1()
         .min_w_0()
         .min_h(px(TOUCH_TARGET))
+        .truncate()
         .child(key.label.clone())
         .when(dimmed, |cell| {
             cell.opacity(crate::spawn_view::DISABLED_OPACITY)
@@ -641,6 +701,7 @@ impl PhoneRoot {
         let Some(top) = self.settings.as_ref().and_then(Settings::top) else {
             return div();
         };
+        self.forget_list_boxes();
         match top {
             SubPage::KeyPicker { .. } => self.key_picker_page(t, cx),
             SubPage::KeyEditor { .. } => self.key_editor_body(t, cx),
@@ -664,6 +725,7 @@ impl PhoneRoot {
             .map(|(step, press)| Self::press_row(step, press, cx))
             .collect();
         let mut page = div()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -673,10 +735,16 @@ impl PhoneRoot {
             .child(
                 div()
                     .driver_id(|| "phone-key-editor-steps".to_owned())
+                    .relative()
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .children(rows),
+                    .children(rows)
+                    .child(reorder::list_box_canvas(
+                        &self.list_boxes,
+                        ListId::KeySteps,
+                        editor.draft.steps.len(),
+                    )),
             )
             .child(
                 phone_button("phone-key-editor-add-step", ButtonKind::Outlined, cx)
@@ -699,7 +767,7 @@ impl PhoneRoot {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.remove_key(cx))),
             );
         }
-        page
+        page.child(reorder::reorder_area(&self.list_boxes, cx))
     }
 
     /// One press of the editor: its Ctrl, Alt and Shift toggles, its key

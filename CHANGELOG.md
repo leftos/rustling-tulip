@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On a host that supports it, Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
 - Source Control and a shell pane's repo chip follow a plain shell that changes folder into another registered repo.
 - The phone app's Settings › Quick replies edits, removes, restores and reorders the Quick dock's replies and their groups, for agent sessions and shells.
+- The phone app's Settings › Keys arranges the key bar and Keys dock's keys, edits them, and adds keys that send a chord like Ctrl+B or a short sequence.
 
 ### Fixed
 

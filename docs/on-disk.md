@@ -105,7 +105,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   The other actions are `{"kind": "ctrl"}`, `{"kind": "paste"}` and `{"kind": "quick"}`; absent or null means the built-in grid (Esc, Tab, Ctrl, the arrows, Paste, Quick, Shift+Tab, Enter, Ctrl+C and the digits 1 to 9), and an empty list is Ctrl, Paste and Quick alone.
 
-  A value that is not a list loads as absent, and a key that does not decode is dropped with a warning; an action, press key or named key a later release added loads as `unknown`, which draws dimmed and sends nothing.
+  A value that is not a list loads as absent, and a key that does not decode is dropped with a warning; an action, press key or named key a later release added loads as `unknown`, which draws dimmed and sends nothing. The grid is written back whole, so a build that does not know a kind saves it as `unknown`, and a newer build's key is lost once that older build saves.
 
   A loaded grid is normalised: Ctrl, Paste and Quick each appear once (a missing one is appended, a repeat dropped), an id that is not lower-case letters, digits and `-`, or that repeats an earlier key's, becomes `key-{n}` (one past the highest `n` in use), and a send key's blank label becomes the label its presses make ("Ctrl+B", "Esc : w Enter").
 

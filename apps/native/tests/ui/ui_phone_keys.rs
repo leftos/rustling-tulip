@@ -3,11 +3,15 @@
 //! which is dimmed while the built-in grid already shows.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{Modifiers, Pixels, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
+use gpui::{
+    GestureTuning, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase,
+    point, px,
+};
 use protocol::{ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot};
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use rustling_tulip_native::target::HostKey;
@@ -115,6 +119,29 @@ fn phone_open<'a>(cx: &'a mut TestAppContext, dir: &TestDir, ui: &Value) -> Harn
 /// The index of the last key in [`key_grid::defaults`].
 fn last_default_cell() -> usize {
     20
+}
+
+/// Window point in the left sixth of what `selector` tags, which is a cell's
+/// left half: a drop there takes the cell's `Before`.
+fn before(h: &mut Harness<'_>, selector: &str) -> Point<Pixels> {
+    let bounds = h.bounds(selector);
+    point(bounds.left() + px(6.0), bounds.center().y)
+}
+
+/// A send action of one plain press of each named key in `names`, in order.
+fn send_action(names: &[&str]) -> Value {
+    let steps: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            json!({
+                "ctrl": false,
+                "alt": false,
+                "shift": false,
+                "key": { "kind": "named", "name": name },
+            })
+        })
+        .collect();
+    json!({ "kind": "send", "steps": steps })
 }
 
 /// Types `text` key by key into the focused field.
@@ -716,5 +743,204 @@ fn back_from_the_editor_discards_it(cx: &mut TestAppContext) {
     assert!(
         saved_ui(&dir).get("phone_keys").is_none(),
         "the draft was discarded"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_moves_a_key_and_the_bar_follows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_open(cx, &dir, &json!({}));
+    open_keys(&mut h);
+
+    let from = h.center("phone-keys-cell-3");
+    let to = before(&mut h, "phone-keys-cell-0");
+    h.long_press_drag(from, to);
+
+    let saved = saved_ui(&dir);
+    assert_eq!(
+        saved["phone_keys"][0]["id"],
+        json!("up"),
+        "the lifted key lands at the grid's start"
+    );
+    assert_eq!(saved["phone_keys"][1]["id"], json!("esc"), "Esc follows it");
+
+    close_settings(&mut h);
+    on_terminal(&mut h);
+
+    assert!(
+        h.bounds("phone-bar-up").left() < h.bounds("phone-bar-esc").left(),
+        "the bar draws the moved key first, keeping its id"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_moves_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    let from = h.center("phone-keys-cell-7");
+    let to = before(&mut h, "phone-keys-cell-0");
+    h.long_press_drag(from, to);
+
+    let saved = saved_ui(&dir);
+    assert_eq!(
+        saved["phone_keys"][0]["id"],
+        json!("paste"),
+        "a protected key moves, though it cannot be removed"
+    );
+    assert_eq!(saved["phone_keys"][1]["id"], json!("esc"));
+    assert_eq!(
+        saved["phone_keys"].as_array().map(Vec::len),
+        Some(last_default_cell() + 1),
+        "no key was dropped"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_reorders_a_keys_presses(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        grid_key("seq", "vim save", &send_action(&["esc", "tab", "enter"])),
+    ] });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_keys(&mut h);
+    h.click_on("phone-keys-cell-0");
+
+    let from = h.center("phone-key-editor-step-0");
+    let to = point(
+        from.x,
+        h.bounds("phone-key-editor-steps").bottom() + px(4.0),
+    );
+    h.long_press_drag(from, to);
+    h.click_on("phone-key-editor-save");
+
+    let saved = saved_ui(&dir);
+    let steps = saved["phone_keys"][0]["action"]["steps"]
+        .as_array()
+        .expect("the saved presses");
+    let names: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step["key"]["name"].as_str())
+        .collect();
+    assert_eq!(names, ["tab", "enter", "esc"], "the first press moved last");
+}
+
+#[gpui::test]
+fn a_long_press_on_add_key_still_opens_the_editor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    h.long_press_on("phone-keys-add");
+
+    assert!(
+        drawn(&mut h, "phone-key-editor-label"),
+        "a hold off the grid leaves the press to the button, so its tap opens the editor"
+    );
+}
+
+#[gpui::test]
+fn a_hold_on_the_empty_end_of_the_last_row_lifts_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+
+    let column = h.bounds("phone-keys-cell-2");
+    let last = h.bounds("phone-keys-cell-20");
+    let from = point(column.center().x, last.center().y);
+    let to = before(&mut h, "phone-keys-cell-0");
+    h.long_press_drag(from, to);
+
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "the empty places of the last row lift nothing"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-cell-20"),
+        "so the grid keeps its keys and their order"
+    );
+}
+
+#[gpui::test]
+fn a_part_full_last_row_draws_cells_at_the_grid_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let keys: Vec<Value> = (0..23)
+        .map(|n| named_key(&format!("k{n}"), "K", "esc"))
+        .collect();
+    let ui = json!({ "phone_keys": keys });
+    let mut h = phone_saved(cx, &dir, &ui);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+
+    let (first, second) = (h.bounds("phone-keys-cell-0"), h.bounds("phone-keys-cell-1"));
+    let (last, last_next) = (
+        h.bounds("phone-keys-cell-24"),
+        h.bounds("phone-keys-cell-25"),
+    );
+    assert!(last.top() > first.top(), "the cells sit in the last row");
+    assert_eq!(
+        last.left(),
+        first.left(),
+        "the last row's first cell starts where the first row's does"
+    );
+    assert_eq!(last.size.width, first.size.width, "and is the same width");
+    assert_eq!(last_next.left(), second.left());
+    assert_eq!(last_next.size.width, second.size.width);
+}
+
+#[gpui::test]
+fn a_long_key_label_keeps_its_row_one_height(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        grid_key("long", "Esc : w Enter : q", &send_action(&["esc"])),
+        named_key("tab", "Tab", "tab"),
+        named_key("enter", "Enter", "enter"),
+        named_key("up", "Up", "up"),
+    ] });
+    let mut h = phone_saved(cx, &dir, &ui);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+
+    let long = h.bounds("phone-keys-cell-1");
+    let same_row = h.bounds("phone-keys-cell-0");
+    let next_row = h.bounds("phone-keys-cell-4");
+    assert!(
+        drawn(&mut h, "phone-keys-cell-1"),
+        "the long label's cell draws"
+    );
+    assert_eq!(
+        long.size.height, same_row.size.height,
+        "a long label keeps its row one height"
+    );
+    assert_eq!(
+        long.size.height, next_row.size.height,
+        "and the rows stay one height"
+    );
+    assert_eq!(long.size.height, touch_target());
+}
+
+#[gpui::test]
+fn a_cancelled_key_drag_saves_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    let from = h.center("phone-keys-cell-4");
+    let to = before(&mut h, "phone-keys-cell-0");
+    h.touch(TouchPhase::Started, from);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+    h.touch(TouchPhase::Moved, to);
+    h.touch(TouchPhase::Cancelled, to);
+
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "a cancelled touch drops the drag without saving"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-cell-20"),
+        "the grid keeps its keys and their order"
     );
 }
