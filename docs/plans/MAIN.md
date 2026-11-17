@@ -176,7 +176,6 @@
 - [ ] RT-1859 Drive the remote link menu end to end in a live-tier spec
 - [ ] RT-1861 Refuse a driven run whose RUSTLING_TULIP_SSH is not the fake ssh, or whose fake ssh state is outside .tmp
 - [ ] RT-1863 Keep a seeded gates override off the machine's slot locks and cutover flag
-- [ ] RT-1864 Route the driver MCP live check to a builder desktop
 - [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
 
 ## Elevated daemon and security
@@ -492,7 +491,6 @@
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
-- [ ] RT-1827 Assert the iOS text-input notifications in TextInput specs through the gpui test window · release vNext
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
@@ -517,8 +515,6 @@
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
-- [ ] RT-1749 Edit the phone's Quick replies in Settings: add, edit, remove, reorder · release vNext
-- [ ] RT-1756 Arrange the phone's Keys in a grid in Settings, with multi-key keys like Ctrl+B · release vNext
 - [ ] RT-1765 Draw the phone tray's read-only options without a pressed state
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
 - [ ] RT-1768 Let a tap on the phone terminal's command gutter toggle the keyboard
@@ -533,6 +529,9 @@
 - [ ] RT-1793 Keep an offline host's card on Settings › Hosts from jumping on each redial
 - [ ] RT-1797 Hit-test a wrapped right- or centre-aligned Chat table cell by its own line's offset
 - [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone
+- [ ] RT-1879 Copy a phone Terminal selection to the clipboard
+- [ ] RT-1880 Show the lifted key and drop line while dragging in phone Settings › Keys
+- [ ] RT-1881 Flush a pending dead key before a phone grid key sends
 
 ## Dashboard, Gates and Linear
 
@@ -608,7 +607,6 @@
 - [ ] RT-1132 Treat an all-folder workspace like a folder in the spawn dialog and launch last, and stop fetching folder members
 - [ ] RT-1291 Take the worktree size walk off the connection's reader
 - [ ] RT-1711 Run the daemon's read-only git calls with --no-optional-locks
-- [ ] RT-1815 Follow a shell's cd into another registered repo or workspace · release vNext
 
 ## Agents and subagents
 
