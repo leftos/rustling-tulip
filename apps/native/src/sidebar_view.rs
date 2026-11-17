@@ -1452,7 +1452,7 @@ fn header(
 ) -> Div {
     let t = theme(cx);
     let filtering = view == SidebarView::Repos;
-    let pad = if filtering { 7.0 } else { 9.0 };
+    let pad = if filtering { 4.0 } else { 9.0 };
     let filter_control = filtering.then(|| {
         segmented(&FILTER_CHOICES, filter, pad, cx, |this, choice, cx| {
             this.set_repo_filter(choice, cx);
@@ -1461,7 +1461,7 @@ fn header(
     let view_control = segmented(&VIEW_CHOICES, view, pad, cx, |this, choice, cx| {
         this.set_sidebar_view(choice, cx);
     });
-    let gap = if filtering { 6.0 } else { 8.0 };
+    let gap = if filtering { 4.0 } else { 8.0 };
     div()
         .flex()
         .flex_none()
@@ -1479,8 +1479,9 @@ fn header(
                 .driver_id(|| "sidebar-title".to_owned())
                 .flex_basis(px(0.0))
                 .flex_grow(1.0)
-                // Beside the button's slot and the controls, the default
-                // width leaves the title this much; a wider floor wraps them.
+                // At the default width the whole title fits beside the
+                // button's slot and the controls; narrower, the title gives
+                // way down to this floor before the controls wrap.
                 .min_w(ui_px(cx, 24.0))
                 .text_size(ui_px(cx, 13.0))
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
