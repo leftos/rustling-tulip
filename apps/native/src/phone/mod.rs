@@ -8,6 +8,7 @@ mod home_view;
 mod hosts_view;
 mod key_bar;
 pub mod key_grid;
+mod keys_view;
 pub(crate) mod lifecycle;
 mod long_press;
 mod open_tap;

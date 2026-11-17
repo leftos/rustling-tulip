@@ -73,6 +73,8 @@ pub struct PhoneRoot {
     pub(super) reply_editor: Option<super::quick_replies_view::TextEditor>,
     /// The reply set whose Restore defaults asks for confirmation.
     pub(super) restore_confirm: Option<ReplySet>,
+    /// What the Keys page's Restore defaults draws.
+    pub(super) keys_restore: super::keys_view::KeysRestore,
     /// The drag reordering a Settings list, while a long press holds one.
     pub(super) reorder_drag: Option<super::reorder::ReorderDrag>,
     /// The boxes the open page's lists recorded in its last frame, which a
@@ -171,6 +173,7 @@ impl PhoneRoot {
             settings: None,
             reply_editor: None,
             restore_confirm: None,
+            keys_restore: super::keys_view::KeysRestore::Idle,
             reorder_drag: None,
             list_boxes: super::reorder::ListBoxes::default(),
             resumes: Vec::new(),
@@ -284,6 +287,7 @@ impl PhoneRoot {
                 self.settings = None;
                 self.keep_reply_editor();
                 self.keep_restore_confirm();
+                self.keep_keys_restore_confirm();
                 self.open_note = Some(note);
                 cx.notify();
             }
@@ -374,6 +378,7 @@ impl PhoneRoot {
         self.settings = None;
         self.keep_reply_editor();
         self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
@@ -1142,7 +1147,7 @@ impl Render for PhoneRoot {
         self.sync_terminal(keyboard_up, padding.bottom, window, cx);
         let body = if let Some(page) = self.session_page(keyboard_up, cx) {
             page
-        } else if let Some(page) = self.settings_page(cx) {
+        } else if let Some(page) = self.settings_page(window, cx) {
             page
         } else if hosts_view::any_host_open(self.root.read(cx)) {
             self.list_body(cx)

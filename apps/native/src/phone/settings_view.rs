@@ -72,6 +72,7 @@ impl PhoneRoot {
         self.forget_pending_open();
         self.settings = Some(Settings::default());
         self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
         cx.notify();
     }
 
@@ -82,6 +83,7 @@ impl PhoneRoot {
             settings.open(page);
         }
         self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
         cx.notify();
     }
 
@@ -92,6 +94,7 @@ impl PhoneRoot {
         settings.open(page);
         self.settings = Some(settings);
         self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
         cx.notify();
     }
 
@@ -116,6 +119,7 @@ impl PhoneRoot {
         }
         self.keep_reply_editor();
         self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
         cx.notify();
     }
 
@@ -150,7 +154,7 @@ impl PhoneRoot {
 
     /// While Settings is open: its header over the category list, the page it
     /// is on, or the sub-page opened over that page.
-    pub(super) fn settings_page(&self, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let settings = self.settings.as_ref()?;
         let t = theme(cx);
         let body = match settings.top() {
@@ -164,6 +168,7 @@ impl PhoneRoot {
                 Some(Page::Hosts) => self.hosts_content(&t, cx),
                 Some(Page::Appearance) => self.appearance_page(&t, cx),
                 Some(Page::QuickReplies) => self.quick_replies_page(&t, cx),
+                Some(Page::Keys) => self.keys_page(window, &t, cx),
             },
         };
         Some(

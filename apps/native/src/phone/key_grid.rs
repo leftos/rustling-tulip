@@ -525,6 +525,17 @@ fn char_label(value: char, step: &Step) -> String {
     value.to_string()
 }
 
+/// How many equal columns of at least `min_cell` pt, `gap` apart, fit in
+/// `width`, and at least one however narrow the width.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the count is clamped to at least one first, and a phone's width in points is far below what a usize holds"
+)]
+pub(crate) fn grid_columns(width: f32, min_cell: f32, gap: f32) -> usize {
+    ((width + gap) / (min_cell + gap)).max(1.0) as usize
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -631,6 +642,22 @@ mod tests {
             label: "Macro".to_owned(),
             action: KeyAction::Unknown,
         }
+    }
+
+    #[test]
+    fn grid_columns_at_390_points() {
+        assert_eq!(grid_columns(358.0, 72.0, 8.0), 4);
+    }
+
+    #[test]
+    fn grid_columns_narrower() {
+        assert_eq!(grid_columns(300.0, 72.0, 8.0), 3);
+    }
+
+    #[test]
+    fn grid_columns_never_below_one() {
+        assert_eq!(grid_columns(60.0, 72.0, 8.0), 1);
+        assert_eq!(grid_columns(0.0, 72.0, 8.0), 1);
     }
 
     #[test]

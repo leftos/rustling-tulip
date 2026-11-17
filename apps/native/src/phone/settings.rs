@@ -16,15 +16,18 @@ pub(crate) enum Page {
     Appearance,
     /// The two sets of one-tap replies, a group at a time.
     QuickReplies,
+    /// The key grid the bar and the dock draw.
+    Keys,
 }
 
 impl Page {
     /// Every category, in the order the list draws them.
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Notifications,
         Self::Hosts,
         Self::Appearance,
         Self::QuickReplies,
+        Self::Keys,
     ];
 
     /// The category's name: its row's label and its page's title.
@@ -34,6 +37,7 @@ impl Page {
             Self::Hosts => "Hosts",
             Self::Appearance => "Appearance",
             Self::QuickReplies => "Quick replies",
+            Self::Keys => "Keys",
         }
     }
 
@@ -44,6 +48,7 @@ impl Page {
             Self::Hosts => "hosts",
             Self::Appearance => "appearance",
             Self::QuickReplies => "quick-replies",
+            Self::Keys => "keys",
         }
     }
 }
@@ -180,7 +185,13 @@ mod tests {
 
         assert_eq!(
             keys,
-            ["notifications", "hosts", "appearance", "quick-replies"]
+            [
+                "notifications",
+                "hosts",
+                "appearance",
+                "quick-replies",
+                "keys"
+            ]
         );
     }
 
