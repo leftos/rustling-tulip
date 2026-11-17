@@ -1489,13 +1489,117 @@ fn keys_types_each_key(cx: &mut TestAppContext) {
     let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
     h.host(&saved_remote()).sent();
     h.click_on("phone-composer-keys");
-    assert!(drawn(&mut h, "phone-dock-keys"), "the tray opens");
+    assert!(drawn(&mut h, "phone-dock-keys"), "the dock opens");
 
     h.click_on("phone-key-0");
     assert_eq!(h.host(&saved_remote()).sent_input("a"), b"\x1b", "Esc");
 
-    h.click_on("phone-key-6");
+    h.click_on("phone-key-11");
     assert_eq!(h.host(&saved_remote()).sent_input("a"), b"\x03", "Ctrl+C");
+}
+
+#[gpui::test]
+fn the_keys_dock_lists_the_grid_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-keys");
+
+    for index in 0..=20 {
+        assert!(
+            drawn(&mut h, &format!("phone-key-{index}")),
+            "phone-key-{index}"
+        );
+    }
+    assert!(!drawn(&mut h, "phone-key-21"), "the grid holds 21 keys");
+}
+
+#[gpui::test]
+fn the_keys_dock_opens_with_ctrl_unarmed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-keys");
+    h.click_on("phone-key-2");
+    h.click_on("phone-composer-keys");
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-3");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"\x1b[A",
+        "a reopened dock leaves no armed Ctrl behind"
+    );
+}
+
+#[gpui::test]
+fn the_dock_ctrl_arms_the_next_key_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-2");
+    h.click_on("phone-key-3");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"\x1b[1;5A",
+        "armed Ctrl turns the next key into Ctrl+Up"
+    );
+
+    h.click_on("phone-key-3");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"\x1b[A",
+        "and disarms after one key"
+    );
+}
+
+#[gpui::test]
+fn the_dock_ctrl_leaves_a_chord_armed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-2");
+    h.click_on("phone-key-11");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"\x03",
+        "Ctrl+C sends its control byte"
+    );
+
+    h.click_on("phone-key-3");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("a"),
+        b"\x1b[1;5A",
+        "a chord leaves Ctrl armed"
+    );
+}
+
+#[gpui::test]
+fn the_dock_paste_pastes_into_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.set_clipboard("pasted text");
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-7");
+
+    assert_eq!(composer_text(&mut h).as_deref(), Some("pasted text"));
+}
+
+#[gpui::test]
+fn the_dock_quick_switches_to_the_quick_dock(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-8");
+
+    assert!(drawn(&mut h, "phone-dock-quick"), "the Quick dock shows");
+    assert!(!drawn(&mut h, "phone-dock-keys"), "the Keys dock closed");
 }
 
 #[gpui::test]

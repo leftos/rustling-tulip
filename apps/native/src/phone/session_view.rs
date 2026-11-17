@@ -9,10 +9,11 @@ use gpui::{
 };
 
 use super::PhoneRoot;
-use super::composer::{self, Dock};
+use super::composer::Dock;
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
+use super::key_grid::{self, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
@@ -666,7 +667,7 @@ impl PhoneRoot {
         match self.composer_dock {
             Dock::None => None,
             Dock::Quick => Some(self.quick_dock(session_id, QuickTarget::Composer, &t, cx)),
-            Dock::Keys => Some(Self::keys_dock(session_id, cx)),
+            Dock::Keys => Some(self.keys_dock(cx)),
         }
     }
 
@@ -758,31 +759,60 @@ impl PhoneRoot {
         }
     }
 
-    /// The Keys tray: every key of the strip, each a tap that types its
-    /// bytes.
-    fn keys_dock(session_id: &str, cx: &mut Context<Self>) -> Div {
-        let id = session_id.to_owned();
+    /// The Keys dock: the grid's keys as wrapping rows, each a tap that runs
+    /// its action, Ctrl lit while it is armed.
+    fn keys_dock(&self, cx: &mut Context<Self>) -> Div {
+        let armed = self.key_bar.borrow().armed();
         let mut dock = div()
             .driver_id(|| "phone-dock-keys".to_owned())
             .flex()
             .flex_wrap()
             .gap(px(COMPOSER_GAP));
-        for (index, key) in composer::KEY_TRAY.iter().enumerate() {
-            let bytes = key.bytes;
+        for (index, key) in key_grid::defaults().iter().enumerate() {
+            let kind = if armed && key.action == KeyAction::Ctrl {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Outlined
+            };
             dock = dock.child(
-                phone_button(&format!("phone-key-{index}"), ButtonKind::Outlined, cx)
+                phone_button(&format!("phone-key-{index}"), kind, cx)
                     .min_h(px(TOUCH_TARGET))
-                    .child(key.label)
-                    .on_click(cx.listener({
-                        let id = id.clone();
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.root
-                                .update(cx, |root, _| root.send_phone_input(&id, bytes));
-                        }
+                    .child(key.label.clone())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.press_dock_key(index, window, cx);
                     })),
             );
         }
         dock
+    }
+
+    /// A tap on the Keys dock's key at `index`: Ctrl arms the sticky Ctrl,
+    /// Paste pastes the clipboard into the composer's field, Quick opens the
+    /// Quick dock, and a send key types its presses into the shown session,
+    /// armed Ctrl joined to a key of one press. The dock holds no terminal,
+    /// so its arrows send the plain cursor keys.
+    pub fn press_dock_key(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = key_grid::defaults();
+        let Some(key) = keys.get(index) else {
+            return;
+        };
+        match &key.action {
+            KeyAction::Ctrl => self.key_bar.borrow_mut().toggle_ctrl(),
+            KeyAction::Paste => self.paste_into_composer(window, cx),
+            KeyAction::Quick => self.composer_dock = Dock::Quick,
+            KeyAction::Send { steps } => {
+                let sticky = self.key_bar.borrow_mut().take_ctrl_for(key);
+                let bytes = key_grid::key_bytes(steps, sticky, KeyModes { app_cursor: false });
+                if let Some(bytes) = bytes
+                    && let Some((_, session_id)) = self.shown.clone()
+                {
+                    self.root
+                        .update(cx, |root, _| root.send_phone_input(&session_id, &bytes));
+                }
+            }
+            KeyAction::Unknown => {}
+        }
+        cx.notify();
     }
 
     /// The header: Back, the label over the status word, and the toggle

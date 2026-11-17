@@ -308,10 +308,14 @@ impl PhoneRoot {
         self.toggle_dock(super::composer::DockButton::Quick, cx);
     }
 
-    /// A tap on the composer's Keys button: the Keys tray opens over it, or
-    /// the open one closes.
+    /// A tap on the composer's Keys button: the Keys dock opens over it, or
+    /// the open one closes. Opening it disarms Ctrl, so a dock never opens
+    /// with a Ctrl armed by an earlier one.
     pub fn tap_composer_keys(&mut self, cx: &mut Context<Self>) {
         self.toggle_dock(super::composer::DockButton::Keys, cx);
+        if self.composer_dock == super::composer::Dock::Keys {
+            *self.key_bar.borrow_mut() = KeyBar::new();
+        }
     }
 
     /// The shown session's Quick dock replies, group by group: an agent's

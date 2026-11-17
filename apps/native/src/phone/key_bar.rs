@@ -4,6 +4,8 @@
 
 use gpui::{Keystroke, Modifiers};
 
+use super::key_grid::{GridKey, takes_sticky_ctrl};
+
 /// The bar's keys in the order it draws them; [`shown`] adds the Hide key
 /// at their end while the on-screen keyboard is up.
 pub(crate) const KEYS: &[Key] = &[
@@ -120,6 +122,21 @@ impl KeyBar {
         self.armed
     }
 
+    /// Arms Ctrl for the next key, or disarms it.
+    pub(crate) fn toggle_ctrl(&mut self) {
+        self.armed = !self.armed;
+    }
+
+    /// Whether armed Ctrl applies to `key`: true, and disarmed, for a key
+    /// that takes sticky Ctrl while armed; false, and left as it was, else.
+    pub(crate) fn take_ctrl_for(&mut self, key: &GridKey) -> bool {
+        let takes = self.armed && takes_sticky_ctrl(key);
+        if takes {
+            self.armed = false;
+        }
+        takes
+    }
+
     /// A tap on `key`: Ctrl toggles arming, Paste, Quick and Hide yield their
     /// action and leave arming as it is, and the rest send their keystroke
     /// and disarm Ctrl.
@@ -196,6 +213,7 @@ mod tests {
     use gpui::{Keystroke, Modifiers};
     use protocol::ShiftEnter;
 
+    use crate::phone::key_grid::{self, GridKey, NamedKey, Step, StepKey};
     use crate::term_input::{CopyKeys, KeyAction, key_action};
 
     use super::{Action, KEYS, Key, KeyBar, shown};
@@ -209,6 +227,70 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    /// The default grid's key with `id`.
+    fn grid_key(id: &str) -> GridKey {
+        key_grid::defaults()
+            .into_iter()
+            .find(|key| key.id == id)
+            .expect("the default grid holds the key")
+    }
+
+    /// The plain press a step is.
+    fn plain(key: StepKey) -> Step {
+        Step {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key,
+        }
+    }
+
+    #[test]
+    fn take_ctrl_for_unarmed_is_false() {
+        let mut bar = KeyBar::new();
+        assert!(!bar.take_ctrl_for(&grid_key("esc")));
+        assert!(!bar.armed(), "an unarmed bar stays unarmed");
+    }
+
+    #[test]
+    fn take_ctrl_for_a_plain_key_disarms() {
+        let mut bar = KeyBar::new();
+        bar.toggle_ctrl();
+        assert!(bar.take_ctrl_for(&grid_key("esc")));
+        assert!(!bar.armed(), "one key takes the armed Ctrl");
+    }
+
+    #[test]
+    fn take_ctrl_for_a_chord_leaves_ctrl_armed() {
+        let mut bar = KeyBar::new();
+        bar.toggle_ctrl();
+        assert!(!bar.take_ctrl_for(&grid_key("ctrl-c")), "a chord");
+        assert!(bar.armed(), "a chord leaves Ctrl armed");
+        let sequence = GridKey {
+            id: "seq".to_owned(),
+            label: "Esc :".to_owned(),
+            action: key_grid::KeyAction::Send {
+                steps: vec![
+                    plain(StepKey::Named {
+                        name: NamedKey::Esc,
+                    }),
+                    plain(StepKey::Char { value: ':' }),
+                ],
+            },
+        };
+        assert!(!bar.take_ctrl_for(&sequence), "a sequence");
+        assert!(bar.armed(), "a sequence leaves Ctrl armed");
+    }
+
+    #[test]
+    fn toggle_ctrl_arms_and_disarms() {
+        let mut bar = KeyBar::new();
+        bar.toggle_ctrl();
+        assert!(bar.armed());
+        bar.toggle_ctrl();
+        assert!(!bar.armed());
     }
 
     #[test]
