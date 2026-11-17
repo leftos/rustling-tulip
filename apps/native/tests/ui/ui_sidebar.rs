@@ -35,9 +35,7 @@ fn tree_keys(h: &mut Harness<'_>) -> Vec<String> {
     })
 }
 
-/// Whether the element tagged `selector` has been painted on screen. gpui
-/// keeps the bounds of an element that left the tree, so a `false` only
-/// holds for an element the spec never showed.
+/// Whether the element tagged `selector` has been painted on screen.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).origin.x >= px(0.0)
 }
@@ -370,7 +368,11 @@ fn attention_marks_leaf_and_container_and_clears_on_click_or_working(cx: &mut Te
     h.send(flag.clone());
     assert_eq!(attention(&mut h), (true, true), "leaf and container");
     h.click_on("leaf-s1");
-    assert_eq!(attention(&mut h), (false, false), "a click clears it");
+    assert_eq!(
+        attention(&mut h),
+        (false, false),
+        "a look at an idle session clears it"
+    );
 
     h.send(flag);
     assert_eq!(attention(&mut h), (true, true));
@@ -547,6 +549,40 @@ fn headless_leaf_click_only_clears_attention(cx: &mut TestAppContext) {
     let sent = h.sent();
     assert!(sent.is_empty(), "sent {sent:?}");
     assert_eq!(home_of(&mut h, "hl").map(|home| home.2), Some(false));
+}
+
+#[gpui::test]
+fn a_leaf_click_keeps_a_waiting_sessions_needs_you_marks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture
+        .sessions
+        .push(session("s2").status("awaiting_input").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.send(DaemonMessage::Attention {
+        session_id: "s2".to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    });
+    assert!(drawn(&mut h, "leaf-badge-s2"), "precondition: s2 asks");
+
+    h.click_on("leaf-s2");
+
+    assert_eq!(
+        home_of(&mut h, "s2").map(|home| (home.2, home.3)),
+        Some((true, true)),
+        "a look is not an answer: the leaf and its container keep the mark"
+    );
+    assert!(
+        drawn(&mut h, "leaf-badge-s2"),
+        "the `!` stays while s2 waits"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").status("working").build(),
+        request_id: None,
+    });
+    assert!(!drawn(&mut h, "leaf-badge-s2"), "the answer clears it");
 }
 
 #[gpui::test]

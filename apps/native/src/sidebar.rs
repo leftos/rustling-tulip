@@ -2562,10 +2562,19 @@ impl SidebarModel {
         }
     }
 
-    /// `host`'s session `id` no longer needs attention; another host's
-    /// session of the same id keeps its mark.
+    /// `host`'s session `id` no longer needs attention, unless it still waits
+    /// on the user: a waiting session keeps its mark until an update moves it to
+    /// working, idle or spawning (`HostSlice::update_session`), or until a look
+    /// after it stopped or failed. Another host's session of the same id keeps its
+    /// mark.
     pub fn clear_attention_on(&mut self, host: &HostKey, id: &str) {
-        if let Some(slice) = self.listed_slice_mut(host) {
+        let Some(slice) = self.listed_slice_mut(host) else {
+            return;
+        };
+        let waiting = slice
+            .session(id)
+            .is_some_and(|s| s.status == SessionStatus::AwaitingInput);
+        if !waiting {
             slice.attention.remove(id);
         }
     }

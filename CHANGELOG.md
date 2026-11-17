@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- Opening a session that is waiting on you keeps its sidebar `!` until you answer it; a finished turn still clears when you look.
+
 ## v0.16.0-alpha
 
 ### Highlights

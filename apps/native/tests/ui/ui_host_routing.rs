@@ -2460,12 +2460,66 @@ fn opening_a_remote_leaf_keeps_this_pcs_same_id_attention(cx: &mut TestAppContex
     assert_eq!(
         s1_attention(&mut h, HostKey::of(&remote())),
         Some(false),
-        "the opened remote s1 no longer needs you"
+        "a look clears an idle session's mark"
     );
     assert_eq!(
         s1_attention(&mut h, HostKey::Local),
         Some(true),
         "This PC's s1 still does"
+    );
+}
+
+/// A look at one host's leaf reads that host's own status: it keeps the mark
+/// of a session waiting there and clears an idle one, leaving the other
+/// host's session of the same id alone.
+#[gpui::test]
+fn a_look_keeps_only_the_waiting_hosts_mark(cx: &mut TestAppContext) {
+    {
+        let dir = TestDir::new();
+        let mut h = shared_id_with(
+            cx,
+            &dir,
+            session("s1").status("awaiting_input").build(),
+            session("s1").build(),
+        );
+        h.send(awaiting("s1"));
+        h.host(&remote()).send(awaiting("s1"));
+
+        h.click_on(&remote_leaf("", "s1"));
+
+        assert_eq!(
+            s1_attention(&mut h, HostKey::of(&remote())),
+            Some(false),
+            "the idle remote s1 loses its mark to a look"
+        );
+        assert_eq!(
+            s1_attention(&mut h, HostKey::Local),
+            Some(true),
+            "This PC's waiting s1 keeps its own"
+        );
+    }
+
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").build(),
+        session("s1").status("awaiting_input").build(),
+    );
+    h.send(awaiting("s1"));
+    h.host(&remote()).send(awaiting("s1"));
+
+    h.click_on("leaf-s1");
+
+    assert_eq!(
+        s1_attention(&mut h, HostKey::Local),
+        Some(false),
+        "the idle This PC s1 loses its mark to a look"
+    );
+    assert_eq!(
+        s1_attention(&mut h, HostKey::of(&remote())),
+        Some(true),
+        "the remote waiting s1 keeps its own"
     );
 }
 

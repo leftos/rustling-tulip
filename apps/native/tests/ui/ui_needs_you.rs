@@ -53,6 +53,11 @@ fn waited_of(h: &mut Harness<'_>, id: &str) -> Option<String> {
         .map(|row| row.waited)
 }
 
+/// Whether the element tagged `selector` is laid out on screen.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x >= px(0.0)
+}
+
 /// The session whose context menu is open.
 fn menu_of(h: &mut Harness<'_>) -> Option<String> {
     h.root(|root, _| root.session_menu().map(str::to_owned))
@@ -243,6 +248,51 @@ fn error_attention_adds_an_ended_row_that_a_click_removes(cx: &mut TestAppContex
     assert_eq!(ids(&mut h), ["s1", "s2"], "the click dismissed it");
     assert!(!h.in_model("needs-you-row-s3"));
     assert_eq!(activity(&mut h), Activity::NeedsYou);
+}
+
+#[gpui::test]
+fn a_row_click_keeps_a_waiting_sessions_leaf_mark(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture
+        .sessions
+        .push(session("s2").in_repo("r1").status("awaiting_input").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.send(DaemonMessage::Attention {
+        session_id: "s2".to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    });
+    assert!(
+        drawn(&mut h, "leaf-badge-s2"),
+        "precondition: s2's leaf shows its mark"
+    );
+    h.click_on("activity-needs-you");
+    assert!(h.in_model("needs-you-row-s2"), "precondition: s2 asks");
+
+    h.click_on("needs-you-row-s2");
+
+    assert_eq!(
+        ids(&mut h),
+        ["s2"],
+        "the row follows the status, which a look does not change"
+    );
+
+    h.click_on("activity-sessions");
+    assert!(
+        drawn(&mut h, "leaf-badge-s2"),
+        "the `!` stays while s2 waits"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").in_repo("r1").status("working").build(),
+        request_id: None,
+    });
+    assert!(!drawn(&mut h, "leaf-badge-s2"), "the answer clears it");
+
+    h.click_on("activity-needs-you");
+    assert!(!h.in_model("needs-you-row-s2"), "and the row goes with it");
 }
 
 #[gpui::test]
