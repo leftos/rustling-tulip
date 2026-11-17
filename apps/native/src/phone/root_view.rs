@@ -68,6 +68,11 @@ pub struct PhoneRoot {
     sheet: Option<Sheet>,
     /// Settings, drawn in place of Home or the hosts screen while open.
     pub(super) settings: Option<super::settings::Settings>,
+    /// The Quick replies title or reply editor over the open editor
+    /// sub-page, while it is open.
+    pub(super) reply_editor: Option<super::quick_replies_view::TextEditor>,
+    /// The reply set whose Restore defaults asks for confirmation.
+    pub(super) restore_confirm: Option<ReplySet>,
     /// The sheet's resumes out, each until the reply its request id gets.
     /// The phone's own record: the desktop's `Duplicates` never sees them.
     resumes: Vec<home::PendingResume>,
@@ -159,6 +164,8 @@ impl PhoneRoot {
             tray: super::tray::Tray::default(),
             sheet: None,
             settings: None,
+            reply_editor: None,
+            restore_confirm: None,
             resumes: Vec::new(),
             insets_override: None,
             logged_ready: false,
@@ -268,6 +275,8 @@ impl PhoneRoot {
                     self.close_session(cx);
                 }
                 self.settings = None;
+                self.keep_reply_editor();
+                self.keep_restore_confirm();
                 self.open_note = Some(note);
                 cx.notify();
             }
@@ -352,6 +361,8 @@ impl PhoneRoot {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
         self.settings = None;
+        self.keep_reply_editor();
+        self.keep_restore_confirm();
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));

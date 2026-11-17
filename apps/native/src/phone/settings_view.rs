@@ -5,14 +5,15 @@
 //! renders and forwards taps.
 
 use gpui::{
-    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window,
-    div, prelude::*, px,
+    BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div,
+    prelude::*, px,
 };
 
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
-use super::quick_replies::{self, ReplySet};
+use super::quick_replies::ReplySet;
+use super::quick_replies_view::sub_page_stands;
 use super::session;
 use super::settings::{BackStep, Page, Settings, SubPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
@@ -70,6 +71,7 @@ impl PhoneRoot {
         tracing::debug!("phone: opening Settings");
         self.forget_pending_open();
         self.settings = Some(Settings::default());
+        self.keep_restore_confirm();
         cx.notify();
     }
 
@@ -79,6 +81,7 @@ impl PhoneRoot {
         if let Some(settings) = self.settings.as_mut() {
             settings.open(page);
         }
+        self.keep_restore_confirm();
         cx.notify();
     }
 
@@ -88,6 +91,7 @@ impl PhoneRoot {
         let mut settings = Settings::default();
         settings.open(page);
         self.settings = Some(settings);
+        self.keep_restore_confirm();
         cx.notify();
     }
 
@@ -101,29 +105,18 @@ impl PhoneRoot {
     /// item is gone closes with the step.
     pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
-        let counts = (
-            self.saved_group_count(ReplySet::Agent, cx),
-            self.saved_group_count(ReplySet::Shell, cx),
-        );
+        let agent = self.reply_counts(ReplySet::Agent, cx);
+        let shell = self.reply_counts(ReplySet::Shell, cx);
         let step = self.settings.as_mut().map(Settings::back);
         if let Some(settings) = self.settings.as_mut() {
-            settings.retain_valid(|sub| match sub {
-                SubPage::ReplyGroup { set, group } => match set {
-                    ReplySet::Agent => group < counts.0,
-                    ReplySet::Shell => group < counts.1,
-                },
-            });
+            settings.retain_valid(|sub| sub_page_stands(sub, &agent, &shell));
         }
         if step == Some(BackStep::Close) {
             self.settings = None;
         }
+        self.keep_reply_editor();
+        self.keep_restore_confirm();
         cx.notify();
-    }
-
-    /// How many groups `set` offers as Settings draws it.
-    fn saved_group_count(&self, set: ReplySet, cx: &App) -> usize {
-        let saved = self.saved_replies(set, cx);
-        quick_replies::groups(saved.as_deref(), set).len()
     }
 
     /// A back gesture over the window while a session or Settings shows:
@@ -162,6 +155,9 @@ impl PhoneRoot {
         let t = theme(cx);
         let body = match settings.top() {
             Some(SubPage::ReplyGroup { set, group }) => self.reply_group_page(set, group, &t, cx),
+            Some(SubPage::GroupTitle { .. } | SubPage::Reply { .. }) => {
+                self.reply_editor_page(&t, cx)
+            }
             None => match settings.page {
                 None => Self::category_list(&t, cx),
                 Some(Page::Notifications) => self.notifications_page(&t, cx),

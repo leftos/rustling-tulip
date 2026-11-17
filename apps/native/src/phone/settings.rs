@@ -54,6 +54,14 @@ pub(crate) enum SubPage {
     /// One set's group and its replies; `group` is the group's index in the
     /// set.
     ReplyGroup { set: ReplySet, group: usize },
+    /// A group's title in its editor; `None` is a group being added.
+    GroupTitle { set: ReplySet, group: Option<usize> },
+    /// One reply in its editor; `None` is a reply being added.
+    Reply {
+        set: ReplySet,
+        group: usize,
+        reply: Option<usize>,
+    },
 }
 
 impl SubPage {
@@ -61,6 +69,8 @@ impl SubPage {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::ReplyGroup { .. } => "Group",
+            Self::GroupTitle { .. } => "Group title",
+            Self::Reply { .. } => "Reply",
         }
     }
 }
@@ -245,24 +255,45 @@ mod tests {
             group: 0,
         });
         assert_eq!(settings.title(), "Group");
+
+        settings.push(SubPage::GroupTitle {
+            set: ReplySet::Shell,
+            group: None,
+        });
+        assert_eq!(settings.title(), "Group title");
+
+        settings.push(SubPage::Reply {
+            set: ReplySet::Shell,
+            group: 0,
+            reply: Some(1),
+        });
+        assert_eq!(settings.title(), "Reply");
     }
 
     #[test]
     fn a_sub_page_whose_item_is_gone_closes_with_those_over_it() {
         let mut settings = Settings::default();
         settings.open(Page::QuickReplies);
-        for _ in 0..2 {
-            settings.push(SubPage::ReplyGroup {
-                set: ReplySet::Agent,
-                group: 1,
-            });
-        }
-
-        settings.retain_valid(|sub| match sub {
-            SubPage::ReplyGroup { group, .. } => group == 0,
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 1,
+        });
+        settings.push(SubPage::Reply {
+            set: ReplySet::Agent,
+            group: 1,
+            reply: Some(0),
         });
 
-        assert_eq!(settings.stack, Vec::new());
+        settings.retain_valid(|sub| match sub {
+            SubPage::GroupTitle { group, .. } => group.is_none_or(|group| group == 0),
+            SubPage::ReplyGroup { group, .. } | SubPage::Reply { group, .. } => group == 0,
+        });
+
+        assert_eq!(
+            settings.stack,
+            Vec::new(),
+            "the reply over the removed group closes with it"
+        );
     }
 
     #[test]
@@ -279,7 +310,8 @@ mod tests {
         });
 
         settings.retain_valid(|sub| match sub {
-            SubPage::ReplyGroup { group, .. } => group == 0,
+            SubPage::GroupTitle { group, .. } => group.is_none_or(|group| group == 0),
+            SubPage::ReplyGroup { group, .. } | SubPage::Reply { group, .. } => group == 0,
         });
 
         assert_eq!(

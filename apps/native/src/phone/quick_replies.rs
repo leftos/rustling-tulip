@@ -120,7 +120,116 @@ fn is_one_line(reply: &str) -> bool {
     !reply.trim().is_empty() && !reply.contains(['\n', '\r'])
 }
 
+/// Why a group title or a reply's text cannot be saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ListError {
+    /// The title is blank.
+    BlankTitle,
+    /// Another group of the set already holds the title.
+    TitleTaken(String),
+    /// The reply is blank.
+    BlankReply,
+    /// The reply holds a line break.
+    MultiLineReply,
+}
+
+impl ListError {
+    /// What the editor says under its field.
+    #[must_use]
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::BlankTitle => "A group needs a title.".to_owned(),
+            Self::TitleTaken(title) => format!("Another group is already called “{title}”."),
+            Self::BlankReply => "A reply needs some text.".to_owned(),
+            Self::MultiLineReply => "A reply is one line: it is typed, then Return.".to_owned(),
+        }
+    }
+}
+
+/// `typed` as the title to save: trimmed, refused while blank or while
+/// another group of `groups` holds it. `editing` is the group keeping its own
+/// title, if any.
+pub(crate) fn check_title(
+    groups: &[ReplyGroup],
+    typed: &str,
+    editing: Option<usize>,
+) -> Result<String, ListError> {
+    let title = typed.trim();
+    if title.is_empty() {
+        return Err(ListError::BlankTitle);
+    }
+    let taken = groups
+        .iter()
+        .enumerate()
+        .any(|(index, group)| Some(index) != editing && group.title == title);
+    if taken {
+        return Err(ListError::TitleTaken(title.to_owned()));
+    }
+    Ok(title.to_owned())
+}
+
+/// `typed` as the reply to save: refused while blank or holding a line break,
+/// kept as typed otherwise.
+pub(crate) fn check_reply(typed: &str) -> Result<String, ListError> {
+    if typed.trim().is_empty() {
+        return Err(ListError::BlankReply);
+    }
+    if typed.contains(['\n', '\r']) {
+        return Err(ListError::MultiLineReply);
+    }
+    Ok(typed.to_owned())
+}
+
+/// One edit to a set's groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplyEdit {
+    /// Appends a group with the title and no replies.
+    AddGroup { title: String },
+    /// Renames a group, keeping its replies.
+    RenameGroup { group: usize, title: String },
+    /// Drops a group with its replies.
+    RemoveGroup { group: usize },
+    /// Appends a reply to a group.
+    AddReply { group: usize, text: String },
+    /// Replaces one reply's text.
+    SetReply {
+        group: usize,
+        reply: usize,
+        text: String,
+    },
+    /// Drops one reply.
+    RemoveReply { group: usize, reply: usize },
+}
+
+/// `groups` with `edit` made; `None` while an index names nothing.
+#[must_use]
+pub(crate) fn apply(groups: &[ReplyGroup], edit: ReplyEdit) -> Option<Vec<ReplyGroup>> {
+    let mut next = groups.to_vec();
+    match edit {
+        ReplyEdit::AddGroup { title } => next.push(ReplyGroup {
+            title,
+            replies: Vec::new(),
+        }),
+        ReplyEdit::RenameGroup { group, title } => next.get_mut(group)?.title = title,
+        ReplyEdit::RemoveGroup { group } => {
+            next.get(group)?;
+            next.remove(group);
+        }
+        ReplyEdit::AddReply { group, text } => next.get_mut(group)?.replies.push(text),
+        ReplyEdit::SetReply { group, reply, text } => {
+            *next.get_mut(group)?.replies.get_mut(reply)? = text;
+        }
+        ReplyEdit::RemoveReply { group, reply } => {
+            let entry = next.get_mut(group)?;
+            entry.replies.get(reply)?;
+            entry.replies.remove(reply);
+        }
+    }
+    Some(next)
+}
+
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test's fixture groups always apply")]
 mod tests {
     use super::*;
 
@@ -271,5 +380,228 @@ mod tests {
         for set in [ReplySet::Agent, ReplySet::Shell] {
             assert_eq!(normalized(defaults(set)), defaults(set));
         }
+    }
+
+    #[test]
+    fn check_title_trims_a_new_title() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(check_title(&groups, "  mine ", None), Ok("mine".to_owned()));
+    }
+
+    #[test]
+    fn check_title_refuses_a_blank_title() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(check_title(&groups, "", None), Err(ListError::BlankTitle));
+        assert_eq!(
+            check_title(&groups, "  ", Some(0)),
+            Err(ListError::BlankTitle)
+        );
+    }
+
+    #[test]
+    fn check_title_refuses_a_taken_title() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(
+            check_title(&groups, "common", None),
+            Err(ListError::TitleTaken("common".to_owned()))
+        );
+    }
+
+    #[test]
+    fn check_title_lets_a_group_keep_its_title() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(
+            check_title(&groups, "confirm", Some(0)),
+            Ok("confirm".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_title_refuses_renaming_onto_another() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(
+            check_title(&groups, "common", Some(0)),
+            Err(ListError::TitleTaken("common".to_owned()))
+        );
+    }
+
+    #[test]
+    fn check_title_compares_exactly() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(
+            check_title(&groups, "Common", None),
+            Ok("Common".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_reply_takes_one_line() {
+        assert_eq!(check_reply("continue"), Ok("continue".to_owned()));
+    }
+
+    #[test]
+    fn check_reply_keeps_the_text_as_typed() {
+        assert_eq!(
+            check_reply("  keep my spaces "),
+            Ok("  keep my spaces ".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_reply_refuses_a_blank_reply() {
+        assert_eq!(check_reply(""), Err(ListError::BlankReply));
+        assert_eq!(check_reply("   "), Err(ListError::BlankReply));
+    }
+
+    #[test]
+    fn check_reply_refuses_a_line_break() {
+        assert_eq!(check_reply("a\nb"), Err(ListError::MultiLineReply));
+        assert_eq!(check_reply("a\rb"), Err(ListError::MultiLineReply));
+    }
+
+    #[test]
+    fn list_errors_say_what_to_fix() {
+        assert_eq!(ListError::BlankTitle.message(), "A group needs a title.");
+        assert_eq!(
+            ListError::TitleTaken("common".to_owned()).message(),
+            "Another group is already called “common”."
+        );
+        assert_eq!(ListError::BlankReply.message(), "A reply needs some text.");
+        assert_eq!(
+            ListError::MultiLineReply.message(),
+            "A reply is one line: it is typed, then Return."
+        );
+    }
+
+    #[test]
+    fn apply_add_group_appends() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::AddGroup {
+                title: "mine".to_owned(),
+            },
+        )
+        .expect("the groups");
+
+        let mut expected = defaults(ReplySet::Agent);
+        expected.push(group("mine", &[]));
+        assert_eq!(next, expected);
+    }
+
+    #[test]
+    fn apply_rename_keeps_the_replies() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::RenameGroup {
+                group: 1,
+                title: "often".to_owned(),
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next[1],
+            group(
+                "often",
+                &[
+                    "continue",
+                    "commit and push",
+                    "retry",
+                    "skip",
+                    "drastically simplify"
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn apply_remove_group_drops_it() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::RemoveGroup { group: 0 },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next,
+            vec![group(
+                "common",
+                &[
+                    "continue",
+                    "commit and push",
+                    "retry",
+                    "skip",
+                    "drastically simplify"
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn apply_add_reply_appends() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::AddReply {
+                group: 0,
+                text: "maybe".to_owned(),
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(next[0], group("confirm", &["yes", "no", "maybe"]));
+    }
+
+    #[test]
+    fn apply_set_reply_edits_in_place() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::SetReply {
+                group: 1,
+                reply: 2,
+                text: "try again".to_owned(),
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(next[1].replies[2], "try again");
+        assert_eq!(next[1].replies.len(), 5, "the other replies stay");
+    }
+
+    #[test]
+    fn apply_remove_reply_drops_it() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::RemoveReply { group: 1, reply: 0 },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next[1],
+            group(
+                "common",
+                &["commit and push", "retry", "skip", "drastically simplify"]
+            )
+        );
+    }
+
+    #[test]
+    fn apply_refuses_an_index_that_names_nothing() {
+        let groups = defaults(ReplySet::Agent);
+        assert_eq!(apply(&groups, ReplyEdit::RemoveGroup { group: 5 }), None);
+        assert_eq!(
+            apply(&groups, ReplyEdit::RemoveReply { group: 1, reply: 9 }),
+            None
+        );
+        assert_eq!(
+            apply(
+                &groups,
+                ReplyEdit::SetReply {
+                    group: 7,
+                    reply: 0,
+                    text: "x".to_owned(),
+                }
+            ),
+            None
+        );
     }
 }

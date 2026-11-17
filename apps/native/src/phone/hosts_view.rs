@@ -438,7 +438,7 @@ pub(super) fn phone_button(
 
 /// A field in its outlined box, tagged `selector`; a press anywhere on the
 /// box gives the field the keyboard.
-fn field_box(
+pub(super) fn field_box(
     selector: &'static str,
     input: &Entity<TextInput>,
     t: &UiTheme,

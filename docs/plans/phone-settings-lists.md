@@ -113,7 +113,7 @@ P22. **Load normalisation.** Proposed by the design pass. Replies: a title is tr
 
    Keys: Ctrl, Paste and Quick appear exactly once (a missing one is appended at the end, a repeat dropped); an id that is not lower-case letters, digits and `-`, or repeats an earlier one, is replaced by `key-{n}`; a blank label on a send key becomes its derived label.
 
-P23. **A sub-page whose item is gone closes.** Proposed by the design pass. Sub-pages name items by index. After any edit, `Settings::retain_valid` drops the innermost sub-pages whose index no longer names an item (a Restore under an open group page is the case the UI can reach).
+P23. **A sub-page whose item is gone closes.** Proposed by the design pass. Sub-pages name items by index. After any edit, `Settings::retain_valid` drops the innermost sub-pages whose index no longer names an item (Restore is drawn only on the list page, so no tap reaches it under an open group page; the rule is pinned by `phone::settings` unit tests, and B5's Keys page keeps the same layout).
 
 P24. **A bar key is at least a touch target wide and at most 96 pt.** Proposed by the design pass. Today's bar keys shrink to share the width (`key_bar_row`, `terminal_view.rs:154-182`, `flex_1().min_w_0()`). In the scrolling row each key is `flex_none`, at least `TOUCH_TARGET` wide, and a longer label truncates at 96 pt.
 
@@ -687,7 +687,7 @@ Every command runs through the repo's gate wrapper as CLAUDE.md says. The filter
 - Change: (1) `check_title`, `check_reply`, `ListError`, `ReplyEdit` (no moves yet) and `apply`. (2) `SubPage::GroupTitle` and `SubPage::Reply`; `PhoneRoot.reply_editor` (P13); `field_box` becomes `pub(super)`. (3) Remove on group and reply rows, Add group, Add reply, and Restore with its confirm (P16); every save writes the whole resolved set through `RootView::set_phone_replies`, and Restore writes `None`. (4) The specs.
 - Tests, red first: `-E 'test(/^phone::quick_replies::tests::(check_|list_errors|apply_)/) | test(/^phone::settings::/)'`; `--test ui -E 'test(/^ui_phone_quick_replies::/)'` adds `adding_a_reply_appends_it_and_saves`, `editing_a_reply_changes_its_text`, `a_blank_reply_is_refused_with_a_message`, `adding_a_group_with_a_taken_title_is_refused`, `renaming_a_group_renames_its_dock_ids`, `removing_a_reply_drops_it`, `removing_a_group_drops_it`, `the_first_edit_of_the_defaults_saves_the_whole_set`.
 
-  Also: `restore_asks_then_brings_back_the_defaults` (`saved_ui` then has no `phone_agent_replies`), `cancel_keeps_the_saved_replies`, `restore_is_dimmed_while_the_defaults_show`, `restore_closes_a_group_page_that_no_longer_exists`, `back_from_an_editor_discards_the_draft`, `enter_in_the_field_saves`, `the_dock_shows_an_edited_reply`.
+  Also: `restore_asks_then_brings_back_the_defaults` (`saved_ui` then has no `phone_agent_replies`), `cancel_keeps_the_saved_replies`, `restore_is_dimmed_while_the_defaults_show`, `back_from_an_editor_discards_the_draft`, `enter_in_the_field_saves`, `the_dock_shows_an_edited_reply`.
 - Shots: refresh `phone-settings-replies` and `phone-settings-reply-group` (Remove, Add and Restore now drawn).
 - Docs: `docs/native-client.md` (the editors, the data rules and their messages, Restore); `docs/testing.md` (the two views' descriptions).
 
