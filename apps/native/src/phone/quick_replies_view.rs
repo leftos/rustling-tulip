@@ -4,17 +4,19 @@
 //! Restore defaults asks before it brings the built-in groups back.
 
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, Focusable, SharedString, Stateful, Subscription, Window,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, Entity, Focusable, SharedString, Stateful,
+    Subscription, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::{field_box, phone_button};
 use super::quick_replies::{self, ListError, ReplyEdit, ReplyGroup, ReplySet};
+use super::reorder::{self, ListId, ReorderDrag};
 use super::settings::{Page, Settings, SubPage};
 use super::settings_view::{CHEVRON, section_label};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
+use crate::drag::Side;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -44,6 +46,10 @@ const STALE_ITEM: &str = "That item no longer exists.";
 const TITLE_PLACEHOLDER: &str = "Group title";
 /// A new reply's field says what to type.
 const REPLY_PLACEHOLDER: &str = "Reply text";
+/// How faintly a dragged row draws while it is lifted.
+const LIFTED_OPACITY: f32 = 0.4;
+/// The accent line marking a drop slot, in points.
+const SLOT_LINE: f32 = 2.0;
 
 /// The two sets, in the order the page draws them.
 const SETS: [ReplySet; 2] = [ReplySet::Agent, ReplySet::Shell];
@@ -80,6 +86,45 @@ fn reply_count(n: usize) -> String {
     } else {
         format!("{n} replies")
     }
+}
+
+/// The drop slot a drag marks on the row at `index`, if any.
+fn slot_of(drag: Option<ReorderDrag>, index: usize) -> Option<Side> {
+    drag.and_then(|drag| drag.over)
+        .filter(|(at, _)| *at == index)
+        .map(|(_, side)| side)
+}
+
+/// One row of a dragged list as its page draws it: the accent line where the
+/// row above would drop it, the row itself, at reduced opacity while it is
+/// the lifted one, and the line where it would drop below it.
+fn dragged_row(
+    row: Stateful<Div>,
+    lifted: bool,
+    slot: Option<Side>,
+    t: &UiTheme,
+) -> Vec<AnyElement> {
+    let line = || {
+        div()
+            .flex_none()
+            .h(px(SLOT_LINE))
+            .w_full()
+            .bg(gpui::rgb(t.accent))
+            .into_any_element()
+    };
+    let mut out = Vec::new();
+    if slot == Some(Side::Before) {
+        out.push(line());
+    }
+    out.push(if lifted {
+        row.opacity(LIFTED_OPACITY).into_any_element()
+    } else {
+        row.into_any_element()
+    });
+    if slot == Some(Side::After) {
+        out.push(line());
+    }
+    out
 }
 
 /// A title or reply editor: the field, the sub-page it saves and its refusal.
@@ -157,14 +202,16 @@ impl PhoneRoot {
         cx.notify();
     }
 
-    /// Keeps the Restore confirm only while the Quick replies page tops
-    /// Settings: leaving the page or opening anything over it drops it.
+    /// Keeps the Restore confirm, and a drag that can still draw, only while
+    /// the Quick replies page tops Settings: leaving the page, opening
+    /// anything over it or closing Settings drops both.
     pub(super) fn keep_restore_confirm(&mut self) {
         let on_page = self.settings.as_ref().is_some_and(|settings| {
             settings.top().is_none() && settings.page == Some(Page::QuickReplies)
         });
         if !on_page {
             self.restore_confirm = None;
+            self.reorder_drag = None;
         }
     }
 
@@ -203,7 +250,7 @@ impl PhoneRoot {
 
     /// The set's groups as the page draws them: the saved ones, else the
     /// built-in defaults.
-    fn saved_groups(&self, set: ReplySet, cx: &App) -> Vec<ReplyGroup> {
+    pub(super) fn saved_groups(&self, set: ReplySet, cx: &App) -> Vec<ReplyGroup> {
         let saved = self.saved_replies(set, cx);
         quick_replies::groups(saved.as_deref(), set)
     }
@@ -398,23 +445,37 @@ impl PhoneRoot {
     }
 
     /// The Quick replies page: each set's groups under its name, then its
-    /// Add group and its Restore defaults.
+    /// Add group and its Restore defaults, with the page's drag area over
+    /// the lists.
     pub(super) fn quick_replies_page(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        self.forget_list_boxes();
         div()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .p(px(SIDE_PADDING))
             .children(SETS.map(|set| self.reply_set_section(set, t, cx)))
+            .child(reorder::reorder_area(&self.list_boxes, cx))
     }
 
     /// One set: its name, a row per group, Add group and Restore defaults.
     fn reply_set_section(&self, set: ReplySet, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let groups = self.saved_groups(set, cx);
-        let rows: Vec<Stateful<Div>> = groups
+        let drag = self
+            .reorder_drag
+            .filter(|drag| drag.list == ListId::ReplyGroups(set));
+        let rows: Vec<AnyElement> = groups
             .iter()
             .enumerate()
-            .map(|(index, group)| Self::group_row(set, group, index, t, cx))
+            .flat_map(|(index, group)| {
+                dragged_row(
+                    Self::group_row(set, group, index, t, cx),
+                    drag.is_some_and(|drag| drag.from == index),
+                    slot_of(drag, index),
+                    t,
+                )
+            })
             .collect();
         div()
             .flex()
@@ -424,10 +485,16 @@ impl PhoneRoot {
             .child(section_label(set_label(set), t, cx))
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .driver_id(|| format!("phone-replies-{}-groups", set_key(set)))
-                    .children(rows),
+                    .children(rows)
+                    .child(reorder::list_box_canvas(
+                        &self.list_boxes,
+                        ListId::ReplyGroups(set),
+                        groups.len(),
+                    )),
             )
             .child(Self::add_group_row(set, cx))
             .child(self.restore_row(set, t, cx))
@@ -559,7 +626,8 @@ impl PhoneRoot {
             }))
     }
 
-    /// One group's page: its Title row over its replies, then Add reply.
+    /// One group's page: its Title row over its replies, then Add reply,
+    /// with the page's drag area over the replies.
     pub(super) fn reply_group_page(
         &self,
         set: ReplySet,
@@ -567,11 +635,38 @@ impl PhoneRoot {
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.forget_list_boxes();
         let groups = self.saved_groups(set, cx);
         let Some(entry) = groups.get(group) else {
             return div();
         };
+        let drag = self
+            .reorder_drag
+            .filter(|drag| drag.list == ListId::Replies);
+        let rows: Vec<AnyElement> = entry
+            .replies
+            .iter()
+            .enumerate()
+            .flat_map(|(index, text)| {
+                dragged_row(
+                    Self::reply_row(
+                        &ReplyRow {
+                            set,
+                            group,
+                            text,
+                            index,
+                        },
+                        t,
+                        cx,
+                    ),
+                    drag.is_some_and(|drag| drag.from == index),
+                    slot_of(drag, index),
+                    t,
+                )
+            })
+            .collect();
         div()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -580,21 +675,16 @@ impl PhoneRoot {
             .child(section_label(REPLIES_LABEL, t, cx))
             .child(
                 div()
+                    .relative()
                     .driver_id(|| "phone-replies-replies".to_owned())
                     .flex()
                     .flex_col()
-                    .children(entry.replies.iter().enumerate().map(|(index, text)| {
-                        Self::reply_row(
-                            &ReplyRow {
-                                set,
-                                group,
-                                text,
-                                index,
-                            },
-                            t,
-                            cx,
-                        )
-                    })),
+                    .children(rows)
+                    .child(reorder::list_box_canvas(
+                        &self.list_boxes,
+                        ListId::Replies,
+                        entry.replies.len(),
+                    )),
             )
             .child(
                 phone_button(
@@ -608,6 +698,7 @@ impl PhoneRoot {
                     this.open_reply_editor(set, group, None, window, cx);
                 })),
             )
+            .child(reorder::reorder_area(&self.list_boxes, cx))
     }
 
     /// The group page's Title row: the group's title and a chevron; a tap

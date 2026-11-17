@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::reorder;
+use crate::drag::Side;
+
 /// One titled group of replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyGroup {
@@ -199,6 +202,15 @@ pub(crate) enum ReplyEdit {
     },
     /// Drops one reply.
     RemoveReply { group: usize, reply: usize },
+    /// Moves a group to `side` of the group at `to`.
+    MoveGroup { from: usize, to: usize, side: Side },
+    /// Moves one of a group's replies to `side` of the reply at `to`.
+    MoveReply {
+        group: usize,
+        from: usize,
+        to: usize,
+        side: Side,
+    },
 }
 
 /// `groups` with `edit` made; `None` while an index names nothing.
@@ -223,6 +235,23 @@ pub(crate) fn apply(groups: &[ReplyGroup], edit: ReplyEdit) -> Option<Vec<ReplyG
             let entry = next.get_mut(group)?;
             entry.replies.get(reply)?;
             entry.replies.remove(reply);
+        }
+        ReplyEdit::MoveGroup { from, to, side } => {
+            next.get(from)?;
+            next.get(to)?;
+            next = reorder::reordered(&next, from, to, side);
+        }
+        ReplyEdit::MoveReply {
+            group,
+            from,
+            to,
+            side,
+        } => {
+            let replies = &mut next.get_mut(group)?.replies;
+            replies.get(from)?;
+            replies.get(to)?;
+            let moved = reorder::reordered(replies, from, to, side);
+            *replies = moved;
         }
     }
     Some(next)
@@ -603,5 +632,104 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn apply_move_group_to_the_top() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::MoveGroup {
+                from: 1,
+                to: 0,
+                side: Side::Before,
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next,
+            vec![
+                group(
+                    "common",
+                    &[
+                        "continue",
+                        "commit and push",
+                        "retry",
+                        "skip",
+                        "drastically simplify"
+                    ]
+                ),
+                group("confirm", &["yes", "no"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_move_reply_down() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::MoveReply {
+                group: 1,
+                from: 0,
+                to: 2,
+                side: Side::After,
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next[1],
+            group(
+                "common",
+                &[
+                    "commit and push",
+                    "retry",
+                    "continue",
+                    "skip",
+                    "drastically simplify"
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn apply_move_reply_to_the_top() {
+        let next = apply(
+            &defaults(ReplySet::Agent),
+            ReplyEdit::MoveReply {
+                group: 1,
+                from: 4,
+                to: 0,
+                side: Side::Before,
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(
+            next[1].replies,
+            [
+                "drastically simplify",
+                "continue",
+                "commit and push",
+                "retry",
+                "skip"
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_move_onto_itself_changes_nothing() {
+        let groups = defaults(ReplySet::Agent);
+        let next = apply(
+            &groups,
+            ReplyEdit::MoveGroup {
+                from: 0,
+                to: 0,
+                side: Side::After,
+            },
+        )
+        .expect("the groups");
+
+        assert_eq!(next, groups);
     }
 }

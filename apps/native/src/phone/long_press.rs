@@ -112,15 +112,18 @@ fn drag_hitbox(
     (window.insert_hitbox(bounds, HitboxBehavior::Normal), held)
 }
 
-/// [`long_press_area`] that also follows the press it claimed: `on_press`
-/// runs with where the press started, then `on_move` with the finger's
-/// position for each of that press's moves, and `on_end` once when it ends
-/// or is cancelled. Whether it holds the press outlives a frame drawn while
-/// the finger is down.
+/// [`long_press_area`] that also follows the press it claimed: `wants` says
+/// whether the press starting at a point is the area's at all, and only a
+/// press it wants is claimed; `on_press` runs with where that press started,
+/// then `on_move` with the finger's position for each of that press's moves,
+/// and `on_end` once when it ends (`true`) or is cancelled (`false`). A
+/// press the area does not want keeps its tap and its pan. Whether it holds
+/// the press outlives a frame drawn while the finger is down.
 pub(crate) fn long_press_drag_area(
+    wants: impl Fn(Point<Pixels>) -> bool + 'static,
     on_press: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
     on_move: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
-    on_end: impl Fn(&mut Window, &mut App) + 'static,
+    on_end: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     canvas(
         |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
@@ -129,7 +132,8 @@ pub(crate) fn long_press_drag_area(
         move |_, (hitbox, held): (Hitbox, Rc<Cell<bool>>), window: &mut Window, _: &mut App| {
             window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                 let prevented = window.default_prevented();
-                let claim = claims(event.phase, phase, prevented, hitbox.is_hovered(window));
+                let claim = claims(event.phase, phase, prevented, hitbox.is_hovered(window))
+                    && wants(event.start_position);
                 let (hold, holds) = step(held.get(), event.phase, claim);
                 if phase.bubble() {
                     held.set(holds);
@@ -141,7 +145,9 @@ pub(crate) fn long_press_drag_area(
                         on_press(event.start_position, window, cx);
                     }
                     Hold::Move if phase.bubble() => on_move(event.position, window, cx),
-                    _ if ends(hold, phase.bubble()) => on_end(window, cx),
+                    _ if ends(hold, phase.bubble()) => {
+                        on_end(event.phase == TouchPhase::Ended, window, cx);
+                    }
                     _ => {}
                 }
             });

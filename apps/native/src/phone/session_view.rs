@@ -272,6 +272,7 @@ impl PhoneRoot {
         let end_id = session_id.to_owned();
         // Each update fails only when the app's root is gone.
         long_press_drag_area(
+            |_| true,
             move |at, _, cx| {
                 press_root
                     .update(cx, |root, cx| root.phone_select_start(&press_id, at, cx))
@@ -282,7 +283,7 @@ impl PhoneRoot {
                     .update(cx, |root, cx| root.phone_select_widen(&move_id, at, cx))
                     .ok();
             },
-            move |_, cx| {
+            move |_, _, cx| {
                 end_root
                     .update(cx, |root, _| root.phone_select_hold_end(&end_id))
                     .ok();

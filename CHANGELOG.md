@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Ctrl+click a path or URL in a subagent or dispatch run pane to open it, or Ctrl+Shift+click for the link menu, as in a terminal.
 - On a host that supports it, Ctrl+click fetches any file or folder the host can read, not only those inside the session's folders.
 - Source Control and a shell pane's repo chip follow a plain shell that changes folder into another registered repo.
+- The phone app's Settings › Quick replies edits, removes, restores and reorders the Quick dock's replies and their groups, for agent sessions and shells.
 
 ### Fixed
 

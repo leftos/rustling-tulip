@@ -1924,6 +1924,12 @@
     },
     {
       "paths": [
+        "apps/native/src/phone/reorder.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^phone::reorder::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_phone_quick_replies::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/phone/settings*.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^phone::settings::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_settings::/) | test(/^ui_phone_quick_replies::/) | test(/^ui_phone_push::/)))"

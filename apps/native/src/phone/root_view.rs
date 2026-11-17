@@ -73,6 +73,11 @@ pub struct PhoneRoot {
     pub(super) reply_editor: Option<super::quick_replies_view::TextEditor>,
     /// The reply set whose Restore defaults asks for confirmation.
     pub(super) restore_confirm: Option<ReplySet>,
+    /// The drag reordering a Settings list, while a long press holds one.
+    pub(super) reorder_drag: Option<super::reorder::ReorderDrag>,
+    /// The boxes the open page's lists recorded in its last frame, which a
+    /// long press on the page hit-tests against.
+    pub(super) list_boxes: super::reorder::ListBoxes,
     /// The sheet's resumes out, each until the reply its request id gets.
     /// The phone's own record: the desktop's `Duplicates` never sees them.
     resumes: Vec<home::PendingResume>,
@@ -166,6 +171,8 @@ impl PhoneRoot {
             settings: None,
             reply_editor: None,
             restore_confirm: None,
+            reorder_drag: None,
+            list_boxes: super::reorder::ListBoxes::default(),
             resumes: Vec::new(),
             insets_override: None,
             logged_ready: false,

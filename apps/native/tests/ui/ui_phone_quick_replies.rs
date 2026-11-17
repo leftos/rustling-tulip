@@ -6,11 +6,12 @@
 //! whole set in `native-ui.json`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{BackGesturePhase, Pixels, TestAppContext, point, px};
+use gpui::{BackGesturePhase, GestureTuning, Pixels, TestAppContext, TouchPhase, point, px};
 use protocol::{ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
@@ -646,5 +647,247 @@ fn the_dock_shows_an_edited_reply(cx: &mut TestAppContext) {
         quick_items(&mut h)[3],
         "push it",
         "the dock offers the new text"
+    );
+}
+
+/// Window point `at` in the top eighth of what `selector` tags, which is a
+/// row's top half: a drop there takes the row's `Before`.
+fn above(h: &mut Harness<'_>, selector: &str) -> gpui::Point<Pixels> {
+    let bounds = h.bounds(selector);
+    point(bounds.center().x, bounds.top() + px(6.0))
+}
+
+/// Window point `at` in the bottom eighth of what `selector` tags, which is
+/// a row's bottom half: a drop there takes the row's `After`.
+fn below(h: &mut Harness<'_>, selector: &str) -> gpui::Point<Pixels> {
+    let bounds = h.bounds(selector);
+    point(bounds.center().x, bounds.bottom() - px(6.0))
+}
+
+#[gpui::test]
+fn a_long_press_drag_moves_a_reply_below_the_next(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+    h.click_on("phone-replies-agent-group-1");
+
+    let from = h.center("phone-replies-reply-0");
+    let to = below(&mut h, "phone-replies-reply-1");
+    h.long_press_drag(from, to);
+
+    assert_eq!(
+        saved_ui(&dir)["phone_agent_replies"][1]["replies"],
+        json!([
+            "commit and push",
+            "continue",
+            "retry",
+            "skip",
+            "drastically simplify"
+        ]),
+        "continue moved below the reply after it"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_moves_a_group_to_the_top(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+
+    let from = h.center("phone-replies-agent-group-1");
+    let to = above(&mut h, "phone-replies-agent-group-0");
+    h.long_press_drag(from, to);
+
+    let saved = saved_ui(&dir);
+    let groups = saved["phone_agent_replies"]
+        .as_array()
+        .expect("the saved agent set");
+    let titles: Vec<&str> = groups
+        .iter()
+        .filter_map(|group| group["title"].as_str())
+        .collect();
+    assert_eq!(titles, ["common", "confirm"]);
+
+    h.click_on("phone-replies-agent-group-0");
+    assert!(
+        drawn(&mut h, "phone-replies-reply-4"),
+        "the first row is \"common\", which holds five replies"
+    );
+
+    h.click_on("phone-settings-back");
+    h.click_on("phone-replies-agent-group-1");
+    assert!(
+        drawn(&mut h, "phone-replies-reply-1"),
+        "the second row is \"confirm\""
+    );
+    assert!(
+        !drawn(&mut h, "phone-replies-reply-2"),
+        "which holds two replies, not five"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_in_the_shell_set_leaves_the_agent_set(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "phone_agent_replies": [{ "title": "a1", "replies": ["x"] }],
+        "phone_shell_replies": [
+            { "title": "s1", "replies": ["x"] },
+            { "title": "s2", "replies": ["y"] },
+        ],
+    });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_replies(&mut h);
+
+    let from = h.center("phone-replies-shell-group-1");
+    let to = above(&mut h, "phone-replies-shell-group-0");
+    h.long_press_drag(from, to);
+
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["phone_shell_replies"][0]["title"], json!("s2"));
+    assert_eq!(saved["phone_shell_replies"][1]["title"], json!("s1"));
+    assert_eq!(
+        saved["phone_agent_replies"][0]["title"],
+        json!("a1"),
+        "the other set keeps its order"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_drag_saves_the_new_order_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+    h.click_on("phone-replies-agent-group-1");
+
+    let from = h.center("phone-replies-reply-2");
+    let middle = below(&mut h, "phone-replies-reply-3");
+    let to = above(&mut h, "phone-replies-reply-0");
+    h.touch(TouchPhase::Started, from);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+
+    h.touch(TouchPhase::Moved, middle);
+    assert!(
+        saved_ui(&dir).get("phone_agent_replies").is_none(),
+        "a move saves nothing"
+    );
+
+    h.touch(TouchPhase::Moved, to);
+    assert!(
+        saved_ui(&dir).get("phone_agent_replies").is_none(),
+        "nor does the next move: nothing is saved until the lift"
+    );
+
+    h.touch(TouchPhase::Ended, to);
+
+    assert_eq!(
+        saved_ui(&dir)["phone_agent_replies"][1]["replies"],
+        json!([
+            "retry",
+            "continue",
+            "commit and push",
+            "skip",
+            "drastically simplify"
+        ]),
+        "the one save holds the final order"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_on_add_group_still_opens_its_editor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+
+    h.long_press_on("phone-replies-agent-add-group");
+
+    assert!(
+        drawn(&mut h, "phone-edit-field"),
+        "a hold off the lists leaves the press to the button, so its tap opens the editor"
+    );
+}
+
+#[gpui::test]
+fn a_hold_then_pan_on_a_section_label_scrolls_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "phone_agent_replies": (0..8)
+            .map(|n| json!({ "title": format!("g{n}"), "replies": ["x"] }))
+            .collect::<Vec<_>>(),
+        "phone_shell_replies": (0..8)
+            .map(|n| json!({ "title": format!("s{n}"), "replies": ["x"] }))
+            .collect::<Vec<_>>(),
+    });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_replies(&mut h);
+
+    let section = h.bounds("phone-replies-agent");
+    let at = point(section.center().x, section.top() + px(6.0));
+    let before = h.bounds("phone-replies-agent-groups").top();
+    h.touch(TouchPhase::Started, at);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+    h.touch(TouchPhase::Moved, point(at.x, at.y - px(200.0)));
+    h.touch(TouchPhase::Ended, point(at.x, at.y - px(200.0)));
+
+    assert!(
+        h.bounds("phone-replies-agent-groups").top() < before,
+        "a hold off the rows leaves the pan to the page, which scrolls"
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_long_press_drag_saves_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+    h.click_on("phone-replies-agent-group-1");
+
+    let from = h.center("phone-replies-reply-0");
+    let to = below(&mut h, "phone-replies-reply-2");
+    h.touch(TouchPhase::Started, from);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+    h.touch(TouchPhase::Moved, to);
+    h.touch(TouchPhase::Cancelled, to);
+
+    assert!(
+        saved_ui(&dir).get("phone_agent_replies").is_none(),
+        "a cancelled touch drops the drag without saving"
+    );
+    assert!(
+        drawn(&mut h, "phone-replies-reply-4"),
+        "the list keeps its order and its rows"
+    );
+}
+
+#[gpui::test]
+fn a_long_press_without_a_move_changes_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+
+    let at = h.center("phone-replies-agent-group-0");
+    h.long_press_drag(at, at);
+
+    assert!(
+        saved_ui(&dir).get("phone_agent_replies").is_none(),
+        "a hold that moves nowhere saves nothing"
+    );
+    assert!(
+        !drawn(&mut h, "phone-replies-replies"),
+        "and opens no group page"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_row_still_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_replies(&mut h);
+
+    h.tap_on("phone-replies-agent-group-0");
+
+    assert!(
+        drawn(&mut h, "phone-replies-replies"),
+        "the drag area over the rows lets a plain tap through"
     );
 }
