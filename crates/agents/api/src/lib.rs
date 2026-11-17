@@ -193,6 +193,18 @@ pub struct HookReport {
     /// An idle the agent reports while it may still be waiting on a prompt,
     /// which leaves a pending prompt alone.
     pub weak_idle: bool,
+    /// The event is a prompt the agent's CLI marks as delivering its own
+    /// background result (a `source` on the prompt), not input from the owner:
+    /// it never ends a waiting prompt.
+    pub delivered: bool,
+}
+
+impl HookReport {
+    /// Whether the event leaves a waiting prompt alone: a subagent's event, a weak idle, or a delivered result.
+    #[must_use]
+    pub fn spares_pending(&self) -> bool {
+        self.subagent || self.weak_idle || self.delivered
+    }
 }
 
 /// A piece of the answer the agent is writing, as one of its hook events

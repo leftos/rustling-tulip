@@ -653,7 +653,11 @@ mod tests {
                 100,
                 r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
             ),
-            (200, r#"{"hook_event_name":"Stop"}"#),
+            (
+                200,
+                r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#,
+            ),
+            (300, r#"{"hook_event_name":"Stop"}"#),
         ] {
             let time = time.to_string();
             let response = build_loopback_router(hub.clone())
@@ -676,7 +680,7 @@ mod tests {
         assert_eq!(
             snapshot.status,
             SessionStatus::Idle,
-            "the Stop cleared the prompt"
+            "the prompt was cleared, and the Stop ended the turn"
         );
         assert_eq!(snapshot.pending_input, None, "no prompt is pending");
         assert!(

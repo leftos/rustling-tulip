@@ -705,12 +705,15 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         "the question the hook reported"
     );
 
-    // The fake runs the Stop hook on its own timer. Between this cue and that
-    // Stop the screen shows the spinner and then the question, so the only
-    // Idle at or after this cursor is the Stop's, however late the
-    // AwaitingInput wait returned.
+    // The fake runs the Stop hook on its own timer and then paints its idle
+    // box. The Stop leaves the question waiting, since the question's own tool
+    // has not finished, so the Idle at or after this cursor is the screen
+    // seeing the dialog go, however late the AwaitingInput wait returned.
     let stopped = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
-    assert_eq!(stopped.pending_input, None, "Stop clears the pending input");
+    assert_eq!(
+        stopped.pending_input, None,
+        "the screen's own end clears the pending input"
+    );
 }
 
 /// An Esc mid-turn fires no hook: the interrupt row on the screen alone ends

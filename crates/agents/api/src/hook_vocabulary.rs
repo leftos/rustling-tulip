@@ -233,7 +233,18 @@ fn stop_wakeup(cron: &Value) -> Option<StopWakeup> {
 #[must_use]
 pub fn map(body: &Value) -> Option<HookReport> {
     let signal = map_signal(body)?;
-    Some(report(signal, &details(body)))
+    Some(report(signal, &details(body), delivers_result(body)))
+}
+
+/// Whether the payload delivers the agent's own background result as a
+/// prompt: a `UserPromptSubmit` naming a non-empty string `source`, which a
+/// prompt the owner types does not carry.
+fn delivers_result(body: &Value) -> bool {
+    body.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")
+        && body
+            .get("source")
+            .and_then(Value::as_str)
+            .is_some_and(|source| !source.is_empty())
 }
 
 /// The live line a `MessageDisplay` payload carries: its `delta` as the
@@ -266,7 +277,7 @@ pub fn live_line(body: &Value) -> Option<LiveLine> {
 
 /// The report of an event whose status and pending input are `signal`, with
 /// the rest read from its `details`.
-fn report(signal: Signal, details: &HookDetails) -> HookReport {
+fn report(signal: Signal, details: &HookDetails, delivered: bool) -> HookReport {
     let event = details.event.as_str();
     let failure = (event == "StopFailure").then(|| {
         match details
@@ -287,6 +298,7 @@ fn report(signal: Signal, details: &HookDetails) -> HookReport {
     let stop_work = is_stop.then(|| details.background_work.clone());
     HookReport {
         weak_idle: event == "Notification" && signal.status == Some(SessionStatus::Idle),
+        delivered,
         status: signal.status,
         pending: signal.pending,
         conversation_id: details
@@ -823,6 +835,31 @@ mod tests {
         assert_eq!(
             subagent_stop.background, None,
             "a subagent's stop says nothing about it"
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_a_source_is_delivered() {
+        let delivered = |body: Value| signal(&body).delivered;
+        assert!(
+            delivered(json!({"hook_event_name": "UserPromptSubmit", "source": "poll_event"})),
+            "a sourced prompt delivers the agent's own result"
+        );
+        assert!(
+            !delivered(json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})),
+            "a typed prompt delivers nothing"
+        );
+        assert!(
+            !delivered(json!({"hook_event_name": "UserPromptSubmit", "source": ""})),
+            "an empty source is no delivery"
+        );
+        assert!(
+            !delivered(json!({"hook_event_name": "UserPromptSubmit", "source": 5})),
+            "a source that is not a string is no delivery"
+        );
+        assert!(
+            !delivered(json!({"hook_event_name": "SessionStart", "source": "startup"})),
+            "another event's source delivers nothing"
         );
     }
 

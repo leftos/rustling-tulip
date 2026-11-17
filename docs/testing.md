@@ -106,6 +106,11 @@ More a real-Claude rig needs:
 - A session folder under this repo sees `.mcp.json`, so the CLI shows the `rt-driver` MCP dialog first.
 - Startup dialogs change with the session's mode, so check the screen before sending scripted keys.
 - `permissions.defaultMode: "default"` in `settings.json` is needed for a mock's tool to raise a permission prompt.
+- Code Mode needs a settings download from Anthropic, so `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns it off: leave it unset for a run that needs Code Mode.
+- A scratch folder under the user's home triggers the external-imports dialog.
+- Real hook payloads can be captured with a hook in the isolated Claude home's own `settings.json`.
+- Submit text with `send --keys` and then a separate `<Enter>`: `send --raw` arrives as a paste and does not submit.
+- A daemon CLI verb started through `cmd /c` mangles `<Enter>`.
 
 Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the shell rewrites the leading `/` into a Windows path.
 

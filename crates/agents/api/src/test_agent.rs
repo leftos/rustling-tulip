@@ -227,6 +227,7 @@ impl Agent for TestAgent {
             background: None,
             stop_work: None,
             weak_idle: false,
+            delivered: false,
         })
     }
 

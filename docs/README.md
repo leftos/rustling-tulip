@@ -322,7 +322,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Promoted shell**: a plain shell session whose screen showed an agent running in it, so it became an agent session (Chat and Summary on) until the agent ends and the shell is handed back (`docs/session-runtime.md`).
 - **Prompt box**: the terminal's input area where the agent's TUI takes the user's text; the composer state is read from it, and it can hold a draft or a suggestion.
 - **Prompt id**: the chat's id for a terminal dialog (`p<n>`), kept while the same dialog is up; an answer must name the current one.
-- **Prompt owner**: who a pending `AwaitingInput` prompt belongs to, `PromptOwner` `Main`, `Subagent` or `Unknown` (`SessionRecord.pending_owner`); it decides whether a main `Stop` or a subagent's view may end the prompt (`docs/session-runtime.md` "Session status").
+- **Prompt owner**: who a pending `AwaitingInput` prompt belongs to, `PromptOwner` `Main`, `Subagent` or `Unknown` (`SessionRecord.pending_owner`); it decides whether a main `Stop` (for a `Main` prompt, only one that names no tool) or a subagent's view may end the prompt (`docs/session-runtime.md` "Session status").
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
 - **Prompt stash**: the TUI's one-slot draft store (ctrl+s), shared by every view.
 - **Protected profile**: an elevated daemon's own config, binaries, worktrees, `daemon-id`, tailnet and summarizer folders, kept under the protected root so no lower-integrity process can read or write them; it starts empty (`docs/on-disk.md`, "An elevated daemon's protected profile").

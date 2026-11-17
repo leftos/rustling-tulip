@@ -10,7 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
-- Opening a session that is waiting on you keeps its sidebar `!` until you answer it; a finished turn still clears when you look.
+- Needs You stays until you answer: opening the session, a Code Mode script's result or the agent's turn ending no longer clears it.
 
 ## v0.16.0-alpha
 

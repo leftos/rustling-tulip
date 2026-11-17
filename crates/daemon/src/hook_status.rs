@@ -483,15 +483,28 @@ fn apply_pending(record: &mut SessionRecord, report: &HookReport, event_time: u1
 }
 
 /// Whether `report` is main's turn end (a `Stop` or a `StopFailure`) over a
-/// wait that is not main's own prompt: one a subagent raised, one a
-/// label-less notification filled, or one the screen raised with nothing
-/// pending. Main's turn ending answers none of them.
+/// wait it must leave alone: one a subagent raised, one a label-less
+/// notification filled, one the screen raised with nothing pending, or main's
+/// own prompt whose tool has not finished. A question, plan or permission
+/// outlives the turn that ended beside it: its own tool's
+/// `PostToolUse`/`PostToolUseFailure` ends it, an answer from the chat, the
+/// screen seeing the dialog go, or the agent exiting.
 fn spares_a_wait_not_mains(record: &SessionRecord, report: &HookReport) -> bool {
     let main_turn_end =
         !report.subagent && (report.background.is_some() || report.failure.is_some());
     main_turn_end
         && record.status == SessionStatus::AwaitingInput
-        && (record.pending_input.is_none() || record.pending_owner != PromptOwner::Main)
+        && !main_turn_end_ends_the_wait(record)
+}
+
+/// Whether main's turn end is the answer to the prompt `record` waits on: a
+/// prompt naming no tool has nothing left to finish.
+fn main_turn_end_ends_the_wait(record: &SessionRecord) -> bool {
+    record.pending_owner == PromptOwner::Main
+        && record
+            .pending_input
+            .as_ref()
+            .is_some_and(|pending| agent_api::hook_vocabulary::pending_tool(pending).is_none())
 }
 
 /// Whether an event must leave the record's status and pending input alone,
@@ -502,7 +515,9 @@ fn spares_a_wait_not_mains(record: &SessionRecord, report: &HookReport) -> bool 
 /// permission request counts only when no prompt is waiting (a pending value
 /// left beside another status is stale and is replaced). A weak idle (an
 /// idle the agent reports while it may still be waiting) is ignored while the
-/// record waits on a pending prompt.
+/// record waits on a pending prompt, and so is a delivered event (the agent's
+/// own background result arriving as a prompt, [`HookReport::delivered`]):
+/// nobody answered the waiting prompt.
 ///
 /// A prompt a tool owns ends only when that tool finishes: tools run in
 /// parallel, so a `Glob`'s `PostToolUse` can land after an `AskUserQuestion`'s
@@ -510,8 +525,9 @@ fn spares_a_wait_not_mains(record: &SessionRecord, report: &HookReport) -> bool 
 /// notification 6 s later word a permission its prompt never asked for. A
 /// `PostToolUse` that names no tool clears as it always has.
 ///
-/// Main's turn end leaves any wait that is not main's own prompt alone
-/// ([`spares_a_wait_not_mains`]).
+/// Main's turn end leaves a wait it does not answer alone
+/// ([`spares_a_wait_not_mains`]), main's own prompt included while its tool
+/// still runs.
 fn leaves_pending_alone(record: &SessionRecord, report: &HookReport) -> bool {
     if spares_a_wait_not_mains(record, report) {
         return true;
@@ -522,7 +538,7 @@ fn leaves_pending_alone(record: &SessionRecord, report: &HookReport) -> bool {
     if record.status != SessionStatus::AwaitingInput {
         return false;
     }
-    if report.subagent || report.weak_idle {
+    if report.spares_pending() {
         return true;
     }
     matches!(
@@ -1021,6 +1037,79 @@ mod tests {
         );
     }
 
+    /// Code Mode hands a finished script's result to the main agent as a
+    /// `UserPromptSubmit` that names its `source`, while a question another
+    /// script asked still waits: nobody answered it.
+    #[test]
+    fn a_delivered_event_keeps_the_pending_question() {
+        let mut record = record_asking_a_question();
+        let applied = apply_body(
+            &mut record,
+            3,
+            &json!({
+                "hook_event_name": "UserPromptSubmit",
+                "source": "poll_event",
+                "prompt": "<event kind=\"repl-eval\" eval=\"5\" status=\"settled\">\n<result>slept</result>\n</event>",
+            }),
+        );
+        assert!(
+            applied.status_change.is_none(),
+            "the delivered event moved the status: {:?}",
+            applied.status_change
+        );
+        assert!(
+            !applied.entered_awaiting,
+            "the delivered event entered AwaitingInput"
+        );
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "a delivered event ended the unanswered question"
+        );
+        assert!(
+            matches!(record.pending_input, Some(PendingInput::Question { .. })),
+            "the question is no longer pending: {:?}",
+            record.pending_input
+        );
+    }
+
+    /// A prompt the owner types carries no `source`, and it is the owner
+    /// answering: the question is gone.
+    #[test]
+    fn a_typed_prompt_still_ends_a_waiting_question() {
+        let mut record = record_asking_a_question();
+        apply_body(
+            &mut record,
+            3,
+            &json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "go on",
+            }),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.pending_input, None);
+    }
+
+    /// A delivered event with nothing waiting maps as any prompt does.
+    #[test]
+    fn a_delivered_event_with_nothing_pending_still_marks_working() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Idle;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(
+            &mut record,
+            2,
+            &json!({
+                "hook_event_name": "UserPromptSubmit",
+                "source": "poll_event",
+                "prompt": "<event kind=\"repl-eval\" eval=\"7\" status=\"settled\">\n<result>done</result>\n</event>",
+            }),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.pending_input, None);
+    }
+
     /// Claude fires this `Notification` for every dialog, a question's too, so
     /// with nothing pending its bare text says nothing about the kind.
     #[expect(
@@ -1376,11 +1465,89 @@ mod tests {
         assert_eq!(record.pending_owner, PromptOwner::Subagent);
     }
 
+    /// Main's own prompt outlives the turn that ended beside it: its tool has
+    /// not finished, so the prompt is still waiting, and the turn's report is
+    /// taken all the same.
     #[test]
-    fn a_main_stop_still_ends_mains_own_stale_prompt() {
+    fn a_main_stop_keeps_mains_prompt_while_its_tool_runs() {
         let mut record = record_with_open_prompt();
+        let applied = apply_body(&mut record, 2, &bare_main_stop());
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "main's Stop ended a prompt whose tool still runs"
+        );
+        assert_eq!(record.pending_input, Some(main_prompt()));
+        assert_eq!(applied.turn_report.as_deref(), Some("started"));
+    }
+
+    #[test]
+    fn a_main_stop_failure_keeps_mains_prompt_while_its_tool_runs() {
+        let mut record = record_with_open_prompt();
+        let body = json!({"hook_event_name": "StopFailure", "error": "rate_limit"});
+        apply_body(&mut record, 2, &body);
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "main's StopFailure ended a prompt whose tool still runs"
+        );
+        assert_eq!(record.pending_input, Some(main_prompt()));
+    }
+
+    /// A prompt naming no tool has nothing left to finish, so the turn end is
+    /// the answer to it.
+    #[test]
+    fn a_main_stop_ends_a_main_prompt_that_names_no_tool() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::AwaitingInput;
+        record.pending_input = Some(PendingInput::Other {
+            message: "waiting on an answer".to_owned(),
+        });
+        record.pending_owner = PromptOwner::Main;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
         apply_body(&mut record, 2, &bare_main_stop());
         assert_eq!(record.status, SessionStatus::Idle);
+        assert_eq!(record.pending_input, None);
+    }
+
+    /// The sequence Code Mode runs: a question, another script's delivered
+    /// result, a sibling tool's end, the turn's `Stop`, and finally the
+    /// question's own tool finishing.
+    #[test]
+    fn a_delivered_turn_ending_keeps_the_question() {
+        let mut record = record_asking_a_question();
+        apply_body(
+            &mut record,
+            3,
+            &json!({
+                "hook_event_name": "UserPromptSubmit",
+                "source": "poll_event",
+                "prompt": "<event kind=\"repl-eval\" eval=\"5\" status=\"settled\">\n<result>slept</result>\n</event>",
+            }),
+        );
+        apply_body(
+            &mut record,
+            4,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": "REPL"}),
+        );
+        apply_body(&mut record, 5, &bare_main_stop());
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "the turn's end ended the unanswered question"
+        );
+        assert!(
+            matches!(record.pending_input, Some(PendingInput::Question { .. })),
+            "the question is no longer pending: {:?}",
+            record.pending_input
+        );
+        apply_body(
+            &mut record,
+            6,
+            &json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion"}),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
         assert_eq!(record.pending_input, None);
     }
 
