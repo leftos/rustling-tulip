@@ -1,18 +1,20 @@
 //! Draws the phone's Settings ([`super::settings`]): the header row over
 //! Home and the hosts screen with its `Settings` button, and, while
 //! Settings is open, its own header (Back and the title) over the category
-//! list or a category's page. It only renders and forwards taps.
+//! list, a category's page or the sub-page opened over that page. It only
+//! renders and forwards taps.
 
 use gpui::{
-    BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div,
-    prelude::*, px,
+    App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::quick_replies::{self, ReplySet};
 use super::session;
-use super::settings::{BackStep, Page, Settings};
+use super::settings::{BackStep, Page, Settings, SubPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
@@ -26,7 +28,7 @@ const BACK_LABEL: &str = "Back";
 /// What the Notifications page says while no host draws a switch.
 const NO_NOTIFICATIONS_TEXT: &str = "No host offers notifications yet.";
 /// The mark at a category row's right end.
-const CHEVRON: &str = "›";
+pub(super) const CHEVRON: &str = "›";
 /// The Appearance page's heading over the theme list.
 const THEMES_LABEL: &str = "Theme";
 /// The Appearance page's heading over the text-size row.
@@ -54,7 +56,7 @@ fn header_frame(t: &UiTheme) -> Div {
 }
 
 /// A heading over the Appearance page's two sections.
-fn section_label(label: &str, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+pub(super) fn section_label(label: &str, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
     div()
         .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
         .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
@@ -94,15 +96,34 @@ impl PhoneRoot {
         self.open_settings_on(Page::Appearance, cx);
     }
 
-    /// One Back step in Settings: a page goes back to the list, the list
-    /// closes Settings.
+    /// One Back step in Settings: the innermost sub-page pops, then a page
+    /// goes back to the list, then the list closes Settings. A sub-page whose
+    /// item is gone closes with the step.
     pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
+        let counts = (
+            self.saved_group_count(ReplySet::Agent, cx),
+            self.saved_group_count(ReplySet::Shell, cx),
+        );
         let step = self.settings.as_mut().map(Settings::back);
+        if let Some(settings) = self.settings.as_mut() {
+            settings.retain_valid(|sub| match sub {
+                SubPage::ReplyGroup { set, group } => match set {
+                    ReplySet::Agent => group < counts.0,
+                    ReplySet::Shell => group < counts.1,
+                },
+            });
+        }
         if step == Some(BackStep::Close) {
             self.settings = None;
         }
         cx.notify();
+    }
+
+    /// How many groups `set` offers as Settings draws it.
+    fn saved_group_count(&self, set: ReplySet, cx: &App) -> usize {
+        let saved = self.saved_replies(set, cx);
+        quick_replies::groups(saved.as_deref(), set).len()
     }
 
     /// A back gesture over the window while a session or Settings shows:
@@ -134,16 +155,20 @@ impl PhoneRoot {
         header_frame(t).justify_end().child(open)
     }
 
-    /// While Settings is open: its header over the category list or the
-    /// page it is on.
+    /// While Settings is open: its header over the category list, the page it
+    /// is on, or the sub-page opened over that page.
     pub(super) fn settings_page(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let settings = self.settings?;
+        let settings = self.settings.as_ref()?;
         let t = theme(cx);
-        let body = match settings.page {
-            None => Self::category_list(&t, cx),
-            Some(Page::Notifications) => self.notifications_page(&t, cx),
-            Some(Page::Hosts) => self.hosts_content(&t, cx),
-            Some(Page::Appearance) => self.appearance_page(&t, cx),
+        let body = match settings.top() {
+            Some(SubPage::ReplyGroup { set, group }) => self.reply_group_page(set, group, &t, cx),
+            None => match settings.page {
+                None => Self::category_list(&t, cx),
+                Some(Page::Notifications) => self.notifications_page(&t, cx),
+                Some(Page::Hosts) => self.hosts_content(&t, cx),
+                Some(Page::Appearance) => self.appearance_page(&t, cx),
+                Some(Page::QuickReplies) => self.quick_replies_page(&t, cx),
+            },
         };
         Some(
             div()

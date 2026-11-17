@@ -1,6 +1,9 @@
 //! The phone's Settings screen as plain data: open on its category list or
-//! on one category's page, and the step Back takes through it, from a page
-//! to the list and from the list out of Settings. `settings_view` draws it.
+//! on one category's page, with the sub-pages opened over that page, and the
+//! step Back takes through them, from a sub-page to its page, from a page to
+//! the list and from the list out of Settings. `settings_view` draws it.
+
+use super::quick_replies::ReplySet;
 
 /// One category of the phone's Settings, a row on the list and a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,11 +14,18 @@ pub(crate) enum Page {
     Hosts,
     /// The theme the phone draws in and the size of its text.
     Appearance,
+    /// The two sets of one-tap replies, a group at a time.
+    QuickReplies,
 }
 
 impl Page {
     /// Every category, in the order the list draws them.
-    pub(crate) const ALL: [Self; 3] = [Self::Notifications, Self::Hosts, Self::Appearance];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Notifications,
+        Self::Hosts,
+        Self::Appearance,
+        Self::QuickReplies,
+    ];
 
     /// The category's name: its row's label and its page's title.
     pub(crate) fn label(self) -> &'static str {
@@ -23,6 +33,7 @@ impl Page {
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
             Self::Appearance => "Appearance",
+            Self::QuickReplies => "Quick replies",
         }
     }
 
@@ -32,21 +43,43 @@ impl Page {
             Self::Notifications => "notifications",
             Self::Hosts => "hosts",
             Self::Appearance => "appearance",
+            Self::QuickReplies => "quick-replies",
+        }
+    }
+}
+
+/// A page opened over a category's page: one of its items, named by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubPage {
+    /// One set's group and its replies; `group` is the group's index in the
+    /// set.
+    ReplyGroup { set: ReplySet, group: usize },
+}
+
+impl SubPage {
+    /// The sub-page's name: its header's title.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::ReplyGroup { .. } => "Group",
         }
     }
 }
 
 /// Where an open Settings is: its list while `page` is `None`, else that
-/// category's page.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// category's page, with its sub-pages over it innermost last.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Settings {
     /// The category page shown over the list, if any.
     pub(crate) page: Option<Page>,
+    /// The sub-pages open over the page, innermost last.
+    pub(crate) stack: Vec<SubPage>,
 }
 
 /// What one Back step did to an open Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackStep {
+    /// The innermost sub-page closed: its category's page shows.
+    Pop,
     /// A category's page closed: the list shows.
     ToList,
     /// The list closed: Settings is gone.
@@ -57,23 +90,54 @@ pub(crate) enum BackStep {
 pub(crate) const TITLE: &str = "Settings";
 
 impl Settings {
-    /// Shows `page` over the list.
+    /// Shows `page` over the list, with no sub-page over it.
     pub(crate) fn open(&mut self, page: Page) {
         self.page = Some(page);
+        self.stack.clear();
     }
 
-    /// One Back step: a page goes back to the list, the list closes.
-    pub(crate) fn back(&mut self) -> BackStep {
-        if self.page.take().is_some() {
-            BackStep::ToList
-        } else {
-            BackStep::Close
+    /// Opens `sub` over the page; nothing while no page shows.
+    pub(crate) fn push(&mut self, sub: SubPage) {
+        if self.page.is_some() {
+            self.stack.push(sub);
         }
     }
 
-    /// The header's title: the page's category, else Settings'.
-    pub(crate) fn title(self) -> &'static str {
+    /// The innermost sub-page, if any.
+    pub(crate) fn top(&self) -> Option<SubPage> {
+        self.stack.last().copied()
+    }
+
+    /// One Back step: the innermost sub-page pops, then a page goes back to
+    /// the list, then the list closes.
+    pub(crate) fn back(&mut self) -> BackStep {
+        if self.stack.pop().is_some() {
+            return BackStep::Pop;
+        }
+        if self.page.take().is_some() {
+            return BackStep::ToList;
+        }
+        BackStep::Close
+    }
+
+    /// The header's title: the innermost sub-page's, else the page's
+    /// category, else Settings'.
+    pub(crate) fn title(&self) -> &'static str {
+        if let Some(sub) = self.top() {
+            return sub.title();
+        }
         self.page.map_or(TITLE, Page::label)
+    }
+
+    /// Drops the innermost sub-pages `valid` refuses, and the ones under them
+    /// with them: a page whose item is gone closes.
+    pub(crate) fn retain_valid(&mut self, valid: impl Fn(SubPage) -> bool) {
+        while let Some(top) = self.top() {
+            if valid(top) {
+                return;
+            }
+            self.stack.pop();
+        }
     }
 }
 
@@ -98,5 +162,132 @@ mod tests {
 
         assert_eq!(settings.back(), BackStep::Close);
         assert_eq!(settings.page, None);
+    }
+
+    #[test]
+    fn the_categories_are_listed_in_order() {
+        let keys: Vec<&str> = Page::ALL.iter().map(|page| page.key()).collect();
+
+        assert_eq!(
+            keys,
+            ["notifications", "hosts", "appearance", "quick-replies"]
+        );
+    }
+
+    #[test]
+    fn a_sub_page_needs_a_page() {
+        let mut settings = Settings::default();
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 0,
+        });
+
+        assert_eq!(settings.stack, Vec::new());
+        assert_eq!(settings.top(), None);
+    }
+
+    #[test]
+    fn back_from_a_sub_page_pops_it() {
+        let mut settings = Settings::default();
+        settings.open(Page::QuickReplies);
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 0,
+        });
+
+        assert_eq!(settings.back(), BackStep::Pop);
+        assert_eq!(settings.page, Some(Page::QuickReplies), "the page stays");
+        assert_eq!(settings.stack, Vec::new());
+    }
+
+    #[test]
+    fn back_steps_out_one_sub_page_at_a_time() {
+        let mut settings = Settings::default();
+        settings.open(Page::QuickReplies);
+        for group in [0, 1] {
+            settings.push(SubPage::ReplyGroup {
+                set: ReplySet::Agent,
+                group,
+            });
+        }
+
+        assert_eq!(settings.back(), BackStep::Pop);
+        assert_eq!(settings.back(), BackStep::Pop);
+        assert_eq!(settings.back(), BackStep::ToList);
+        assert_eq!(settings.page, None);
+    }
+
+    #[test]
+    fn opening_a_page_clears_its_sub_pages() {
+        let mut settings = Settings::default();
+        settings.open(Page::QuickReplies);
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 0,
+        });
+
+        settings.open(Page::Hosts);
+
+        assert_eq!(settings.page, Some(Page::Hosts));
+        assert_eq!(settings.stack, Vec::new());
+    }
+
+    #[test]
+    fn the_title_is_the_innermost_pages() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.title(), TITLE);
+
+        settings.open(Page::QuickReplies);
+        assert_eq!(settings.title(), "Quick replies");
+
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Shell,
+            group: 0,
+        });
+        assert_eq!(settings.title(), "Group");
+    }
+
+    #[test]
+    fn a_sub_page_whose_item_is_gone_closes_with_those_over_it() {
+        let mut settings = Settings::default();
+        settings.open(Page::QuickReplies);
+        for _ in 0..2 {
+            settings.push(SubPage::ReplyGroup {
+                set: ReplySet::Agent,
+                group: 1,
+            });
+        }
+
+        settings.retain_valid(|sub| match sub {
+            SubPage::ReplyGroup { group, .. } => group == 0,
+        });
+
+        assert_eq!(settings.stack, Vec::new());
+    }
+
+    #[test]
+    fn only_the_stale_sub_pages_close() {
+        let mut settings = Settings::default();
+        settings.open(Page::QuickReplies);
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 0,
+        });
+        settings.push(SubPage::ReplyGroup {
+            set: ReplySet::Agent,
+            group: 3,
+        });
+
+        settings.retain_valid(|sub| match sub {
+            SubPage::ReplyGroup { group, .. } => group == 0,
+        });
+
+        assert_eq!(
+            settings.stack,
+            [SubPage::ReplyGroup {
+                set: ReplySet::Agent,
+                group: 0
+            }]
+        );
     }
 }

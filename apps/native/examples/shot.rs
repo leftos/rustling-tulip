@@ -79,6 +79,10 @@
 //! `phone-settings-appearance` shows Settings' Appearance page: its header
 //! with Back and the title `Appearance`, the theme list with the one in use
 //! marked, and the text-size row under them.
+//! `phone-settings-replies` shows Settings' Quick replies page: each set's
+//! name over a row per group, its title over its reply count and a chevron.
+//! `phone-settings-reply-group` shows the agent set's `common` group open:
+//! the header's title `Group` over its Title row and its five replies.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -117,6 +121,7 @@ use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::perf_pills::PillLevel;
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::UnsupportedPlatform;
+use rustling_tulip_native::phone::quick_replies::ReplySet;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
@@ -320,10 +325,12 @@ enum View {
     PhoneTerminal,
     PhoneSettings,
     PhoneSettingsAppearance,
+    PhoneSettingsReplies,
+    PhoneSettingsReplyGroup,
 }
 
 impl View {
-    const ALL: [Self; 56] = [
+    const ALL: [Self; 58] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -380,6 +387,8 @@ impl View {
         Self::PhoneTerminal,
         Self::PhoneSettings,
         Self::PhoneSettingsAppearance,
+        Self::PhoneSettingsReplies,
+        Self::PhoneSettingsReplyGroup,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -393,6 +402,8 @@ impl View {
                 | Self::PhoneTerminal
                 | Self::PhoneSettings
                 | Self::PhoneSettingsAppearance
+                | Self::PhoneSettingsReplies
+                | Self::PhoneSettingsReplyGroup
         )
     }
 
@@ -454,6 +465,8 @@ impl View {
             Self::PhoneTerminal => "phone-terminal",
             Self::PhoneSettings => "phone-settings",
             Self::PhoneSettingsAppearance => "phone-settings-appearance",
+            Self::PhoneSettingsReplies => "phone-settings-replies",
+            Self::PhoneSettingsReplyGroup => "phone-settings-reply-group",
         }
     }
 
@@ -505,7 +518,9 @@ impl View {
             | Self::PhoneSessionSheet
             | Self::PhoneTerminal
             | Self::PhoneSettings
-            | Self::PhoneSettingsAppearance => PHONE_WINDOW_SIZE,
+            | Self::PhoneSettingsAppearance
+            | Self::PhoneSettingsReplies
+            | Self::PhoneSettingsReplyGroup => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -551,7 +566,9 @@ impl View {
             | Self::PhoneSessionSheet
             | Self::PhoneTerminal
             | Self::PhoneSettings
-            | Self::PhoneSettingsAppearance => true,
+            | Self::PhoneSettingsAppearance
+            | Self::PhoneSettingsReplies
+            | Self::PhoneSettingsReplyGroup => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -828,6 +845,8 @@ impl Shot {
             | View::PhoneTerminal
             | View::PhoneSettings
             | View::PhoneSettingsAppearance
+            | View::PhoneSettingsReplies
+            | View::PhoneSettingsReplyGroup
             | View::Toast => None,
         };
         if let Some(text) = sample_text {
@@ -1644,6 +1663,19 @@ async fn open_phone_screen(
             cx.background_executor().timer(DRIVE_WAIT).await;
             Ok(())
         }
+        View::PhoneSettingsReplies => {
+            handle.update(cx, |phone, _, cx| phone.open_settings_replies(cx))?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
+        View::PhoneSettingsReplyGroup => {
+            // The agent set's `common` group, the second of its two.
+            handle.update(cx, |phone, _, cx| {
+                phone.open_settings_reply_group(ReplySet::Agent, 1, cx);
+            })?;
+            cx.background_executor().timer(DRIVE_WAIT).await;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1803,7 +1835,9 @@ fn drive(
         | View::PhoneSessionSheet
         | View::PhoneTerminal
         | View::PhoneSettings
-        | View::PhoneSettingsAppearance => Ok(()),
+        | View::PhoneSettingsAppearance
+        | View::PhoneSettingsReplies
+        | View::PhoneSettingsReplyGroup => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),

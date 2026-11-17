@@ -63,6 +63,7 @@ mod ui_paste_upload;
 mod ui_perf;
 mod ui_phone_home;
 mod ui_phone_push;
+mod ui_phone_quick_replies;
 mod ui_phone_root;
 mod ui_phone_session;
 mod ui_phone_settings;
