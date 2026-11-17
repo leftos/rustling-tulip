@@ -16,8 +16,8 @@ use gpui::{
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, ScriptFacts,
-    SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
+    ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL,
+    ScriptFacts, SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::RowShape;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
@@ -1771,6 +1771,118 @@ fn a_phone_draft_offers_pull_and_send(cx: &mut TestAppContext) {
         let height = h.bounds(selector).size.height;
         assert!(height >= touch_target(), "{selector} is {height} tall");
     }
+    assert!(
+        !drawn(&mut h, "phone-draft-clear"),
+        "a host without chat_clear_draft shows no Clear"
+    );
+}
+
+/// Session `a`'s page on a host that can also clear the prompt box's
+/// draft, the box holding one.
+fn on_a_clear_draft<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = chat_loaded_on(cx, dir, &[FEATURE_CHAT_DRAFT, FEATURE_CHAT_CLEAR_DRAFT]);
+    composer_shows(&mut h, ComposerState::Draft);
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The request ids of the `ChatClearDraft`s for `a` sent since the last
+/// drain.
+fn phone_clears(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatClearDraft {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_phone_draft_on_a_clear_draft_host_offers_clear_too(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft(cx, &dir);
+
+    assert_eq!(
+        composer_note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Pull, send or clear it first.")
+    );
+    for selector in ["phone-draft-pull", "phone-draft-send", "phone-draft-clear"] {
+        assert!(drawn(&mut h, selector), "{selector} shows");
+        let height = h.bounds(selector).size.height;
+        assert!(height >= touch_target(), "{selector} is {height} tall");
+    }
+    let send = h.bounds("phone-draft-send");
+    let clear = h.bounds("phone-draft-clear");
+    assert!(send.origin.x < clear.origin.x, "Clear comes after Send");
+}
+
+#[gpui::test]
+fn tapping_clear_asks_then_its_clear_sends_one_draft_clear(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft(cx, &dir);
+
+    h.tap_on("phone-draft-clear");
+
+    assert!(phone_clears(&mut h).is_empty(), "a tap only asks");
+    assert!(drawn(&mut h, "phone-draft-clear-ask"), "the question shows");
+    assert!(drawn(&mut h, "phone-draft-clear-confirm"));
+    assert!(drawn(&mut h, "phone-draft-clear-cancel"));
+    assert!(!drawn(&mut h, "phone-draft-pull"), "the row asks in place");
+
+    h.tap_on("phone-draft-clear-confirm");
+
+    let sent = phone_clears(&mut h);
+    assert_eq!(sent.len(), 1, "one clear goes out: {sent:?}");
+    assert!(sent[0].is_some(), "under a request id");
+    assert!(
+        !drawn(&mut h, "phone-draft-clear-ask"),
+        "the row drops back"
+    );
+    assert!(drawn(&mut h, "phone-draft-clear"));
+}
+
+#[gpui::test]
+fn cancelling_a_phone_draft_clear_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft(cx, &dir);
+
+    h.tap_on("phone-draft-clear");
+    h.tap_on("phone-draft-clear-cancel");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ChatSend { .. }
+                | ClientMessage::ChatPullDraft { .. }
+                | ClientMessage::ChatSendDraft { .. }
+                | ClientMessage::ChatClearDraft { .. }
+        )),
+        "nothing is sent: {sent:?}"
+    );
+    assert!(!drawn(&mut h, "phone-draft-clear-ask"));
+    for selector in ["phone-draft-pull", "phone-draft-send", "phone-draft-clear"] {
+        assert!(drawn(&mut h, selector), "{selector} is back");
+    }
+}
+
+#[gpui::test]
+fn a_phone_draft_clear_question_drops_when_the_draft_goes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft(cx, &dir);
+
+    h.tap_on("phone-draft-clear");
+    composer_shows(&mut h, ComposerState::Ready);
+    composer_shows(&mut h, ComposerState::Draft);
+
+    assert!(!drawn(&mut h, "phone-draft-clear-ask"), "the question went");
+    assert!(drawn(&mut h, "phone-draft-clear"));
+    assert!(phone_clears(&mut h).is_empty(), "nothing is sent");
 }
 
 #[gpui::test]
@@ -1860,6 +1972,7 @@ fn a_host_without_chat_draft_shows_no_draft_buttons(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-composer-note"));
     assert!(!drawn(&mut h, "phone-draft-pull"));
     assert!(!drawn(&mut h, "phone-draft-send"));
+    assert!(!drawn(&mut h, "phone-draft-clear"));
 }
 
 #[gpui::test]
@@ -1908,6 +2021,7 @@ fn a_phone_suggestion_chip_pulls_it_into_the_composer(cx: &mut TestAppContext) {
             ClientMessage::ChatSend { .. }
                 | ClientMessage::ChatPullDraft { .. }
                 | ClientMessage::ChatSendDraft { .. }
+                | ClientMessage::ChatClearDraft { .. }
         )),
         "nothing is sent: {sent:?}"
     );

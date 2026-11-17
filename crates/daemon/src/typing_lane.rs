@@ -32,6 +32,8 @@ pub enum Holder {
     ChatAnswer,
     /// A chat pull clearing the box's draft.
     ChatPull,
+    /// A chat clear emptying the box's draft.
+    ChatClear,
 }
 
 /// A session's typing lane: at most one [`TypingTurn`] at a time.

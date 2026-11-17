@@ -9,6 +9,8 @@
 //! ([`crate::chat_draft::pull`]), answering the requester alone with a
 //! `ChatDraft`, and `ChatSendDraft` sends that draft as it stands
 //! ([`crate::inject::send_draft`]), answering only a refusal.
+//! `ChatClearDraft` empties that box without reading the draft out
+//! ([`crate::chat_draft::clear_draft`]), answering only a refusal.
 
 use std::sync::Arc;
 
@@ -76,6 +78,10 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             session_id,
             request_id,
         } => send_draft(hub, ctx, &session_id, request_id),
+        ClientMessage::ChatClearDraft {
+            session_id,
+            request_id,
+        } => clear_draft(hub, ctx, &session_id, request_id),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
 }
@@ -139,6 +145,32 @@ fn send_draft(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, request_id: Option
                 "chat draft send refused"
             );
             refuse(&out_tx, refusal.code, refusal.message, request_id);
+        }
+    });
+}
+
+/// Clear the draft in `session_id`'s terminal box on a task of its own,
+/// after the checks that need no waiting; a refusal, or a clear that left
+/// part of the draft, now or from the task, is answered with an `Error`
+/// carrying `request_id`.
+fn clear_draft(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, request_id: Option<String>) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        match chat_draft::clear_draft(&target, &out_tx).await {
+            Ok(()) => debug!(session_id = %target.session_id, "chat draft cleared"),
+            Err(refusal) => {
+                debug!(
+                    session_id = %target.session_id,
+                    code = refusal.code,
+                    message = %refusal.message,
+                    "chat draft clear refused"
+                );
+                refuse(&out_tx, refusal.code, refusal.message, request_id);
+            }
         }
     });
 }
@@ -2215,6 +2247,15 @@ mod tests {
                 };
                 dispatch_on(&self.hub, msg, 9, out_tx).await;
             }
+
+            /// Ask to clear `s1`'s draft, as request `r-clear`.
+            async fn clear_draft(&self, out_tx: &Outbox) {
+                let msg = ClientMessage::ChatClearDraft {
+                    session_id: "s1".to_owned(),
+                    request_id: Some("r-clear".to_owned()),
+                };
+                dispatch_on(&self.hub, msg, 9, out_tx).await;
+            }
         }
 
         /// `capture` with `from` replaced by `to` once, which it must hold.
@@ -2687,7 +2728,7 @@ mod tests {
         #[tokio::test]
         async fn a_pasted_draft_is_refused_before_any_key() {
             let pasted = "the draft holds pasted text or an image; \
-                          send it as it stands or clear it in the terminal";
+                          send it as it stands or clear it";
             for (tag, first) in [("pull-pasted", DRAFT_PASTED), ("pull-image", V186)] {
                 assert_eq!(
                     pull_refused_on(tag, first).await,
@@ -2918,6 +2959,196 @@ mod tests {
             assert_eq!(next_refusal(&mut s_rx).await, pulling, "an answer");
             fx.send_draft(&s_tx).await;
             assert_eq!(next_refusal(&mut s_rx).await, pulling, "a draft's send");
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        /// The code and message of `msg`, which must be the clear's `Error`.
+        fn clear_refusal(msg: DaemonMessage) -> (String, String) {
+            match msg {
+                DaemonMessage::Error {
+                    message,
+                    code,
+                    request_id,
+                } => {
+                    assert_eq!(request_id.as_deref(), Some("r-clear"));
+                    (code.unwrap_or_default(), message)
+                }
+                other => panic!("expected an Error, got {other:?}"),
+            }
+        }
+
+        /// Clear the draft of a terminal showing `first`, whose box reads
+        /// `emptied` after the first press: one press, and no answer.
+        async fn cleared_with_one_press(tag: &str, first: &str, emptied: &str) {
+            let (fx, mut term) = Fixture::with_terminal(tag, None, first);
+            let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+            fx.clear_draft(&c_tx).await;
+            assert_eq!(term.typed().await, CLEAR_LINE, "{tag}: the first ctrl+u");
+            term.show(emptied).await;
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "{tag}: one press");
+            assert!(drain(&mut c_rx).is_empty(), "{tag}: nothing answers");
+        }
+
+        #[tokio::test]
+        async fn a_clear_empties_a_typed_draft_and_answers_nothing() {
+            cleared_with_one_press("clear-one-line", DRAFT_ONE_LINE, &one_line_cleared()).await;
+        }
+
+        #[tokio::test]
+        async fn a_clear_empties_a_pasted_and_an_image_draft() {
+            let pasted = edited(
+                DRAFT_PASTED,
+                "❯\u{a0}fix these: [Pasted text #1 +40 lines]  then sort them",
+                "❯",
+            );
+            cleared_with_one_press("clear-pasted", DRAFT_PASTED, &pasted).await;
+            let image = edited(
+                V186,
+                "❯\u{a0}[Image #1] what colour is this square? Reply with one word.",
+                "❯",
+            );
+            cleared_with_one_press("clear-image", V186, &image).await;
+        }
+
+        #[tokio::test]
+        async fn a_clear_refuses_a_scrolled_draft_before_any_key() {
+            let (fx, mut term) = Fixture::with_terminal("clear-scrolled", None, DRAFT_SCROLLED);
+            let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+            fx.clear_draft(&c_tx).await;
+            assert_eq!(
+                clear_refusal(next_message(&mut c_rx).await),
+                refused(
+                    CHAT_REFUSED,
+                    "the draft is taller than the box shows; \
+                     send it as it stands or clear it in the terminal"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        /// On a paused clock, so the press's wait for output runs out at
+        /// once: the terminal never answers the first press.
+        #[tokio::test(start_paused = true)]
+        async fn a_clear_that_leaves_part_of_the_draft_says_so() {
+            let (fx, mut term) = Fixture::with_terminal("clear-partial", None, DRAFT_ONE_LINE);
+            let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+            fx.clear_draft(&c_tx).await;
+            assert_eq!(term.typed().await, CLEAR_LINE, "the first ctrl+u");
+            assert_eq!(
+                clear_refusal(next_message(&mut c_rx).await),
+                refused(
+                    CHAT_REFUSED,
+                    "part of the draft is still in the terminal's box; \
+                     clear the rest in the terminal"
+                )
+            );
+            term.lane_free().await;
+            assert!(term.typed_now().is_empty(), "one press");
+        }
+
+        /// The first message on `inbox` if it comes before a 1 ms timer: on
+        /// a paused clock no timer fires while a task can still run, so a
+        /// message means the writer answered without waiting for the lane.
+        async fn at_once(inbox: &mut Inbox) -> Option<DaemonMessage> {
+            tokio::select! {
+                biased;
+                msg = inbox.recv() => msg,
+                () = tokio::time::sleep(Duration::from_millis(1)) => None,
+            }
+        }
+
+        /// On a paused clock, so the view switch gives the lane back inside
+        /// the clear's wait for it, whatever the machine's load.
+        #[tokio::test(start_paused = true)]
+        async fn a_draft_clear_waits_out_a_view_switch() {
+            let (fx, mut term) = Fixture::with_terminal("clear-view", None, DRAFT_ONE_LINE);
+            let viewing = term
+                .pty
+                .typing()
+                .try_take(Holder::ViewReturn)
+                .expect("a free lane");
+            let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+            fx.clear_draft(&c_tx).await;
+            assert!(
+                at_once(&mut c_rx).await.is_none(),
+                "the clear waits for the lane"
+            );
+            assert!(
+                term.typed_now().is_empty(),
+                "nothing is typed while it waits"
+            );
+            drop(viewing);
+            assert_eq!(term.typed().await, CLEAR_LINE, "the clear went on");
+            term.show(&one_line_cleared()).await;
+            term.lane_free().await;
+            assert!(drain(&mut c_rx).is_empty(), "nothing answers the clear");
+        }
+
+        /// On a paused clock, as `a_second_send_is_busy`: a refusal before a
+        /// 1 ms timer is one that never waited for the lane.
+        #[tokio::test(start_paused = true)]
+        async fn a_draft_clear_is_busy_at_once_behind_a_chat_writer() {
+            let (fx, mut term) = Fixture::with_terminal("clear-busy", None, DRAFT_ONE_LINE);
+            let clearing = "the terminal's draft is being cleared from the chat";
+            for (holder, text) in [
+                (Holder::ChatSend, "another message is being typed"),
+                (Holder::ChatAnswer, "another message is being typed"),
+                (
+                    Holder::ChatPull,
+                    "the terminal's draft is being pulled into the chat",
+                ),
+                (Holder::ChatClear, clearing),
+            ] {
+                let _held = term.pty.typing().try_take(holder).expect("a free lane");
+                let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+                fx.clear_draft(&c_tx).await;
+                let refusal = at_once(&mut c_rx).await.expect("refused at once");
+                assert_eq!(clear_refusal(refusal), refused(BUSY, text), "{holder:?}");
+            }
+            let _clearing = term
+                .pty
+                .typing()
+                .try_take(Holder::ChatClear)
+                .expect("a free lane");
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            let send = at_once(&mut s_rx).await.expect("a send is refused at once");
+            assert_eq!(refusal_of(send), refused(BUSY, clearing), "a send");
+            fx.send_draft(&s_tx).await;
+            let send = at_once(&mut s_rx)
+                .await
+                .expect("a draft's send is refused at once");
+            assert_eq!(refusal_of(send), refused(BUSY, clearing), "a draft's send");
+            fx.pull_draft(&s_tx).await;
+            let pull = at_once(&mut s_rx).await.expect("a pull is refused at once");
+            assert_eq!(pull_refusal(pull), refused(BUSY, clearing), "a pull");
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        /// On a paused clock, so the owner's key lands after the clear took
+        /// the lane and before its settled reading lets it press.
+        #[tokio::test(start_paused = true)]
+        async fn a_draft_clear_refuses_an_owner_key_before_its_first_press() {
+            let (fx, mut term) = Fixture::with_terminal("clear-owner-key", None, DRAFT_ONE_LINE);
+            let (c_tx, mut c_rx) = mpsc::unbounded_channel();
+            fx.clear_draft(&c_tx).await;
+            for _ in 0..1000 {
+                if term.pty.typing().holder() == Some(Holder::ChatClear) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                term.pty.typing().holder(),
+                Some(Holder::ChatClear),
+                "the clear took the lane"
+            );
+            term.pty.typing().owner_typed();
+            assert_eq!(
+                clear_refusal(next_message(&mut c_rx).await),
+                refused(CHAT_REFUSED, "someone typed in the terminal")
+            );
             assert!(term.typed_now().is_empty(), "nothing is typed");
         }
 

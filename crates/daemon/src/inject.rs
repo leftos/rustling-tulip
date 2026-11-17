@@ -921,6 +921,7 @@ impl TypeRefusal {
             Some(Holder::Injector) => "the session is starting",
             Some(Holder::ChatSend | Holder::ChatAnswer) => "another message is being typed",
             Some(Holder::ChatPull) => "the terminal's draft is being pulled into the chat",
+            Some(Holder::ChatClear) => "the terminal's draft is being cleared from the chat",
             None => "the terminal is busy",
         };
         Self {
@@ -1010,8 +1011,8 @@ pub async fn send_draft(target: &TypeTarget) -> Result<(), TypeRefusal> {
 }
 
 /// `target`'s typing lane for `who`, a chat writer: refused at once while a
-/// send, an answer or a pull holds it, else once its holder has kept it for
-/// [`SEND_LANE_WAIT`].
+/// send, an answer, a pull or a clear holds it, else once its holder has kept
+/// it for [`SEND_LANE_WAIT`].
 ///
 /// # Errors
 ///
@@ -1019,7 +1020,9 @@ pub async fn send_draft(target: &TypeTarget) -> Result<(), TypeRefusal> {
 pub(crate) async fn take_lane(target: &TypeTarget, who: Holder) -> Result<TypingTurn, TypeRefusal> {
     let lane = target.pty.typing();
     // Another message is refused at once, never queued behind the one typed.
-    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer | Holder::ChatPull)) = lane.holder()
+    if let Some(
+        holder @ (Holder::ChatSend | Holder::ChatAnswer | Holder::ChatPull | Holder::ChatClear),
+    ) = lane.holder()
     {
         return Err(TypeRefusal::busy(Some(holder)));
     }

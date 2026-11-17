@@ -47,6 +47,8 @@ const KEYS_LABEL: &str = "Keys";
 const HIDE_LABEL: &str = "Hide keyboard";
 /// The room between the composer's rows, and between its buttons.
 const COMPOSER_GAP: f32 = 8.0;
+/// What the composer's note row asks once the draft's Clear is tapped.
+const DRAFT_CLEAR_ASK: &str = "Clear the terminal's draft?";
 
 /// One of the composer row's buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,23 @@ fn buttons_shown(keyboard_up: bool) -> Vec<ComposerButton> {
 }
 
 impl PhoneRoot {
+    /// Drops the draft Clear's question once its session is no longer shown
+    /// or its composer no longer offers Clear.
+    pub(super) fn keep_draft_clear_confirm(&mut self, cx: &App) {
+        let Some(asking) = self.draft_clear_asking.as_deref() else {
+            return;
+        };
+        let stands = self.shown.as_ref().is_some_and(|(_, id)| id == asking)
+            && self
+                .root
+                .read(cx)
+                .chat_composer_line(asking)
+                .is_some_and(|line| line.offers_clear());
+        if !stands {
+            self.draft_clear_asking = None;
+        }
+    }
+
     /// Whether `host`'s session `session_id` mirrors its chat now.
     pub(super) fn chat_mirrored(&self, host: &HostKey, session_id: &str, cx: &App) -> bool {
         let sidebar = &self.root.read(cx).sidebar;
@@ -414,7 +433,7 @@ impl PhoneRoot {
             )
         };
         let chip_live = !composer_line_disables(line.as_ref());
-        let note = line.map(|line| Self::composer_note_row(session_id, &line, cx));
+        let note = line.map(|line| self.composer_note_row(session_id, &line, cx));
         let chip = chip
             .map(|(text, actions)| Self::suggestion_chip(session_id, text, actions, chip_live, cx));
         let dock = if self.dock_drawn(session_id, Page::Chat, cx) {
@@ -488,8 +507,18 @@ impl PhoneRoot {
 
     /// The composer's note row (`phone-composer-note`): `line`'s text, and
     /// for a draft the host can pull or send, Pull (`phone-draft-pull`) and
-    /// Send (`phone-draft-send`) after it.
-    fn composer_note_row(session_id: &str, line: &ComposerLine, cx: &mut Context<Self>) -> Div {
+    /// Send (`phone-draft-send`) after it, then Clear (`phone-draft-clear`)
+    /// where the host offers it. Once Clear is tapped the row asks first
+    /// ([`Self::draft_clear_confirm_row`]).
+    fn composer_note_row(
+        &self,
+        session_id: &str,
+        line: &ComposerLine,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if line.offers_clear() && self.draft_clear_asking.as_deref() == Some(session_id) {
+            return Self::draft_clear_confirm_row(session_id, cx);
+        }
         let t = theme(cx);
         let note = div()
             .driver_id(|| "phone-composer-note".to_owned())
@@ -512,6 +541,15 @@ impl PhoneRoot {
                     .update(cx, |root, cx| root.send_draft(&send_id, cx));
             }),
         );
+        let clear_id = session_id.to_owned();
+        let clear = line.offers_clear().then(|| {
+            Self::composer_action("phone-draft-clear", "Clear", true, cx).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.draft_clear_asking = Some(clear_id.clone());
+                    cx.notify();
+                },
+            ))
+        });
         div()
             .flex()
             .items_center()
@@ -519,6 +557,40 @@ impl PhoneRoot {
             .child(note.flex_1().min_w(px(0.0)))
             .child(pull)
             .child(send)
+            .children(clear)
+    }
+
+    /// The question the draft's Clear turns the note row into
+    /// (`phone-draft-clear-ask`), with its Clear
+    /// (`phone-draft-clear-confirm`) and Cancel (`phone-draft-clear-cancel`).
+    fn draft_clear_confirm_row(session_id: &str, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let id = session_id.to_owned();
+        let confirm = Self::composer_action("phone-draft-clear-confirm", "Clear", true, cx)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.draft_clear_asking = None;
+                this.root.update(cx, |root, cx| root.clear_draft(&id, cx));
+                cx.notify();
+            }));
+        let cancel = Self::composer_action("phone-draft-clear-cancel", "Cancel", true, cx)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.draft_clear_asking = None;
+                cx.notify();
+            }));
+        let ask = div()
+            .driver_id(|| "phone-draft-clear-ask".to_owned())
+            .flex_1()
+            .min_w(px(0.0))
+            .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+            .text_color(gpui::rgb(t.text))
+            .child(DRAFT_CLEAR_ASK);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(COMPOSER_GAP))
+            .child(ask)
+            .child(confirm)
+            .child(cancel)
     }
 
     /// The agent's suggested next prompt above the composer's field

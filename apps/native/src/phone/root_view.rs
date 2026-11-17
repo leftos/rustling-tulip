@@ -77,6 +77,8 @@ pub struct PhoneRoot {
     pub(super) restore_confirm: Option<ReplySet>,
     /// What the Keys page's Restore defaults draws.
     pub(super) keys_restore: super::keys_view::KeysRestore,
+    /// The session whose composer draft's Clear asks for confirmation.
+    pub(super) draft_clear_asking: Option<String>,
     /// The drag reordering a Settings list, while a long press holds one.
     pub(super) reorder_drag: Option<super::reorder::ReorderDrag>,
     /// The boxes the open page's lists recorded in its last frame, which a
@@ -126,6 +128,7 @@ impl PhoneRoot {
             this.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
             this.try_open_pending(cx);
             this.forget_gone_session(cx);
+            this.keep_draft_clear_confirm(cx);
             this.take_replies(cx);
             this.sync_sheet(cx);
             this.push_changed(cx);
@@ -177,6 +180,7 @@ impl PhoneRoot {
             key_editor: None,
             restore_confirm: None,
             keys_restore: super::keys_view::KeysRestore::Idle,
+            draft_clear_asking: None,
             reorder_drag: None,
             list_boxes: super::reorder::ListBoxes::default(),
             resumes: Vec::new(),
@@ -384,6 +388,7 @@ impl PhoneRoot {
         self.keep_key_editor();
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
+        self.draft_clear_asking = None;
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
@@ -640,6 +645,7 @@ impl PhoneRoot {
         self.forget_pending_open();
         self.shown = None;
         self.page = None;
+        self.draft_clear_asking = None;
         self.composer_dock = super::composer::Dock::None;
         self.prompt_sheet = SheetState::default();
         self.root

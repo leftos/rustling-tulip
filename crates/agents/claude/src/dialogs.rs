@@ -243,15 +243,16 @@ pub(crate) fn read_draft(rows: &[String], dim: &[String]) -> Option<DraftReading
 /// deletes to the start of its line and at a line's start the newline before
 /// it, so N lines take 2N-1 presses; the recipe sends 2·rows+2, and a press
 /// on the empty box does nothing. No key moves the keys out of the box, so
-/// the presses all reach it. A paste, or a draft the box shows only the end
-/// of, is refused.
+/// the presses all reach it. A paste or image token is ordinary text on its
+/// row and goes with its line. A draft the box shows only the end of is
+/// refused.
 ///
 /// # Errors
 ///
 /// [`AnswerRefusal::NotThisDialog`] for a draft whose text the box does not
 /// show whole: its keys would clear less than the draft.
 pub(crate) fn clear_draft_recipe(draft: &DraftReading) -> Result<AnswerRecipe, AnswerRefusal> {
-    if draft.pasted || !draft.whole {
+    if !draft.whole {
         return Err(AnswerRefusal::NotThisDialog);
     }
     Ok(AnswerRecipe {
@@ -3713,7 +3714,7 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_the_box_cannot_show_whole_is_not_cleared() {
+    fn only_a_draft_the_box_cannot_show_whole_is_refused_a_clear() {
         let pasted = DraftReading {
             text: String::new(),
             pasted: true,
@@ -3721,8 +3722,8 @@ mod tests {
             rows: 1,
         };
         assert_eq!(
-            clear_draft_recipe(&pasted),
-            Err(AnswerRefusal::NotThisDialog)
+            clear_draft_recipe(&pasted).map(|recipe| recipe.steps.len()),
+            Ok(4)
         );
         let scrolled = DraftReading {
             text: String::new(),
@@ -3734,5 +3735,37 @@ mod tests {
             clear_draft_recipe(&scrolled),
             Err(AnswerRefusal::NotThisDialog)
         );
+    }
+
+    #[test]
+    fn a_draft_holding_pastes_and_an_image_is_cleared_line_by_line() {
+        // Claude Code 2.1.326 drew these; five ctrl+u presses emptied the first,
+        // three the second: a paste or image token goes with its line.
+        let pasted = draft_box(
+            120,
+            &rows(&[
+                "❯ typed line one",
+                "  [Pasted text #4 +9 lines]",
+                "  third [Pasted text #5 +9 lines] tail",
+            ]),
+            32,
+        );
+        let image = draft_box(
+            120,
+            &rows(&[
+                "❯ look at [Image #7] and this",
+                "  [Pasted text #8 +7 lines] end",
+            ]),
+            32,
+        );
+        for (screen, presses) in [(pasted, 8), (image, 6)] {
+            let draft = draft_of(&screen).expect("a draft");
+            assert!(draft.pasted && draft.whole, "{draft:?}");
+            let steps = clear_draft_recipe(&draft)
+                .expect("a pasted draft has a recipe")
+                .steps;
+            assert_eq!(steps.len(), presses);
+            assert!(steps.iter().all(|step| step.keys == vec![Key::ClearLine]));
+        }
     }
 }

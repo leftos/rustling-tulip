@@ -174,6 +174,11 @@ pub const FEATURE_TYPED_PROMPT_ANSWERS: &str = "typed_prompt_answers";
 /// that lists it.
 pub const FEATURE_CHAT_DRAFT: &str = "chat_draft";
 
+/// `Welcome.features` entry: the daemon clears the draft in a session's
+/// terminal prompt box ([`ClientMessage::ChatClearDraft`]). A client offers
+/// Clear only on a host that lists it.
+pub const FEATURE_CHAT_CLEAR_DRAFT: &str = "chat_clear_draft";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -6314,6 +6319,16 @@ pub enum ClientMessage {
     /// one Enter. A refusal is answered with [`DaemonMessage::Error`]
     /// carrying this `request_id`.
     ChatSendDraft {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Clear the draft in the session's terminal prompt box without reading
+    /// it out: the daemon empties the box with the agent's line clears.
+    /// Nothing answers a clear that emptied the box; a refusal, or a clear
+    /// that left part of the draft, is answered with [`DaemonMessage::Error`]
+    /// carrying this `request_id`.
+    ChatClearDraft {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -18174,6 +18189,34 @@ mod tests {
                 assert_eq!(session_id, "s1");
                 assert_eq!(request_id, None);
             }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_clear_draft_message_round_trips() {
+        let clear = ClientMessage::ChatClearDraft {
+            session_id: "s1".to_string(),
+            request_id: Some("req-clear".to_string()),
+        };
+        let json = serde_json::to_string(&clear).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"chat_clear_draft","session_id":"s1","request_id":"req-clear"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ChatClearDraft {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-clear"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"chat_clear_draft","session_id":"s1"}"#;
+        match serde_json::from_str::<ClientMessage>(bare).expect("deserialize") {
+            ClientMessage::ChatClearDraft { request_id, .. } => assert_eq!(request_id, None),
             other => panic!("unexpected variant: {other:?}"),
         }
     }

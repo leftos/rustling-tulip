@@ -1654,6 +1654,16 @@ pub fn send_draft_message(session_id: &str, request_id: String) -> ClientMessage
     }
 }
 
+/// The message that clears session `session_id`'s terminal prompt-box
+/// draft without reading it out.
+#[must_use]
+pub fn clear_draft_message(session_id: &str, request_id: String) -> ClientMessage {
+    ClientMessage::ChatClearDraft {
+        session_id: session_id.to_owned(),
+        request_id: Some(request_id),
+    }
+}
+
 /// The text a send carried, as the daemon's pending entry shows it.
 fn sent_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_owned()
@@ -1916,6 +1926,9 @@ pub fn composer_note(
 /// What the composer's note row says over a draft on a host that can pull
 /// or send it, beside its Pull and Send buttons.
 pub const DRAFT_ACTIONS_NOTE: &str = "The prompt box has a draft.";
+/// What the note row says over a draft on a host that can also clear it,
+/// beside its Pull, Send and Clear buttons.
+pub const CLEAR_ACTIONS_NOTE: &str = "The prompt box has a draft. Pull, send or clear it first.";
 /// What the note row says while a pull of the draft is awaited.
 pub const PULLING_NOTE: &str = "Pulling the draft\u{2026}";
 /// What the composer says when a pull left some of the draft in the box.
@@ -1930,6 +1943,8 @@ pub enum ComposerLine {
     Note(ComposerNote),
     /// The draft's line with its Pull and Send buttons.
     DraftActions,
+    /// The draft's line with its Pull, Send and Clear buttons.
+    DraftClearActions,
     /// A pull of the draft is awaited; no buttons.
     Pulling,
 }
@@ -1941,6 +1956,7 @@ impl ComposerLine {
         match self {
             Self::Note(note) => note.text(),
             Self::DraftActions => DRAFT_ACTIONS_NOTE.to_owned(),
+            Self::DraftClearActions => CLEAR_ACTIONS_NOTE.to_owned(),
             Self::Pulling => PULLING_NOTE.to_owned(),
         }
     }
@@ -1948,7 +1964,23 @@ impl ComposerLine {
     /// Whether the row draws the draft's Pull and Send buttons.
     #[must_use]
     pub fn has_draft_actions(&self) -> bool {
-        matches!(self, Self::DraftActions)
+        matches!(self, Self::DraftActions | Self::DraftClearActions)
+    }
+
+    /// Whether the row draws the draft's Clear beside Pull and Send.
+    #[must_use]
+    pub fn offers_clear(&self) -> bool {
+        matches!(self, Self::DraftClearActions)
+    }
+
+    /// This line on a host that can clear the draft (`clear`): the draft's
+    /// buttons gain Clear; any other line stays as it is.
+    #[must_use]
+    pub fn with_clear(self, clear: bool) -> Self {
+        match self {
+            Self::DraftActions if clear => Self::DraftClearActions,
+            line => line,
+        }
     }
 }
 
@@ -1994,6 +2026,31 @@ impl DraftPull {
         let ours = request_id.is_some() && self.pending.as_deref() == request_id;
         if ours {
             self.pending = None;
+        }
+        ours
+    }
+}
+
+/// A session's last clear of its prompt-box draft that may still be
+/// refused: its request id, from the confirmed Clear until a refusal with
+/// that id or the next clear. A clear that emptied the box is never answered.
+#[derive(Debug, Default)]
+pub struct DraftClear {
+    last: Option<String>,
+}
+
+impl DraftClear {
+    /// A clear went out under `request_id`.
+    pub fn sent(&mut self, request_id: String) {
+        self.last = Some(request_id);
+    }
+
+    /// A refusal carrying `request_id` arrived: whether it names the last
+    /// clear, which it then ends.
+    pub fn refused(&mut self, request_id: &str) -> bool {
+        let ours = self.last.as_deref() == Some(request_id);
+        if ours {
+            self.last = None;
         }
         ours
     }
@@ -3553,6 +3610,11 @@ mod strip_tests {
             super::send_draft_message("s1", "r2".to_owned()),
             ClientMessage::ChatSendDraft { session_id, request_id }
                 if session_id == "s1" && request_id.as_deref() == Some("r2")
+        ));
+        assert!(matches!(
+            super::clear_draft_message("s1", "r3".to_owned()),
+            ClientMessage::ChatClearDraft { session_id, request_id }
+                if session_id == "s1" && request_id.as_deref() == Some("r3")
         ));
     }
 

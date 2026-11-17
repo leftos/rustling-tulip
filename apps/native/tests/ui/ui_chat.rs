@@ -24,9 +24,9 @@ use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, poin
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_DRAFT,
-    FEATURE_FILE_TAIL, GridNode, ScriptFacts, SplitDirection, ToolKind, ToolOutcome, WorkShell,
-    WorkSubagent,
+    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_CLEAR_DRAFT,
+    FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, GridNode, ScriptFacts, SplitDirection, ToolKind,
+    ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::target::Target;
@@ -2464,10 +2464,26 @@ fn a_draft_composer_shows_why_it_cannot_send(cx: &mut TestAppContext) {
 /// `s1`'s chat loaded on a daemon listing `chat_draft`, everything sent so
 /// far drained.
 fn loaded_on_a_draft_host<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    loaded_listing(cx, dir, &[FEATURE_CHAT_DRAFT])
+}
+
+/// `s1`'s chat loaded on a daemon listing `chat_draft` and
+/// `chat_clear_draft`, the box holding a draft, everything sent so far
+/// drained.
+fn on_a_clear_draft_host<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = loaded_listing(cx, dir, &[FEATURE_CHAT_DRAFT, FEATURE_CHAT_CLEAR_DRAFT]);
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.sent();
+    h
+}
+
+/// `s1`'s chat loaded on a daemon listing `features`, everything sent so
+/// far drained.
+fn loaded_listing<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
     let fixture = Fixture::single(session("s1").build());
     let mut h = Harness::with(cx, dir, &fixture);
     h.answer_scrollback("s1", b"");
-    h.reconnect_with_features(&[FEATURE_CHAT_DRAFT]);
+    h.reconnect_with_features(features);
     h.load(&fixture);
     h.answer_scrollback("s1", b"");
     h.sent();
@@ -2507,8 +2523,8 @@ fn composer_error(h: &mut Harness<'_>) -> Option<String> {
     h.root(|root, _| root.chat_composer_error("s1"))
 }
 
-/// Whether anything sent since the last drain asks the chat to send or
-/// pull.
+/// Whether anything sent since the last drain asks the chat to send, pull
+/// or clear.
 fn sent_chat_work(h: &mut Harness<'_>) -> bool {
     h.sent().iter().any(|msg| {
         matches!(
@@ -2516,8 +2532,24 @@ fn sent_chat_work(h: &mut Harness<'_>) -> bool {
             ClientMessage::ChatSend { .. }
                 | ClientMessage::ChatPullDraft { .. }
                 | ClientMessage::ChatSendDraft { .. }
+                | ClientMessage::ChatClearDraft { .. }
         )
     })
+}
+
+/// The request ids of the `ChatClearDraft`s for `s1` sent since the last
+/// drain.
+fn clears(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatClearDraft {
+                session_id,
+                request_id,
+            } if session_id == "s1" => Some(request_id),
+            _ => None,
+        })
+        .collect()
 }
 
 #[gpui::test]
@@ -2529,6 +2561,197 @@ fn a_draft_on_a_chat_draft_host_offers_pull_and_send(cx: &mut TestAppContext) {
     assert!(painted(&mut h, "chat-composer-note"));
     assert!(painted(&mut h, "chat-draft-pull"));
     assert!(painted(&mut h, "chat-draft-send"));
+    assert!(
+        !painted(&mut h, "chat-draft-clear"),
+        "a host without chat_clear_draft shows no Clear"
+    );
+}
+
+#[gpui::test]
+fn a_draft_on_a_clear_draft_host_offers_pull_send_and_clear(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Pull, send or clear it first.")
+    );
+    let pull = h.bounds("chat-draft-pull");
+    let send = h.bounds("chat-draft-send");
+    let clear = h.bounds("chat-draft-clear");
+    assert!(clear.size.height > px(0.0), "Clear shows");
+    assert!(
+        pull.origin.x < send.origin.x && send.origin.x < clear.origin.x,
+        "Pull, Send, Clear in that order"
+    );
+    assert!(!painted(&mut h, "chat-draft-clear-confirm"));
+}
+
+#[gpui::test]
+fn a_draft_clear_arms_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-draft-clear");
+    assert!(!sent_chat_work(&mut h), "a press only arms");
+    assert!(drawn_now(&mut h, "chat-draft-clear-confirm"));
+    assert!(drawn_now(&mut h, "chat-draft-clear-cancel"));
+    assert!(
+        !drawn_now(&mut h, "chat-draft-clear"),
+        "Confirm clear takes its place"
+    );
+    assert!(drawn_now(&mut h, "chat-draft-pull"), "Pull and Send stay");
+    assert!(drawn_now(&mut h, "chat-draft-send"));
+}
+
+#[gpui::test]
+fn confirm_clear_sends_one_draft_clear_and_disarms(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-draft-clear");
+    h.click_on("chat-draft-clear-confirm");
+    let sent = clears(&mut h);
+    assert_eq!(sent.len(), 1, "one clear goes out: {sent:?}");
+    assert!(sent[0].is_some(), "under a request id");
+    assert!(!drawn_now(&mut h, "chat-draft-clear-confirm"), "disarmed");
+    assert!(drawn_now(&mut h, "chat-draft-clear"));
+    assert_eq!(composer_error(&mut h), None);
+}
+
+#[gpui::test]
+fn an_armed_draft_clear_drops_on_cancel_escape_or_a_press_elsewhere(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    for (how, drop) in [
+        ("Cancel", "cancel"),
+        ("Esc", "escape"),
+        ("a press elsewhere", "press"),
+    ] {
+        h.click_on("chat-draft-clear");
+        assert!(
+            drawn_now(&mut h, "chat-draft-clear-confirm"),
+            "{how}: armed"
+        );
+        match drop {
+            "cancel" => h.click_on("chat-draft-clear-cancel"),
+            "escape" => h.keys("escape"),
+            _ => h.click_on("chat-composer-note"),
+        }
+        assert!(
+            !drawn_now(&mut h, "chat-draft-clear-confirm"),
+            "{how} disarms"
+        );
+        assert!(
+            drawn_now(&mut h, "chat-draft-clear"),
+            "{how}: Clear is back"
+        );
+        assert!(!sent_chat_work(&mut h), "{how}: nothing is sent");
+    }
+}
+
+#[gpui::test]
+fn an_armed_draft_clear_drops_when_the_draft_goes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-draft-clear");
+    show_screen(&mut h, ComposerState::Ready, None);
+    show_screen(&mut h, ComposerState::Draft, None);
+    assert!(
+        !drawn_now(&mut h, "chat-draft-clear-confirm"),
+        "the arm went with the draft"
+    );
+    assert!(drawn_now(&mut h, "chat-draft-clear"));
+    assert!(!sent_chat_work(&mut h), "nothing is sent");
+}
+
+#[gpui::test]
+fn escape_in_the_composer_disarms_a_draft_clear(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-composer");
+    h.click_on("chat-draft-clear");
+    assert!(drawn_now(&mut h, "chat-draft-clear-confirm"), "armed");
+    h.keys("escape");
+    assert!(
+        !drawn_now(&mut h, "chat-draft-clear-confirm"),
+        "the composer's Esc disarms Clear"
+    );
+    assert!(drawn_now(&mut h, "chat-draft-clear"), "Clear is back");
+    assert!(!sent_chat_work(&mut h), "nothing is sent");
+    assert!(h.sent_input("s1").is_empty(), "no Esc reached the terminal");
+}
+
+#[gpui::test]
+fn an_armed_draft_clear_drops_while_a_send_takes_the_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-composer");
+    h.click_on("chat-draft-clear");
+    assert!(drawn_now(&mut h, "chat-draft-clear-confirm"), "armed");
+    type_text(&mut h, "hello");
+    h.keys("ctrl-enter");
+    let sends: Vec<Option<String>> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSend { request_id, .. } => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sends.len(), 1, "the keyboard send went out: {sends:?}");
+    assert_eq!(note(&mut h).as_deref(), Some("Sending\u{2026}"));
+    refused(&mut h, sends[0].clone(), "the prompt box is busy");
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Pull, send or clear it first."),
+        "the draft row is back"
+    );
+    assert!(
+        !drawn_now(&mut h, "chat-draft-clear-confirm"),
+        "the arm went while the row showed no Clear"
+    );
+    assert!(drawn_now(&mut h, "chat-draft-clear"), "Clear shows");
+}
+
+#[gpui::test]
+fn an_armed_draft_clear_drops_on_a_dropped_connection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-draft-clear");
+    assert!(drawn_now(&mut h, "chat-draft-clear-confirm"), "armed");
+    h.lose_connection();
+    assert_eq!(note(&mut h).as_deref(), Some("Not connected"));
+    h.reconnect_with_features(&[FEATURE_CHAT_DRAFT, FEATURE_CHAT_CLEAR_DRAFT]);
+    h.load(&Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    if let Some(id) = load_request(&h.sent()) {
+        h.send(reply(Some(&id), vec![]));
+    }
+    show_screen(&mut h, ComposerState::Draft, None);
+    h.sent();
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Pull, send or clear it first."),
+        "the draft row is back"
+    );
+    assert!(drawn_now(&mut h, "chat-draft-clear"), "Clear shows again");
+    assert!(
+        !drawn_now(&mut h, "chat-draft-clear-confirm"),
+        "the arm went with the connection"
+    );
+    assert!(!sent_chat_work(&mut h), "nothing is sent");
+}
+
+#[gpui::test]
+fn a_refused_draft_clear_shows_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_a_clear_draft_host(cx, &dir);
+    h.click_on("chat-draft-clear");
+    h.click_on("chat-draft-clear-confirm");
+    let sent = clears(&mut h);
+    let partial =
+        "part of the draft is still in the terminal's box; clear the rest in the terminal";
+    refused(&mut h, sent[0].clone(), partial);
+    assert_eq!(composer_error(&mut h).as_deref(), Some(partial));
+    assert!(painted(&mut h, "chat-composer-error"));
 }
 
 #[gpui::test]

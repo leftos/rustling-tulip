@@ -5049,9 +5049,10 @@ impl RootView {
             | NetEvent::PairRequestSent => {}
         }
         // A Welcome that forgot the rows, a host that stopped listing the
-        // feature or a dropped connection takes the chip away; its popover
-        // closes with it rather than reopening when the chip comes back.
-        self.close_accounts_without_chip();
+        // feature or a dropped connection takes the accounts chip away; its
+        // popover closes with it rather than reopening when the chip comes
+        // back. A row that no longer offers a draft's Clear drops its arm.
+        self.drop_what_an_event_took();
         self.refresh_tab_close_after_event(window, cx);
         if moves_badge {
             self.schedule_taskbar_badge(window, cx);
@@ -6443,15 +6444,28 @@ impl RootView {
         }
     }
 
+    /// What a network event may have taken away: the accounts chip, whose
+    /// popover closes with it, and a draft's Clear, whose arm drops with it.
+    fn drop_what_an_event_took(&mut self) {
+        self.close_accounts_without_chip();
+        self.keep_draft_clear_arms();
+    }
+
     /// Esc's one-click arms: a header Stop, a tab close, a container
-    /// removal's armed row and the Detached banner's Stop all. Returns
-    /// whether one was dropped.
+    /// removal's armed row, the Detached banner's Stop all and a chat
+    /// draft's Clear. Returns whether one was dropped.
     pub(crate) fn disarm_escape_arms(&mut self) -> bool {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
         let detached_stop_all = self.detached_stop_all.disarm();
         let run_stop = self.disarm_run_stop();
-        self.confirm.disarm() || tab_close || remove_armed || detached_stop_all || run_stop
+        let draft_clear = self.disarm_draft_clear();
+        self.confirm.disarm()
+            || tab_close
+            || remove_armed
+            || detached_stop_all
+            || run_stop
+            || draft_clear
     }
 
     /// The keys a focused container row takes: Up and Down move the row
@@ -6763,13 +6777,14 @@ impl RootView {
     }
 
     /// A press anywhere that did not stop at a tab's close button, a session
-    /// action's confirm or a container menu's Remove row drops what they
-    /// armed.
+    /// action's confirm, a container menu's Remove row or a chat draft's
+    /// Clear drops what they armed.
     fn on_any_mouse_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
         let run_stop = self.disarm_run_stop();
-        if self.confirm.disarm() || tab_close || remove_armed || run_stop {
+        let draft_clear = self.disarm_draft_clear();
+        if self.confirm.disarm() || tab_close || remove_armed || run_stop || draft_clear {
             cx.notify();
         }
     }

@@ -215,6 +215,13 @@ export const FEATURE_TYPED_PROMPT_ANSWERS = "typed_prompt_answers";
 export const FEATURE_CHAT_DRAFT = "chat_draft";
 
 /**
+ * `Welcome.features` entry: the daemon clears the draft in a session's
+ * terminal prompt box ([`ClientMessage::ChatClearDraft`]). A client offers
+ * Clear only on a host that lists it.
+ */
+export const FEATURE_CHAT_CLEAR_DRAFT = "chat_clear_draft";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -5001,6 +5008,14 @@ export type ClientMessage =
    * carrying this `request_id`.
    */
   | { type: "chat_send_draft"; session_id: string; request_id?: string | null }
+  /**
+   * Clear the draft in the session's terminal prompt box without reading
+   * it out: the daemon empties the box with the agent's line clears.
+   * Nothing answers a clear that emptied the box; a refusal, or a clear
+   * that left part of the draft, is answered with [`DaemonMessage::Error`]
+   * carrying this `request_id`.
+   */
+  | { type: "chat_clear_draft"; session_id: string; request_id?: string | null }
   /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this

@@ -296,6 +296,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CLIENT_PRESENCE,
     protocol::FEATURE_TYPED_PROMPT_ANSWERS,
     protocol::FEATURE_CHAT_DRAFT,
+    protocol::FEATURE_CHAT_CLEAR_DRAFT,
     protocol::FEATURE_RESUME_SESSION,
     protocol::FEATURE_LAUNCH_LAST,
     protocol::FEATURE_PRESET_JOB_REPEAT,

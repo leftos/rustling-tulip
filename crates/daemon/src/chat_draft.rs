@@ -14,6 +14,11 @@
 //! or a loader's message. A pull may run while the session's first prompt is
 //! held: a line clear never reaches the agent, and an emptied box lets the
 //! prompt be typed.
+//!
+//! `ChatClearDraft`'s runner ([`clear_draft`]) types the same presses under
+//! the same checks, as a lane holder of its own, and answers no text: it
+//! clears a paste or an image too, and reports a box left holding part of
+//! the draft as a refusal.
 
 use std::time::Duration;
 
@@ -34,15 +39,37 @@ use crate::sync::lock;
 use crate::typing_lane::{Holder, TypingTurn};
 use crate::view_drive::{KEY_WAIT, Reading, ScreenReader};
 
-/// The longest a pull runs, from taking the lane to its last reading.
+/// The longest a pull or a clear runs, from taking the lane to its last
+/// reading.
 const PULL_CEILING: Duration = Duration::from_secs(30);
 
 pub(crate) const PASTED: &str =
-    "the draft holds pasted text or an image; send it as it stands or clear it in the terminal";
+    "the draft holds pasted text or an image; send it as it stands or clear it";
 pub(crate) const SCROLLED: &str =
     "the draft is taller than the box shows; send it as it stands or clear it in the terminal";
 pub(crate) const UNREADABLE: &str = "the terminal's draft cannot be read";
 pub(crate) const CANNOT_CLEAR: &str = "this agent's box cannot be cleared from the chat";
+pub(crate) const CLEAR_PARTIAL: &str =
+    "part of the draft is still in the terminal's box; clear the rest in the terminal";
+
+/// What the presses are for: a pull reads the draft out, a clear only
+/// empties the box.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Pull,
+    Clear,
+}
+
+impl Mode {
+    /// The lane holder a writer in this mode takes the lane as.
+    fn holder(self) -> Holder {
+        match self {
+            Self::Pull => Holder::ChatPull,
+            Self::Clear => Holder::ChatClear,
+        }
+    }
+}
 
 /// The draft a pull read, and whether the box last read empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,16 +80,19 @@ pub struct Pulled {
     pub cleared: bool,
 }
 
-/// How far a pull got: the text it read with its first press, and the
-/// presses left.
+/// How far a pull or a clear got: the text it read with its first press,
+/// and the presses left. A clear keeps the text only to check later presses
+/// against it.
 #[derive(Default)]
 struct Progress {
+    mode: Mode,
     text: Option<String>,
     steps: std::vec::IntoIter<RecipeStep>,
 }
 
 impl Progress {
-    /// The pull's answer once it stops: the text read, with `cleared`.
+    /// The answer of a pull or a clear once it stops: the text read, with
+    /// `cleared` (a clear drops the text and keeps `cleared`).
     ///
     /// # Errors
     ///
@@ -109,9 +139,43 @@ pub(crate) async fn pull_within(
     requester: &mpsc::UnboundedSender<DaemonMessage>,
     ceiling: Duration,
 ) -> Result<Pulled, TypeRefusal> {
-    let turn = take_lane(target, Holder::ChatPull).await?;
+    run(target, requester, ceiling, Mode::Pull).await
+}
+
+/// Clear the draft in `target`'s main box for `requester`, the connection
+/// that asked, without reading it out: the pull's presses, under the same
+/// checks, with a paste or an image cleared too.
+///
+/// # Errors
+///
+/// Before any press, the pull's refusals but a paste's; after one, the box
+/// not read empty at the end ([`CLEAR_PARTIAL`],
+/// [`protocol::error_codes::CHAT_REFUSED`]).
+pub async fn clear_draft(
+    target: &TypeTarget,
+    requester: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Result<(), TypeRefusal> {
+    let pulled = run(target, requester, PULL_CEILING, Mode::Clear).await?;
+    if pulled.cleared {
+        Ok(())
+    } else {
+        Err(TypeRefusal::refused(CLEAR_PARTIAL))
+    }
+}
+
+/// The lane taken as `mode`'s holder, then [`clear`] within `ceiling`.
+async fn run(
+    target: &TypeTarget,
+    requester: &mpsc::UnboundedSender<DaemonMessage>,
+    ceiling: Duration,
+    mode: Mode,
+) -> Result<Pulled, TypeRefusal> {
+    let turn = take_lane(target, mode.holder()).await?;
     let mut reader = screen_reader(target);
-    let mut progress = Progress::default();
+    let mut progress = Progress {
+        mode,
+        ..Progress::default()
+    };
     let cleared = timeout(
         ceiling,
         clear(target, &turn, &mut reader, requester, &mut progress),
@@ -123,7 +187,8 @@ pub(crate) async fn pull_within(
     }
 }
 
-/// The pull's steps within its ceiling: the gate on a settled reading, then
+/// The steps of a pull or a clear within its ceiling: the gate on a settled
+/// reading, then
 /// one press per pass until the box reads empty, a check stops it, the
 /// presses run out, or a press brings no output.
 async fn clear(
@@ -142,7 +207,7 @@ async fn clear(
             Some(reading) if box_empty(&reading) => return progress.pulled(true),
             Some(_) => {}
             None => {
-                debug!(session_id = %target.session_id, "chat pull: a press brought no output");
+                debug!(session_id = %target.session_id, mode = ?progress.mode, "chat draft: a press brought no output");
                 break;
             }
         }
@@ -179,7 +244,7 @@ fn press_clear(
         if first {
             return Err(refusal);
         }
-        debug!(session_id = %target.session_id, reason = %refusal.message, "chat pull: stopped");
+        debug!(session_id = %target.session_id, mode = ?progress.mode, reason = %refusal.message, "chat draft: stopped");
         return Ok(Step::Stop);
     }
     if progress
@@ -187,11 +252,11 @@ fn press_clear(
         .as_deref()
         .is_some_and(|read| unread_in_view(target, read, &screen))
     {
-        debug!(session_id = %target.session_id, "chat pull: a line it never read came into view");
+        debug!(session_id = %target.session_id, mode = ?progress.mode, "chat draft: a line it never read came into view");
         return Ok(Step::Stop);
     }
     if first {
-        let (text, recipe) = first_draft(target, &screen)?;
+        let (text, recipe) = first_draft(target, &screen, progress.mode)?;
         progress.text = Some(text);
         progress.steps = recipe.steps.into_iter();
     }
@@ -241,17 +306,18 @@ fn press_refusal(
 ///
 /// # Errors
 ///
-/// The draft cannot be read, holds a paste or an image, scrolls, or the
-/// agent's plugin has no recipe that clears it
-/// ([`protocol::error_codes::CHAT_REFUSED`]).
+/// The draft cannot be read, holds a paste or an image (for a pull, whose
+/// text would be the placeholder), scrolls, or the agent's plugin has no
+/// recipe that clears it ([`protocol::error_codes::CHAT_REFUSED`]).
 fn first_draft(
     target: &TypeTarget,
     screen: &Screen,
+    mode: Mode,
 ) -> Result<(String, AnswerRecipe), TypeRefusal> {
     let Some(draft) = dialogs::read_draft(&target.agent, screen) else {
         return Err(TypeRefusal::refused(UNREADABLE));
     };
-    if draft.pasted {
+    if draft.pasted && mode == Mode::Pull {
         return Err(TypeRefusal::refused(PASTED));
     }
     if !draft.whole {

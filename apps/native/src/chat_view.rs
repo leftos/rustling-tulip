@@ -28,16 +28,16 @@ use gpui::{
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
     AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL,
-    SessionMode, SessionSnapshot, ToolOutcome,
+    ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT,
+    FEATURE_FILE_TAIL, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
-    self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftPull,
-    PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork, ScriptRow,
-    SendTracker, Strip, SuggestionChip, ViewKey,
+    self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftClear,
+    DraftPull, PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork,
+    ScriptRow, SendTracker, Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -50,6 +50,7 @@ use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
+use crate::session_menu::on_press;
 use crate::shell_lines;
 use crate::sidebar::{agent_up, runtime_label, session_view_key};
 use crate::stretchtext;
@@ -173,6 +174,10 @@ pub(crate) struct SessionChat {
     sends: SendTracker,
     /// The pull of the prompt box's draft awaiting its answer.
     pull: DraftPull,
+    /// The last clear of the prompt box's draft, until a refusal names it.
+    clear: DraftClear,
+    /// Whether the draft's Clear was pressed and awaits its Confirm clear.
+    clear_armed: bool,
     /// The composer, made once the chat has loaded.
     composer: Option<Composer>,
     /// The daemon's reason for refusing the last send.
@@ -189,18 +194,23 @@ pub(crate) struct SessionChat {
 /// What one daemon refusal ended in a chat: the text of a send it refused
 /// (empty for a draft sent as it stands), the box text a card answer took
 /// and where it goes back, the refused answer's card, and whether it ended
-/// the pending draft pull.
+/// the pending draft pull or named the last draft clear.
 struct ChatRefusal {
     text: Option<String>,
     boxed: Option<(String, GiveBack)>,
     card: Option<crate::chat_cards::AnswerRefusal>,
     pull: bool,
+    clear: bool,
 }
 
 impl ChatRefusal {
     /// Whether the refusal ended anything of the chat's.
     fn is_ours(&self) -> bool {
-        self.text.is_some() || self.boxed.is_some() || self.card.is_some() || self.pull
+        self.text.is_some()
+            || self.boxed.is_some()
+            || self.card.is_some()
+            || self.pull
+            || self.clear
     }
 }
 
@@ -274,6 +284,7 @@ impl SessionChat {
             boxed: self.boxes.refused(request_id),
             card: self.cards.refused(request_id, message),
             pull: self.pull.answered(Some(request_id)),
+            clear: self.clear.refused(request_id),
         };
         refusal.is_ours().then_some(refusal)
     }
@@ -282,7 +293,8 @@ impl SessionChat {
     /// box while its card is up, and sent text goes back to the composer
     /// before what was typed since, with `message` under it. A draft sent
     /// as it stands gives back no text, so the composer and its caret stay
-    /// as they are; it and a refused pull still show `message`.
+    /// as they are; it, a refused pull and a refused clear still show
+    /// `message`.
     fn settle_refusal(&mut self, refusal: ChatRefusal, message: &str, cx: &mut App) {
         let mut text = refusal.text;
         match refusal.boxed {
@@ -293,7 +305,7 @@ impl SessionChat {
             Some((taken, GiveBack::Composer)) => text = Some(taken),
             None => {}
         }
-        let shows_reason = text.is_some() || refusal.pull;
+        let shows_reason = text.is_some() || refusal.pull || refusal.clear;
         if let Some(text) = text.filter(|text| !text.is_empty()) {
             self.give_back(&text, cx);
         }
@@ -335,8 +347,12 @@ impl SessionChat {
     }
 
     /// A screen reading: the card stack, the cards' marks, the send in
-    /// flight and the composer state follow it.
+    /// flight and the composer state follow it; a box no longer holding a
+    /// draft drops an armed Clear.
     fn take_screen(&mut self, screen: &ChatScreen, now: Instant) {
+        if !matches!(screen.composer, ComposerState::Draft) {
+            self.clear_armed = false;
+        }
         let before = self.stack.current().map(|prompt| prompt.id.clone());
         self.stack.on_screen(screen, now);
         let after = screen.prompt.as_ref().map(|prompt| prompt.id.as_str());
@@ -2621,8 +2637,10 @@ impl RootView {
     /// it answers the current card, sends the composer's text, interrupts a
     /// running turn (dropping an armed one-click Stop first), or is
     /// swallowed; Ctrl+Enter does nothing while a send is in flight, and Esc
-    /// interrupts once per screen reading. Returns whether the key was
-    /// taken.
+    /// interrupts once per screen reading. An Esc the chat would pass on
+    /// drops a one-click arm (an armed Stop or draft Clear) when there is
+    /// one, since the composer's own Esc binding keeps it from the window.
+    /// Returns whether the key was taken.
     pub(crate) fn chat_key(
         &mut self,
         session_id: &str,
@@ -2655,7 +2673,14 @@ impl RootView {
                 }
             }
             KeyAction::Swallow => {}
-            KeyAction::Pass => return false,
+            // The composer binds Esc to its own action, so the window's Esc
+            // never sees it: a one-click arm is dropped here instead.
+            KeyAction::Pass => {
+                if key != CardKey::Escape || !self.disarm_escape_arms() {
+                    return false;
+                }
+                cx.notify();
+            }
         }
         cx.stop_propagation();
         true
@@ -2761,6 +2786,7 @@ impl RootView {
             return;
         };
         chat.sends.sent(request_id, text, now);
+        chat.clear_armed = false;
         chat.send_error = None;
         chat.set_composer_text("", cx);
         let host = self.chat.host_of(session_id);
@@ -2780,6 +2806,7 @@ impl RootView {
             return;
         }
         chat.pull.sent(request_id.clone());
+        chat.clear_armed = false;
         chat.send_error = None;
         let host = self.chat.host_of(session_id);
         self.send_to(&host, chat::pull_draft_message(session_id, request_id));
@@ -2799,10 +2826,69 @@ impl RootView {
             return;
         }
         chat.sends.sent_draft(request_id.clone(), now);
+        chat.clear_armed = false;
         chat.send_error = None;
         let host = self.chat.host_of(session_id);
         self.send_to(&host, chat::send_draft_message(session_id, request_id));
         cx.notify();
+    }
+
+    /// Asks session `session_id`'s host to clear the terminal prompt box's
+    /// draft, tracked so a refusal shows under the composer; a clear that
+    /// emptied the box is not answered.
+    pub(crate) fn clear_draft(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let request_id = new_request_id();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        chat.clear.sent(request_id.clone());
+        chat.clear_armed = false;
+        chat.send_error = None;
+        let host = self.chat.host_of(session_id);
+        self.send_to(&host, chat::clear_draft_message(session_id, request_id));
+        cx.notify();
+    }
+
+    /// Arms session `session_id`'s draft Clear, dropping any other
+    /// session's.
+    fn arm_draft_clear(&mut self, session_id: &str) {
+        self.disarm_draft_clear();
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.clear_armed = true;
+        }
+    }
+
+    /// Drops an armed draft Clear whose composer line no longer offers
+    /// Clear: the draft went, a pull or send took the row, or the host's
+    /// connection dropped. Run after every network event, so the arm never
+    /// shows again once its Clear went away.
+    pub(crate) fn keep_draft_clear_arms(&mut self) {
+        let gone: Vec<String> = self
+            .chat
+            .sessions
+            .iter()
+            .filter(|(session_id, chat)| {
+                chat.clear_armed
+                    && !self
+                        .composer_line_of(session_id, chat)
+                        .is_some_and(|line| line.offers_clear())
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in gone {
+            if let Some(chat) = self.chat.sessions.get_mut(&session_id) {
+                chat.clear_armed = false;
+            }
+        }
+    }
+
+    /// Drops every armed draft Clear; returns whether one was armed.
+    pub(crate) fn disarm_draft_clear(&mut self) -> bool {
+        let mut armed = false;
+        for chat in self.chat.sessions.values_mut() {
+            armed |= std::mem::take(&mut chat.clear_armed);
+        }
+        armed
     }
 
     /// Sends the agent's suggested next prompt `text` for session
@@ -2878,16 +2964,17 @@ impl RootView {
     }
 
     /// The note row `chat`'s composer draws: its note, with the draft's
-    /// Pull and Send on a host that offers them.
+    /// Pull and Send, and Clear, on a host that offers them.
     fn composer_line_of(&self, session_id: &str, chat: &SessionChat) -> Option<ComposerLine> {
-        let draft_actions = self
-            .conn_of(&self.chat.host_of(session_id))
-            .is_some_and(|conn| conn.supports(FEATURE_CHAT_DRAFT));
+        let conn = self.conn_of(&self.chat.host_of(session_id));
+        let draft_actions = conn.is_some_and(|conn| conn.supports(FEATURE_CHAT_DRAFT));
+        let clear = conn.is_some_and(|conn| conn.supports(FEATURE_CHAT_CLEAR_DRAFT));
         chat::composer_line(
             self.composer_note_of(session_id, chat),
             draft_actions,
             chat.pull.is_pending(),
         )
+        .map(|line| line.with_clear(clear))
     }
 
     /// The name people read for session `session_id`'s agent, for the
@@ -3595,7 +3682,8 @@ impl RootView {
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let line = self.composer_line_of(session_id, chat);
         let disabled = composer_line_disables(line.as_ref());
-        let note = line.map(|line| Self::composer_note_row(session_id, &line, cx));
+        let armed = chat.clear_armed;
+        let note = line.map(|line| Self::composer_note_row(session_id, &line, armed, cx));
         let chip = self
             .suggestion_chip_of(chat)
             .map(|chip| Self::suggestion_chip_row(session_id, &chip, !disabled, cx));
@@ -3657,10 +3745,13 @@ impl RootView {
 
     /// The composer's note row (`chat-composer-note`): `line`'s text, and
     /// for a draft the host can pull or send, Pull (`chat-draft-pull`) and
-    /// Send (`chat-draft-send`) beside it.
+    /// Send (`chat-draft-send`) beside it, then the draft's Clear where the
+    /// host offers it (see [`Self::draft_clear_controls`]; `armed` once
+    /// pressed).
     fn composer_note_row(
         session_id: &str,
         line: &ComposerLine,
+        armed: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
@@ -3697,6 +3788,11 @@ impl RootView {
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.send_draft(&send_id, cx);
         }));
+        let clear = if line.offers_clear() {
+            Self::draft_clear_controls(session_id, armed, cx)
+        } else {
+            Vec::new()
+        };
         div()
             .flex()
             .items_center()
@@ -3704,7 +3800,50 @@ impl RootView {
             .child(note.flex_1().min_w(px(0.0)))
             .child(pull)
             .child(send)
+            .children(clear)
             .into_any_element()
+    }
+
+    /// The draft's Clear (`chat-draft-clear`), or once pressed (`armed`) its
+    /// Confirm clear (`chat-draft-clear-confirm`) in the danger colour and
+    /// Cancel (`chat-draft-clear-cancel`). They act on the press, which then
+    /// goes no further, so the window's press elsewhere does not disarm them.
+    fn draft_clear_controls(
+        session_id: &str,
+        armed: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let compact = |selector: &str| {
+            outlined_button(
+                offset,
+                shift,
+                selector,
+                ButtonSize::Compact,
+                true,
+                Layer::Base,
+                &t,
+            )
+        };
+        let id = session_id.to_owned();
+        if !armed {
+            let clear = compact("chat-draft-clear").child("Clear");
+            return vec![
+                on_press(clear, cx, move |this, _, _| this.arm_draft_clear(&id)).into_any_element(),
+            ];
+        }
+        let confirm = compact("chat-draft-clear-confirm")
+            .text_color(gpui::rgb(t.danger))
+            .child("Confirm clear");
+        let cancel = compact("chat-draft-clear-cancel").child("Cancel");
+        vec![
+            on_press(confirm, cx, move |this, _, cx| this.clear_draft(&id, cx)).into_any_element(),
+            on_press(cancel, cx, |this, _, _| {
+                this.disarm_draft_clear();
+            })
+            .into_any_element(),
+        ]
     }
 
     /// The agent's suggested next prompt above the composer

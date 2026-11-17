@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- A terminal draft's Pull and Send now come with Clear, which empties the prompt box, pasted text and images included, once you confirm.
+
 ### Fixed
 
 - Opening a session that is waiting on you keeps its sidebar `!` until you answer it; a finished turn still clears when you look.
