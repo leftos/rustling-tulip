@@ -738,6 +738,17 @@ impl TerminalPane {
         &self.font
     }
 
+    /// Whether the program asked for application-cursor mode (DECCKM), in
+    /// which the arrows send `ESC O x` instead of `ESC [ x`.
+    pub fn app_cursor(&self) -> bool {
+        self.term.app_cursor()
+    }
+
+    /// Whether the pane holds a selection of its terminal's text.
+    pub fn has_selection(&self) -> bool {
+        self.term.has_selection()
+    }
+
     /// Draws with `settings` from the next frame, which re-measures the grid
     /// and resizes the PTY to fit.
     ///

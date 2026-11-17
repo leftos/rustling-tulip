@@ -13,7 +13,7 @@ use super::composer::Dock;
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
 use super::hosts_view::phone_button;
-use super::key_grid::{self, KeyAction, KeyModes};
+use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
@@ -779,40 +779,75 @@ impl PhoneRoot {
                     .min_h(px(TOUCH_TARGET))
                     .child(key.label.clone())
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.press_dock_key(index, window, cx);
+                        this.press_grid_key(index, KeySurface::Dock, window, cx);
                     })),
             );
         }
         dock
     }
 
-    /// A tap on the Keys dock's key at `index`: Ctrl arms the sticky Ctrl,
-    /// Paste pastes the clipboard into the composer's field, Quick opens the
-    /// Quick dock, and a send key types its presses into the shown session,
-    /// armed Ctrl joined to a key of one press. The dock holds no terminal,
-    /// so its arrows send the plain cursor keys.
-    pub fn press_dock_key(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// A tap on the grid's key at `index`, from the Keys dock or the
+    /// Terminal page's key bar: Ctrl arms the sticky Ctrl, Paste pastes into
+    /// the composer's field or the terminal, Quick opens the Quick dock or
+    /// the Terminal page's replies, and a send key types its bytes into the
+    /// surface. The dock holds no terminal, so its arrows send the plain
+    /// cursor keys.
+    pub fn press_grid_key(
+        &mut self,
+        index: usize,
+        surface: KeySurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let keys = key_grid::defaults();
         let Some(key) = keys.get(index) else {
             return;
         };
         match &key.action {
             KeyAction::Ctrl => self.key_bar.borrow_mut().toggle_ctrl(),
-            KeyAction::Paste => self.paste_into_composer(window, cx),
-            KeyAction::Quick => self.composer_dock = Dock::Quick,
-            KeyAction::Send { steps } => {
-                let sticky = self.key_bar.borrow_mut().take_ctrl_for(key);
-                let bytes = key_grid::key_bytes(steps, sticky, KeyModes { app_cursor: false });
-                if let Some(bytes) = bytes
-                    && let Some((_, session_id)) = self.shown.clone()
-                {
+            KeyAction::Paste => match surface {
+                KeySurface::Dock => self.paste_into_composer(window, cx),
+                KeySurface::Terminal => {
+                    let pane = self.terminal_pane(cx);
+                    Self::paste_into_terminal(pane, self.terminal_session(), cx);
+                }
+            },
+            KeyAction::Quick => match surface {
+                KeySurface::Dock => self.composer_dock = Dock::Quick,
+                KeySurface::Terminal => self.terminal_quick = !self.terminal_quick,
+            },
+            KeyAction::Send { .. } => self.press_send_key(key, surface, cx),
+            KeyAction::Unknown => {}
+        }
+        cx.notify();
+    }
+
+    /// A tap on a send key: its bytes, armed Ctrl joined to a key of one
+    /// press, typed into the terminal on the Terminal page, which reads the
+    /// terminal's modes, or sent to the shown session from the dock.
+    fn press_send_key(&mut self, key: &GridKey, surface: KeySurface, cx: &mut Context<Self>) {
+        let KeyAction::Send { steps } = &key.action else {
+            return;
+        };
+        let sticky = self.key_bar.borrow_mut().take_ctrl_for(key);
+        let pane = self
+            .terminal_pane(cx)
+            .filter(|_| surface == KeySurface::Terminal);
+        let modes = KeyModes {
+            app_cursor: pane.as_ref().is_some_and(|pane| pane.read(cx).app_cursor()),
+        };
+        let Some(bytes) = key_grid::key_bytes(steps, sticky, modes) else {
+            return;
+        };
+        match pane {
+            Some(pane) => pane.update(cx, |pane, cx| pane.type_bytes(&bytes, cx)),
+            None => {
+                if let Some((_, session_id)) = self.shown.clone() {
                     self.root
                         .update(cx, |root, _| root.send_phone_input(&session_id, &bytes));
                 }
             }
-            KeyAction::Unknown => {}
         }
-        cx.notify();
     }
 
     /// The header: Back, the label over the status word, and the toggle
@@ -861,6 +896,15 @@ impl PhoneRoot {
             )
             .children(toggle)
     }
+}
+
+/// Where a tap on a key of the grid happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySurface {
+    /// The Keys dock over the composer.
+    Dock,
+    /// The Terminal page's key bar.
+    Terminal,
 }
 
 /// Where a Quick dock's replies are typed.

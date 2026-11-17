@@ -13,9 +13,10 @@ use gpui::{
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
-use super::key_bar::{self, Action, Key, KeyBar};
+use super::key_bar::KeyBar;
+use super::key_grid::{self, KeyAction};
 use super::session::Page;
-use super::session_view::QuickTarget;
+use super::session_view::{KeySurface, QuickTarget};
 use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
@@ -26,9 +27,14 @@ use crate::ui_theme::theme;
 /// The room between the bar's keys, and around the bar.
 const BAR_GAP: f32 = 4.0;
 
-/// The horizontal padding of each of the bar's keys, narrow enough for ten
-/// of them to share a phone's width.
+/// The horizontal padding of each of the bar's keys.
 const BAR_KEY_PAD: f32 = 6.0;
+
+/// The widest a bar key draws, so a long label truncates rather than runs on.
+const BAR_KEY_MAX: f32 = 96.0;
+
+/// The Hide key's label, pinned at the bar's right end.
+const HIDE_LABEL: &str = "Hide";
 
 impl PhoneRoot {
     /// Opens the shown session's terminal while its Terminal page shows and
@@ -95,7 +101,7 @@ impl PhoneRoot {
     }
 
     /// The phone's open terminal, if any.
-    fn terminal_pane(&self, cx: &App) -> Option<Entity<TerminalPane>> {
+    pub(super) fn terminal_pane(&self, cx: &App) -> Option<Entity<TerminalPane>> {
         self.root.read(cx).phone_terminal_view()
     }
 
@@ -149,66 +155,69 @@ impl PhoneRoot {
             .child(self.key_bar_row(keyboard_up, cx))
     }
 
-    /// The key bar: one row of the bar's keys in order, Ctrl lit while it
-    /// is armed, and Hide at its end while the on-screen keyboard is up.
+    /// The key bar: one sideways-scrolling row of the grid's keys in order,
+    /// Ctrl lit while it is armed, then Hide pinned at its end while the
+    /// on-screen keyboard is up.
     fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.key_bar.borrow().armed();
-        let mut bar = div()
+        let mut scroll = div()
+            .id("phone-key-bar-scroll")
+            .driver_id(|| "phone-key-bar-scroll".to_owned())
+            .flex()
+            .gap(px(BAR_GAP))
+            .flex_1()
+            .min_w_0()
+            .overflow_x_scroll();
+        for (index, key) in key_grid::defaults().iter().enumerate() {
+            let kind = if key.action == KeyAction::Ctrl && armed {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Outlined
+            };
+            scroll = scroll.child(
+                phone_button(&format!("phone-bar-{}", key.id), kind, cx)
+                    .flex_none()
+                    .min_w(px(TOUCH_TARGET))
+                    .max_w(px(BAR_KEY_MAX))
+                    .min_h(px(TOUCH_TARGET))
+                    .px(px(BAR_KEY_PAD))
+                    .truncate()
+                    .child(key.label.clone())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.press_grid_key(index, KeySurface::Terminal, window, cx);
+                    })),
+            );
+        }
+        let hide = keyboard_up.then(|| {
+            phone_button("phone-bar-hide", ButtonKind::Outlined, cx)
+                .flex_none()
+                .min_h(px(TOUCH_TARGET))
+                .px(px(BAR_KEY_PAD))
+                .child(HIDE_LABEL)
+                .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
+                    crate::keyboard::lower(window);
+                    cx.notify();
+                }))
+        });
+        div()
             .driver_id(|| "phone-key-bar".to_owned())
             .flex_none()
             .flex()
             .gap(px(BAR_GAP))
             .px(px(SIDE_PADDING))
-            .py(px(BAR_GAP));
-        for key in key_bar::shown(keyboard_up) {
-            let kind = if key == Key::Ctrl && armed {
-                ButtonKind::Primary
-            } else {
-                ButtonKind::Outlined
-            };
-            bar = bar.child(
-                phone_button(&format!("phone-bar-{}", key.id()), kind, cx)
-                    .flex_1()
-                    .min_w_0()
-                    .min_h(px(TOUCH_TARGET))
-                    .px(px(BAR_KEY_PAD))
-                    .child(key.label())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.tap_bar(key, window, cx);
-                    })),
-            );
-        }
-        bar
-    }
-
-    /// A tap on the bar's `key`: its keystroke through the terminal, the
-    /// clipboard's text pasted, the Quick replies opened or closed, Ctrl
-    /// armed or disarmed, or the on-screen keyboard put away.
-    fn tap_bar(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
-        let action = self.key_bar.borrow_mut().press(key);
-        let pane = self.terminal_pane(cx);
-        match action {
-            Action::Key(keystroke) => {
-                if let Some(pane) = pane {
-                    pane.update(cx, |pane, cx| pane.press(&keystroke, cx));
-                }
-            }
-            Action::Paste => Self::paste_into_terminal(pane, self.terminal_session(), cx),
-            Action::Quick => self.terminal_quick = !self.terminal_quick,
-            Action::Hide => crate::keyboard::lower(window),
-            Action::None => {}
-        }
-        cx.notify();
+            .py(px(BAR_GAP))
+            .child(scroll)
+            .children(hide)
     }
 
     /// The session the open terminal shows, as this page opened it.
-    fn terminal_session(&self) -> Option<String> {
+    pub(super) fn terminal_session(&self) -> Option<String> {
         self.terminal_open.as_ref().map(|(_, id)| id.clone())
     }
 
     /// Paste's tap: the clipboard's text pasted into `pane`, bracketed when
     /// the program asked; a clipboard with no text sends nothing.
-    fn paste_into_terminal(
+    pub(super) fn paste_into_terminal(
         pane: Option<Entity<TerminalPane>>,
         session_id: Option<String>,
         cx: &mut Context<Self>,

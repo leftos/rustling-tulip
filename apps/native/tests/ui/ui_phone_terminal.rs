@@ -6,7 +6,10 @@
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{Edges, Pixels, TestAppContext, WindowInsets, WindowOptions, px};
+use gpui::{
+    Edges, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase,
+    WindowInsets, WindowOptions, point, px,
+};
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
     DaemonMessage, SessionSnapshot,
@@ -565,6 +568,256 @@ fn the_key_bar_arrows_send_cursor_keys(cx: &mut TestAppContext) {
         h.host(&saved_remote()).sent_input("n"),
         b"\x1bOA",
         "application-cursor mode"
+    );
+}
+
+/// The key bar's keys' driver ids: the whole grid in its order.
+const GRID_BAR_KEYS: [&str; 21] = [
+    "phone-bar-esc",
+    "phone-bar-tab",
+    "phone-bar-ctrl",
+    "phone-bar-up",
+    "phone-bar-down",
+    "phone-bar-left",
+    "phone-bar-right",
+    "phone-bar-paste",
+    "phone-bar-quick",
+    "phone-bar-shift-tab",
+    "phone-bar-enter",
+    "phone-bar-ctrl-c",
+    "phone-bar-1",
+    "phone-bar-2",
+    "phone-bar-3",
+    "phone-bar-4",
+    "phone-bar-5",
+    "phone-bar-6",
+    "phone-bar-7",
+    "phone-bar-8",
+    "phone-bar-9",
+];
+
+/// Resizes the phone to the window it draws at on a phone, narrow enough for
+/// the key bar's keys to run off its right edge.
+fn phone_width(h: &mut Harness<'_>) {
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+}
+
+/// Scrolls the key bar sideways until what `selector` tags lies inside its
+/// scroller, as a finger's pan does.
+fn scroll_bar_to(h: &mut Harness<'_>, selector: &str) {
+    let at = h.center("phone-key-bar-scroll");
+    for _ in 0..50 {
+        let (outer, inner) = (h.bounds("phone-key-bar-scroll"), h.bounds(selector));
+        let dx = if inner.right() > outer.right() {
+            outer.right() - inner.right()
+        } else if inner.left() < outer.left() {
+            outer.left() - inner.left()
+        } else {
+            return;
+        };
+        h.cx.simulate_event(ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(dx, px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
+        });
+        h.cx.run_until_parked();
+    }
+    let (outer, inner) = (h.bounds("phone-key-bar-scroll"), h.bounds(selector));
+    assert!(
+        inner.left() >= outer.left() && inner.right() <= outer.right() + px(1.0),
+        "{selector} does not show in the key bar after 50 scrolls: {inner:?} in {outer:?}"
+    );
+}
+
+#[gpui::test]
+fn the_key_bar_is_one_row_of_the_grid_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+
+    let mut row: Option<Pixels> = None;
+    let mut left = px(-1.0);
+    for key in GRID_BAR_KEYS {
+        let bounds = h.bounds(key);
+        assert!(bounds.size.width > px(0.0), "{key} is drawn: {bounds:?}");
+        let y = bounds.origin.y;
+        assert_eq!(
+            *row.get_or_insert(y),
+            y,
+            "{key} sits on the bar's one row: {bounds:?}"
+        );
+        assert!(
+            bounds.origin.x > left,
+            "{key} follows the key before it: {bounds:?}"
+        );
+        left = bounds.origin.x;
+    }
+}
+
+#[gpui::test]
+fn the_key_bar_scrolls_sideways_to_its_last_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+    let bar = h.bounds("phone-key-bar-scroll");
+    let last = h.bounds("phone-bar-9");
+    assert!(
+        last.right() > bar.right(),
+        "the last key starts off the bar: {last:?} in {bar:?}"
+    );
+
+    scroll_bar_to(&mut h, "phone-bar-9");
+
+    let (bar, last) = (h.bounds("phone-key-bar-scroll"), h.bounds("phone-bar-9"));
+    assert!(
+        last.left() >= bar.left() && last.right() <= bar.right() + px(1.0),
+        "the sideways scroll brings the last key inside the bar: {last:?} in {bar:?}"
+    );
+}
+
+#[gpui::test]
+fn the_key_bar_stays_one_row_tall(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+    let bar = h.bounds("phone-key-bar");
+    let key = h.bounds("phone-bar-esc");
+    assert!(
+        bar.size.height <= key.size.height + px(8.0),
+        "the bar is one key tall: {bar:?}, a key {key:?}"
+    );
+
+    draw_keyboard(&mut h, true);
+
+    assert_eq!(
+        h.bounds("phone-key-bar").size.height,
+        bar.size.height,
+        "Hide stays on the bar's row"
+    );
+}
+
+#[gpui::test]
+fn the_key_bar_keeps_hide_pinned_at_its_right_end(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+    draw_keyboard(&mut h, true);
+    let hide = h.bounds("phone-bar-hide");
+
+    scroll_bar_to(&mut h, "phone-bar-9");
+
+    let scrolled = h.bounds("phone-bar-hide");
+    assert_eq!(
+        scrolled.origin.x, hide.origin.x,
+        "Hide stays put while the keys scroll under it: {scrolled:?} was {hide:?}"
+    );
+    let last = h.bounds("phone-bar-9");
+    assert!(
+        last.right() <= scrolled.left() + px(1.0),
+        "the scrolled keys end before Hide: {last:?}, Hide {scrolled:?}"
+    );
+}
+
+/// The point `dx` points past the centre of cell (`col`, 0) of the terminal
+/// `pane` holds, as the desktop's own selection specs take theirs.
+fn cell_edge(h: &mut Harness<'_>, pane: &str, col: usize, dx: f32) -> Point<Pixels> {
+    let at = h
+        .root(|root, cx| root.pane_cell_center(pane, col, 0, cx))
+        .expect("the terminal pane is laid out");
+    point(at.x + px(dx), at.y)
+}
+
+/// Whether the phone's terminal slot `pane` holds a selection.
+fn selected(h: &mut Harness<'_>, pane: &str) -> bool {
+    h.root(|root, cx| {
+        root.pane_terminal(pane)
+            .is_some_and(|view| view.read(cx).has_selection())
+    })
+}
+
+#[gpui::test]
+fn the_bar_ctrl_c_key_interrupts_with_text_selected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    // At its final width first: a resize reflows the terminal's columns, and
+    // that clears any selection the drag had made.
+    phone_width(&mut h);
+    h.host(&saved_remote()).pty("n", b"hello world");
+    h.cx.run_until_parked();
+    let slot = slot_id("n");
+    let (from, to) = (
+        cell_edge(&mut h, &slot, 0, -2.0),
+        cell_edge(&mut h, &slot, 4, 2.0),
+    );
+    let terminal = h.bounds("phone-session-terminal");
+    assert!(
+        terminal.contains(&from) && terminal.contains(&to),
+        "the selection drags inside the terminal: {from:?} to {to:?} in {terminal:?}"
+    );
+    // A selection made as `ui_terminal`'s copy specs make one. The phone
+    // drops the `Copied` its release emits (`drops_phone_event`), so the
+    // selection is checked through the pane, not the clipboard.
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert!(selected(&mut h, &slot), "the drag selects text");
+    h.set_clipboard("other");
+
+    scroll_bar_to(&mut h, "phone-bar-ctrl-c");
+    h.click_on("phone-bar-ctrl-c");
+
+    assert!(
+        !selected(&mut h, &slot),
+        "the bar's send clears the selection, as every key typed into the terminal does"
+    );
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        [0x03],
+        "Ctrl+C interrupts a terminal with a selection instead of copying"
+    );
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("other"),
+        "and the bar's Ctrl+C copies nothing"
+    );
+}
+
+#[gpui::test]
+fn the_bar_enter_and_digit_keys_send_their_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+
+    scroll_bar_to(&mut h, "phone-bar-enter");
+    h.click_on("phone-bar-enter");
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), b"\r");
+
+    scroll_bar_to(&mut h, "phone-bar-1");
+    h.click_on("phone-bar-1");
+    assert_eq!(h.host(&saved_remote()).sent_input("n"), b"1");
+}
+
+#[gpui::test]
+fn armed_ctrl_is_left_armed_by_the_bar_ctrl_c_chord(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_width(&mut h);
+
+    h.click_on("phone-bar-ctrl");
+    scroll_bar_to(&mut h, "phone-bar-ctrl-c");
+    h.click_on("phone-bar-ctrl-c");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        [0x03],
+        "Ctrl+C is a chord of its own"
+    );
+
+    scroll_bar_to(&mut h, "phone-bar-up");
+    h.click_on("phone-bar-up");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"\x1b[1;5A",
+        "the armed Ctrl still waits for the next plain key"
     );
 }
 
