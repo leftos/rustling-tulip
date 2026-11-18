@@ -1791,6 +1791,7 @@ impl RootView {
             host_path,
             local_path: parts.join("/"),
             size: entry.size().unwrap_or_else(|| entry.bytes_received()),
+            host_label: entry.host_label().to_owned(),
         })
     }
 

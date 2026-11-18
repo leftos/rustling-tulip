@@ -31,6 +31,7 @@ mod sweep;
 mod terminal_fit;
 mod terminal_view;
 mod tray;
+mod viewer_view;
 
 use std::rc::Rc;
 use std::sync::Arc;

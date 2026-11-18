@@ -162,6 +162,7 @@ fn kept(name: &str, size: u64) -> PhoneFetched {
         host_path: format!("/abs/{name}"),
         local_path: format!("{REMOTE}/root/abs/{name}"),
         size,
+        host_label: REMOTE.to_owned(),
     }
 }
 
@@ -176,6 +177,8 @@ fn keep_two(h: &mut Harness<'_>, copies: &std::path::Path) {
         std::fs::write(&path, b"copy").expect("write the copy");
         h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
     }
+    // A save opens the viewer over Home; Back shows Home again.
+    h.click_on("phone-viewer-back");
 }
 
 /// The kept copies' size as the Storage page shows it, and its error line.

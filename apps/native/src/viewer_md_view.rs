@@ -33,6 +33,7 @@ use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
+use crate::viewer_tab_view::PHONE_VIEWER_ID;
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The tooltip of the toggle a document over the render cap disables.
@@ -1166,6 +1167,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The phone's viewer follows only a jump within its page.
+        if tab_id == PHONE_VIEWER_ID && !matches!(target, LinkTarget::Anchor(_)) {
+            tracing::debug!(tab_id, "the phone's viewer follows no link out of its page");
+            return;
+        }
         let Some(tab) = self.viewer_tabs.get(tab_id) else {
             return;
         };

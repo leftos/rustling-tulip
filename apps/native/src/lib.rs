@@ -515,6 +515,8 @@ pub struct PhoneFetched {
     pub local_path: String,
     /// The file's size in bytes.
     pub size: u64,
+    /// The host as the fetch's toasts name it.
+    pub host_label: String,
 }
 
 impl RootView {

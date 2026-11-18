@@ -26,7 +26,7 @@ use crate::ui_theme::{UiTheme, theme};
 /// The header's button that opens Settings.
 const OPEN_LABEL: &str = "Settings";
 /// Settings' Back button.
-const BACK_LABEL: &str = "Back";
+pub(super) const BACK_LABEL: &str = "Back";
 /// What the Notifications page says while no host draws a switch.
 const NO_NOTIFICATIONS_TEXT: &str = "No host offers notifications yet.";
 /// The mark at a category row's right end.
@@ -50,7 +50,7 @@ const CLEAR_LABEL: &str = "Clear";
 
 /// A header row's frame, the session page's: at least a touch target tall,
 /// the side padding, a line under it.
-fn header_frame(t: &UiTheme) -> Div {
+pub(super) fn header_frame(t: &UiTheme) -> Div {
     div()
         .flex_none()
         .flex()
@@ -159,8 +159,8 @@ impl PhoneRoot {
         self.keep_key_editor();
     }
 
-    /// A back gesture over the window while a session or Settings shows:
-    /// one step of the screen shown once it commits.
+    /// A back gesture over the window while the viewer, a session or
+    /// Settings shows: one step of the screen shown once it commits.
     pub(super) fn screen_back_gesture(
         &mut self,
         event: &BackGestureEvent,
@@ -170,7 +170,9 @@ impl PhoneRoot {
         if !session::back_on(event.phase) {
             return;
         }
-        if self.shown.is_some() {
+        if self.viewer.is_some() {
+            self.viewer_back(cx);
+        } else if self.shown.is_some() {
             self.session_back(cx);
         } else if self.settings.is_some() {
             self.settings_back(cx);
