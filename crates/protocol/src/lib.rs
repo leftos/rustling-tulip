@@ -197,6 +197,13 @@ pub const FEATURE_FILE_SEARCH: &str = "file_search";
 /// A client offers its `/` catalog only on a host that lists it.
 pub const FEATURE_CHAT_CATALOG: &str = "chat_catalog";
 
+/// `Welcome.features` entry: the daemon detects Linear issue identifiers in
+/// terminal text: it sends [`DaemonMessage::LinearContext`] at connect and
+/// again whenever any of it changes, and answers
+/// [`ClientMessage::GetLinearIssues`] with [`DaemonMessage::LinearIssues`].
+/// A client detects Linear issues only on a host that lists it.
+pub const FEATURE_LINEAR_LINKS: &str = "linear_links";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -6437,6 +6444,16 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Ask for the Linear issues a client saw identified in terminal text:
+    /// answered to every client with [`DaemonMessage::LinearIssues`], since
+    /// the cache is shared. `request_id` is echoed only on an
+    /// [`DaemonMessage::Error`]. Sent only to a daemon that lists
+    /// [`FEATURE_LINEAR_LINKS`].
+    GetLinearIssues {
+        identifiers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Load a session's summary for this connection: every stretch line as
     /// it stands, answered with [`DaemonMessage::Summary`] carrying this
     /// `request_id`, then the changed lines as
@@ -8070,6 +8087,27 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// The host's Linear context, sent to every client at connect and again
+    /// whenever any of it changes: `team_keys` are the workspace's team keys,
+    /// which an identifier must carry to count; `workspace` is the
+    /// workspace's `urlKey`, which issue URLs are built from; and
+    /// `key_configured` says whether the daemon has a Linear API key. Sent
+    /// only by a daemon that lists [`FEATURE_LINEAR_LINKS`].
+    LinearContext {
+        #[serde(default)]
+        team_keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+        #[serde(default)]
+        key_configured: bool,
+    },
+    /// Linear issues fetched for the identifiers clients asked for, sent to
+    /// every client since the cache is shared. An issue whose identifier is
+    /// already known replaces it.
+    LinearIssues {
+        #[serde(default)]
+        issues: Vec<LinearIssue>,
+    },
     /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
     /// with its `request_id`: every stretch line of the session's chat as it
     /// stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -8159,6 +8197,75 @@ pub enum CatalogEntrySource {
     /// Carried by the session's own folders.
     Project,
     /// A source this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One Linear issue a [`DaemonMessage::LinearIssues`] carries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinearIssue {
+    /// The issue's identifier, such as `RT-134`: its team key and number.
+    pub identifier: String,
+    /// The issue's title.
+    pub title: String,
+    /// The issue's Linear URL.
+    pub url: String,
+    /// The issue's workflow state, when Linear reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<LinearState>,
+    /// Linear's priority for the issue: 0 (none) to 4 (low).
+    #[serde(default)]
+    pub priority: u8,
+    /// Linear's name for that priority, such as `Urgent`.
+    #[serde(default)]
+    pub priority_label: String,
+    /// The name of the issue's project, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// The names of the releases the issue belongs to.
+    #[serde(default)]
+    pub releases: Vec<String>,
+    /// The display name of the issue's assignee, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// When the issue last changed in Linear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// When the daemon last fetched the issue.
+    pub fetched_at: DateTime<Utc>,
+    /// The last refresh of the issue failed, so this is the cached copy.
+    #[serde(default)]
+    pub stale: bool,
+}
+
+/// The workflow state of a [`LinearIssue`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinearState {
+    /// The state's name, such as `In Progress`.
+    pub name: String,
+    /// What kind of state it is.
+    pub kind: LinearStateKind,
+    /// The state's colour, as Linear's `#rrggbb`.
+    pub color: String,
+}
+
+/// What kind of workflow state a [`LinearState`] is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearStateKind {
+    /// An issue the team has not triaged yet.
+    Triage,
+    /// An issue the team has not scheduled.
+    Backlog,
+    /// An issue planned but not started.
+    Unstarted,
+    /// An issue being worked on.
+    Started,
+    /// An issue that is finished.
+    Completed,
+    /// An issue dropped without being finished.
+    Canceled,
+    /// A kind this build does not know.
     #[serde(other)]
     Unknown,
 }
@@ -18861,6 +18968,172 @@ mod tests {
                 assert!(!entries[0].opens_terminal);
                 assert_eq!(entries[1].kind, CatalogEntryKind::Command);
                 assert_eq!(entries[1].source, CatalogEntrySource::User);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linear_context_round_trips() {
+        let msg = DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_string(), "LL".to_string()],
+            workspace: Some("leftos".to_string()),
+            key_configured: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"linear_context","team_keys":["RT","LL"],"workspace":"leftos","key_configured":true}"#
+        );
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::LinearContext {
+                team_keys,
+                workspace,
+                key_configured,
+            } => {
+                assert_eq!(team_keys, vec!["RT".to_string(), "LL".to_string()]);
+                assert_eq!(workspace.as_deref(), Some("leftos"));
+                assert!(key_configured);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"linear_context"}"#;
+        match serde_json::from_str::<DaemonMessage>(bare).expect("deserialize") {
+            DaemonMessage::LinearContext {
+                team_keys,
+                workspace,
+                key_configured,
+            } => {
+                assert_eq!(team_keys.len(), 0);
+                assert_eq!(workspace, None);
+                assert!(!key_configured);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_linear_issues_round_trips() {
+        let msg = ClientMessage::GetLinearIssues {
+            identifiers: vec!["RT-134".to_string(), "RT-116".to_string()],
+            request_id: Some("req-linear".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"get_linear_issues","identifiers":["RT-134","RT-116"],"request_id":"req-linear"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::GetLinearIssues {
+                identifiers,
+                request_id,
+            } => {
+                assert_eq!(
+                    identifiers,
+                    vec!["RT-134".to_string(), "RT-116".to_string()]
+                );
+                assert_eq!(request_id.as_deref(), Some("req-linear"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"get_linear_issues","identifiers":["RT-1"]}"#;
+        match serde_json::from_str::<ClientMessage>(bare).expect("deserialize") {
+            ClientMessage::GetLinearIssues { request_id, .. } => assert_eq!(request_id, None),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linear_issues_round_trip_with_every_field_and_with_only_the_required_ones() {
+        let fetched_at = "2026-11-18T09:30:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+        let updated_at = "2026-11-17T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+        let msg = DaemonMessage::LinearIssues {
+            issues: vec![
+                LinearIssue {
+                    identifier: "RT-134".to_string(),
+                    title: "Linear protocol messages".to_string(),
+                    url: "https://linear.app/leftos/issue/RT-134/linear-protocol-messages"
+                        .to_string(),
+                    state: Some(LinearState {
+                        name: "In Progress".to_string(),
+                        kind: LinearStateKind::Started,
+                        color: "#f2c94c".to_string(),
+                    }),
+                    priority: 2,
+                    priority_label: "High".to_string(),
+                    project: Some("Linear links".to_string()),
+                    releases: vec!["v0.9.0-alpha".to_string()],
+                    assignee: Some("Sam".to_string()),
+                    updated_at: Some(updated_at),
+                    fetched_at,
+                    stale: false,
+                },
+                LinearIssue {
+                    identifier: "RT-1".to_string(),
+                    title: "Bare issue".to_string(),
+                    url: "https://linear.app/leftos/issue/RT-1".to_string(),
+                    state: None,
+                    priority: 0,
+                    priority_label: String::new(),
+                    project: None,
+                    releases: Vec::new(),
+                    assignee: None,
+                    updated_at: None,
+                    fetched_at,
+                    stale: false,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r##"{"type":"linear_issues","issues":[{"identifier":"RT-134","title":"Linear protocol messages","url":"https://linear.app/leftos/issue/RT-134/linear-protocol-messages","state":{"name":"In Progress","kind":"started","color":"#f2c94c"},"priority":2,"priority_label":"High","project":"Linear links","releases":["v0.9.0-alpha"],"assignee":"Sam","updated_at":"2026-11-17T12:00:00Z","fetched_at":"2026-11-18T09:30:00Z","stale":false},{"identifier":"RT-1","title":"Bare issue","url":"https://linear.app/leftos/issue/RT-1","priority":0,"priority_label":"","releases":[],"fetched_at":"2026-11-18T09:30:00Z","stale":false}]}"##
+        );
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::LinearIssues { issues } => {
+                assert_eq!(issues.len(), 2);
+                let full = &issues[0];
+                assert_eq!(full.identifier, "RT-134");
+                assert_eq!(full.priority, 2);
+                assert_eq!(full.priority_label, "High");
+                assert_eq!(full.project.as_deref(), Some("Linear links"));
+                assert_eq!(full.releases, vec!["v0.9.0-alpha".to_string()]);
+                assert_eq!(full.assignee.as_deref(), Some("Sam"));
+                let state = full.state.as_ref().expect("state");
+                assert_eq!(state.name, "In Progress");
+                assert_eq!(state.kind, LinearStateKind::Started);
+                assert_eq!(state.color, "#f2c94c");
+                assert_eq!(full.updated_at, Some(updated_at));
+                assert_eq!(full.fetched_at, fetched_at);
+                assert!(!full.stale);
+                let bare = &issues[1];
+                assert_eq!(bare.state, None);
+                assert_eq!(bare.priority, 0);
+                assert_eq!(bare.priority_label, "");
+                assert_eq!(bare.project, None);
+                assert_eq!(bare.releases.len(), 0);
+                assert_eq!(bare.assignee, None);
+                assert_eq!(bare.updated_at, None);
+                assert_eq!(bare.fetched_at, fetched_at);
+                assert!(!bare.stale);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_linear_state_of_an_unknown_type_still_decodes() {
+        let json = r##"{"type":"linear_issues","issues":[{"identifier":"RT-1","title":"x","url":"https://linear.app/leftos/issue/RT-1","state":{"name":"Paused","kind":"paused","color":"#999999"},"fetched_at":"2026-11-18T09:30:00Z"}]}"##;
+        match serde_json::from_str::<DaemonMessage>(json).expect("deserialize") {
+            DaemonMessage::LinearIssues { issues } => {
+                assert_eq!(issues.len(), 1);
+                let state = issues[0].state.as_ref().expect("state");
+                assert_eq!(state.kind, LinearStateKind::Unknown);
+                assert_eq!(state.name, "Paused");
             }
             other => panic!("unexpected variant: {other:?}"),
         }

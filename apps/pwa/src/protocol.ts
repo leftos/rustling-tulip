@@ -246,6 +246,15 @@ export const FEATURE_FILE_SEARCH = "file_search";
 export const FEATURE_CHAT_CATALOG = "chat_catalog";
 
 /**
+ * `Welcome.features` entry: the daemon detects Linear issue identifiers in
+ * terminal text: it sends [`DaemonMessage::LinearContext`] at connect and
+ * again whenever any of it changes, and answers
+ * [`ClientMessage::GetLinearIssues`] with [`DaemonMessage::LinearIssues`].
+ * A client detects Linear issues only on a host that lists it.
+ */
+export const FEATURE_LINEAR_LINKS = "linear_links";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -5115,6 +5124,14 @@ export type ClientMessage =
    */
   | { type: "list_catalog"; session_id: string; request_id?: string | null }
   /**
+   * Ask for the Linear issues a client saw identified in terminal text:
+   * answered to every client with [`DaemonMessage::LinearIssues`], since
+   * the cache is shared. `request_id` is echoed only on an
+   * [`DaemonMessage::Error`]. Sent only to a daemon that lists
+   * [`FEATURE_LINEAR_LINKS`].
+   */
+  | { type: "get_linear_issues"; identifiers: string[]; request_id?: string | null }
+  /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this
    * `request_id`, then the changed lines as
@@ -6386,6 +6403,21 @@ export type DaemonMessage =
    */
   | { type: "catalog"; session_id: string; entries?: CatalogEntry[]; request_id?: string | null }
   /**
+   * The host's Linear context, sent to every client at connect and again
+   * whenever any of it changes: `team_keys` are the workspace's team keys,
+   * which an identifier must carry to count; `workspace` is the
+   * workspace's `urlKey`, which issue URLs are built from; and
+   * `key_configured` says whether the daemon has a Linear API key. Sent
+   * only by a daemon that lists [`FEATURE_LINEAR_LINKS`].
+   */
+  | { type: "linear_context"; team_keys?: string[]; workspace?: string | null; key_configured?: boolean }
+  /**
+   * Linear issues fetched for the identifiers clients asked for, sent to
+   * every client since the cache is shared. An issue whose identifier is
+   * already known replaces it.
+   */
+  | { type: "linear_issues"; issues?: LinearIssue[] }
+  /**
    * The answer to [`ClientMessage::LoadSummary`], sent to the requester
    * with its `request_id`: every stretch line of the session's chat as it
    * stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -6453,6 +6485,59 @@ export type CatalogEntrySource =
   | "user"
   /** Carried by the session's own folders. */
   | "project";
+
+/** One Linear issue a [`DaemonMessage::LinearIssues`] carries. */
+export interface LinearIssue {
+  /** The issue's identifier, such as `RT-134`: its team key and number. */
+  identifier: string;
+  /** The issue's title. */
+  title: string;
+  /** The issue's Linear URL. */
+  url: string;
+  /** The issue's workflow state, when Linear reports one. */
+  state?: LinearState | null;
+  /** Linear's priority for the issue: 0 (none) to 4 (low). */
+  priority?: number;
+  /** Linear's name for that priority, such as `Urgent`. */
+  priority_label?: string;
+  /** The name of the issue's project, when it has one. */
+  project?: string | null;
+  /** The names of the releases the issue belongs to. */
+  releases?: string[];
+  /** The display name of the issue's assignee, when it has one. */
+  assignee?: string | null;
+  /** When the issue last changed in Linear. */
+  updated_at?: string | null;
+  /** When the daemon last fetched the issue. */
+  fetched_at: string;
+  /** The last refresh of the issue failed, so this is the cached copy. */
+  stale?: boolean;
+}
+
+/** The workflow state of a [`LinearIssue`]. */
+export interface LinearState {
+  /** The state's name, such as `In Progress`. */
+  name: string;
+  /** What kind of state it is. */
+  kind: LinearStateKind;
+  /** The state's colour, as Linear's `#rrggbb`. */
+  color: string;
+}
+
+/** What kind of workflow state a [`LinearState`] is. */
+export type LinearStateKind =
+  /** An issue the team has not triaged yet. */
+  | "triage"
+  /** An issue the team has not scheduled. */
+  | "backlog"
+  /** An issue planned but not started. */
+  | "unstarted"
+  /** An issue being worked on. */
+  | "started"
+  /** An issue that is finished. */
+  | "completed"
+  /** An issue dropped without being finished. */
+  | "canceled";
 
 /**
  * A single resolved script invocation. The dialog renders these in the

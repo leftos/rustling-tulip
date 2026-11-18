@@ -1274,6 +1274,15 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FollowTranscript { .. } | ClientMessage::UnfollowTranscript { .. }) => {
             transcripts::handle(hub, m, ctx);
         }
+        ClientMessage::GetLinearIssues { request_id, .. } => {
+            // No daemon serves Linear issues yet, and nothing offers
+            // `linear_links`, so no client sends this.
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: "this daemon does not serve Linear issues yet".to_owned(),
+                request_id,
+                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
+            });
+        }
     }
     Ok(())
 }
@@ -1546,6 +1555,31 @@ mod tests {
                 DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if message == "unknown session: s1" && id == "d1"
                         && code == protocol::error_codes::NOT_FOUND
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// A `GetLinearIssues` request is refused as unsupported until a daemon
+    /// serves Linear issues, echoing the requester's id.
+    #[tokio::test]
+    async fn get_linear_issues_is_refused_as_unsupported_until_served() {
+        let (hub, _scratch) = test_hub("get-linear-issues-unsupported");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::GetLinearIssues {
+                identifiers: vec!["RT-134".to_string()],
+                request_id: Some("l1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
+                    if message == "this daemon does not serve Linear issues yet"
+                        && id == "l1"
+                        && code == protocol::error_codes::UNSUPPORTED_MESSAGE
             ),
             "{reply:?}"
         );
