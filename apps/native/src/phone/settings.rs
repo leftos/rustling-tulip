@@ -18,16 +18,19 @@ pub(crate) enum Page {
     QuickReplies,
     /// The key grid the bar and the dock draw.
     Keys,
+    /// The copies kept of fetched files: their size and Clear.
+    Storage,
 }
 
 impl Page {
     /// Every category, in the order the list draws them.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Notifications,
         Self::Hosts,
         Self::Appearance,
         Self::QuickReplies,
         Self::Keys,
+        Self::Storage,
     ];
 
     /// The category's name: its row's label and its page's title.
@@ -38,6 +41,7 @@ impl Page {
             Self::Appearance => "Appearance",
             Self::QuickReplies => "Quick replies",
             Self::Keys => "Keys",
+            Self::Storage => "Storage",
         }
     }
 
@@ -49,6 +53,7 @@ impl Page {
             Self::Appearance => "appearance",
             Self::QuickReplies => "quick-replies",
             Self::Keys => "keys",
+            Self::Storage => "storage",
         }
     }
 }
@@ -196,7 +201,8 @@ mod tests {
                 "hosts",
                 "appearance",
                 "quick-replies",
-                "keys"
+                "keys",
+                "storage"
             ]
         );
     }

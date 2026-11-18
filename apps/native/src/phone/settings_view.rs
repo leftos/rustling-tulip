@@ -41,6 +41,12 @@ const CHECK: &str = "✓";
 const DOWN_LABEL: &str = "−";
 /// The stepper's button one size larger.
 const UP_LABEL: &str = "+";
+/// The Storage page's row title.
+const FETCHED_FILES_LABEL: &str = "Fetched files";
+/// The Storage page's line on how long copies are kept.
+const KEPT_UNTIL_TEXT: &str = "Kept until 30 days after you last open one";
+/// The Storage page's button that deletes every kept copy.
+const CLEAR_LABEL: &str = "Clear";
 
 /// A header row's frame, the session page's: at least a touch target tall,
 /// the side padding, a line under it.
@@ -71,6 +77,7 @@ impl PhoneRoot {
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
         tracing::debug!("phone: opening Settings");
         self.forget_pending_open();
+        self.storage_error = None;
         self.settings = Some(Settings::default());
         self.keep_reply_editor();
         self.keep_key_editor();
@@ -82,6 +89,7 @@ impl PhoneRoot {
     /// Opens `page` over Settings' list, as its row's tap does.
     fn open_settings_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.forget_pending_open();
+        self.storage_error = None;
         if let Some(settings) = self.settings.as_mut() {
             settings.open(page);
         }
@@ -98,6 +106,7 @@ impl PhoneRoot {
         let mut settings = Settings::default();
         settings.open(page);
         self.settings = Some(settings);
+        self.storage_error = None;
         self.keep_reply_editor();
         self.keep_key_editor();
         self.keep_restore_confirm();
@@ -116,6 +125,9 @@ impl PhoneRoot {
     pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
         let step = self.settings.as_mut().map(Settings::back);
+        if step == Some(BackStep::ToList) {
+            self.storage_error = None;
+        }
         self.retain_sub_pages(cx);
         if step == Some(BackStep::Close) {
             self.settings = None;
@@ -196,6 +208,7 @@ impl PhoneRoot {
                 Some(Page::Appearance) => self.appearance_page(&t, cx),
                 Some(Page::QuickReplies) => self.quick_replies_page(&t, cx),
                 Some(Page::Keys) => self.keys_page(window, &t, cx),
+                Some(Page::Storage) => self.storage_page(&t, cx),
             },
         };
         Some(
@@ -460,6 +473,90 @@ impl PhoneRoot {
     /// The pixels every UI text size is offset by, as saved.
     fn text_size_offset(&self, cx: &Context<Self>) -> i8 {
         self.root.read(cx).sidebar.ui_state().ui_text_size
+    }
+
+    /// The kept copies' size as the Storage page shows it.
+    #[must_use]
+    pub fn kept_size_text(&self) -> String {
+        crate::spawn_form::human_size(self.fetched.total_size())
+    }
+
+    /// The Storage page's error line after a Clear that left copies behind,
+    /// until the page is left.
+    #[must_use]
+    pub fn storage_error(&self) -> Option<&str> {
+        self.storage_error.as_deref()
+    }
+
+    /// The Storage page: the kept copies' size and how long they are kept,
+    /// over Clear and, after a Clear that failed, why.
+    fn storage_page(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let row = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .min_h(px(TOUCH_TARGET))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+                            .child(FETCHED_FILES_LABEL),
+                    )
+                    .child(
+                        div()
+                            .driver_id(|| "phone-settings-storage-size".to_owned())
+                            .flex_none()
+                            .child(self.kept_size_text()),
+                    ),
+            )
+            .child(div().text_color(gpui::rgb(t.muted)).child(KEPT_UNTIL_TEXT));
+        let clear = phone_button("phone-settings-storage-clear", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_none()
+            .child(CLEAR_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clear_fetched(cx)));
+        let error = self.storage_error.clone().map(|err| {
+            div()
+                .driver_id(|| "phone-settings-storage-error".to_owned())
+                .text_color(gpui::rgb(t.muted))
+                .child(format!("Some copies could not be deleted: {err}"))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(SIDE_PADDING))
+            .child(row)
+            .child(div().flex().child(clear))
+            .children(error)
+    }
+
+    /// Deletes every kept copy and writes the index; a copy left behind
+    /// shows why under Clear.
+    fn clear_fetched(&mut self, cx: &mut Context<Self>) {
+        let result = match self.root.read(cx).remote_files_root() {
+            Ok(root) => {
+                let root = root.to_path_buf();
+                self.fetched.clear(&root).map_err(|err| err.to_string())
+            }
+            Err(err) => Err(err.to_owned()),
+        };
+        self.write_fetched();
+        self.storage_error = result.err();
+        if let Some(err) = &self.storage_error {
+            tracing::warn!(error = %err, "phone: clearing the fetched copies");
+        }
+        cx.notify();
     }
 
     /// Steps the text size one `delta`; at an end of the range nothing

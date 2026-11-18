@@ -2,8 +2,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use gpui::{
@@ -12,6 +14,7 @@ use gpui::{
 };
 use protocol::ClientMessage;
 
+use super::fetched::{Entry, Index};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
@@ -32,6 +35,18 @@ use crate::connection::State;
 use crate::driver_id::DriverId as _;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
+
+/// The phone's index of kept copies, in the UI folder.
+const FETCHED_FILE: &str = "fetched.json";
+
+/// The wall-clock time in milliseconds since the Unix epoch; 0 before it.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
 
 /// The phone's root view: the saved hosts or the first-run form, or while
 /// a saved host is open the phone's Home list at the window's width, or the
@@ -117,6 +132,13 @@ pub struct PhoneRoot {
     /// Why the last tap could not open its session, until the next
     /// navigation or tap.
     pub(super) open_note: Option<String>,
+    /// The copies the phone keeps of fetched files.
+    pub(super) fetched: Index,
+    /// Where the index is saved; `None` keeps it in memory only.
+    fetched_path: Option<PathBuf>,
+    /// Why the Storage page's last Clear left copies behind, until the page
+    /// is left.
+    pub(super) storage_error: Option<String>,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
     /// Redials the dropped saved hosts when the window comes back to the
@@ -144,6 +166,7 @@ impl PhoneRoot {
             this.sync_sheet(cx);
             this.push_changed(cx);
             this.sweep_delivered(cx);
+            this.take_fetched(cx);
             cx.notify();
         });
         if platform.supported() {
@@ -170,9 +193,12 @@ impl PhoneRoot {
                 });
                 this.swept = None;
                 this.sweep_delivered(cx);
+                this.sweep_fetched(cx);
             }
         });
-        Self {
+        let fetched_path = root.read(cx).ui_dir().map(|dir| dir.join(FETCHED_FILE));
+        let fetched = fetched_path.as_deref().map(Index::read).unwrap_or_default();
+        let mut this = Self {
             hosts: hosts_view::PhoneHosts::new(&root, cx),
             root,
             platform,
@@ -206,8 +232,64 @@ impl PhoneRoot {
             sweeps: 0,
             pending_open: None,
             open_note: None,
+            fetched,
+            fetched_path,
+            storage_error: None,
             _root_changed: root_changed,
             _visibility: visibility,
+        };
+        this.sweep_fetched(cx);
+        this
+    }
+
+    /// Records the root's queued saved fetches in the index, opened now, and
+    /// writes it once.
+    fn take_fetched(&mut self, cx: &mut Context<Self>) {
+        let saved = self.root.update(cx, |root, _| root.take_phone_fetched());
+        if saved.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        for saved in saved {
+            self.fetched.upsert(Entry {
+                host: saved.host,
+                host_path: saved.host_path,
+                local_path: saved.local_path,
+                size: saved.size,
+                modified: None,
+                fetched_at: now,
+                last_opened: now,
+            });
+        }
+        self.write_fetched();
+    }
+
+    /// Deletes the copies unopened for the retention time and writes the
+    /// index when that changed it.
+    fn sweep_fetched(&mut self, cx: &App) {
+        let root = match self.root.read(cx).remote_files_root() {
+            Ok(root) => root.to_path_buf(),
+            Err(err) => {
+                tracing::warn!(error = %err, "phone: no copies folder; fetched copies not swept");
+                return;
+            }
+        };
+        let before = self.fetched.entries.len();
+        if let Err(err) = self.fetched.sweep(&root, now_ms()) {
+            tracing::warn!(error = %err, "phone: sweeping the fetched copies");
+        }
+        if self.fetched.entries.len() != before {
+            self.write_fetched();
+        }
+    }
+
+    /// Writes the index to the UI folder; with none it stays in memory.
+    pub(super) fn write_fetched(&self) {
+        let Some(path) = self.fetched_path.as_deref() else {
+            return;
+        };
+        if let Err(err) = self.fetched.write_atomic(path) {
+            tracing::warn!(path = %path.display(), error = %err, "phone: writing the fetched index");
         }
     }
 

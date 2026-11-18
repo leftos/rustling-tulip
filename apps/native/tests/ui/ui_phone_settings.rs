@@ -7,16 +7,20 @@ use std::sync::Arc;
 
 use crate::support;
 
+use base64::Engine as _;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{BackGesturePhase, Pixels, TestAppContext, point, px};
 use protocol::{DaemonMessage, FEATURE_RELAY_PUSH};
 use rustling_tulip_native::builtin_themes::DRACULA;
+use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
+use rustling_tulip_native::target::HostKey;
 use rustling_tulip_native::theme_store::{BUILT_INS, THEMES_DIR};
+use rustling_tulip_native::{LinkAction, PhoneFetched};
 use rustling_tulip_native::{fonts, ui_theme};
 use serde_json::json;
-use support::{Harness, REMOTE, TestDir, saved_remote, saved_ui, seed_ui, session};
+use support::{Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
 
 /// The least height of a row or a target.
 fn touch_target() -> Pixels {
@@ -130,10 +134,179 @@ fn the_settings_button_shows_the_category_list(cx: &mut TestAppContext) {
     assert!(!drawn(&mut h, "phone-home"), "in Home's place");
     assert!(drawn(&mut h, "phone-settings-back"));
     assert!(h.bounds("phone-settings-back").size.height >= touch_target());
-    let row = "phone-settings-row-notifications";
-    assert!(drawn(&mut h, row), "the Notifications row shows");
-    assert!(h.bounds(row).size.height >= touch_target());
+    for key in [
+        "notifications",
+        "hosts",
+        "appearance",
+        "quick-replies",
+        "keys",
+        "storage",
+    ] {
+        let row = format!("phone-settings-row-{key}");
+        assert!(drawn(&mut h, &row), "the {key} row shows");
+        assert!(h.bounds(&row).size.height >= touch_target());
+    }
+    assert!(
+        h.bounds("phone-settings-row-keys").bottom()
+            <= h.bounds("phone-settings-row-storage").top(),
+        "Storage is the last row"
+    );
     assert!(!drawn(&mut h, &switch()), "the list draws no switch");
+}
+
+/// The copy of `name` fetched from [`REMOTE`] that the phone keeps, `size`
+/// bytes long.
+fn kept(name: &str, size: u64) -> PhoneFetched {
+    PhoneFetched {
+        host: REMOTE.to_owned(),
+        host_path: format!("/abs/{name}"),
+        local_path: format!("{REMOTE}/root/abs/{name}"),
+        size,
+    }
+}
+
+/// Hands the phone two saved fetches, 1024 and 2048 bytes, whose copies sit
+/// under `copies`.
+fn keep_two(h: &mut Harness<'_>, copies: &std::path::Path) {
+    for (name, size) in [("one.txt", 1024), ("two.txt", 2048)] {
+        let saved = kept(name, size);
+        let path = copies.join(&saved.local_path);
+        std::fs::create_dir_all(path.parent().expect("a copy has a folder"))
+            .expect("make the copy's folder");
+        std::fs::write(&path, b"copy").expect("write the copy");
+        h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
+    }
+}
+
+/// The kept copies' size as the Storage page shows it, and its error line.
+fn storage(h: &mut Harness<'_>) -> (String, Option<String>) {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        let phone = phone.read(cx);
+        (
+            phone.kept_size_text(),
+            phone.storage_error().map(str::to_owned),
+        )
+    })
+}
+
+/// The entries `fetched.json` in `dir` holds.
+fn saved_index(dir: &TestDir) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(dir.path().join("fetched.json")).expect("read the index");
+    let index: serde_json::Value = serde_json::from_str(&text).expect("parse the index");
+    index["entries"].as_array().cloned().unwrap_or_default()
+}
+
+#[gpui::test]
+fn the_storage_row_opens_a_page_with_the_kept_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    h.root_update(|root, _, _| root.set_remote_files_root(copies.clone()));
+    keep_two(&mut h, &copies);
+
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-storage");
+
+    assert!(
+        drawn(&mut h, "phone-settings-storage-size"),
+        "the size shows"
+    );
+    assert!(drawn(&mut h, "phone-settings-storage-clear"), "with Clear");
+    assert!(h.bounds("phone-settings-storage-clear").size.height >= touch_target());
+    assert!(
+        !drawn(&mut h, "phone-settings-storage-error"),
+        "a fresh page shows no error"
+    );
+    assert_eq!(storage(&mut h), ("3.0 KB".to_owned(), None));
+    let entries = saved_index(&dir);
+    assert_eq!(entries.len(), 2, "both copies are saved: {entries:?}");
+    assert_eq!(entries[0]["host_path"], "/abs/one.txt");
+    assert_eq!(entries[1]["size"], 2048);
+}
+
+#[gpui::test]
+fn a_saved_fetch_on_the_phone_is_kept_in_the_index(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/repos/repo")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").worktree("r1").build()],
+    });
+    host.sent();
+    h.root_update(|root, _, _| root.set_remote_files_root(copies.clone()));
+    let request = FetchRequest {
+        host: HostKey::of(&saved_remote()),
+        repo_id: "r1".to_owned(),
+        repo_name: "repo".to_owned(),
+        worktree_path: Some("C:/wt/r1".to_owned()),
+        rel_path: "notes.txt".to_owned(),
+        host_path: false,
+        line: None,
+        column: None,
+        open_when_done: true,
+        action: LinkAction::DefaultApp,
+    };
+    let id = h
+        .root_update(move |root, _, cx| root.fetch_remote_file(request, cx))
+        .expect("a fetch on a remote host starts");
+
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FileFetchStarted {
+        id: id.clone(),
+        resolved_path: r"\\?\C:\repos\repo\notes.txt".to_owned(),
+        size: 4,
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: id.clone(),
+        seq: 0,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(b"note"),
+    });
+    host.send(DaemonMessage::FileFetchDone { id });
+
+    let local = format!("{REMOTE}/repo/notes.txt");
+    assert_eq!(
+        std::fs::read(copies.join(&local)).expect("the copy is saved"),
+        b"note"
+    );
+    assert!(h.opened().is_empty(), "the phone opens nothing itself");
+    let entries = saved_index(&dir);
+    assert_eq!(entries.len(), 1, "the saved fetch is kept: {entries:?}");
+    assert_eq!(entries[0]["host"], REMOTE);
+    assert_eq!(entries[0]["host_path"], "repo/notes.txt");
+    assert_eq!(entries[0]["local_path"], local);
+    assert_eq!(entries[0]["size"], 4);
+    assert_eq!(storage(&mut h).0, "4 B");
+}
+
+#[gpui::test]
+fn clear_empties_the_kept_copies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    h.root_update(|root, _, _| root.set_remote_files_root(copies.clone()));
+    keep_two(&mut h, &copies);
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-storage");
+
+    h.click_on("phone-settings-storage-clear");
+
+    assert_eq!(storage(&mut h), ("0 B".to_owned(), None));
+    assert!(!drawn(&mut h, "phone-settings-storage-error"));
+    assert!(saved_index(&dir).is_empty(), "the saved index is empty");
+    for name in ["one.txt", "two.txt"] {
+        assert!(
+            !copies.join(kept(name, 0).local_path).exists(),
+            "{name}'s copy is deleted"
+        );
+    }
 }
 
 #[gpui::test]

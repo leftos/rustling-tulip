@@ -28,7 +28,8 @@ The phone reuses the desktop's host-path fetch (RT-1823) and the file manager's 
 
 ## Steps
 
-- [ ] Copies on the phone: `remote_files_dir` on iOS in Documents, the two `Info.plist` keys, `fetched.json`, the freshness check (stat, refetch when changed, the stale line offline), the 30-day sweep, and Settings' storage row with Clear.
+- [x] Copies on the phone: `remote_files_dir` on iOS in Documents, the two `Info.plist` keys, `fetched.json`, the fetch seam that records a saved fetch, the 30-day sweep, and Settings' Storage row with Clear.
+- [ ] Opening a copy again: the freshness check (stat, refetch when changed, the stale line offline), and the open that sets a copy's last-opened time (RT-1935).
 - [ ] The viewer page: highlighted text, rendered Markdown, images, the other-type card, the header and its stale line; `native-shot` views `phone-viewer` and `phone-viewer-md`.
 - [ ] The share sheet seam and Share in the viewer header, proved in the simulator by `tools/ios/sim-run.ps1`'s log.
 - [ ] Tapped paths: links in the phone's chat and terminal, resolved and stat-ed, opening the viewer or the browser, and the inline not-on-host line.

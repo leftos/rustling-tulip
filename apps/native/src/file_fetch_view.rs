@@ -1735,6 +1735,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.shape == crate::RootShape::Phone {
+            if let Some(saved) = self.phone_fetched_of(entry, &path) {
+                self.phone_file_saved(saved, cx);
+            }
+            return;
+        }
         let request = entry.request();
         let sends_folders = self.host_sends_folders(entry.host_key());
         if request.open_when_done && request.action == LinkAction::Folder && sends_folders {
@@ -1747,6 +1753,45 @@ impl RootView {
         if request.open_when_done {
             self.open_fetched(path, request, window, cx);
         }
+    }
+
+    /// The phone's record of `entry`, saved at `path`: its host is the
+    /// folder the copy sits in under the copies folder. `None`, with a
+    /// warning, when `path` is not under that folder.
+    fn phone_fetched_of(&self, entry: &FetchEntry, path: &Path) -> Option<crate::PhoneFetched> {
+        let relative = self
+            .remote_files_root
+            .as_ref()
+            .ok()
+            .and_then(|root| path.strip_prefix(root).ok());
+        let parts: Option<Vec<&str>> = relative.and_then(|relative| {
+            relative
+                .components()
+                .map(|part| match part {
+                    std::path::Component::Normal(part) => part.to_str(),
+                    _ => None,
+                })
+                .collect()
+        });
+        let Some(parts) = parts.filter(|parts| parts.len() > 1) else {
+            tracing::warn!(
+                path = %path.display(),
+                "phone: a saved fetch is not under the copies folder; not kept"
+            );
+            return None;
+        };
+        let request = entry.request();
+        let host_path = if request.host_path {
+            request.rel_path.clone()
+        } else {
+            format!("{}/{}", request.repo_name, request.rel_path)
+        };
+        Some(crate::PhoneFetched {
+            host: parts[0].to_owned(),
+            host_path,
+            local_path: parts.join("/"),
+            size: entry.size().unwrap_or_else(|| entry.bytes_received()),
+        })
     }
 
     /// Open containing folder on the file fetch `id` of `entry`, saved at

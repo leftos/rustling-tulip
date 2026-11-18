@@ -503,6 +503,49 @@ pub enum RootShape {
     Phone,
 }
 
+/// A file fetch the phone saved, waiting for the phone's root to record it
+/// in its index of kept copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhoneFetched {
+    /// The host's folder under the copies folder.
+    pub host: String,
+    /// The path the fetch asked the host for.
+    pub host_path: String,
+    /// The copy's path relative to the copies folder, `/` separated.
+    pub local_path: String,
+    /// The file's size in bytes.
+    pub size: u64,
+}
+
+impl RootView {
+    /// Queues the phone's saved file fetch `saved` for the phone's root,
+    /// which records it as it observes this view.
+    pub fn phone_file_saved(&mut self, saved: PhoneFetched, cx: &mut Context<Self>) {
+        self.phone_fetched.push(saved);
+        cx.notify();
+    }
+
+    /// The phone's saved file fetches queued since the last take.
+    pub(crate) fn take_phone_fetched(&mut self) -> Vec<PhoneFetched> {
+        std::mem::take(&mut self.phone_fetched)
+    }
+
+    /// Where `native-ui.json` and the phone's other files live; `None` keeps
+    /// them in memory only.
+    pub(crate) fn ui_dir(&self) -> Option<&Path> {
+        self.ui_dir.as_deref()
+    }
+
+    /// The folder fetched files are saved under, or why it could not be
+    /// resolved.
+    pub(crate) fn remote_files_root(&self) -> Result<&Path, &str> {
+        match &self.remote_files_root {
+            Ok(root) => Ok(root),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
     /// Opens a connection to a host: the network thread (or a spec's fake
@@ -1533,6 +1576,8 @@ pub struct RootView {
     /// The folder fetched files are saved under, or why it could not be
     /// resolved.
     remote_files_root: Result<PathBuf, String>,
+    /// The phone's saved file fetches, until the phone's root takes them.
+    phone_fetched: Vec<PhoneFetched>,
     /// The updater, the update ready to install and the last check.
     update: update_view::UpdateUi,
 }
@@ -2020,6 +2065,7 @@ impl RootView {
             remote_files_root: daemon_client::remote_files_dir()
                 .map(file_fetch_view::absolute_root)
                 .map_err(|err| format!("{err:#}")),
+            phone_fetched: Vec::new(),
             update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);

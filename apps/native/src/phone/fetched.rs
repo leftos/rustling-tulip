@@ -5,10 +5,6 @@
 //!
 //! Every time here is milliseconds since the Unix epoch and passed in by the
 //! caller: nothing in this module reads a clock.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the phone fetch seam in the next part")
-)]
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -54,6 +50,10 @@ pub struct Index {
 }
 
 /// How a copy compares to the host's file.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the open-again flow, not built yet")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
     /// The host's file is the one the copy holds.
@@ -65,6 +65,10 @@ pub enum Freshness {
 }
 
 /// What the host answered when asked about its file.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the open-again flow, not built yet")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostStat {
     /// The host file's size in bytes.
@@ -129,10 +133,7 @@ impl Index {
 
     /// Marks the copy at `host` and `host_path` as opened at `now`; when no
     /// entry is there, nothing changes.
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "used by the fetch seam and the storage page next")
-    )]
+    #[expect(dead_code, reason = "used by the open-again flow, not built yet")]
     pub fn touch_opened(&mut self, host: &str, host_path: &str, now: i64) {
         if let Some(entry) = self
             .entries
@@ -145,19 +146,22 @@ impl Index {
 
     /// The copies not opened for [`RETENTION_MS`] before `now`.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the sweep picks the same copies through `is_expired`"
+        )
+    )]
     pub fn expired(&self, now: i64) -> Vec<&Entry> {
         self.entries
             .iter()
-            .filter(|entry| now.saturating_sub(entry.last_opened) >= RETENTION_MS)
+            .filter(|entry| is_expired(entry, now))
             .collect()
     }
 
     /// The bytes every copy in the index takes.
     #[must_use]
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "used by the storage page in the next part")
-    )]
     pub fn total_size(&self) -> u64 {
         self.entries
             .iter()
@@ -186,44 +190,47 @@ impl Index {
         copies_root: &Path,
         remove: impl Fn(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.remove_where(copies_root, |_| true, remove)
+    }
+
+    /// Removes the copies [`Self::expired`] names at `now` the way
+    /// [`Self::clear`] removes every copy, and keeps every other entry as it
+    /// is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::clear`], for the expired copies only.
+    pub fn sweep(&mut self, copies_root: &Path, now: i64) -> io::Result<()> {
+        self.sweep_using(copies_root, now, remove_path)
+    }
+
+    fn sweep_using(
+        &mut self,
+        copies_root: &Path,
+        now: i64,
+        remove: impl Fn(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.remove_where(copies_root, |entry| is_expired(entry, now), remove)
+    }
+
+    /// Removes the copy of every entry `chosen` picks, as [`Self::clear`]
+    /// describes; the entries it does not pick stay untouched.
+    fn remove_where(
+        &mut self,
+        copies_root: &Path,
+        chosen: impl Fn(&Entry) -> bool,
+        remove: impl Fn(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut first_error: Option<io::Error> = None;
         let mut kept = Vec::with_capacity(self.entries.len());
         for entry in std::mem::take(&mut self.entries) {
-            let Some(path) = copy_path(copies_root, &entry) else {
-                tracing::warn!(
-                    host = %entry.host,
-                    path = %entry.host_path,
-                    "dropping a fetched entry whose copy path leaves the copies folder"
-                );
-                continue;
-            };
-            if let Some(link) = linked_folder(copies_root, Path::new(&entry.local_path)) {
-                tracing::warn!(
-                    path = %link.display(),
-                    "refusing to delete a fetched copy through a linked folder"
-                );
-                if first_error.is_none() {
-                    first_error = Some(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        format!(
-                            "{} is a link, so nothing under it is deleted",
-                            link.display()
-                        ),
-                    ));
-                }
+            if !chosen(&entry) {
                 kept.push(entry);
                 continue;
             }
-            match remove(&path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    tracing::warn!(path = %path.display(), error = %err, "removing a fetched copy");
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
-                    kept.push(entry);
-                }
+            if let Err(err) = remove_copy(copies_root, &entry, &remove) {
+                first_error.get_or_insert(err);
+                kept.push(entry);
             }
         }
         self.entries = kept;
@@ -234,12 +241,61 @@ impl Index {
     }
 }
 
+/// Whether `entry` went unopened for [`RETENTION_MS`] before `now`.
+fn is_expired(entry: &Entry, now: i64) -> bool {
+    now.saturating_sub(entry.last_opened) >= RETENTION_MS
+}
+
+/// Removes `entry`'s copy under `copies_root`. `Ok` means the entry leaves the
+/// index: its copy is gone, or its path leaves the root and it is dropped
+/// without a delete. `Err` keeps the entry, with the error a refused link or
+/// a failed delete gives.
+fn remove_copy(
+    copies_root: &Path,
+    entry: &Entry,
+    remove: &impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(path) = copy_path(copies_root, entry) else {
+        tracing::warn!(
+            host = %entry.host,
+            path = %entry.host_path,
+            "dropping a fetched entry whose copy path leaves the copies folder"
+        );
+        return Ok(());
+    };
+    if let Some(link) = linked_folder(copies_root, Path::new(&entry.local_path)) {
+        tracing::warn!(
+            path = %link.display(),
+            "refusing to delete a fetched copy through a linked folder"
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is a link, so nothing under it is deleted",
+                link.display()
+            ),
+        ));
+    }
+    match remove(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "removing a fetched copy");
+            Err(err)
+        }
+    }
+}
+
 /// How `entry` compares to the host's answer about its file: `answer` is
 /// `None` when the host gave none.
 ///
 /// A copy or an answer without a modified time is compared by size alone, so
 /// only two present times that differ can make a same-sized copy `Changed`.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the open-again flow, not built yet")
+)]
 pub fn freshness(entry: &Entry, answer: Option<HostStat>) -> Freshness {
     let Some(answer) = answer else {
         return Freshness::Unknown;
@@ -677,6 +733,93 @@ mod tests {
 
         let error = index
             .clear(&root)
+            .expect_err("a linked folder below the root is refused");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(outside_file.exists(), "the file outside the root survives");
+        assert_eq!(index.entries.len(), 1, "the entry it refused stays");
+    }
+
+    /// An entry for `local_path`, its host path its own, last opened at
+    /// `last_opened`.
+    fn opened_at(local_path: &str, last_opened: i64) -> Entry {
+        let mut copy = entry(local_path);
+        copy.host_path = format!("/{local_path}");
+        copy.last_opened = last_opened;
+        copy
+    }
+
+    #[test]
+    fn sweep_deletes_only_expired_copies() {
+        let dir = TestDir::new("sweep");
+        let root = dir.0.join("copies");
+        std::fs::create_dir_all(root.join("host-a")).expect("create the copies folder");
+        std::fs::write(root.join("host-a/old.txt"), b"hi").expect("write the old copy");
+        std::fs::write(root.join("host-a/recent.txt"), b"hi").expect("write the recent copy");
+        let now = 1_800_000_000_000;
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/old.txt", now - 30 * DAY_MS));
+        let recent = opened_at("host-a/recent.txt", now - 30 * DAY_MS + 60 * 60 * 1000);
+        index.upsert(recent.clone());
+
+        index.sweep(&root, now).expect("sweep the copies");
+
+        assert_eq!(index.entries, [recent], "only the expired entry leaves");
+        assert!(
+            !root.join("host-a/old.txt").exists(),
+            "the copy unopened for 30 days is deleted"
+        );
+        assert!(
+            root.join("host-a/recent.txt").exists(),
+            "the copy opened 29 days and 23 hours ago is kept"
+        );
+    }
+
+    #[test]
+    fn sweep_keeps_an_entry_whose_delete_failed() {
+        let dir = TestDir::new("sweep-failure");
+        let root = dir.0.join("copies");
+        std::fs::create_dir_all(root.join("host-a")).expect("create the copies folder");
+        std::fs::write(root.join("host-a/stuck.txt"), b"hi").expect("write the stuck copy");
+        let now = 1_800_000_000_000;
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/stuck.txt", now - 31 * DAY_MS));
+        let stuck_path = root.join("host-a/stuck.txt");
+
+        let error = index
+            .sweep_using(&root, now, |path| {
+                if path == stuck_path {
+                    return Err(io::Error::other("the file is busy"));
+                }
+                remove_path(path)
+            })
+            .expect_err("the stuck copy's delete fails");
+
+        assert_eq!(error.to_string(), "the file is busy");
+        assert_eq!(
+            index.entries.len(),
+            1,
+            "the entry it could not delete stays"
+        );
+        assert!(stuck_path.exists());
+    }
+
+    #[test]
+    fn sweep_refuses_a_copy_behind_a_linked_folder() {
+        let dir = TestDir::new("sweep-link");
+        let root = dir.0.join("copies");
+        let outside = dir.0.join("outside");
+        std::fs::create_dir_all(&outside).expect("create the outside folder");
+        let outside_file = outside.join("keep.txt");
+        std::fs::write(&outside_file, b"keep me").expect("write the outside file");
+        std::fs::create_dir_all(&root).expect("create the copies folder");
+        link_folder(&outside, &root.join("host-a"));
+        let now = 1_800_000_000_000;
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/keep.txt", now - 31 * DAY_MS));
+
+        let error = index
+            .sweep(&root, now)
             .expect_err("a linked folder below the root is refused");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
