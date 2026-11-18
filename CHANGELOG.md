@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- The desktop chat composer has a row of Quick replies, such as "continue" or "yes", that send in one click.
 - A terminal draft's Pull and Send now come with Clear, which empties the prompt box, pasted text and images included, once you confirm.
 
 ### Fixed
@@ -17,6 +18,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's chat shows a question's final Submit or Cancel step even when the terminal is too narrow or short to show its tabs.
 - Raising the phone's keyboard over a session's terminal no longer shrinks it, so the chat keeps reading Claude's questions; drag to see hidden rows.
 - Needs You stays until you answer: opening the session, a Code Mode script's result or the agent's turn ending no longer clears it.
+
+### Changed
+
+- The phone's Composer Quick replies now send as chat messages, so they wait while a question or a draft is showing, or the host is offline.
 
 ## v0.16.0-alpha
 

@@ -1290,23 +1290,131 @@ fn paste_inserts_the_clipboard_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn quick_types_its_reply_with_return(cx: &mut TestAppContext) {
+fn a_composer_quick_reply_sends_a_chat_message(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
-    h.host(&saved_remote()).sent();
-
     h.click_on("phone-composer-quick");
     assert!(drawn(&mut h, "phone-dock-quick"), "the dock opens");
+    h.host(&saved_remote()).sent();
+
     h.click_on("phone-quick-common-0");
 
+    let sent = h.host(&saved_remote()).sent();
+    let chats: Vec<&str> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSend {
+                session_id, text, ..
+            } if session_id == "a" => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        h.host(&saved_remote()).sent_input("a"),
-        b"continue\r",
-        "a quick reply types its text and Return"
+        chats,
+        ["continue"],
+        "a Quick reply sends its text as a chat message"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SendInput { .. })),
+        "and not as raw input: {sent:?}"
     );
     assert!(
         drawn(&mut h, "phone-dock-quick"),
         "the dock stays open after a tap"
+    );
+}
+
+#[gpui::test]
+fn a_composer_quick_reply_is_disabled_while_the_host_is_disconnected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-quick");
+    let target: Target = saved_remote();
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    let _ = conn.on_closed("dropped".to_owned());
+    h.host(&target).event(NetEvent::State(conn));
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    assert!(
+        !h.root(|root, _| root.chat_send_enabled("a", "continue")),
+        "no connection greys the reply"
+    );
+
+    h.click_on("phone-quick-common-0");
+
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ChatSend { .. } | ClientMessage::SendInput { .. }
+        )),
+        "a greyed reply sends nothing: {sent:?}"
+    );
+
+    let mut host = h.host(&target);
+    host.connect();
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+    h.cx.run_until_parked();
+    assert!(
+        h.root(|root, _| root.chat_send_enabled("a", "continue")),
+        "the lost reply leaves no send in flight, so the reconnected host can send"
+    );
+}
+
+#[gpui::test]
+fn a_composer_quick_reply_is_disabled_under_a_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(cx, &dir, permission_prompt("p1"));
+    assert!(
+        !h.root(|root, _| root.chat_send_enabled("a", "continue")),
+        "a card up greys the reply"
+    );
+
+    // The card's sheet occludes the composer's buttons, so the Quick dock
+    // cannot even open under it: no reply of it is on screen to be tapped.
+    h.click_on("phone-composer-quick");
+    assert!(
+        !drawn(&mut h, "phone-quick-common-0"),
+        "no reply of the dock reaches the screen under a card"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ChatSend { .. })),
+        "and nothing is sent: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_refused_composer_quick_reply_shows_the_reason(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-quick");
+    h.host(&saved_remote()).sent();
+    h.click_on("phone-quick-common-0");
+    let sent = chat_sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send to refuse: {sent:?}");
+
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "the prompt box holds a draft".to_owned(),
+        request_id: sent[0].1.clone(),
+        code: Some(CHAT_REFUSED.to_owned()),
+    });
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.root(|root, _| root.chat_composer_error("a")).as_deref(),
+        Some("the prompt box holds a draft"),
+        "the daemon's reason is kept"
+    );
+    assert!(
+        drawn(&mut h, "phone-composer-error"),
+        "the reason shows under the field"
     );
 }
 
@@ -1372,7 +1480,7 @@ fn saved_shell_replies_show_for_a_shell(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn saved_reply_types_its_text_then_return(cx: &mut TestAppContext) {
+fn saved_reply_sends_its_text_as_a_chat_message(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let ui = json!({ "phone_agent_replies": [reply_group("mine", &["run the tests"])] });
     let mut h = saved_phone(cx, &dir, &ui, "a");
@@ -1381,10 +1489,11 @@ fn saved_reply_types_its_text_then_return(cx: &mut TestAppContext) {
 
     h.click_on("phone-quick-mine-0");
 
+    let sends = chat_sends(&mut h);
+    assert_eq!(sends.len(), 1, "one send: {sends:?}");
     assert_eq!(
-        h.host(&saved_remote()).sent_input("a"),
-        b"run the tests\r",
-        "a saved reply types its text and Return"
+        sends[0].0, "run the tests",
+        "a saved reply sends its text as a chat message"
     );
 }
 

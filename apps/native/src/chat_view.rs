@@ -49,6 +49,7 @@ use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
+use crate::phone::quick_replies::{self, ReplySet};
 use crate::scrollbar::Scrollbar;
 use crate::session_menu::on_press;
 use crate::shell_lines;
@@ -2770,28 +2771,53 @@ impl RootView {
         self.answer_card(session_id, prompt, resolved, taken, cx);
     }
 
-    /// Sends session `session_id`'s composer text, clearing the composer;
-    /// a refusal puts it back. Nothing happens while a send is in flight.
-    pub(crate) fn send_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    /// Sends `text` as session `session_id`'s chat message, tracked as the
+    /// composer's Send is: its pending entry, a refusal giving it back. The
+    /// composer's own text is left alone. A blank `text` and a send already
+    /// in flight send nothing. Says whether the message went out.
+    pub(crate) fn send_text(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let now = (self.now)();
         let request_id = new_request_id();
         let Some(chat) = self.chat.sessions.get_mut(session_id) else {
-            return;
+            return false;
         };
         if chat.sends.in_flight(now) {
-            return;
+            return false;
         }
-        let text = chat.composer_text(cx);
-        let Some(msg) = chat::send_message(session_id, &text, request_id.clone()) else {
-            return;
+        let Some(msg) = chat::send_message(session_id, text, request_id.clone()) else {
+            return false;
         };
-        chat.sends.sent(request_id, text, now);
+        chat.sends.sent(request_id, text.to_owned(), now);
         chat.clear_armed = false;
         chat.send_error = None;
-        chat.set_composer_text("", cx);
         let host = self.chat.host_of(session_id);
         self.send_to(&host, msg);
         cx.notify();
+        true
+    }
+
+    /// Sends session `session_id`'s composer text, clearing the composer;
+    /// a refusal puts it back. Nothing happens while a send is in flight.
+    pub(crate) fn send_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .chat
+            .sessions
+            .get(session_id)
+            .map(|chat| chat.composer_text(cx))
+        else {
+            return;
+        };
+        if !self.send_text(session_id, &text, cx) {
+            return;
+        }
+        if let Some(chat) = self.chat.sessions.get(session_id) {
+            chat.set_composer_text("", cx);
+        }
     }
 
     /// Asks session `session_id`'s host for the terminal prompt box's draft,
@@ -2895,22 +2921,7 @@ impl RootView {
     /// `session_id`, as the composer sends its own text but leaving that
     /// text alone. Nothing happens while a send is in flight.
     pub(crate) fn send_suggestion(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
-        let now = (self.now)();
-        let request_id = new_request_id();
-        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
-            return;
-        };
-        if chat.sends.in_flight(now) {
-            return;
-        }
-        let Some(msg) = chat::send_message(session_id, text, request_id.clone()) else {
-            return;
-        };
-        chat.sends.sent(request_id, text.to_owned(), now);
-        chat.send_error = None;
-        let host = self.chat.host_of(session_id);
-        self.send_to(&host, msg);
-        cx.notify();
+        self.send_text(session_id, text, cx);
     }
 
     /// Puts the agent's suggested next prompt `text` into session
@@ -2924,7 +2935,7 @@ impl RootView {
     }
 
     /// Types `bytes` into session `session_id` through its host, as the
-    /// phone's Quick and Keys buttons do.
+    /// phone's Keys buttons and prompt sheet do.
     pub(crate) fn send_phone_input(&mut self, session_id: &str, bytes: &[u8]) {
         let host = self.chat.host_of(session_id);
         self.send_to(
@@ -3013,6 +3024,18 @@ impl RootView {
         };
         let text = composer.input.read(cx).text().to_owned();
         self.send_enabled(session_id, chat, &text)
+    }
+
+    /// Whether session `session_id`'s chat could send `text` now, as the
+    /// composer's Send judges its own text: not blank, the host connected,
+    /// no disabling note, no send in flight and no card up. A Quick reply is
+    /// drawn live only while this holds for its own text.
+    #[must_use]
+    pub fn chat_send_enabled(&self, session_id: &str, text: &str) -> bool {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return false;
+        };
+        self.send_enabled(session_id, chat, text)
     }
 
     /// The text of session `session_id`'s composer; none before its chat
@@ -3669,9 +3692,10 @@ impl RootView {
     /// send (with the draft's Pull and Send where the host offers them),
     /// the agent's suggested next prompt as a chip, the input (tagged
     /// `chat-composer`) with Send (`chat-send`), disabled while a card is
-    /// up since a card's typed answers go in its own box, and the daemon's
-    /// reason for refusing the last send (`chat-composer-error`). Without
-    /// a connection the input is disabled.
+    /// up since a card's typed answers go in its own box, the Quick replies
+    /// under it (`chat-quick`), and the daemon's reason for refusing the
+    /// last send (`chat-composer-error`). Without a connection the input is
+    /// disabled.
     pub(crate) fn composer_row(
         &self,
         session_id: &str,
@@ -3696,6 +3720,7 @@ impl RootView {
             .when(disabled, |field| field.opacity(DISABLED_OPACITY))
             .when(!disabled, |field| field.child(composer.input.clone()));
         let enabled = self.send_enabled(session_id, chat, &text);
+        let quick = self.quick_row(session_id, chat, cx);
         let id = session_id.to_owned();
         let send = primary_button(
             offset,
@@ -3732,6 +3757,7 @@ impl RootView {
                         .child(field)
                         .child(send),
                 )
+                .children(quick)
                 .children(chat.send_error.clone().map(|reason| {
                     div()
                         .driver_id(|| "chat-composer-error".to_owned())
@@ -3741,6 +3767,71 @@ impl RootView {
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// Session `session_id`'s Quick reply row under the composer field
+    /// (`chat-quick`): the agent reply set's groups in order, a gap between
+    /// groups, every reply a chip (`chat-quick-{group}-{reply}`) sending its
+    /// own text as a chat message and leaving the composer's text alone. A
+    /// chip is live whenever `chat`'s composer could send that reply's text:
+    /// no disabling note, no send in flight and no card up. None when the set
+    /// holds no reply.
+    fn quick_row(
+        &self,
+        session_id: &str,
+        chat: &SessionChat,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let saved = &self.sidebar.ui_state().phone_agent_replies;
+        let groups = quick_replies::groups(saved.as_deref(), ReplySet::Agent);
+        if groups.iter().all(|group| group.replies.is_empty()) {
+            return None;
+        }
+        let mut row = div()
+            .driver_id(|| "chat-quick".to_owned())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(QUICK_GROUP_GAP));
+        for (group_index, group) in groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| !group.replies.is_empty())
+        {
+            let mut section = div()
+                .driver_id(move || format!("chat-quick-group-{group_index}"))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(QUICK_CHIP_GAP));
+            for (reply_index, text) in group.replies.iter().enumerate() {
+                let id = session_id.to_owned();
+                let reply = text.clone();
+                let enabled = self.send_enabled(session_id, chat, text);
+                let selector = format!("chat-quick-{group_index}-{reply_index}");
+                section = section.child(
+                    outlined_button(
+                        offset,
+                        shift,
+                        &selector,
+                        ButtonSize::Compact,
+                        enabled,
+                        Layer::Base,
+                        &t,
+                    )
+                    .child(text.clone())
+                    .when(enabled, |chip| {
+                        chip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.send_text(&id, &reply, cx);
+                        }))
+                    }),
+                );
+            }
+            row = row.child(section);
+        }
+        Some(row.into_any_element())
     }
 
     /// The composer's note row (`chat-composer-note`): `line`'s text, and
@@ -3901,6 +3992,11 @@ impl RootView {
 
 /// How a disabled composer is dimmed.
 const DISABLED_OPACITY: f32 = 0.5;
+
+/// The gap between the composer's Quick reply groups, and between the chips
+/// of one group.
+const QUICK_GROUP_GAP: f32 = 12.0;
+const QUICK_CHIP_GAP: f32 = 4.0;
 
 /// Whether the composer's note row `line` disables the composer, and with
 /// it the suggestion chip's Send and Pull.

@@ -2379,6 +2379,100 @@ fn while_a_dialog_is_up_the_composer_offers_only_a_disabled_send(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_quick_reply_sends_its_text_as_a_chat_message(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    assert!(
+        painted(&mut h, "chat-quick-1-0"),
+        "the common group's first reply is drawn"
+    );
+    h.sent();
+
+    h.click_on("chat-quick-1-0");
+
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send: {sent:?}");
+    assert_eq!(sent[0].0, "continue");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "the composer keeps its own text, still empty"
+    );
+}
+
+#[gpui::test]
+fn a_quick_reply_leaves_typed_text_in_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "hi");
+    h.sent();
+
+    h.click_on("chat-quick-1-0");
+
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send: {sent:?}");
+    assert_eq!(sent[0].0, "continue");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("hi"),
+        "the composer keeps its own text"
+    );
+}
+
+#[gpui::test]
+fn a_quick_reply_is_disabled_under_a_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "careful");
+    show(&mut h, permission("p1"));
+    assert!(
+        painted(&mut h, "chat-quick-1-0"),
+        "the chip is drawn, disabled"
+    );
+    h.sent();
+
+    h.click_on("chat-quick-1-0");
+
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ChatSend { .. })),
+        "a disabled chip sends nothing: {sent:?}"
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some("careful"));
+}
+
+#[gpui::test]
+fn an_empty_quick_reply_group_draws_no_section(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    support::seed_ui(
+        &dir,
+        &serde_json::json!({
+            "phone_agent_replies": [
+                { "title": "more", "replies": [] },
+                { "title": "common", "replies": ["continue"] },
+            ],
+        }),
+    );
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.sent();
+
+    assert!(
+        !painted(&mut h, "chat-quick-group-0"),
+        "an empty group draws no section"
+    );
+    assert!(
+        painted(&mut h, "chat-quick-group-1"),
+        "the group with a reply draws its section"
+    );
+    assert!(painted(&mut h, "chat-quick-1-0"), "with its reply");
+}
+
+#[gpui::test]
 fn a_permission_cards_box_allows_or_denies_with_its_text(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

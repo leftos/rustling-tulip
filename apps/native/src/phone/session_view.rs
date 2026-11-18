@@ -746,7 +746,11 @@ impl PhoneRoot {
     }
 
     /// The Quick dock for `target`: each of the shown session's reply
-    /// groups under its title, every reply a tap that types it and Return. A
+    /// groups under its title, every reply a tap that sends it as a chat
+    /// message from the composer, or types it and Return through the
+    /// terminal. A composer reply is greyed and takes no tap while the
+    /// composer could not send it now (no connection, a disabling note, a
+    /// send in flight or a card up); the terminal's always take a tap. A
     /// group with no replies draws no section, and a set with no reply at all
     /// says where replies are added.
     pub(super) fn quick_dock(
@@ -780,7 +784,10 @@ impl PhoneRoot {
         for group in groups {
             let mut row = div().flex().flex_wrap().gap(px(COMPOSER_GAP));
             for (index, text) in group.replies.iter().enumerate() {
-                let bytes = quick_replies::quick_bytes(text);
+                let live = match target {
+                    QuickTarget::Composer => self.root.read(cx).chat_send_enabled(session_id, text),
+                    QuickTarget::Terminal => true,
+                };
                 row = row.child(
                     phone_button(
                         &format!("{}-{}-{index}", target.reply_prefix(), group.title),
@@ -789,12 +796,18 @@ impl PhoneRoot {
                     )
                     .min_h(px(TOUCH_TARGET))
                     .child(text.clone())
-                    .on_click(cx.listener({
-                        let id = id.clone();
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.quick_reply(target, &id, &bytes, cx);
-                        }
-                    })),
+                    .when(!live, |button| {
+                        button.opacity(crate::spawn_view::DISABLED_OPACITY)
+                    })
+                    .when(live, |button| {
+                        button.on_click(cx.listener({
+                            let id = id.clone();
+                            let reply = text.clone();
+                            move |this, _: &ClickEvent, _, cx| {
+                                this.quick_reply(target, &id, &reply, cx);
+                            }
+                        }))
+                    }),
                 );
             }
             let section = format!("{}-group-{}", target.reply_prefix(), group.title);
@@ -816,20 +829,25 @@ impl PhoneRoot {
         dock
     }
 
-    /// A Quick reply's tap: `bytes` typed into session `session_id` from the
-    /// composer, or through the terminal on the Terminal page.
+    /// A Quick reply's tap: `text` sent as session `session_id`'s chat
+    /// message from the composer, or typed with Return through the terminal
+    /// on the Terminal page.
     fn quick_reply(
         &mut self,
         target: QuickTarget,
         session_id: &str,
-        bytes: &[u8],
+        text: &str,
         cx: &mut Context<Self>,
     ) {
         match target {
-            QuickTarget::Composer => self
-                .root
-                .update(cx, |root, _| root.send_phone_input(session_id, bytes)),
-            QuickTarget::Terminal => self.quick_into_terminal(bytes, cx),
+            QuickTarget::Composer => {
+                self.root.update(cx, |root, cx| {
+                    root.send_text(session_id, text, cx);
+                });
+            }
+            QuickTarget::Terminal => {
+                self.quick_into_terminal(&quick_replies::quick_bytes(text), cx);
+            }
         }
     }
 
