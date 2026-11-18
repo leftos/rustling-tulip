@@ -283,7 +283,7 @@ fn a_saved_fetch_on_the_phone_is_kept_in_the_index(cx: &mut TestAppContext) {
     let entries = saved_index(&dir);
     assert_eq!(entries.len(), 1, "the saved fetch is kept: {entries:?}");
     assert_eq!(entries[0]["host"], REMOTE);
-    assert_eq!(entries[0]["host_path"], "repo/notes.txt");
+    assert_eq!(entries[0]["host_path"], r"C:\repos\repo\notes.txt");
     assert_eq!(entries[0]["local_path"], local);
     assert_eq!(entries[0]["size"], 4);
     assert_eq!(storage(&mut h).0, "4 B");

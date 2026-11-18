@@ -613,7 +613,7 @@ impl RootView {
 
     /// `host` as fetch toasts name it ([`file_fetch::host_label`]); "The
     /// host" when it has no connection.
-    fn host_label_of(&self, host: &HostKey) -> String {
+    pub(crate) fn host_label_of(&self, host: &HostKey) -> String {
         self.conn_of(host).map_or_else(
             || "The host".to_owned(),
             |conn| file_fetch::host_label(conn.target()),
@@ -1322,7 +1322,7 @@ impl RootView {
     /// Folds in a fetch's reply; returns whether it was one.
     pub(crate) fn on_fetch_message(
         &mut self,
-        _host: &HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1359,7 +1359,25 @@ impl RootView {
                 };
                 self.on_folder_fetch_started(id, resolved_path, announced, window, cx);
             }
-            DaemonMessage::PathStat { id, kind, .. } => return self.on_path_stat(id, *kind, cx),
+            DaemonMessage::PathStat {
+                id,
+                kind,
+                size,
+                modified,
+            } => {
+                let answer = crate::PhoneStatAnswer::Stat {
+                    kind: *kind,
+                    size: *size,
+                    modified: *modified,
+                };
+                // A phone stat's answer goes to the phone, never to the
+                // desktop's link stats.
+                if self.phone_stats.answer(host, id, answer) {
+                    cx.notify();
+                    return true;
+                }
+                return self.on_path_stat(id, *kind, cx);
+            }
             DaemonMessage::SessionFolders { id, folders, error } => {
                 return self.on_session_folders(id, folders, error.as_deref(), cx);
             }
@@ -1780,11 +1798,21 @@ impl RootView {
             );
             return None;
         };
+        // The path on the host, so the copy can be stated and fetched again
+        // whichever way it was fetched.
         let request = entry.request();
-        let host_path = if request.host_path {
-            request.rel_path.clone()
-        } else {
-            format!("{}/{}", request.repo_name, request.rel_path)
+        let host_path = match entry.resolved_path() {
+            // The form the host's path check accepts: a Windows host's
+            // verbatim `\\?\` prefix is dropped.
+            Some(resolved) => display_host_path(resolved),
+            None if request.host_path => request.rel_path.clone(),
+            None => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "phone: a saved fetch has no host path; not kept"
+                );
+                return None;
+            }
         };
         Some(crate::PhoneFetched {
             host: parts[0].to_owned(),

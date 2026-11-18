@@ -1,20 +1,20 @@
 //! [`PhoneRoot`], the phone's root view, and its push effect plumbing.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FontWeight, IntoElement, Pixels, Render, Stateful,
-    Subscription, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
+    Subscription, Task, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
 };
-use protocol::ClientMessage;
+use protocol::{ClientMessage, PathKind};
 
-use super::fetched::{Entry, Index};
+use super::fetched::{self, Entry, Freshness, HostStat, Index};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
@@ -29,15 +29,34 @@ use super::sheet::{
 };
 use super::sweep::{self, HostNow};
 use super::{PhoneLayout, content_padding, home, hosts_view};
-use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::connection::State;
 use crate::driver_id::DriverId as _;
+use crate::file_fetch::{self, FetchRequest};
+use crate::open::LinkAction;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
+use crate::{PhoneFetched, PhoneStatAnswer, RootView};
 
 /// The phone's index of kept copies, in the UI folder.
 const FETCHED_FILE: &str = "fetched.json";
+
+/// How long the host may take to answer whether a kept copy changed before
+/// the copy opens as possibly out of date.
+const KEPT_STAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A stat out to a host about a kept copy, until its answer, its timeout
+/// or its host's reset, whichever comes first.
+struct KeptStat {
+    /// The stat's id, as the host echoes it.
+    id: String,
+    /// The host asked.
+    host: HostKey,
+    /// The copy's entry when the stat went out.
+    entry: Entry,
+    /// The timeout's timer; dropping it cancels the timeout.
+    timeout: Task<()>,
+}
 
 /// The wall-clock time in milliseconds since the Unix epoch; 0 before it.
 fn now_ms() -> i64 {
@@ -141,6 +160,11 @@ pub struct PhoneRoot {
     pub(super) storage_error: Option<String>,
     /// The viewer page, drawn over the page shown while open.
     pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
+    /// The stats out about kept copies, at most one per host and host path.
+    kept_stats: Vec<KeptStat>,
+    /// The modified time a changed copy's host answered with, by the copy's
+    /// host folder and host path, until its fetch again is saved.
+    refetching: HashMap<(String, String), Option<i64>>,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
     /// Redials the dropped saved hosts when the window comes back to the
@@ -168,6 +192,7 @@ impl PhoneRoot {
             this.sync_sheet(cx);
             this.push_changed(cx);
             this.sweep_delivered(cx);
+            this.take_kept_answers(cx);
             this.take_fetched(cx);
             cx.notify();
         });
@@ -238,6 +263,8 @@ impl PhoneRoot {
             fetched_path,
             storage_error: None,
             viewer: None,
+            kept_stats: Vec::new(),
+            refetching: HashMap::new(),
             _root_changed: root_changed,
             _visibility: visibility,
         };
@@ -254,12 +281,18 @@ impl PhoneRoot {
         };
         let now = now_ms();
         for saved in saved {
+            // A copy fetched again because it changed keeps the modified
+            // time its host answered with.
+            let modified = self
+                .refetching
+                .remove(&(saved.host.clone(), saved.host_path.clone()))
+                .flatten();
             self.fetched.upsert(Entry {
                 host: saved.host,
                 host_path: saved.host_path,
                 local_path: saved.local_path,
                 size: saved.size,
-                modified: None,
+                modified,
                 fetched_at: now,
                 last_opened: now,
             });
@@ -295,6 +328,186 @@ impl PhoneRoot {
         if let Err(err) = self.fetched.write_atomic(path) {
             tracing::warn!(path = %path.display(), error = %err, "phone: writing the fetched index");
         }
+    }
+
+    /// Opens the kept copy of `host`'s `host_path` again. With no copy, the
+    /// file is fetched by its host path and opens once saved. With one, a
+    /// host that is open and serves host paths is asked whether its file
+    /// changed: the answer opens the copy or fetches it again, and no answer
+    /// within [`KEPT_STAT_TIMEOUT`] opens the copy as possibly out of date,
+    /// as a host that cannot be asked does at once. While a stat about the
+    /// same copy is out, nothing happens.
+    pub fn open_kept(&mut self, host: HostKey, host_path: String, cx: &mut Context<Self>) {
+        let Some(entry) = self.kept_entry(&host, &host_path, cx) else {
+            tracing::debug!(?host, %host_path, "phone: no kept copy; fetching the file");
+            self.fetch_kept(host, host_path, cx);
+            return;
+        };
+        if self
+            .kept_stats
+            .iter()
+            .any(|stat| stat.host == host && stat.entry.host_path == host_path)
+        {
+            tracing::debug!(?host, %host_path, "phone: a kept copy's stat is already out");
+            return;
+        }
+        let asks = {
+            let root = self.root.read(cx);
+            hosts_view::host_open(root, &host) && root.host_serves_paths(&host)
+        };
+        if !asks {
+            tracing::debug!(?host, %host_path, "phone: the host cannot be asked; opening the kept copy");
+            self.open_kept_copy(&host, &entry, true, cx);
+            return;
+        }
+        self.send_kept_stat(host, entry, cx);
+    }
+
+    /// The latest kept copy of `host`'s `host_path`, if any.
+    fn kept_entry(&self, host: &HostKey, host_path: &str, cx: &App) -> Option<Entry> {
+        let folder = self
+            .root
+            .read(cx)
+            .conn_of(host)
+            .and_then(|conn| file_fetch::host_folder(conn.target()))?;
+        self.fetched
+            .entries
+            .iter()
+            .filter(|entry| entry.host == folder && entry.host_path == host_path)
+            .max_by_key(|entry| entry.fetched_at)
+            .cloned()
+    }
+
+    /// Asks `host` whether `entry`'s file changed, under a fresh id the
+    /// desktop's link stats never see, and starts its timeout.
+    fn send_kept_stat(&mut self, host: HostKey, entry: Entry, cx: &mut Context<Self>) {
+        let id = crate::new_request_id();
+        let request = kept_request(host.clone(), entry.host_path.clone());
+        tracing::debug!(%id, ?host, path = %entry.host_path, "phone: asking whether a kept copy changed");
+        self.root.update(cx, |root, _| {
+            root.phone_stats.register(&host, &id);
+            root.send_to(&host, file_fetch::stat_message(id.clone(), &request));
+        });
+        let timed_out = id.clone();
+        let timeout = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(KEPT_STAT_TIMEOUT).await;
+            // Fails only when the phone's root is gone.
+            this.update(cx, |this, cx| this.kept_stat_timed_out(&timed_out, cx))
+                .ok();
+        });
+        self.kept_stats.push(KeptStat {
+            id,
+            host,
+            entry,
+            timeout,
+        });
+    }
+
+    /// The stat `id` went unanswered for [`KEPT_STAT_TIMEOUT`]: its copy
+    /// opens as possibly out of date, and a later answer is dropped.
+    fn kept_stat_timed_out(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(at) = self.kept_stats.iter().position(|stat| stat.id == id) else {
+            return;
+        };
+        let stat = self.kept_stats.remove(at);
+        // This runs inside the timer's own task, which ends on its own.
+        stat.timeout.detach();
+        tracing::debug!(%id, "phone: a kept copy's stat went unanswered");
+        self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+    }
+
+    /// Takes the answers the root view kept for the phone's stats: each one
+    /// still waited for decides its copy; any other is dropped.
+    fn take_kept_answers(&mut self, cx: &mut Context<Self>) {
+        let answers = self.root.update(cx, |root, _| root.phone_stats.drain());
+        for (id, answer) in answers {
+            let Some(at) = self.kept_stats.iter().position(|stat| stat.id == id) else {
+                tracing::debug!(%id, "phone: dropping a stat answer no longer waited for");
+                continue;
+            };
+            // Dropping the stat cancels its timeout.
+            let stat = self.kept_stats.remove(at);
+            self.on_kept_answer(&stat, answer, cx);
+        }
+    }
+
+    /// `answer` came for `stat`: a file that has not changed opens its copy,
+    /// one that changed is fetched again, and anything else (another kind,
+    /// a host that started over) opens the copy as possibly out of date.
+    fn on_kept_answer(&mut self, stat: &KeptStat, answer: PhoneStatAnswer, cx: &mut Context<Self>) {
+        let PhoneStatAnswer::Stat {
+            kind: PathKind::File,
+            size,
+            modified,
+        } = answer
+        else {
+            tracing::debug!(id = %stat.id, ?answer, "phone: no file answer; opening the kept copy");
+            self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+            return;
+        };
+        match fetched::freshness(&stat.entry, Some(HostStat { size, modified })) {
+            Freshness::Fresh => self.open_kept_copy(&stat.host, &stat.entry, false, cx),
+            Freshness::Changed => {
+                tracing::debug!(id = %stat.id, "phone: the kept copy changed; fetching it again");
+                let key = (stat.entry.host.clone(), stat.entry.host_path.clone());
+                self.refetching.insert(key.clone(), modified);
+                if !self.fetch_kept(stat.host.clone(), stat.entry.host_path.clone(), cx) {
+                    // The tap still shows something: the old copy, marked.
+                    self.refetching.remove(&key);
+                    self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+                }
+            }
+            Freshness::Unknown => self.open_kept_copy(&stat.host, &stat.entry, true, cx),
+        }
+    }
+
+    /// Fetches `host`'s `host_path` by its host path; the saved copy is
+    /// recorded and opens as every phone fetch does. Returns whether the
+    /// fetch started.
+    fn fetch_kept(&mut self, host: HostKey, host_path: String, cx: &mut Context<Self>) -> bool {
+        let request = kept_request(host, host_path);
+        let started = self.root.update(cx, |root, cx| {
+            root.try_start_fetch(request, None, false, cx)
+        });
+        match started {
+            Ok(_) => true,
+            Err(refusal) => {
+                tracing::info!(
+                    reason = refusal.message(),
+                    "phone: a kept copy's fetch was refused"
+                );
+                false
+            }
+        }
+    }
+
+    /// Opens `entry`'s copy from `host` in the viewer page, marked possibly
+    /// out of date when `stale`, and records it opened now.
+    fn open_kept_copy(
+        &mut self,
+        host: &HostKey,
+        entry: &Entry,
+        stale: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let host_label = self.root.read(cx).host_label_of(host);
+        self.fetched
+            .touch_opened(&entry.host, &entry.local_path, now_ms());
+        self.write_fetched();
+        self.open_viewer(
+            PhoneFetched {
+                host: entry.host.clone(),
+                host_path: entry.host_path.clone(),
+                local_path: entry.local_path.clone(),
+                size: entry.size,
+                host_label,
+            },
+            cx,
+        );
+        if let Some(viewer) = self.viewer.as_mut() {
+            viewer.stale = stale;
+        }
+        cx.notify();
     }
 
     /// A host that connects while the hosts screen's add form is open would
@@ -1027,6 +1240,23 @@ impl PhoneRoot {
             .ok();
         })
         .detach();
+    }
+}
+
+/// The fetch of `host`'s file at `host_path` by its host path, opening in
+/// the viewer once saved.
+fn kept_request(host: HostKey, host_path: String) -> FetchRequest {
+    FetchRequest {
+        host,
+        repo_id: String::new(),
+        repo_name: String::new(),
+        worktree_path: None,
+        rel_path: host_path,
+        host_path: true,
+        line: None,
+        column: None,
+        open_when_done: true,
+        action: LinkAction::Viewer,
     }
 }
 

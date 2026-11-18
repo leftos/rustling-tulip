@@ -50,10 +50,6 @@ pub struct Index {
 }
 
 /// How a copy compares to the host's file.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
     /// The host's file is the one the copy holds.
@@ -65,10 +61,6 @@ pub enum Freshness {
 }
 
 /// What the host answered when asked about its file.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostStat {
     /// The host file's size in bytes.
@@ -119,26 +111,27 @@ impl Index {
         std::fs::rename(&tmp, path)
     }
 
-    /// Records `entry`, replacing an earlier copy of the same host path.
+    /// Records `entry`, replacing an earlier entry for the same copy: the
+    /// same host and local path. Two copies of one host path (fetched
+    /// through a repo and by the host path) stay two entries.
     pub fn upsert(&mut self, entry: Entry) {
         match self
             .entries
             .iter_mut()
-            .find(|kept| kept.host == entry.host && kept.host_path == entry.host_path)
+            .find(|kept| kept.host == entry.host && kept.local_path == entry.local_path)
         {
             Some(kept) => *kept = entry,
             None => self.entries.push(entry),
         }
     }
 
-    /// Marks the copy at `host` and `host_path` as opened at `now`; when no
+    /// Marks the copy of `host` at `local_path` as opened at `now`; when no
     /// entry is there, nothing changes.
-    #[expect(dead_code, reason = "used by the open-again flow, not built yet")]
-    pub fn touch_opened(&mut self, host: &str, host_path: &str, now: i64) {
+    pub fn touch_opened(&mut self, host: &str, local_path: &str, now: i64) {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.host == host && entry.host_path == host_path)
+            .find(|entry| entry.host == host && entry.local_path == local_path)
         {
             entry.last_opened = now;
         }
@@ -292,10 +285,6 @@ fn remove_copy(
 /// A copy or an answer without a modified time is compared by size alone, so
 /// only two present times that differ can make a same-sized copy `Changed`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 pub fn freshness(entry: &Entry, answer: Option<HostStat>) -> Freshness {
     let Some(answer) = answer else {
         return Freshness::Unknown;
@@ -496,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_the_same_host_path() {
+    fn upsert_replaces_the_same_local_copy() {
         let mut index = Index::default();
         index.upsert(entry("host-a/abs/file.txt"));
         let mut changed = entry("host-a/abs/file.txt");
@@ -506,6 +495,17 @@ mod tests {
 
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].size, 99);
+
+        // The same host file fetched through a repo lands in another copy.
+        index.upsert(entry("host-a/repo/file.txt"));
+
+        assert_eq!(
+            index.entries.len(),
+            2,
+            "a second copy of the same host path is kept beside the first"
+        );
+        assert_eq!(index.entries[0].local_path, "host-a/abs/file.txt");
+        assert_eq!(index.entries[1].local_path, "host-a/repo/file.txt");
     }
 
     #[test]
