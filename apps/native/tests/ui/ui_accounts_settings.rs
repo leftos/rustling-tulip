@@ -1537,6 +1537,12 @@ fn a_failed_login_shows_its_message_and_screen_lines(cx: &mut TestAppContext) {
         drawn(&mut h, "settings-accounts-login-status=screen line two"),
         "the screen's later lines show too"
     );
+    let screen = h.bounds("settings-accounts-login-status=screen line two");
+    let outcome = h.bounds("settings-accounts-login-status=The login failed: the login ended");
+    assert!(
+        screen.top() < outcome.top(),
+        "the screen line {screen:?} reads above the outcome {outcome:?}"
+    );
     press(&mut h, "settings-accounts-login");
     assert!(
         matches!(one_write(&mut h), ClientMessage::StartAccountLogin { .. }),

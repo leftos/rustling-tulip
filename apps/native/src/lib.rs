@@ -6904,7 +6904,7 @@ impl Render for RootView {
         // Before any pane header is built: they read which tip shows.
         self.settle_header_tips(cx);
         let footer = self.conn().footer(self.sidebar.local_sessions().len());
-        let flyout = self.flyout_layers(cx);
+        let flyout = self.flyout_layers(window, cx);
         let overlay = self
             .conn()
             .overlay()
@@ -7133,11 +7133,11 @@ impl RootView {
 
     /// The open footer flyout over its backdrop: the daemon flyout or the
     /// accounts popover, which share the backdrop; at most one is open.
-    fn flyout_layers(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+    fn flyout_layers(&self, window: &Window, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
         let layer = if self.flyout_open {
             self.flyout(cx)
         } else if self.accounts_popover_open() {
-            self.accounts_popover(cx)
+            self.accounts_popover(window, cx)
         } else {
             return None;
         };

@@ -81,7 +81,7 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   At most one login runs at a time: a second start gets `Error { code: "account_busy" }`, and a start while the daemon shuts down gets `account_draining`. A host with no accounts service answers both messages `account_unsupported`.
 
-  Every connection then hears the run end as one broadcast `AccountLogin` (`succeeded`, `failed` or `cancelled`, `request_id` absent, `message` saying why when there is more to say), and the requester of a start or a cancel also gets its terminal state directly echoing its `request_id`.
+  Every connection then hears the run end as one broadcast `AccountLogin` (`succeeded`, `failed` or `cancelled`, `request_id` absent, `message` saying why when there is more to say: the daemon puts the reason on the first line and the CLI's screen lines after it, which a client relies on to show the reason last), and the requester of a start or a cancel also gets its terminal state directly echoing its `request_id`.
 
   A cancel with no login running is answered `account_refused`, and one while the login is starting or finishing `account_busy`. A login that succeeds changes the store, so the other connections also get `AccountsUpdated` as for any write.
 

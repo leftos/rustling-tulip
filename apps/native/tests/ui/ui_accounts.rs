@@ -477,6 +477,51 @@ fn a_short_email_stays_on_one_line_in_the_popover(cx: &mut TestAppContext) {
     );
 }
 
+/// More rows than a 601 px window's popover has room for.
+fn crowded() -> Vec<AccountSnapshot> {
+    (1u32..=10)
+        .map(|n| {
+            account(n, &format!("account{n}"))
+                .five_hour(61.0)
+                .seven_day(40.0)
+                .build()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_short_window_keeps_the_accounts_popover_header_on_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(984.0), px(601.0)));
+    popover_with_auto(&mut h, crowded(), Some(auto_switch(None)));
+    let height = h.window_height();
+    let popover = h.bounds("accounts-popover");
+    assert!(
+        popover.size.height > px(0.0) && popover.top() >= px(0.0),
+        "the popover {popover:?} starts inside the {height} px window"
+    );
+    assert!(
+        popover.bottom() <= px(height),
+        "the popover {popover:?} ends inside the {height} px window"
+    );
+    let header = h.bounds("accounts-header=Claude accounts");
+    assert!(
+        header.size.height > px(0.0) && header.top() >= px(0.0),
+        "the header {header:?} is on screen"
+    );
+    assert!(
+        drawn(&mut h, "accounts-auto-toggle=Auto-switch: On"),
+        "the header's controls are on screen with it"
+    );
+    let list = h.bounds("accounts-list");
+    let row = h.bounds("accounts-row-1");
+    assert!(
+        list.size.height > px(0.0) && list.size.height < row.size.height * 10.0,
+        "the rows' list {list:?} scrolls instead of growing past its cap"
+    );
+}
+
 #[gpui::test]
 fn the_popover_stays_closed_after_a_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();

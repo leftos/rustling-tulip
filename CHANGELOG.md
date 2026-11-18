@@ -10,6 +10,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- The accounts popover keeps its title and Auto-switch controls on screen in a short window, and its account list scrolls.
+- A failed account login's message now reads after the login's own output, not above it.
 - A fetched folder that holds one file now says "1 file", not "1 files", while it fetches and once it is done.
 - The phone's key editor shows a "Key label" hint in its empty label field.
 - The phone's chat shows a question's final Submit or Cancel step even when the terminal is too narrow or short to show its tabs.

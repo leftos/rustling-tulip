@@ -496,22 +496,38 @@ impl AccountsState {
 
 /// The status line the page shows for `login`, or `None` before the host
 /// ran a login: the run's state, and the daemon's message when it carried
-/// one.
+/// one, its outcome line last.
 pub(crate) fn login_status(login: Option<&Login>) -> Option<String> {
     match login? {
         Login::Running { .. } => Some(LOGIN_RUNNING_LINE.to_owned()),
         Login::Ended { state, message } => match state {
             AccountLoginState::Succeeded => Some(LOGIN_SUCCEEDED.to_owned()),
-            AccountLoginState::Failed => Some(match message {
-                Some(message) => format!("The login failed: {message}"),
-                None => LOGIN_FAILED.to_owned(),
-            }),
-            AccountLoginState::Cancelled => Some(match message {
-                Some(message) => format!("The login was cancelled: {message}"),
-                None => LOGIN_CANCELLED.to_owned(),
-            }),
+            AccountLoginState::Failed => Some(login_ended(
+                "The login failed",
+                LOGIN_FAILED,
+                message.as_deref(),
+            )),
+            AccountLoginState::Cancelled => Some(login_ended(
+                "The login was cancelled",
+                LOGIN_CANCELLED,
+                message.as_deref(),
+            )),
             AccountLoginState::Started | AccountLoginState::Unknown => None,
         },
+    }
+}
+
+/// The page's line for a login that ended: no message reads as `plain`, and
+/// otherwise `message`'s first line is the daemon's reason and the lines
+/// after it are the login's own screen, which reads first so the reason
+/// comes last.
+fn login_ended(outcome: &str, plain: &str, message: Option<&str>) -> String {
+    let Some(message) = message else {
+        return plain.to_owned();
+    };
+    match message.split_once('\n') {
+        Some((reason, screen)) if !screen.is_empty() => format!("{screen}\n{outcome}: {reason}"),
+        _ => format!("{outcome}: {message}"),
     }
 }
 
@@ -1402,7 +1418,7 @@ mod tests {
     };
 
     use super::{
-        AccountsState, AliasChange, ChipCandidate, Level, RELOGIN_LINE, Removal, RowActions,
+        AccountsState, AliasChange, ChipCandidate, Level, Login, RELOGIN_LINE, Removal, RowActions,
         STORE_READ_ONLY, Segment, Tag, Tone, WriteAction, account_toast, add_login_note, age_text,
         alias_change, bar, checked_line, chip, chip_host, cooldown_segments, forecast, header,
         hysteresis_step, label_slug, login_status, minor_money, money, moved_order, paused_line,
@@ -1819,7 +1835,31 @@ mod tests {
         assert!(!state.login_running(&host), "the run ended");
         assert_eq!(
             login_status(state.login(&host)).as_deref(),
-            Some("The login failed: bad login\nsecond line")
+            Some("second line\nThe login failed: bad login")
+        );
+    }
+
+    #[test]
+    fn a_cancelled_login_puts_its_reason_last() {
+        let login = Login::Ended {
+            state: AccountLoginState::Cancelled,
+            message: Some("stopped\nsecond line".to_owned()),
+        };
+        assert_eq!(
+            login_status(Some(&login)).as_deref(),
+            Some("second line\nThe login was cancelled: stopped")
+        );
+    }
+
+    #[test]
+    fn a_one_line_failed_login_reads_as_before() {
+        let login = Login::Ended {
+            state: AccountLoginState::Failed,
+            message: Some("bad login".to_owned()),
+        };
+        assert_eq!(
+            login_status(Some(&login)).as_deref(),
+            Some("The login failed: bad login")
         );
     }
 

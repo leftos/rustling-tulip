@@ -4,7 +4,10 @@
 //! stale-reply rule and every text live in the model.
 
 use chrono::Utc;
-use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, Pixels, Window, div, prelude::*, px,
+    relative,
+};
 use protocol::{AutoSwitchState, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
 
 use crate::accounts::{
@@ -33,6 +36,19 @@ const ROW_BAR: (f32, f32) = (150.0, 6.0);
 const DIM_ROW: f32 = 0.6;
 /// The alpha of the accent wash under the row in use.
 const ACTIVE_WASH: f32 = 0.06;
+/// The popover's gap from the window's top edge, in px.
+const POPOVER_TOP_MARGIN: f32 = 8.0;
+/// The popover's header height, in px: the title's line and its controls
+/// inside 10 px of padding above and below.
+const POPOVER_HEAD_HEIGHT: f32 = 48.0;
+
+/// The tallest the popover gets in a window `window_height` tall: the window
+/// less `footer` and a margin at the top, and never less than its own
+/// header, so a window too short for the rows still shows the header.
+#[must_use]
+pub(crate) fn popover_max_height(window_height: Pixels, footer: Pixels) -> Pixels {
+    (window_height - footer - px(POPOVER_TOP_MARGIN)).max(px(POPOVER_HEAD_HEIGHT))
+}
 
 impl RootView {
     /// Folds what `msg` from `host` says about its accounts, asking for the
@@ -356,8 +372,9 @@ impl RootView {
     }
 
     /// The popover above the chip: the header, the engine's notes, one row
-    /// per account and when the newest usage was fetched.
-    pub(crate) fn accounts_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// per account and when the newest usage was fetched. It is capped to
+    /// the window, so only its rows scroll and its header stays on screen.
+    pub(crate) fn accounts_popover(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let host = self.accounts_shown_host().unwrap_or(HostKey::Local);
         let now = Utc::now();
@@ -369,6 +386,7 @@ impl RootView {
             Self::auto_controls(&host, auto, writing, &t, cx)
         });
         let head = div()
+            .flex_none()
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -387,6 +405,7 @@ impl RootView {
             .children(controls);
         let note = |selector: &str, text: String, color: u32| {
             div()
+                .flex_none()
                 .px(px(14.0))
                 .pb(px(8.0))
                 .text_color(gpui::rgb(color))
@@ -407,6 +426,7 @@ impl RootView {
             .collect::<Vec<_>>();
         let checked = accounts::checked_line(list, now).map(|line| {
             div()
+                .flex_none()
                 .px(px(14.0))
                 .py(px(8.0))
                 .border_t_1()
@@ -414,17 +434,28 @@ impl RootView {
                 .text_color(gpui::rgb(t.subtle))
                 .child(tagged_text("accounts-checked".to_owned(), line))
         });
+        let rows = div()
+            .id("accounts-list")
+            .debug_selector(|| "accounts-list".to_owned())
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(rows);
+        let footer = ui_px(cx, FOOTER_HEIGHT);
         popover_frame(ui_text_size(cx), "accounts-popover", &t)
             .absolute()
             .right(px(POPOVER_RIGHT))
-            .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))
+            .bottom(footer + px(4.0))
             .w(px(POPOVER_WIDTH))
+            .max_h(popover_max_height(window.viewport_size().height, footer))
             .overflow_hidden()
             .flex()
             .flex_col()
             .child(head)
             .children(notes.into_iter().flatten())
-            .children(rows)
+            .child(rows)
             .children(checked)
             .into_any_element()
     }
@@ -799,4 +830,28 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
                     line.reset,
                 )),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popover_max_height_leaves_the_header_on_screen() {
+        assert_eq!(
+            popover_max_height(px(601.0), px(FOOTER_HEIGHT)),
+            px(565.0),
+            "a 601 px window caps the popover under the footer and its top margin"
+        );
+    }
+
+    #[test]
+    fn popover_max_height_never_cuts_the_header() {
+        let cap = popover_max_height(px(40.0), px(FOOTER_HEIGHT));
+        assert_eq!(
+            cap,
+            px(POPOVER_HEAD_HEIGHT),
+            "a window too short for the rows caps at the header"
+        );
+    }
 }
