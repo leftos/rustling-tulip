@@ -116,20 +116,52 @@ pub(crate) fn service_for(
 ) -> Option<SharedAccounts> {
     let cfg = AccountsConfig::new(dir?);
     #[cfg(feature = "e2e-loopback-peers")]
-    let cfg = match accounts_base_url_override(|name| std::env::var(name).ok()) {
-        Some(url) => {
-            warn!(
-                origin = %url,
-                "built with e2e-loopback-peers: the account service's profile, usage and refresh requests go to RUSTLING_TULIP_ACCOUNTS_BASE_URL; never ship this build"
-            );
-            AccountsConfig {
-                base_url: Some(url),
-                ..cfg
-            }
-        }
+    let applied = accounts_base_url_override(|name| std::env::var(name).ok()).inspect(|url| {
+        warn!(
+            origin = %url,
+            "built with e2e-loopback-peers: the account service's profile, usage and refresh requests go to RUSTLING_TULIP_ACCOUNTS_BASE_URL; never ship this build"
+        );
+    });
+    #[cfg(not(feature = "e2e-loopback-peers"))]
+    let applied: Option<String> = None;
+    let offline = std::env::var(ACCOUNTS_OFFLINE_VAR).ok();
+    let cfg = match accounts_origin(applied, offline.as_deref()) {
+        Some(url) => AccountsConfig {
+            base_url: Some(url),
+            ..cfg
+        },
         None => cfg,
     };
     ask(&cfg)
+}
+
+/// The variable that takes an isolated or driven run's account service off
+/// the network: exactly `1` points its requests at a closed loopback port.
+const ACCOUNTS_OFFLINE_VAR: &str = "RUSTLING_TULIP_ACCOUNTS_OFFLINE";
+
+/// The origin `RUSTLING_TULIP_ACCOUNTS_OFFLINE` gives the account service:
+/// the discard port, which nothing listens on, so every request fails at once
+/// with a connection error and none leaves the machine.
+const ACCOUNTS_OFFLINE_ORIGIN: &str = "http://127.0.0.1:9";
+
+/// The origin the account service's profile, usage and refresh requests go
+/// to: `applied`, the loopback origin an `e2e-loopback-peers` build took from
+/// its variable, while it is set; else [`ACCOUNTS_OFFLINE_ORIGIN`] while
+/// `RUSTLING_TULIP_ACCOUNTS_OFFLINE` is exactly `1`; else `None`, the real
+/// endpoints.
+fn accounts_origin(applied: Option<String>, offline: Option<&str>) -> Option<String> {
+    if applied.is_some() {
+        return applied;
+    }
+    if offline != Some("1") {
+        return None;
+    }
+    warn!(
+        origin = ACCOUNTS_OFFLINE_ORIGIN,
+        "accounts offline: the account service's profile, usage and refresh requests go to a \
+         closed loopback port and never leave the machine"
+    );
+    Some(ACCOUNTS_OFFLINE_ORIGIN.to_owned())
 }
 
 /// The origin `RUSTLING_TULIP_ACCOUNTS_BASE_URL` names, read through `read`:
@@ -1268,6 +1300,26 @@ mod tests {
     #[test]
     fn accounts_base_url_override_is_none_when_the_variable_is_unset() {
         assert_eq!(accounts_base_url_override(holding(None)), None);
+    }
+
+    #[test]
+    fn accounts_offline_points_the_service_at_a_closed_loopback_port() {
+        assert_eq!(
+            accounts_origin(None, Some("1")),
+            Some("http://127.0.0.1:9".to_owned())
+        );
+        for value in [None, Some(""), Some("0"), Some("true")] {
+            assert_eq!(
+                accounts_origin(None, value),
+                None,
+                "RUSTLING_TULIP_ACCOUNTS_OFFLINE {value:?} is not 1, so the real endpoints stay"
+            );
+        }
+        assert_eq!(
+            accounts_origin(Some("http://localhost:5000".to_owned()), Some("1")),
+            Some("http://localhost:5000".to_owned()),
+            "an applied base-URL override wins over the offline port"
+        );
     }
 
     use super::fake::{ADDED, HANG, Writable, ask_as, dispatch_with, next_reply};

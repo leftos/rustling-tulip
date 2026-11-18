@@ -93,6 +93,9 @@ pub(crate) fn isolated_envs(
             "RUSTLING_TULIP_ACCOUNTS_DIR",
             root.join("accounts").into_os_string(),
         ),
+        // The account service's requests: a closed loopback port, so a driven
+        // or isolated run never reaches the real endpoints.
+        ("RUSTLING_TULIP_ACCOUNTS_OFFLINE", OsString::from("1")),
         // The updates folder: the live tier never cleans or reads the user's
         // real downloaded installers or `last-result.json`.
         (
@@ -260,6 +263,7 @@ fn path_with_stub(root: &Path) -> Result<OsString, LaunchError> {
     reason = "a test asserts its preconditions with expect"
 )]
 mod tests {
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     use daemon_client::isolation::GATES_DIR_VAR;
@@ -330,6 +334,30 @@ mod tests {
             env_value(&envs, "RUSTLING_TULIP_DISPATCH_DIR"),
             Some(root.join("dispatch-live").into_os_string()),
             "the live tier never reads or stops the owner's real dispatch runs"
+        );
+    }
+
+    #[test]
+    fn isolated_envs_take_accounts_offline() {
+        let root = repo_root_tmp().join(format!("accounts-offline-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_ACCOUNTS_OFFLINE"),
+            Some(OsString::from("1")),
+            "a driven or isolated run's account service never reaches the real endpoints"
+        );
+
+        let mut overridden = spec(root);
+        overridden
+            .extra_env
+            .push(("RUSTLING_TULIP_ACCOUNTS_OFFLINE", OsString::from("0")));
+        let envs = isolated_envs(&overridden).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_ACCOUNTS_OFFLINE"),
+            Some(OsString::from("0")),
+            "a spec's own value wins over the isolation's"
         );
     }
 

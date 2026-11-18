@@ -1305,16 +1305,24 @@ fn wait_source_control_active(hwnd: HWND, click: &str) {
 /// driver pipe, whose pointer methods post window messages to its window.
 #[cfg(feature = "driver")]
 mod driven {
+    use std::cell::Cell;
     use std::fs::{File, OpenOptions};
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::process::{Command, Stdio};
+    use std::rc::Rc;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use base64::Engine as _;
+    use gpui::{
+        App, AppContext as _, Bounds, Context, Font, FontWeight, Hsla, IntoElement, Render,
+        SharedString, TextRun, Window, WindowBounds, WindowOptions, div, px, size,
+    };
     use protocol::ClientMessage;
     use rustling_tulip_native::SIDEBAR_DEFAULT_WIDTH;
     use rustling_tulip_native::driver_gate::{DRIVER_ENV, DRIVER_TOASTS_ENV};
+    use rustling_tulip_native::fonts;
+    use rustling_tulip_native::offscreen::show_cloaked;
     use serde_json::{Value, json};
     use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -1346,6 +1354,16 @@ mod driven {
     const DRAG_BY: f64 = 80.0;
     /// How close the divider must land to where the drag aimed.
     const DRAG_SLACK: f64 = 4.0;
+    /// The sidebar header's title text, its size in logical pixels and the
+    /// weight it draws at: `header` in `apps/native/src/sidebar_view.rs`.
+    const SIDEBAR_TITLE: &str = "Sessions";
+    const SIDEBAR_TITLE_SIZE: f32 = 13.0;
+    /// How far the title's box may fall short of the shaped word: layout
+    /// rounds a subpixel, nothing more.
+    const TITLE_SLACK: f64 = 0.5;
+    /// How far the title's centre may sit from the view toggles' centre and
+    /// still share their row.
+    const SAME_ROW_SLACK: f64 = 1.0;
 
     /// The client binary as a driven run: [`super::launch_client`]'s cloaked
     /// window with the driver endpoint on. The driver gate
@@ -1723,6 +1741,131 @@ mod driven {
 
     fn number(value: &Value) -> f64 {
         value.as_f64().expect("a number")
+    }
+
+    /// Shapes the header's title on the platform's real text system and
+    /// returns its width in logical pixels. gpui's test platform shapes with
+    /// a no-op text system, so a cloaked window of its own measures it, as
+    /// `tests/ellipsis_real_text.rs` does.
+    fn shaped_title_width() -> f32 {
+        let width: Rc<Cell<Option<f32>>> = Rc::new(Cell::new(None));
+        let measuring = width.clone();
+        let quit = width.clone();
+        gpui_platform::application().run(move |cx: &mut App| {
+            fonts::register_bundled(cx);
+            let bounds = Bounds::centered(None, size(px(800.0), px(200.0)), cx);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    show_cloaked(window, (800, 200));
+                    cx.new(|_| ShapedTitle { width: measuring })
+                },
+            );
+            assert!(
+                opened.is_ok(),
+                "opening the measuring window: {:?}",
+                opened.err()
+            );
+            cx.spawn(async move |cx| {
+                let deadline = Instant::now() + DRIVER_TIMEOUT;
+                while quit.get().is_none() && Instant::now() < deadline {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(20))
+                        .await;
+                }
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+        width.get().expect("the measuring window shaped the title")
+    }
+
+    /// Measures [`SIDEBAR_TITLE`] at the header's font when it first draws,
+    /// and draws nothing.
+    struct ShapedTitle {
+        width: Rc<Cell<Option<f32>>>,
+    }
+
+    impl Render for ShapedTitle {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let run = TextRun {
+                len: SIDEBAR_TITLE.len(),
+                font: Font {
+                    weight: FontWeight::BOLD,
+                    ..gpui::font(fonts::DEFAULT_UI_FAMILY)
+                },
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::new_static(SIDEBAR_TITLE),
+                px(SIDEBAR_TITLE_SIZE),
+                &[run],
+                None,
+            );
+            self.width.set(Some(line.width / px(1.0)));
+            div()
+        }
+    }
+
+    /// The vertical centre of the element `name`'s painted box.
+    fn centre_y(driver: &mut Driver, name: &str) -> f64 {
+        let bounds = driver.element(name)["bounds"].clone();
+        number(&bounds["y"]) + number(&bounds["h"]) / 2.0
+    }
+
+    /// Asserts the header's title draws on the view toggles' row, so the
+    /// header has not wrapped, and that its box is at least as wide as the
+    /// word it draws, so it fits beside the fold-all slot and those toggles.
+    fn assert_title_fits(driver: &mut Driver, shaped: f32, when: &str) {
+        let title = centre_y(driver, "sidebar-title");
+        let toggles = centre_y(driver, "sidebar-view-tabs");
+        assert!(
+            (title - toggles).abs() <= SAME_ROW_SLACK,
+            "{when}: the sidebar's title is centred at y {title} and its view toggles at y \
+             {toggles}, so the header wrapped and the title is no longer beside them"
+        );
+        let width = number(&driver.element("sidebar-title")["bounds"]["w"]);
+        assert!(
+            width + TITLE_SLACK >= f64::from(shaped),
+            "{when}: the sidebar's title box is {width} px wide and \"{SIDEBAR_TITLE}\" takes \
+             {shaped} px at its font, so the title is squeezed"
+        );
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_sidebar_title_fits_beside_the_fold_all_slot() {
+        let (smoke, mut driver) = open_driven("smoke-sidebar-title");
+        let shaped = shaped_title_width();
+        driver.wait(
+            &json!({"element": "sidebar-fold-all", "visible": false}),
+            "no fold-all button over a sidebar with no nested rows",
+        );
+        assert_title_fits(&mut driver, shaped, "with no fold-all button");
+
+        let session = seed_fake_agent(&smoke.daemon);
+        let mut ws = connect(&smoke.daemon, "rt-smoke-sidebar-title");
+        wait_scrollback(&mut ws, &session, "idle prompt box", |line| {
+            line.starts_with('\u{276f}')
+        });
+        type_into(&mut ws, &session, b"please rt-subagent\r");
+        driver.wait(
+            &json!({"element": "sidebar-fold-all", "visible": true}),
+            "the fold-all button over the session's subagent row",
+        );
+        assert_title_fits(&mut driver, shaped, "with the fold-all button");
+
+        let _ = ws.close(None);
+        let _ = ws.flush();
+        assert_out_of_the_way(smoke.hwnd);
     }
 
     #[test]

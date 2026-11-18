@@ -305,6 +305,7 @@ enum View {
     SettingsHosts,
     SettingsDashboard,
     SettingsAccounts,
+    SettingsAccountsRows,
     Toast,
     SettingsSounds,
     SettingsToastPosition,
@@ -338,7 +339,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 60] = [
+    const ALL: [Self; 61] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -369,6 +370,7 @@ impl View {
         Self::SettingsHosts,
         Self::SettingsDashboard,
         Self::SettingsAccounts,
+        Self::SettingsAccountsRows,
         Self::SettingsSounds,
         Self::SettingsToastPosition,
         Self::Accounts,
@@ -451,6 +453,7 @@ impl View {
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
             Self::SettingsAccounts => "settings-accounts",
+            Self::SettingsAccountsRows => "settings-accounts-rows",
             Self::SettingsSounds => "settings-sounds",
             Self::SettingsToastPosition => "settings-toast-position",
             Self::Accounts => "accounts",
@@ -646,6 +649,9 @@ impl View {
             Self::Settings => root.settings_open(),
             Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
             Self::SettingsAccounts => root.settings_open() && root.settings_tab() == "Accounts",
+            Self::SettingsAccountsRows => {
+                root.settings_open() && root.settings_tab() == "Accounts"
+            }
             Self::SettingsSounds => {
                 root.settings_open() && root.open_sound_list() == Some(NotifyKind::NeedsYou)
             }
@@ -827,6 +833,7 @@ impl Shot {
             | View::SettingsHosts
             | View::SettingsDashboard
             | View::SettingsAccounts
+            | View::SettingsAccountsRows
             | View::SettingsSounds
             | View::SettingsToastPosition
             | View::Accounts
@@ -1899,6 +1906,7 @@ fn drive(
         View::SettingsSounds => drive_settings_sounds(window, cx),
         View::SettingsToastPosition => drive_settings_toast_position(window, cx),
         View::SettingsAccounts => drive_settings_accounts(step, address, window, cx),
+        View::SettingsAccountsRows => drive_settings_accounts(0, address, window, cx),
         View::Spawn => {
             press("ctrl-shift-n", window, cx)?;
             let root = window
@@ -2243,7 +2251,8 @@ fn open_menu(window: &mut Window, cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// Step `step` of the `settings-accounts` shot: Settings on its Accounts
+/// Step `step` of the `settings-accounts` shot, and the whole of the
+/// `settings-accounts-rows` one (step 0 alone): Settings on its Accounts
 /// tab, then the wheel down the page to the auto-switch block. The tab list's
 /// position depends on the host's feature list and the agents it offers, so
 /// the tab is chosen by name rather than walked to with Down.
