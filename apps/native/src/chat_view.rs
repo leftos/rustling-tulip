@@ -27,18 +27,19 @@ use gpui::{
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
-    AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT,
-    FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
+    AgentDescriptor, CatalogEntry, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CATALOG,
+    FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL,
+    FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
-    self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftClear,
-    DraftPull, FILE_SEARCH_DEBOUNCE, FILE_SEARCH_LIMIT, FILE_TRIGGER, FileSearch, PaneView,
-    PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork, ScriptRow, SendTracker,
-    Strip, SuggestionChip, ViewKey,
+    self, COMMAND_TRIGGER, ChatLoads, ChatLog, ChatMode, CommandCatalog, ComposerLine,
+    ComposerNote, DisplayRow, DraftClear, DraftPull, FILE_SEARCH_DEBOUNCE, FILE_SEARCH_LIMIT,
+    FILE_TRIGGER, FileSearch, PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary,
+    RunningWork, ScriptRow, SendTracker, Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -239,6 +240,8 @@ pub(crate) struct Composer {
     files: FileSearch,
     /// The debounce timer of the next file search.
     file_timer: Option<Task<()>>,
+    /// The session's commands and skills for the `/` token.
+    commands: CommandCatalog,
     _subscriptions: [Subscription; 4],
 }
 
@@ -278,6 +281,33 @@ impl Composer {
         if self.files.token_left() {
             self.completion.set_items(Vec::new());
         }
+    }
+
+    /// The caret now sits in `token`, or none: a `/` token on a host that
+    /// offers the catalog (`offered`) shows the cached entries matching its
+    /// query, or, with none cached and none awaited, returns the request id
+    /// of the catalog request to send; leaving it removes the rows the
+    /// catalog gave.
+    fn follow_command_token(&mut self, token: Option<&Token>, offered: bool) -> Option<String> {
+        let Some(token) = token.filter(|token| token.trigger == COMMAND_TRIGGER) else {
+            if self.commands.token_left() {
+                self.completion.set_items(Vec::new());
+            }
+            return None;
+        };
+        if !offered {
+            return None;
+        }
+        if let Some(rows) = self.commands.rows_for(&token.query) {
+            self.completion.set_items(rows);
+            return None;
+        }
+        if !self.commands.wants_fetch() {
+            return None;
+        }
+        let request_id = new_request_id();
+        self.commands.sent(request_id.clone());
+        Some(request_id)
     }
 }
 
@@ -441,7 +471,14 @@ impl SessionChat {
                         self.log.load(entries, hidden);
                     }
                     Some(_) => return false,
-                    None => self.log.reset(entries, hidden),
+                    None => {
+                        self.log.reset(entries, hidden);
+                        // The chat started over: its agent's commands may
+                        // have changed, so the next `/` asks again.
+                        if let Some(composer) = self.composer.as_mut() {
+                            composer.commands.forget();
+                        }
+                    }
                 }
                 self.take_screen(&screen, now);
                 self.refresh_docs();
@@ -2281,6 +2318,11 @@ impl RootView {
                 request_id,
                 ..
             } => self.on_file_matches(&session_id, matches, request_id.as_deref(), cx),
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => self.on_catalog(&session_id, entries, request_id.as_deref(), cx),
             DaemonMessage::SessionRemoved { session_id } => {
                 let untails = self.chat.tails.close_session(&session_id);
                 self.send_untails(untails);
@@ -2574,6 +2616,7 @@ impl RootView {
                 completion: CompletionState::default(),
                 files: FileSearch::default(),
                 file_timer: None,
+                commands: CommandCatalog::default(),
                 _subscriptions: [keys, edits, completions, images],
             });
         }
@@ -2612,6 +2655,42 @@ impl RootView {
         }
     }
 
+    /// Whether session `session_id`'s host offers its command catalog.
+    fn catalog_offered(&self, session_id: &str) -> bool {
+        self.conn_of(&self.chat.host_of(session_id))
+            .is_some_and(|conn| conn.supports(FEATURE_CHAT_CATALOG))
+    }
+
+    /// Folds a token change or clear from session `session_id`'s composer
+    /// into its command catalog, sending the one `ListCatalog` a first `/`
+    /// token on a host that offers it asks for; any other event leaves it
+    /// alone.
+    fn fold_command_token(&mut self, session_id: &str, event: &CompletionEvent) {
+        let token = match event {
+            CompletionEvent::TokenChanged(token) => Some(token),
+            CompletionEvent::TokenCleared => None,
+            _ => return,
+        };
+        let offered = self.catalog_offered(session_id);
+        let Some(request_id) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+            .and_then(|composer| composer.follow_command_token(token, offered))
+        else {
+            return;
+        };
+        let host = self.chat.host_of(session_id);
+        self.send_to(
+            &host,
+            ClientMessage::ListCatalog {
+                session_id: session_id.to_owned(),
+                request_id: Some(request_id),
+            },
+        );
+    }
+
     /// Folds what session `session_id`'s composer told of its completion
     /// token or the popup's keys into its [`CompletionState`]: Up and Down
     /// move the selection, Tab and Enter (`Accept`) put the pick in place of
@@ -2623,6 +2702,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.fold_file_token(session_id, event, cx);
+        self.fold_command_token(session_id, event);
         let Some(composer) = self
             .chat
             .sessions
@@ -2676,8 +2756,8 @@ impl RootView {
     /// Offers `items` in session `session_id`'s completion popup, the first
     /// selected; the popup shows them while the composer's caret sits in a
     /// `/` or `@` token. The specs give it a fixed list; the session's
-    /// commands and files feed it later. Nothing happens before the
-    /// composer is made.
+    /// commands and files feed it from their own answers. Nothing happens
+    /// before the composer is made.
     pub fn set_chat_completion_items(
         &mut self,
         session_id: &str,
@@ -2694,6 +2774,7 @@ impl RootView {
         };
         composer.completion.set_items(items);
         composer.files.items_given();
+        composer.commands.items_given();
         composer.sync_completion(cx);
         cx.notify();
     }
@@ -2765,6 +2846,45 @@ impl RootView {
             .map(|file| CompletionItem::new(file.path, file.reference))
             .collect();
         composer.completion.set_items(items);
+        composer.sync_completion(cx);
+        cx.notify();
+    }
+
+    /// A `Catalog` answering session `session_id`'s pending catalog request:
+    /// its entries are cached for the composer's `/` tokens, and while the
+    /// caret sits in one, those matching its query become the popup's rows.
+    /// Any other is dropped.
+    fn on_catalog(
+        &mut self,
+        session_id: &str,
+        entries: Vec<CatalogEntry>,
+        request_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            tracing::debug!(%session_id, "command catalog for a chat with no composer: dropped");
+            return;
+        };
+        let count = entries.len();
+        if !composer.commands.answered(request_id, entries) {
+            tracing::debug!(%session_id, "command catalog for no pending request: dropped");
+            return;
+        }
+        tracing::debug!(%session_id, count, "command catalog cached for the composer");
+        let query = composer
+            .completion
+            .token()
+            .filter(|token| token.trigger == COMMAND_TRIGGER)
+            .map(|token| token.query.clone());
+        let Some(rows) = query.and_then(|query| composer.commands.rows_for(&query)) else {
+            return;
+        };
+        composer.completion.set_items(rows);
         composer.sync_completion(cx);
         cx.notify();
     }
