@@ -3,6 +3,7 @@
 //! [`RootView`].
 
 mod composer;
+mod fetched;
 mod home;
 mod home_view;
 mod hosts_view;

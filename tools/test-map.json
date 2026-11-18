@@ -1913,6 +1913,12 @@
     },
     {
       "paths": [
+        "apps/native/src/phone/fetched.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^phone::fetched::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/keyboard.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^keyboard::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_session::/) | test(/^ui_phone_terminal::/)))"

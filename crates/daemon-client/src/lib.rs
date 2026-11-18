@@ -68,7 +68,9 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 /// subfolder per host.
 ///
 /// Honors `RUSTLING_TULIP_REMOTE_FILES_DIR` if set and non-empty (used to
-/// isolate test runs), otherwise falls back to
+/// isolate test runs). On iOS the folder is the app's `Documents` folder,
+/// which the Files app shows under On My iPhone › Rustling Tulip; everywhere
+/// else it falls back to
 /// `ProjectDirs::from("dev", "leftos", "rustling-tulip").data_local_dir()`
 /// joined with `remote-files`: machine-local, so the copies never roam.
 ///
@@ -81,9 +83,31 @@ pub fn remote_files_dir() -> anyhow::Result<PathBuf> {
     {
         return Ok(PathBuf::from(value));
     }
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve the local data directory"))?;
-    Ok(pd.data_local_dir().join("remote-files"))
+    #[cfg(target_os = "ios")]
+    {
+        let bases = directories::BaseDirs::new()
+            .ok_or_else(|| anyhow!("could not resolve the home directory"))?;
+        Ok(ios_remote_files_dir(bases.home_dir()))
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
+            .ok_or_else(|| anyhow!("could not resolve the local data directory"))?;
+        Ok(pd.data_local_dir().join("remote-files"))
+    }
+}
+
+/// The folder fetched copies live in for an app whose home directory is
+/// `home`: its `Documents` folder, which iOS shows in the Files app.
+///
+/// Split out from [`remote_files_dir`] so a test on any platform checks the
+/// path the phone builds.
+#[cfg_attr(
+    all(not(target_os = "ios"), not(test)),
+    expect(dead_code, reason = "the ios branch is its only caller")
+)]
+fn ios_remote_files_dir(home: &Path) -> PathBuf {
+    home.join("Documents")
 }
 
 /// Resolve the folder the native client's updater downloads releases into.
@@ -1346,6 +1370,14 @@ mod tests {
         );
         assert!(alive, "the stand-in was killed");
         assert!(path.exists(), "daemon.json was removed");
+    }
+
+    #[test]
+    fn ios_remote_files_are_the_documents_folder() {
+        assert_eq!(
+            super::ios_remote_files_dir(Path::new("/home/app")),
+            PathBuf::from("/home/app").join("Documents")
+        );
     }
 
     #[test]
