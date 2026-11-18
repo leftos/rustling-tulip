@@ -10,7 +10,7 @@ use crate::support;
 
 use base64::Engine as _;
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{BackGesturePhase, TestAppContext, point, px};
+use gpui::{BackGesturePhase, Entity, RetainAllImageCache, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, FEATURE_HOST_PATHS, FEATURE_RELAY_PUSH, PathKind};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::phone::PhoneRoot;
@@ -25,6 +25,15 @@ const LABEL: &str = "builder@Buildbox";
 
 /// The reserved viewer tab the phone's page reads its file under.
 const PHONE_VIEWER_TAB: &str = "phone-viewer";
+
+/// A 2x2 grayscale PNG, so the viewer has a real image to decode.
+const TWO_BY_TWO_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00, 0x57, 0xdd, 0x52,
+    0xf8, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0x80, 0x01, 0x00,
+    0x00, 0x0a, 0x00, 0x01, 0xec, 0x24, 0x03, 0xb9, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+];
 
 /// Whether the last frame drew what `selector` tags.
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
@@ -78,17 +87,22 @@ fn open_phone_listing<'a>(
 /// Writes `text` as the copy of `name` fetched from [`REMOTE`] under
 /// `copies` and hands the phone its saved fetch.
 fn save(h: &mut Harness<'_>, copies: &std::path::Path, name: &str, text: &str) {
+    save_bytes(h, copies, name, text.as_bytes());
+}
+
+/// [`save`], the copy holding `bytes`.
+fn save_bytes(h: &mut Harness<'_>, copies: &std::path::Path, name: &str, bytes: &[u8]) {
     let saved = PhoneFetched {
         host: REMOTE.to_owned(),
         host_path: format!("/abs/{name}"),
         local_path: format!("{REMOTE}/root/abs/{name}"),
-        size: u64::try_from(text.len()).expect("a small file"),
+        size: u64::try_from(bytes.len()).expect("a small file"),
         host_label: LABEL.to_owned(),
     };
     let path = copies.join(&saved.local_path);
     std::fs::create_dir_all(path.parent().expect("a copy has a folder"))
         .expect("make the copy's folder");
-    std::fs::write(&path, text).expect("write the copy");
+    std::fs::write(&path, bytes).expect("write the copy");
     h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
 }
 
@@ -107,6 +121,17 @@ fn header(h: &mut Harness<'_>) -> Option<(String, String, String, bool)> {
 /// Whether the root view holds the phone's reserved viewer tab.
 fn holds_viewer_tab(h: &mut Harness<'_>) -> bool {
     h.root_update(|root, _, _| root.viewer_tab(PHONE_VIEWER_TAB).is_some())
+}
+
+/// The image cache the phone's viewer page draws through, while it is open.
+fn viewer_cache(h: &mut Harness<'_>) -> Option<Entity<RetainAllImageCache>> {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.read(cx).viewer_image_cache()
+    })
 }
 
 #[gpui::test]
@@ -583,4 +608,82 @@ fn opening_a_path_with_no_copy_fetches_it(cx: &mut TestAppContext) {
     );
     assert_eq!(stats_of(&sent, "/abs/other.txt"), Vec::<String>::new());
     assert_eq!(shown(&mut h), None, "nothing opens before it is saved");
+}
+
+#[gpui::test]
+fn a_saved_image_shows_scaled_to_fit(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+
+    assert!(drawn(&mut h, "phone-viewer"), "the viewer page shows");
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows");
+    assert!(
+        !drawn(&mut h, "viewer-phone-viewer"),
+        "the text body does not"
+    );
+    let page = h.bounds("phone-viewer");
+    let image = h.bounds("phone-viewer-image");
+    assert!(
+        image.size.width <= page.size.width && image.size.height <= page.size.height,
+        "the image fits the page: {image:?} within {page:?}"
+    );
+}
+
+#[gpui::test]
+fn a_saved_binary_file_shows_a_card_with_its_name_and_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save_bytes(&mut h, &copies, "blob.bin", b"\x00binary\x00");
+
+    assert!(drawn(&mut h, "phone-viewer"), "the viewer page shows");
+    assert!(drawn(&mut h, "phone-viewer-card"), "the card shows");
+    assert!(drawn(&mut h, "phone-viewer-card-name"), "with the name");
+    assert!(drawn(&mut h, "phone-viewer-card-size"), "and its size");
+    assert!(
+        !drawn(&mut h, "viewer-phone-viewer"),
+        "the text body does not"
+    );
+}
+
+#[gpui::test]
+fn a_reopened_image_uses_a_fresh_image_cache(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows");
+    let first = viewer_cache(&mut h).expect("the open page draws through a cache");
+    h.click_on("phone-viewer-back");
+    assert!(!drawn(&mut h, "phone-viewer"), "the viewer page is gone");
+
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows again");
+    let second = viewer_cache(&mut h).expect("the reopened page draws through a cache");
+    assert_ne!(first, second, "each open draws through its own cache");
+}
+
+#[gpui::test]
+fn a_broken_image_shows_the_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save_bytes(&mut h, &copies, "broken.png", b"not an image\n");
+
+    assert!(drawn(&mut h, "phone-viewer"), "the viewer page shows");
+    assert!(
+        drawn(&mut h, "phone-viewer-card"),
+        "the card stands in for the image"
+    );
+    assert!(
+        !drawn(&mut h, "viewer-phone-viewer"),
+        "the text body does not"
+    );
 }

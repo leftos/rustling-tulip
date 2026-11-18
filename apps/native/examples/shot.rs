@@ -89,6 +89,11 @@
 //! name over a row per group, its title over its reply count and a chevron.
 //! `phone-settings-reply-group` shows the agent set's `common` group open:
 //! the header's title `Group` over its Title row and its five replies.
+//! `phone-viewer` shows the `phone-home` fixture's viewer page over a saved
+//! Rust file: the header with `Back`, the file's name, its host and its path
+//! on that host, over the file's highlighted lines.
+//! `phone-viewer-md` shows that page over a saved Markdown file: the header
+//! over the file's rendered Markdown.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -136,9 +141,9 @@ use rustling_tulip_native::{
     Activity, AppToast, AppToastKind, AskBlock, AskBox, AskChoice, Assets, CardText, Clock,
     Connection, FOOTER_HEIGHT, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure,
-    Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, SystemToastPlacer,
-    TOAST_CARD_WIDTH, TextInput, ToastKind, ToastPresses, ToastSpec, Transport, TypedRow,
-    ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
+    Opener, PhoneFetched, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker,
+    SystemToastPlacer, TOAST_CARD_WIDTH, TextInput, ToastKind, ToastPresses, ToastSpec, Transport,
+    TypedRow, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -169,6 +174,45 @@ const PHONE_WINDOW_SIZE: (u16, u16) = (390, 844);
 /// insets the iPhone simulator reported in the gpui iOS spike.
 const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
+/// The folder under the shot's temp dir the phone shots' fetched copies
+/// sit in.
+const SHOT_PHONE_COPIES: &str = "copies";
+/// The Rust file the `phone-viewer` shot fetches, as its name and its path
+/// on the host.
+const SHOT_PHONE_RS_NAME: &str = "server.rs";
+const SHOT_PHONE_RS_PATH: &str = "/Users/builder/source/rustling-tulip/crates/daemon/src/server.rs";
+/// The Rust file the `phone-viewer` shot shows.
+const SHOT_PHONE_RS: &str = r"//! Where a session's terminal is drawn.
+//!
+//! The pane follows the grid the daemon streams.
+
+use std::sync::Arc;
+
+/// How many rows a pane keeps before it trims.
+const KEEP_ROWS: usize = 10_000;
+
+/// A session's terminal as the client draws it.
+pub struct Terminal {
+    /// The rows the daemon sent, oldest first.
+    rows: Vec<Arc<str>>,
+}
+
+impl Terminal {
+    /// Appends `row`, trimming the oldest once the cap is reached.
+    pub fn push(&mut self, row: Arc<str>) {
+        if self.rows.len() == KEEP_ROWS {
+            self.rows.remove(0);
+        }
+        self.rows.push(row);
+    }
+}
+";
+/// The Markdown file the `phone-viewer-md` shot fetches, as its name and
+/// its path on the host.
+const SHOT_PHONE_MD_NAME: &str = "README.md";
+const SHOT_PHONE_MD_PATH: &str = "/Users/builder/source/rustling-tulip/README.md";
+/// The Markdown file the `phone-viewer-md` shot shows.
+const SHOT_PHONE_MD: &str = "# Rustling Tulip\n\nA native client for many parallel agent sessions.\n\n## What it does\n\n- Runs each session in its own terminal on the host that owns it.\n- Keeps the sidebar, tabs and panes in step across hosts.\n\n```sh\ncargo run --release\n```\n";
 /// How many session rows the `phone-home` shot's Home lists.
 const PHONE_HOME_ROWS: usize = 4;
 /// The working session whose sheet the `phone-sheet` shot opens, and
@@ -336,10 +380,12 @@ enum View {
     PhoneSettingsKeyEdit,
     PhoneSettingsReplies,
     PhoneSettingsReplyGroup,
+    PhoneViewer,
+    PhoneViewerMd,
 }
 
 impl View {
-    const ALL: [Self; 61] = [
+    const ALL: [Self; 63] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -401,6 +447,8 @@ impl View {
         Self::PhoneSettingsKeyEdit,
         Self::PhoneSettingsReplies,
         Self::PhoneSettingsReplyGroup,
+        Self::PhoneViewer,
+        Self::PhoneViewerMd,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -418,6 +466,8 @@ impl View {
                 | Self::PhoneSettingsKeyEdit
                 | Self::PhoneSettingsReplies
                 | Self::PhoneSettingsReplyGroup
+                | Self::PhoneViewer
+                | Self::PhoneViewerMd
         )
     }
 
@@ -484,6 +534,8 @@ impl View {
             Self::PhoneSettingsKeyEdit => "phone-settings-key-edit",
             Self::PhoneSettingsReplies => "phone-settings-replies",
             Self::PhoneSettingsReplyGroup => "phone-settings-reply-group",
+            Self::PhoneViewer => "phone-viewer",
+            Self::PhoneViewerMd => "phone-viewer-md",
         }
     }
 
@@ -539,7 +591,9 @@ impl View {
             | Self::PhoneSettingsKeys
             | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
-            | Self::PhoneSettingsReplyGroup => PHONE_WINDOW_SIZE,
+            | Self::PhoneSettingsReplyGroup
+            | Self::PhoneViewer
+            | Self::PhoneViewerMd => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -589,7 +643,9 @@ impl View {
             | Self::PhoneSettingsKeys
             | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
-            | Self::PhoneSettingsReplyGroup => true,
+            | Self::PhoneSettingsReplyGroup
+            | Self::PhoneViewer
+            | Self::PhoneViewerMd => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -863,6 +919,8 @@ impl Shot {
             | View::PhoneSettingsKeyEdit
             | View::PhoneSettingsReplies
             | View::PhoneSettingsReplyGroup
+            | View::PhoneViewer
+            | View::PhoneViewerMd
             | View::Toast => None,
         }
     }
@@ -912,7 +970,11 @@ impl Shot {
         };
         let layout = serde_json::to_vec_pretty(&state)
             .with_context(|| format!("serializing the layout for {}", saved.display()))?;
-        std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
+        std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))?;
+        if matches!(self.view, View::PhoneViewer | View::PhoneViewerMd) {
+            return self.seed_phone_viewer();
+        }
+        Ok(())
     }
 
     /// Writes the `themes` shot's user themes: one good, one that does not
@@ -942,6 +1004,25 @@ impl Shot {
             VIEWER_FILE
         };
         self.ui_dir.join(file)
+    }
+
+    /// The fetched copy the `phone-viewer` or `phone-viewer-md` shot's page
+    /// shows, under the shot's copies folder.
+    fn seed_phone_viewer(&self) -> Result<()> {
+        let (host_path, text) = if self.view == View::PhoneViewerMd {
+            (SHOT_PHONE_MD_PATH, SHOT_PHONE_MD)
+        } else {
+            (SHOT_PHONE_RS_PATH, SHOT_PHONE_RS)
+        };
+        let path = self
+            .ui_dir
+            .join(SHOT_PHONE_COPIES)
+            .join(shot_phone_local_path(host_path));
+        let dir = path
+            .parent()
+            .with_context(|| format!("the copy {} has no folder", path.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -1663,6 +1744,9 @@ async fn capture_phone_home(
         }
     }
     open_phone_screen(shot.view, handle, cx).await?;
+    if matches!(shot.view, View::PhoneViewer | View::PhoneViewerMd) {
+        open_phone_viewer(shot, handle, cx).await?;
+    }
     if shot.view == View::PhoneSessionSheet {
         let card = handle.update(cx, |phone, _, cx| {
             phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
@@ -1673,6 +1757,52 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// The copies-folder path of a fetch of `host_path` from the shot's host.
+fn shot_phone_local_path(host_path: &str) -> String {
+    format!("{SHOT_TAILNET_HOST}/root{host_path}")
+}
+
+/// Hands the phone the saved fetch the `phone-viewer` or `phone-viewer-md`
+/// view's page shows, under the shot's copies folder, and checks the page
+/// opened on it.
+async fn open_phone_viewer(
+    shot: &Shot,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let (name, host_path, text) = if shot.view == View::PhoneViewerMd {
+        (SHOT_PHONE_MD_NAME, SHOT_PHONE_MD_PATH, SHOT_PHONE_MD)
+    } else {
+        (SHOT_PHONE_RS_NAME, SHOT_PHONE_RS_PATH, SHOT_PHONE_RS)
+    };
+    let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
+    let saved = PhoneFetched {
+        host: SHOT_TAILNET_HOST.to_owned(),
+        host_path: host_path.to_owned(),
+        local_path: shot_phone_local_path(host_path),
+        size: u64::try_from(text.len()).context("the fixture's size")?,
+        host_label: SHOT_TAILNET_HOST.to_owned(),
+    };
+    handle.update(cx, |phone, _, cx| {
+        phone.root().update(cx, |root, cx| {
+            root.set_remote_files_root(copies);
+            root.phone_file_saved(saved, cx);
+        });
+    })?;
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let header = handle.update(cx, |phone, _, _| phone.viewer_header())?;
+    let Some((shown, _, _, _)) = header else {
+        bail!("the {} view's page did not open", shot.view.name());
+    };
+    if shown != name {
+        bail!(
+            "the {} view's page shows {shown:?}, not {name}",
+            shot.view.name()
+        );
+    }
+    Ok(())
 }
 
 /// Opens the screen a phone view shows past Home: the `phone-terminal`
@@ -1884,7 +2014,9 @@ fn drive(
         | View::PhoneSettingsKeys
         | View::PhoneSettingsKeyEdit
         | View::PhoneSettingsReplies
-        | View::PhoneSettingsReplyGroup => Ok(()),
+        | View::PhoneSettingsReplyGroup
+        | View::PhoneViewer
+        | View::PhoneViewerMd => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
