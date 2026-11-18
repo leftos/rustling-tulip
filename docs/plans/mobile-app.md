@@ -61,7 +61,7 @@ These are the native app's settled design decisions; the phases below build them
 - **Push needs a tailnet host.** A phone registers for push over a tailnet connection, whose device record the daemon keys the subscription to; an SSH bridge connection is the owner's `Local` login with no device record, and stays so. A PC the phone reaches only over SSH sends it no push; the phone has the Tailscale app in any case, so adding that PC as a tailnet host too brings its pushes.
 
   Reason: the device-token check stays in one place, and an SSH device identity would be a second pairing scheme.
-- **Portrait iPhone only.** The app declares iPhone and portrait, as the spike did. Landscape and iPad are not designed here.
+- **Portrait iPhone first.** The app declares iPhone and portrait, as the spike did. The iPad and landscape are designed in [tablet-layout.md](./tablet-layout.md).
 - **The GPUI pin.** The client takes GPUI from Zed's git at one revision, since the crate has had no crates.io release since 0.2.2. It moves by decision, about once a quarter, never per commit, with the desktop pass of MA.5 each time. If Zed drops or breaks `gpui_ios`, a pinned revision still builds.
 - **The first-mouse fix rides on a fork.** At the pin the vendored text-measure fix is upstream (each measure truncates its own copy of the runs), but the first-mouse fix is not: `gpui_windows` answers `WM_MOUSEACTIVATE` without marking the press, and `gpui_macos` marks only a left press. It is carried as one commit on the owner's fork of Zed at the pin, `leftos/zed`, and every GPUI crate comes from that fork's revision; `vendor/gpui` goes.
 
@@ -289,7 +289,7 @@ Risks: a new SSH dependency (`russh`, pure Rust, its licence and advisories chec
 
 ## After the MA phases
 
-The web app's open features wait for the native app and are built there once its screens stand, each from its own issue: Linear cards (RT-142), files (RT-106), the Accounts screen (RT-112) and dictation (RT-83, which on the native app is the keyboard's own dictation key into the composer, checked in MA.16).
+The web app's open features wait for the native app and are built there once its screens stand, each from its own issue: Linear cards (RT-142), files (RT-106, designed in [phone-files.md](./phone-files.md)), the Accounts screen (RT-112) and dictation (RT-83, which on the native app is the keyboard's own dictation key into the composer, checked in MA.16).
 
 **Retiring the web app:** once MA.16's hand check and PR.8 pass, the web app is removed in an item of its own (`apps/pwa`, `tools/protocol-ts`, the tailnet router's static routes and the `-Pwa` build steps), since the native app then replaces it. Whether the daemon's direct Web Push sender goes with it is decided in that item.
 
