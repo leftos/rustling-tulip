@@ -25,7 +25,7 @@ use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
 };
 use super::sweep::{self, HostNow};
-use super::{content_padding, home, hosts_view};
+use super::{PhoneLayout, content_padding, home, hosts_view};
 use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::connection::State;
@@ -98,6 +98,9 @@ pub struct PhoneRoot {
     /// The insets drawn around the content in place of the window's, when
     /// set: a window with none of its own (a shot) draws a phone's.
     insets_override: Option<WindowInsets>,
+    /// The layout the last frame picked from the window's usable size, which
+    /// the views draw their panes by.
+    layout: PhoneLayout,
     /// Whether the first render has logged the app's ready line.
     logged_ready: bool,
     /// Whether the window is in front, so delivered notifications are swept.
@@ -196,6 +199,7 @@ impl PhoneRoot {
             list_boxes: super::reorder::ListBoxes::default(),
             resumes: Vec::new(),
             insets_override: None,
+            layout: PhoneLayout::Single,
             logged_ready: false,
             in_front: window.visibility() == WindowVisibility::Visible,
             swept: None,
@@ -238,6 +242,12 @@ impl PhoneRoot {
     #[must_use]
     pub fn root(&self) -> &Entity<RootView> {
         &self.root
+    }
+
+    /// The layout the last frame picked from the window's usable size.
+    #[must_use]
+    pub fn layout(&self) -> PhoneLayout {
+        self.layout
     }
 
     /// Why the add form refused the typed host, while it says so.
@@ -1164,6 +1174,7 @@ impl Render for PhoneRoot {
             .insets_override
             .clone()
             .unwrap_or_else(|| window.insets());
+        self.layout = PhoneLayout::of(window.viewport_size(), &insets);
         let padding = content_padding(&insets);
         let keyboard_up = crate::keyboard::is_up(&insets);
         let hidden = super::terminal_fit::hidden_height(

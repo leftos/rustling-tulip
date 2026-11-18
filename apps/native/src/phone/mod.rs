@@ -9,6 +9,7 @@ mod hosts_view;
 mod key_bar;
 pub mod key_grid;
 mod keys_view;
+mod layout;
 pub(crate) mod lifecycle;
 mod long_press;
 mod open_tap;
@@ -40,6 +41,7 @@ use crate::{
     LiveSeams, NoTaskbarBadge, NoToastPlacer, RootDeps, RootShape, RootView, SilentNotifier,
     SilentSounder,
 };
+pub use layout::PhoneLayout;
 use push::PushPlatform;
 pub use root_view::PhoneRoot;
 

@@ -11,7 +11,7 @@ use protocol::{
     FEATURE_RELAY_PUSH,
 };
 use rustling_tulip_native::connection_picker::TypedHostError;
-use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::phone::{PhoneLayout, PhoneRoot};
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::json;
@@ -70,6 +70,35 @@ fn no_saved_host_shows_the_first_run_screen(cx: &mut TestAppContext) {
     assert!(
         h.opened_targets().is_empty(),
         "a phone with no saved host opens nothing"
+    );
+}
+
+/// The layout the phone draws by follows its window's size: the harness's
+/// desktop-sized window fits two panes, and an iPhone's portrait window
+/// keeps one.
+#[gpui::test]
+fn the_layout_follows_the_windows_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::phone(cx, &dir);
+    let layout = |h: &mut Harness<'_>| {
+        h.cx.update(|window, cx| {
+            window
+                .root::<PhoneRoot>()
+                .flatten()
+                .map(|phone| phone.read(cx).layout())
+        })
+    };
+    assert_eq!(
+        layout(&mut h),
+        Some(PhoneLayout::TwoPane),
+        "the harness opens a desktop-sized window, wide enough for two panes"
+    );
+    h.cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
+    h.cx.run_until_parked();
+    assert_eq!(
+        layout(&mut h),
+        Some(PhoneLayout::Single),
+        "an iPhone's portrait window keeps one pane"
     );
 }
 
