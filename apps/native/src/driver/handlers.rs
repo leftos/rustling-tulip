@@ -22,6 +22,7 @@ use crate::driver::protocol::{
 };
 use crate::driver::registry::{self, Entry};
 use crate::driver::wait::{PREDICATE_SHAPES, Predicate, StateTest, parse_predicate, value_at};
+use crate::notices::toast_action_selector;
 use crate::sidebar::Activity;
 use crate::spawn_view::SpawnEntry;
 
@@ -87,7 +88,7 @@ fn panic_on_request() -> ! {
 }
 
 /// The window's logical size and scale, the tabs, the shown tab's panes,
-/// every session, and what is drawn over the panes.
+/// every session, what is drawn over the panes, and the toasts on screen.
 fn state(root: &RootView, window: &Window) -> Value {
     let size = window.viewport_size();
     json!({
@@ -105,6 +106,7 @@ fn state(root: &RootView, window: &Window) -> Value {
             .collect::<Vec<_>>(),
         "sessions": root.driver_sessions(),
         "overlay": root.driver_overlay(),
+        "toasts": root.driver_toasts(),
     })
 }
 
@@ -742,6 +744,26 @@ impl RootView {
         } else {
             None
         }
+    }
+
+    /// The toasts on screen, oldest first, each with its id, title, whether
+    /// it is sticky, and the driver name of each of its action buttons.
+    fn driver_toasts(&self) -> Vec<Value> {
+        self.toasts()
+            .iter()
+            .map(|toast| {
+                json!({
+                    "id": toast.id,
+                    "title": toast.title,
+                    "sticky": toast.sticky,
+                    "actions": toast
+                        .actions
+                        .iter()
+                        .map(|action| toast_action_selector(toast.id, action.id))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect()
     }
 
     /// The active tab's focused pane, else its first.

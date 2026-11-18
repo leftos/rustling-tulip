@@ -1619,7 +1619,7 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 | `paste` | `text` | `{"pasted": n}`: the text pasted into whatever holds focus as Ctrl+V (Cmd+V on macOS) pastes it, newlines included; the clipboard is put back as it was, or left holding the text when it was empty | `bad_params` for an empty text |
 | `ping` | none | `{"version"}` | none |
 | `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |
-| `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions` and `overlay` | none |
+| `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions`, `overlay` and `toasts` (the toasts the root view holds, oldest first, each `{"id", "title", "sticky", "actions"}`, `actions` being the driver names of its buttons, `toast-action-<id>-<action>`, as `find` lists them) | none |
 | `type_text` | `text` | `{"typed": n}`, one printable character per keystroke, into whatever holds focus | `bad_params` for any control character (U+0000 to U+001F, U+007F), the hint saying to press Enter, Tab or Escape with `key` |
 | `wait_for` | `until`, `timeout_ms?` (default 5000, clamped to 100..=60000), `interval_ms?` (default 100, clamped to 20..=1000) | always ok: `{"met", "waited_ms", "last"}`, `last` being the final value the predicate read | `bad_params` ("bad until: ...") for a malformed predicate |
 | `wheel` | a target (`x`, `y` or `element`), `notches`: ±1..=273, positive scrolling up | `{"at": {"x", "y"}}` | target errors as below; `bad_params` for 0 or a count out of range |

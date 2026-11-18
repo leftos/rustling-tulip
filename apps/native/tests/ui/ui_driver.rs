@@ -11,6 +11,7 @@ use protocol::ClientMessage;
 use rustling_tulip_native::driver::handlers::{handle, wait_read};
 use rustling_tulip_native::driver::protocol::{ErrorCode, Failure, Outcome, Reply, Request};
 use rustling_tulip_native::driver::wait::parse_predicate;
+use rustling_tulip_native::{ToastAction, ToastKind, ToastSpec};
 use serde_json::{Value, json};
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
 
@@ -412,6 +413,47 @@ fn driver_state_lists_tabs_and_sessions(cx: &mut TestAppContext) {
             && window["height"].as_f64().is_some_and(|height| height > 0.0)
             && window["scale"].as_f64().is_some_and(|scale| scale > 0.0),
         "the window's logical size and scale: {window}"
+    );
+}
+
+#[gpui::test]
+fn driver_state_lists_the_shown_toasts_and_their_action_names(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    assert_eq!(result(&mut h, "state", json!({}))["toasts"], json!([]));
+
+    let spec = ToastSpec {
+        kind: ToastKind::Info,
+        title: "Fetched notes.md".to_owned(),
+        detail: None,
+        key: Some("k".to_owned()),
+        sticky: false,
+        actions: vec![
+            ToastAction {
+                id: "whole-folder",
+                label: "Fetch whole folder",
+                danger: false,
+            },
+            ToastAction {
+                id: "reveal",
+                label: "Reveal",
+                danger: false,
+            },
+        ],
+    };
+    let id = h.root_update(|root, _, cx| root.push_toast_spec(spec, cx));
+
+    assert_eq!(
+        result(&mut h, "state", json!({}))["toasts"],
+        json!([{
+            "id": id,
+            "title": "Fetched notes.md",
+            "sticky": false,
+            "actions": [
+                format!("toast-action-{id}-whole-folder"),
+                format!("toast-action-{id}-reveal"),
+            ],
+        }])
     );
 }
 

@@ -7,6 +7,7 @@ use crate::support;
 
 use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use rustling_tulip_native::driver::registry::{self, Entry};
+use rustling_tulip_native::{ToastAction, ToastKind, ToastSpec, toast_action_selector};
 use support::{Fixture, Harness, TestDir, repo, session};
 
 /// Repos `r1` and `r2`, one session of `r1` alone in pane `p1` of tab `t1`.
@@ -149,4 +150,37 @@ fn a_menu_does_not_scroll_in_a_driver_build(cx: &mut TestAppContext) {
         before,
         "a menu whose rows fit does not scroll under the wheel"
     );
+}
+
+#[gpui::test]
+fn a_toasts_action_buttons_are_in_the_registry(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let spec = ToastSpec {
+        kind: ToastKind::Info,
+        title: "Fetched notes.md".to_owned(),
+        detail: None,
+        key: Some("k".to_owned()),
+        sticky: false,
+        actions: vec![
+            ToastAction {
+                id: "whole-folder",
+                label: "Fetch whole folder",
+                danger: false,
+            },
+            ToastAction {
+                id: "reveal",
+                label: "Reveal",
+                danger: false,
+            },
+        ],
+    };
+    let toast = h.root_update(|root, _, cx| root.push_toast_spec(spec, cx));
+
+    for action in ["whole-folder", "reveal"] {
+        let name = toast_action_selector(toast, action);
+        let found = registered(&mut h, &name);
+        assert!(!found.visible.is_empty(), "{name} shows: {found:?}");
+    }
 }
