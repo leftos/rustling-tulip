@@ -25,10 +25,10 @@ use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
     ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_CLEAR_DRAFT,
-    FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL, GridNode, ScriptFacts, SplitDirection, ToolKind,
-    ToolOutcome, WorkShell, WorkSubagent,
+    FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, GridNode, ScriptFacts,
+    SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
-use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
+use rustling_tulip_native::chat::{self, ChatMode, PaneView, RowShape};
 use rustling_tulip_native::completion::CompletionItem;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
@@ -2322,6 +2322,228 @@ fn an_at_after_a_word_opens_no_popup(cx: &mut TestAppContext) {
         completion(&mut h),
         Some(both_rows(0)),
         "an @ after a space is"
+    );
+}
+
+// The composer's `@` popup, over the session's files.
+
+/// `s1`'s chat loaded on a host offering file search, its composer
+/// holding the keyboard, everything sent so far drained.
+fn file_searching<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = loaded_listing(cx, dir, &[FEATURE_FILE_SEARCH]);
+    h.click_on("chat-composer");
+    h.sent();
+    h
+}
+
+/// Moves the test clock on by `ms` and lets what it woke run.
+fn advance(h: &mut Harness<'_>, ms: u64) {
+    h.cx.executor().advance_clock(Duration::from_millis(ms));
+    h.cx.run_until_parked();
+}
+
+/// Moves the test clock past the file search's debounce.
+fn past_debounce(h: &mut Harness<'_>) {
+    let ms = u64::try_from(chat::FILE_SEARCH_DEBOUNCE.as_millis()).unwrap_or(u64::MAX);
+    advance(h, ms + 10);
+}
+
+/// The query, limit and request id of each `SearchFiles` for `s1` sent
+/// since the last drain.
+fn searches(h: &mut Harness<'_>) -> Vec<(String, Option<u32>, Option<String>)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SearchFiles {
+                session_id,
+                query,
+                limit,
+                request_id,
+            } if session_id == "s1" => Some((query, limit, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one search sent since the last drain: its query and request id.
+fn one_search(h: &mut Harness<'_>) -> (String, Option<String>) {
+    let sent = searches(h);
+    assert_eq!(sent.len(), 1, "one search: {sent:?}");
+    let (query, limit, request_id) = sent[0].clone();
+    assert_eq!(limit, Some(50));
+    (query, request_id)
+}
+
+/// The daemon answers the search `request_id` with `files`, each a path
+/// and its reference.
+fn matched(h: &mut Harness<'_>, request_id: Option<String>, files: &[(&str, &str)]) {
+    h.send(DaemonMessage::FileMatches {
+        session_id: "s1".to_owned(),
+        matches: files
+            .iter()
+            .map(|(path, reference)| FileMatch {
+                path: (*path).to_owned(),
+                reference: (*reference).to_owned(),
+            })
+            .collect(),
+        truncated: false,
+        request_id,
+    });
+}
+
+/// The popup showing `labels`, the first selected.
+fn rows(labels: &[&str]) -> (Vec<String>, usize) {
+    (labels.iter().map(|label| (*label).to_owned()).collect(), 0)
+}
+
+#[gpui::test]
+fn at_popup_lists_matching_files_and_inserts_the_reference(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@src/ma");
+    assert_eq!(searches(&mut h), Vec::new(), "nothing inside the debounce");
+    past_debounce(&mut h);
+    let (query, id) = one_search(&mut h);
+    assert_eq!(query, "src/ma");
+    matched(
+        &mut h,
+        id,
+        &[
+            ("src/main.rs", "@./src/main.rs"),
+            ("src/map.rs", "@./src/map.rs"),
+        ],
+    );
+    assert_eq!(
+        completion(&mut h),
+        Some(rows(&["src/main.rs", "src/map.rs"]))
+    );
+    assert!(painted(&mut h, "chat-completion"));
+    h.keys("enter");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("@./src/main.rs "),
+        "the pick inserts the daemon's reference"
+    );
+    assert_eq!(sends(&mut h), Vec::new());
+}
+
+#[gpui::test]
+fn typing_within_the_debounce_sends_one_search(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@");
+    advance(&mut h, 50);
+    type_text(&mut h, "s");
+    advance(&mut h, 50);
+    type_text(&mut h, "r");
+    assert_eq!(searches(&mut h), Vec::new(), "nothing inside the debounce");
+    past_debounce(&mut h);
+    let (query, _) = one_search(&mut h);
+    assert_eq!(query, "sr", "the last query alone");
+    past_debounce(&mut h);
+    assert_eq!(searches(&mut h), Vec::new(), "no second search");
+}
+
+#[gpui::test]
+fn a_stale_file_answer_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@s");
+    past_debounce(&mut h);
+    let (_, older) = one_search(&mut h);
+    type_text(&mut h, "r");
+    past_debounce(&mut h);
+    let (_, newer) = one_search(&mut h);
+    matched(&mut h, older, &[("src/old.rs", "@./src/old.rs")]);
+    assert_eq!(completion(&mut h), None, "an older search's answer");
+    matched(&mut h, newer, &[("src/lib.rs", "@./src/lib.rs")]);
+    assert_eq!(completion(&mut h), Some(rows(&["src/lib.rs"])));
+
+    type_text(&mut h, " @x");
+    past_debounce(&mut h);
+    let (_, left) = one_search(&mut h);
+    type_text(&mut h, " ");
+    matched(&mut h, left, &[("x.rs", "@./x.rs")]);
+    type_text(&mut h, "@");
+    assert_eq!(
+        completion(&mut h),
+        None,
+        "an answer after the caret left its token"
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some("@sr @x @"));
+}
+
+#[gpui::test]
+fn a_host_without_file_search_opens_no_popup_and_sends_no_request(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_listing(cx, &dir, &[]);
+    h.click_on("chat-composer");
+    h.sent();
+    type_text(&mut h, "@src");
+    past_debounce(&mut h);
+    assert_eq!(searches(&mut h), Vec::new());
+    assert_eq!(completion(&mut h), None);
+    assert!(!painted(&mut h, "chat-completion"));
+}
+
+#[gpui::test]
+fn a_restored_draft_in_an_at_token_searches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@src");
+    h.click_on(TO_TERMINAL);
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat again");
+    h.send(reply(Some(&id), vec![]));
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("@src"),
+        "the draft is back"
+    );
+    past_debounce(&mut h);
+    let (query, _) = one_search(&mut h);
+    assert_eq!(query, "src");
+}
+
+#[gpui::test]
+fn a_search_due_after_the_host_lost_file_search_is_not_sent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@src");
+    h.reconnect_with_features(&[]);
+    past_debounce(&mut h);
+    assert_eq!(searches(&mut h), Vec::new());
+}
+
+#[gpui::test]
+fn leaving_the_at_token_drops_the_file_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching(cx, &dir);
+    type_text(&mut h, "@ma");
+    past_debounce(&mut h);
+    let (_, id) = one_search(&mut h);
+    matched(&mut h, id, &[("main.rs", "@./main.rs")]);
+    assert_eq!(completion(&mut h), Some(rows(&["main.rs"])));
+    type_text(&mut h, " ");
+    assert_eq!(completion(&mut h), None);
+    h.keys("backspace");
+    assert_eq!(
+        completion(&mut h),
+        None,
+        "back in the token, the file rows are gone"
+    );
+    assert!(!painted(&mut h, "chat-completion"));
+
+    h.root_update(|root, _, cx| {
+        root.set_chat_completion_items("s1", vec![CompletionItem::new("clear", "/clear")], cx);
+    });
+    assert_eq!(completion(&mut h), Some(rows(&["clear"])));
+    type_text(&mut h, " ");
+    type_text(&mut h, "@");
+    assert_eq!(
+        completion(&mut h),
+        Some(rows(&["clear"])),
+        "items given from elsewhere stay"
     );
 }
 

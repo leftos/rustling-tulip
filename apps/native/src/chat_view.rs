@@ -29,15 +29,16 @@ use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
     AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen,
     ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT,
-    FEATURE_FILE_TAIL, SessionMode, SessionSnapshot, ToolOutcome,
+    FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
     self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftClear,
-    DraftPull, PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork,
-    ScriptRow, SendTracker, Strip, SuggestionChip, ViewKey,
+    DraftPull, FILE_SEARCH_DEBOUNCE, FILE_SEARCH_LIMIT, FILE_TRIGGER, FileSearch, PaneView,
+    PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork, ScriptRow, SendTracker,
+    Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -46,7 +47,7 @@ use crate::chat_cards::{
 };
 use crate::chat_select::{self, Selection, TextPos, UnitSource, Units};
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
-use crate::completion::{self, CompletionItem, CompletionState};
+use crate::completion::{self, CompletionItem, CompletionState, Token};
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
@@ -232,6 +233,10 @@ struct AnswerDoc {
 pub(crate) struct Composer {
     input: Entity<TextInput>,
     completion: CompletionState,
+    /// The search of the session's files for the `@` token.
+    files: FileSearch,
+    /// The debounce timer of the next file search.
+    file_timer: Option<Task<()>>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -241,6 +246,36 @@ impl Composer {
         let open = self.completion.is_open();
         self.input
             .update(cx, |input, cx| input.set_completion_open(open, cx));
+    }
+
+    /// The caret now sits in `token`, or none: an `@` token restarts the
+    /// file search's debounce, which sends only on a host that offers file
+    /// search (`searchable`); leaving it stops the timer, forgets the
+    /// pending search and removes the rows it gave.
+    fn follow_file_token(
+        &mut self,
+        session_id: &str,
+        token: Option<&Token>,
+        searchable: bool,
+        cx: &mut Context<RootView>,
+    ) {
+        if token.is_some_and(|token| token.trigger == FILE_TRIGGER) {
+            let generation = self.files.token_changed();
+            if searchable {
+                let id = session_id.to_owned();
+                self.file_timer = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FILE_SEARCH_DEBOUNCE).await;
+                    // Fails only when the view is gone, and the composer with it.
+                    this.update(cx, |this, _| this.send_file_search(&id, generation))
+                        .ok();
+                }));
+            }
+            return;
+        }
+        self.file_timer = None;
+        if self.files.token_left() {
+            self.completion.set_items(Vec::new());
+        }
     }
 }
 
@@ -2238,6 +2273,12 @@ impl RootView {
                 self.summary_folded(&session_id, applied, cx);
             }
             msg @ DaemonMessage::FileTail { .. } => self.on_file_tail(host, &msg, cx),
+            DaemonMessage::FileMatches {
+                session_id,
+                matches,
+                request_id,
+                ..
+            } => self.on_file_matches(&session_id, matches, request_id.as_deref(), cx),
             DaemonMessage::SessionRemoved { session_id } => {
                 let untails = self.chat.tails.close_session(&session_id);
                 self.send_untails(untails);
@@ -2517,17 +2558,50 @@ impl RootView {
             this.on_completion_event(&id, event, cx);
         });
         // The draft's set_text told its token before these subscriptions
-        // were active, so the state starts from the input's own token.
-        let mut completion = CompletionState::default();
-        if let Some(token) = input.read(cx).completion_token() {
-            completion.token_changed(token.clone());
-        }
+        // were active, so the input's own token is folded as if it had just
+        // changed.
+        let token = input.read(cx).completion_token().cloned();
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.composer = Some(Composer {
                 input,
-                completion,
+                completion: CompletionState::default(),
+                files: FileSearch::default(),
+                file_timer: None,
                 _subscriptions: [keys, edits, completions],
             });
+        }
+        if let Some(token) = token {
+            self.on_completion_event(session_id, &CompletionEvent::TokenChanged(token), cx);
+        }
+    }
+
+    /// Whether session `session_id`'s host offers file search.
+    fn file_searchable(&self, session_id: &str) -> bool {
+        self.conn_of(&self.chat.host_of(session_id))
+            .is_some_and(|conn| conn.supports(FEATURE_FILE_SEARCH))
+    }
+
+    /// Folds a token change or clear from session `session_id`'s composer
+    /// into its file search; any other event leaves it alone.
+    fn fold_file_token(
+        &mut self,
+        session_id: &str,
+        event: &CompletionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let token = match event {
+            CompletionEvent::TokenChanged(token) => Some(token),
+            CompletionEvent::TokenCleared => None,
+            _ => return,
+        };
+        let searchable = self.file_searchable(session_id);
+        if let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        {
+            composer.follow_file_token(session_id, token, searchable, cx);
         }
     }
 
@@ -2541,6 +2615,7 @@ impl RootView {
         event: &CompletionEvent,
         cx: &mut Context<Self>,
     ) {
+        self.fold_file_token(session_id, event, cx);
         let Some(composer) = self
             .chat
             .sessions
@@ -2610,6 +2685,78 @@ impl RootView {
         else {
             return;
         };
+        composer.completion.set_items(items);
+        composer.files.items_given();
+        composer.sync_completion(cx);
+        cx.notify();
+    }
+
+    /// The debounce timer of session `session_id`'s file search fired: while
+    /// its `generation` is current, the caret sits in an `@` token and the
+    /// session's host still offers file search, the token's query goes to
+    /// that host, and its request id is the one an answer must carry.
+    fn send_file_search(&mut self, session_id: &str, generation: u64) {
+        if !self.file_searchable(session_id) {
+            return;
+        }
+        let host = self.chat.host_of(session_id);
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+            .filter(|composer| composer.files.is_current(generation))
+        else {
+            return;
+        };
+        let Some(query) = composer
+            .completion
+            .token()
+            .filter(|token| token.trigger == FILE_TRIGGER)
+            .map(|token| token.query.clone())
+        else {
+            return;
+        };
+        let request_id = new_request_id();
+        composer.files.sent(request_id.clone());
+        self.send_to(
+            &host,
+            ClientMessage::SearchFiles {
+                session_id: session_id.to_owned(),
+                query,
+                limit: Some(FILE_SEARCH_LIMIT),
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// A `FileMatches` answering session `session_id`'s pending file search
+    /// while the caret is still in its `@` token: its matches, in the
+    /// daemon's order, become the popup's rows. Any other is dropped.
+    fn on_file_matches(
+        &mut self,
+        session_id: &str,
+        matches: Vec<FileMatch>,
+        request_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            tracing::debug!(%session_id, "file matches for a chat with no composer: dropped");
+            return;
+        };
+        if !composer.files.answered(request_id) {
+            tracing::debug!(%session_id, "file matches for no pending search: dropped");
+            return;
+        }
+        let items = matches
+            .into_iter()
+            .map(|file| CompletionItem::new(file.path, file.reference))
+            .collect();
         composer.completion.set_items(items);
         composer.sync_completion(cx);
         cx.notify();

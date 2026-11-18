@@ -2056,6 +2056,78 @@ impl DraftClear {
     }
 }
 
+/// The completion trigger whose token searches the session's files.
+pub const FILE_TRIGGER: char = '@';
+
+/// How long after the `@` token last changed its file search goes out.
+pub const FILE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How many matches a file search asks for.
+pub const FILE_SEARCH_LIMIT: u32 = 50;
+
+/// One composer's search of its session's files for the `@` token the
+/// caret sits in: the generation each change of that token bumps (a
+/// debounce timer sends only while its generation is current), the request
+/// id of the search awaiting its answer, and whether the popup's items are
+/// that search's answer.
+#[derive(Debug, Default)]
+pub struct FileSearch {
+    generation: u64,
+    pending: Option<String>,
+    in_token: bool,
+    showing: bool,
+}
+
+impl FileSearch {
+    /// The caret now sits in an `@` token, changed: the generation the new
+    /// debounce timer carries, which makes every earlier one stale.
+    pub fn token_changed(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.in_token = true;
+        self.generation
+    }
+
+    /// The caret left the `@` token, or sits in another trigger's: every
+    /// timer and the pending search go stale. Returns whether the popup's
+    /// items came from the search, and so must go.
+    pub fn token_left(&mut self) -> bool {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+        self.in_token = false;
+        std::mem::take(&mut self.showing)
+    }
+
+    /// Whether a debounce timer carrying `generation` may still send.
+    #[must_use]
+    pub fn is_current(&self, generation: u64) -> bool {
+        self.in_token && generation == self.generation
+    }
+
+    /// A search went out under `request_id`; an answer to any earlier one
+    /// no longer applies.
+    pub fn sent(&mut self, request_id: String) {
+        self.pending = Some(request_id);
+    }
+
+    /// An answer carrying `request_id` arrived: whether it answers the
+    /// pending search while the caret is still in its token, in which case
+    /// its matches become the popup's items.
+    pub fn answered(&mut self, request_id: Option<&str>) -> bool {
+        let ours = self.in_token && request_id.is_some() && self.pending.as_deref() == request_id;
+        if ours {
+            self.pending = None;
+            self.showing = true;
+        }
+        ours
+    }
+
+    /// The popup's items were given from elsewhere: leaving the token no
+    /// longer removes them.
+    pub fn items_given(&mut self) {
+        self.showing = false;
+    }
+}
+
 /// What the composer says after a pull answered with `cleared`: none when
 /// the box was cleared, else that some of the draft stayed in it.
 #[must_use]
@@ -4861,5 +4933,66 @@ mod final_reply_tests {
     fn a_live_answer_before_the_turn_end_is_the_final_reply() {
         let entries = [user("u1"), answer("a1", true), turn_end("e1")];
         assert_eq!(finals(&entries), ["a1"]);
+    }
+}
+
+#[cfg(test)]
+mod file_search_tests {
+    use super::FileSearch;
+
+    #[test]
+    fn only_the_latest_token_change_keeps_its_timer_current() {
+        let mut search = FileSearch::default();
+        let first = search.token_changed();
+        let second = search.token_changed();
+        assert_ne!(first, second);
+        assert!(
+            !search.is_current(first),
+            "a later keystroke makes it stale"
+        );
+        assert!(search.is_current(second));
+        search.token_left();
+        assert!(
+            !search.is_current(second),
+            "leaving the token makes it stale"
+        );
+    }
+
+    #[test]
+    fn an_answer_applies_only_for_the_pending_request() {
+        let mut search = FileSearch::default();
+        search.token_changed();
+        search.sent("r1".to_owned());
+        search.sent("r2".to_owned());
+        assert!(!search.answered(Some("r1")), "an older search's answer");
+        assert!(!search.answered(None), "an answer naming no search");
+        assert!(search.answered(Some("r2")));
+        assert!(!search.answered(Some("r2")), "an answer applies once");
+    }
+
+    #[test]
+    fn an_answer_after_the_caret_left_the_token_is_dropped() {
+        let mut search = FileSearch::default();
+        search.token_changed();
+        search.sent("r1".to_owned());
+        assert!(!search.token_left(), "no items came from the search yet");
+        assert!(!search.answered(Some("r1")));
+    }
+
+    #[test]
+    fn leaving_the_token_removes_only_the_search_s_items() {
+        let mut search = FileSearch::default();
+        search.token_changed();
+        search.sent("r1".to_owned());
+        assert!(search.answered(Some("r1")));
+        search.token_changed();
+        assert!(search.token_left(), "the popup shows the search's answer");
+        assert!(!search.token_left(), "they went the first time");
+
+        search.token_changed();
+        search.sent("r2".to_owned());
+        assert!(search.answered(Some("r2")));
+        search.items_given();
+        assert!(!search.token_left(), "items given from elsewhere stay");
     }
 }
