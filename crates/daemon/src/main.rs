@@ -50,6 +50,7 @@ mod inject;
 mod instance_lock;
 mod integrity;
 mod keep_awake;
+mod linear;
 mod lock_finder;
 mod logging;
 mod login_path;
