@@ -36,6 +36,7 @@ mod cleanup_failed_view;
 )]
 mod clipboard_image;
 mod combobox;
+pub mod completion;
 mod connection;
 pub mod connection_picker;
 mod connection_picker_view;

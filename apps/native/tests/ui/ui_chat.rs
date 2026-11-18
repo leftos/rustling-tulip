@@ -29,6 +29,7 @@ use protocol::{
     ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
+use rustling_tulip_native::completion::CompletionItem;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
 use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey};
@@ -2141,6 +2142,187 @@ fn the_composer_sends_with_ctrl_enter_and_keeps_its_text_when_refused(cx: &mut T
         Some("the prompt box holds a draft")
     );
     assert!(painted(&mut h, "chat-composer-error"));
+}
+
+// The composer's completion popup, over a fixed list.
+
+/// `p1`'s chat loaded, its composer offering `clear` and `compact` and
+/// holding the keyboard.
+fn completing<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = loaded(cx, dir);
+    h.root_update(|root, _, cx| {
+        root.set_chat_completion_items(
+            "s1",
+            vec![
+                CompletionItem::new("clear", "/clear"),
+                CompletionItem::new("compact", "/compact"),
+            ],
+            cx,
+        );
+    });
+    h.click_on("chat-composer");
+    h.sent();
+    h
+}
+
+/// The popup's rows and selected row, while it shows.
+fn completion(h: &mut Harness<'_>) -> Option<(Vec<String>, usize)> {
+    h.root(|root, _| root.chat_completion("s1"))
+}
+
+fn both_rows(selected: usize) -> (Vec<String>, usize) {
+    (vec!["clear".to_owned(), "compact".to_owned()], selected)
+}
+
+#[gpui::test]
+fn typing_a_slash_opens_the_popup_and_tab_inserts_the_pick(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = completing(cx, &dir);
+    assert!(
+        !painted(&mut h, "chat-completion"),
+        "no popup before a token"
+    );
+    type_text(&mut h, "/");
+    assert_eq!(completion(&mut h), Some(both_rows(0)));
+    assert!(painted(&mut h, "chat-completion"));
+    assert!(painted(&mut h, "chat-completion-1"));
+    h.keys("down");
+    assert_eq!(completion(&mut h), Some(both_rows(1)));
+    h.keys("down");
+    assert_eq!(
+        completion(&mut h),
+        Some(both_rows(0)),
+        "Down wraps to the first"
+    );
+    h.keys("up");
+    assert_eq!(
+        completion(&mut h),
+        Some(both_rows(1)),
+        "Up wraps to the last"
+    );
+    h.keys("tab");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/compact "));
+    assert_eq!(completion(&mut h), None, "the pick closes it");
+    assert!(!painted(&mut h, "chat-completion"));
+    assert_eq!(sends(&mut h), Vec::new());
+}
+
+#[gpui::test]
+fn enter_accepts_the_pick_and_does_not_send(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = completing(cx, &dir);
+    type_text(&mut h, "/c");
+    h.keys("enter");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/clear "));
+    assert_eq!(sends(&mut h), Vec::new(), "Enter accepts, it does not send");
+    h.keys("enter");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/clear \n"),
+        "closed, Enter breaks the line"
+    );
+    type_text(&mut h, "/");
+    h.click_on("chat-completion-1");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/clear \n/compact "),
+        "a click accepts its row, the text before the token kept"
+    );
+    assert_eq!(completion(&mut h), None);
+    type_text(&mut h, "x");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/clear \n/compact x"),
+        "the composer keeps the keyboard after the click"
+    );
+}
+
+#[gpui::test]
+fn esc_closes_the_popup_and_keeps_the_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = completing(cx, &dir);
+    type_text(&mut h, "/co");
+    assert_eq!(completion(&mut h), Some(both_rows(0)));
+    h.keys("escape");
+    assert_eq!(completion(&mut h), None);
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/co"));
+    type_text(&mut h, "m");
+    assert_eq!(completion(&mut h), None, "it stays shut in the same token");
+    h.keys("enter");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/com\n"));
+    type_text(&mut h, "/");
+    assert_eq!(
+        completion(&mut h),
+        Some(both_rows(0)),
+        "a new token opens it again"
+    );
+    assert_eq!(sends(&mut h), Vec::new());
+}
+
+#[gpui::test]
+fn ctrl_enter_sends_while_the_popup_is_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = completing(cx, &dir);
+    type_text(&mut h, "/co");
+    assert_eq!(completion(&mut h), Some(both_rows(0)));
+    h.keys("ctrl-enter");
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send: {sent:?}");
+    assert_eq!(sent[0].0, "/co");
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+    assert_eq!(
+        completion(&mut h),
+        None,
+        "the cleared composer has no token"
+    );
+}
+
+#[gpui::test]
+fn a_restored_draft_ending_in_a_token_opens_the_popup(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "/co");
+    h.click_on(TO_TERMINAL);
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat again");
+    h.send(reply(Some(&id), vec![]));
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/co"),
+        "the draft is back"
+    );
+    h.root_update(|root, _, cx| {
+        root.set_chat_completion_items(
+            "s1",
+            vec![
+                CompletionItem::new("clear", "/clear"),
+                CompletionItem::new("compact", "/compact"),
+            ],
+            cx,
+        );
+    });
+    assert_eq!(
+        completion(&mut h),
+        Some(both_rows(0)),
+        "the restored draft's token opens the popup"
+    );
+    assert!(painted(&mut h, "chat-completion"));
+}
+
+#[gpui::test]
+fn an_at_after_a_word_opens_no_popup(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = completing(cx, &dir);
+    type_text(&mut h, "me@sr");
+    assert_eq!(completion(&mut h), None, "an email address is no token");
+    assert!(!painted(&mut h, "chat-completion"));
+    type_text(&mut h, " @s");
+    assert_eq!(
+        completion(&mut h),
+        Some(both_rows(0)),
+        "an @ after a space is"
+    );
 }
 
 /// Options whose third field is the description drawn under the label.

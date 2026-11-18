@@ -46,18 +46,19 @@ use crate::chat_cards::{
 };
 use crate::chat_select::{self, Selection, TextPos, UnitSource, Units};
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
+use crate::completion::{self, CompletionItem, CompletionState};
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::phone::quick_replies::{self, ReplySet};
 use crate::scrollbar::Scrollbar;
-use crate::session_menu::on_press;
+use crate::session_menu::{on_press, popover_frame};
 use crate::shell_lines;
 use crate::sidebar::{agent_up, runtime_label, session_view_key};
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::target::HostKey;
-use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::text_input::{CompletionEvent, TextChanged, TextInput, TextInputEvent};
 pub(crate) use crate::text_select::{SelectDraw, select_text};
 use crate::text_select::{TextRegistry, align_shift, painted_mark};
 use crate::ui_theme::{UiTheme, theme};
@@ -86,6 +87,9 @@ const PHONE_COMPOSER_PLACEHOLDER: &str = "Message";
 /// How many rows the phone's composer grows between.
 const PHONE_COMPOSER_MIN_ROWS: usize = 1;
 const PHONE_COMPOSER_MAX_ROWS: usize = 5;
+
+/// The characters that open the desktop composer's completion popup.
+const COMPLETION_TRIGGERS: &[char] = &['/', '@'];
 
 /// How a label names an agent the client has no descriptor for.
 const GENERIC_AGENT: &str = "the agent";
@@ -224,10 +228,20 @@ struct AnswerDoc {
     doc: Arc<MdDoc>,
 }
 
-/// A loaded chat's composer and its subscriptions.
+/// A loaded chat's composer, its completion popup and its subscriptions.
 pub(crate) struct Composer {
     input: Entity<TextInput>,
-    _subscriptions: [Subscription; 2],
+    completion: CompletionState,
+    _subscriptions: [Subscription; 3],
+}
+
+impl Composer {
+    /// Tells the input whether the popup is open, so its keys go to it.
+    fn sync_completion(&self, cx: &mut App) {
+        let open = self.completion.is_open();
+        self.input
+            .update(cx, |input, cx| input.set_completion_open(open, cx));
+    }
 }
 
 /// A card's single-line text box and its subscriptions.
@@ -2484,6 +2498,7 @@ impl RootView {
             } else {
                 TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
                     .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+                    .with_completion_triggers(COMPLETION_TRIGGERS)
             };
             input.set_text(draft, cx);
             input
@@ -2497,12 +2512,164 @@ impl RootView {
             this.chat_key(&id, key, cx);
         });
         let edits = cx.subscribe(&input, |_, _, _: &TextChanged, cx| cx.notify());
+        let id = session_id.to_owned();
+        let completions = cx.subscribe(&input, move |this, _, event: &CompletionEvent, cx| {
+            this.on_completion_event(&id, event, cx);
+        });
+        // The draft's set_text told its token before these subscriptions
+        // were active, so the state starts from the input's own token.
+        let mut completion = CompletionState::default();
+        if let Some(token) = input.read(cx).completion_token() {
+            completion.token_changed(token.clone());
+        }
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.composer = Some(Composer {
                 input,
-                _subscriptions: [keys, edits],
+                completion,
+                _subscriptions: [keys, edits, completions],
             });
         }
+    }
+
+    /// Folds what session `session_id`'s composer told of its completion
+    /// token or the popup's keys into its [`CompletionState`]: Up and Down
+    /// move the selection, Tab and Enter (`Accept`) put the pick in place of
+    /// the token, Esc (`Close`) shuts the popup for this token.
+    fn on_completion_event(
+        &mut self,
+        session_id: &str,
+        event: &CompletionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            return;
+        };
+        let state = &mut composer.completion;
+        match event {
+            CompletionEvent::TokenChanged(token) => state.token_changed(token.clone()),
+            CompletionEvent::TokenCleared => state.token_cleared(),
+            CompletionEvent::Up => state.select_previous(),
+            CompletionEvent::Down => state.select_next(),
+            CompletionEvent::Close => state.dismiss(),
+            CompletionEvent::Accept => {
+                if let Some((range, insert)) = state.pick() {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.accept_completion(&range, &insert, cx));
+                }
+            }
+        }
+        composer.sync_completion(cx);
+        cx.notify();
+    }
+
+    /// A click on row `index` of session `session_id`'s completion popup:
+    /// it accepts that row and gives the composer the keyboard back.
+    fn click_completion(
+        &mut self,
+        session_id: &str,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            return;
+        };
+        composer.completion.select(index);
+        let input = composer.input.clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.on_completion_event(session_id, &CompletionEvent::Accept, cx);
+    }
+
+    /// Offers `items` in session `session_id`'s completion popup, the first
+    /// selected; the popup shows them while the composer's caret sits in a
+    /// `/` or `@` token. The specs give it a fixed list; the session's
+    /// commands and files feed it later. Nothing happens before the
+    /// composer is made.
+    pub fn set_chat_completion_items(
+        &mut self,
+        session_id: &str,
+        items: Vec<CompletionItem>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            return;
+        };
+        composer.completion.set_items(items);
+        composer.sync_completion(cx);
+        cx.notify();
+    }
+
+    /// Session `session_id`'s completion popup while it shows: its rows'
+    /// labels and the selected row.
+    #[must_use]
+    pub fn chat_completion(&self, session_id: &str) -> Option<(Vec<String>, usize)> {
+        let composer = self.chat.sessions.get(session_id)?.composer.as_ref()?;
+        let state = &composer.completion;
+        state.is_open().then(|| {
+            let labels = state.items().iter().map(|item| item.label.clone());
+            (labels.collect(), state.selected())
+        })
+    }
+
+    /// Session `session_id`'s completion popup above the composer field
+    /// (`chat-completion`), while it is open: at most
+    /// [`completion::MAX_ROWS`] rows (`chat-completion-{i}`), the selected
+    /// one filled, a click accepting its row.
+    fn completion_popup(
+        session_id: &str,
+        composer: &Composer,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = &composer.completion;
+        if !state.is_open() {
+            return None;
+        }
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
+        let mut popup = popover_frame(offset, "chat-completion", &t)
+            .flex()
+            .flex_col()
+            .py(px(4.0));
+        for index in completion::visible_rows(state.items().len(), state.selected()) {
+            let Some(item) = state.items().get(index) else {
+                continue;
+            };
+            let selected = index == state.selected();
+            let id = session_id.to_owned();
+            let hover = t.popover_hover;
+            popup = popup.child(
+                div()
+                    .id(ElementId::Name(format!("chat-completion-{index}").into()))
+                    .driver_id(move || format!("chat-completion-{index}"))
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(gpui::rgb(t.selected_bg)))
+                    .when(!selected, |row| {
+                        row.hover(move |style| style.bg(gpui::rgb(hover)))
+                    })
+                    .child(item.label.clone())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.click_completion(&id, index, window, cx);
+                    })),
+            );
+        }
+        Some(popup.into_any_element())
     }
 
     /// Gives session `session_id`'s current card its own empty text box
@@ -3721,6 +3888,9 @@ impl RootView {
             .when(!disabled, |field| field.child(composer.input.clone()));
         let enabled = self.send_enabled(session_id, chat, &text);
         let quick = self.quick_row(session_id, chat, cx);
+        let popup = (!disabled)
+            .then(|| Self::completion_popup(session_id, composer, cx))
+            .flatten();
         let id = session_id.to_owned();
         let send = primary_button(
             offset,
@@ -3749,6 +3919,7 @@ impl RootView {
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .children(note)
                 .children(chip)
+                .children(popup)
                 .child(
                     div()
                         .flex()

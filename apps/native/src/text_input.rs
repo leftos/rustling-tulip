@@ -17,13 +17,14 @@ use std::ops::Range;
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    GlobalElementId, KeyBinding, KeyContext, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextInputConfiguration,
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
     prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::completion::{Token, token_at};
 use crate::ui_theme::{UiTheme, theme};
 
 /// The key context a single-line input's bindings apply in.
@@ -58,8 +59,16 @@ actions!(
         Enter,
         Newline,
         Escape,
+        CompletionUp,
+        CompletionDown,
+        CompletionAccept,
+        CompletionClose,
     ]
 );
+
+/// The key context a multi-line input adds while its owner's completion
+/// popup is open, so Up, Down, Tab, Enter and Esc bind to the popup.
+const COMPLETION_OPEN_CONTEXT: &str = "CompletionOpen";
 
 /// The platform's own modifier for a `secondary-` binding: gpui's keystroke parser rejects `secondary-`.
 fn secondary_key(key: &'static str) -> &'static str {
@@ -110,6 +119,31 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", SelectUp, multi_line),
         KeyBinding::new("shift-down", SelectDown, multi_line),
     ]);
+    // Bound after the input's own keys, so they win over them while the popup is open.
+    let open = Some("TextInputMultiLine && CompletionOpen");
+    cx.bind_keys([
+        KeyBinding::new("up", CompletionUp, open),
+        KeyBinding::new("down", CompletionDown, open),
+        KeyBinding::new("tab", CompletionAccept, open),
+        KeyBinding::new("enter", CompletionAccept, open),
+        KeyBinding::new("escape", CompletionClose, open),
+    ]);
+}
+
+/// What a multi-line input with completion triggers
+/// ([`TextInput::with_completion_triggers`]) tells its owner: the caret
+/// entered or moved in a token, or left it (never during IME composition),
+/// and, while the owner says its popup is open
+/// ([`TextInput::set_completion_open`]), the popup's keys: Up, Down, Tab or
+/// Enter (`Accept`) and Esc (`Close`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionEvent {
+    TokenChanged(Token),
+    TokenCleared,
+    Up,
+    Down,
+    Accept,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +191,20 @@ pub struct TextInput {
     /// What the app changed since the last draw, which the next draw reports
     /// to the platform's text input so its keyboard reads it anew.
     platform_report: PlatformReport,
+    /// The completion hook: its triggers, the popup's open flag and the
+    /// token last told to the owner.
+    completion: CompletionHook,
+}
+
+/// A multi-line input's completion hook.
+#[derive(Debug, Default)]
+struct CompletionHook {
+    /// The characters that start a token; none keeps the hook off.
+    triggers: Vec<char>,
+    /// The owner's popup is open, so its keys go to it.
+    open: bool,
+    /// The token last told to the owner.
+    token: Option<Token>,
 }
 
 /// What the app (not the platform's own text input) changed since the last
@@ -213,6 +261,8 @@ impl EventEmitter<TextChanged> for TextInput {}
 
 impl EventEmitter<NavKey> for TextInput {}
 
+impl EventEmitter<CompletionEvent> for TextInput {}
+
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -268,7 +318,127 @@ impl TextInput {
             scroll_x: px(0.),
             input_config: TextInputConfiguration::default(),
             platform_report: PlatformReport::None,
+            completion: CompletionHook::default(),
         }
+    }
+
+    /// Turns on the completion hook of a multi-line input for `triggers`
+    /// (see [`crate::completion::token_at`]): it emits [`CompletionEvent`]s
+    /// as the caret enters, moves in and leaves a token. A single-line input
+    /// keeps the hook off.
+    #[must_use]
+    pub fn with_completion_triggers(mut self, triggers: &[char]) -> Self {
+        if self.mode.is_multi_line() {
+            self.completion.triggers = triggers.to_vec();
+        }
+        self
+    }
+
+    /// The completion token the caret sits in, as last told to the owner;
+    /// none while the hook is off. An owner whose subscription came after
+    /// the input was built reads it here.
+    #[must_use]
+    pub fn completion_token(&self) -> Option<&Token> {
+        self.completion.token.as_ref()
+    }
+
+    /// The owner's popup opened or closed: while open, Up, Down, Tab, Enter
+    /// and Esc emit [`CompletionEvent`]s instead of acting; Ctrl+Enter still
+    /// submits. An input without triggers ignores it.
+    pub fn set_completion_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let open = open && !self.completion.triggers.is_empty();
+        if self.completion.open != open {
+            self.completion.open = open;
+            cx.notify();
+        }
+    }
+
+    /// Accepts a completion pick: `range` (a token's, trigger included)
+    /// becomes `insert` and one space, the caret after the space, as an
+    /// edit ([`TextChanged`]). A range outside the text changes nothing, a
+    /// read-only input takes none, and neither does one while an IME
+    /// composition is marked: the composition is kept.
+    pub fn accept_completion(
+        &mut self,
+        range: &Range<usize>,
+        insert: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only || self.marked_range.is_some() {
+            return;
+        }
+        let Some((text, caret)) = crate::completion::apply_pick(&self.content, range, insert)
+        else {
+            return;
+        };
+        self.content = text.into();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.goal_x = None;
+        self.report_to_platform(PlatformReport::Content);
+        cx.emit(TextChanged);
+        self.check_token(cx);
+        cx.notify();
+    }
+
+    /// Tells the owner when the caret's token changed: a token while the
+    /// caret (an empty selection) sits in one, else its end. Nothing while
+    /// the hook is off or an IME composition is marked.
+    fn check_token(&mut self, cx: &mut Context<Self>) {
+        if self.completion.triggers.is_empty() || self.marked_range.is_some() {
+            return;
+        }
+        let token = if self.selected_range.is_empty() {
+            token_at(
+                &self.content,
+                self.selected_range.end,
+                &self.completion.triggers,
+            )
+        } else {
+            None
+        };
+        if token == self.completion.token {
+            return;
+        }
+        self.completion.token.clone_from(&token);
+        cx.emit(token.map_or(CompletionEvent::TokenCleared, CompletionEvent::TokenChanged));
+    }
+
+    /// The key context the input's bindings apply in: a multi-line input's
+    /// own, with [`COMPLETION_OPEN_CONTEXT`] while its popup is open.
+    fn key_context(&self) -> KeyContext {
+        let mut context = KeyContext::default();
+        if self.mode.is_multi_line() {
+            context.add(MULTI_LINE_CONTEXT);
+            if self.completion.open {
+                context.add(COMPLETION_OPEN_CONTEXT);
+            }
+        } else {
+            context.add(CONTEXT);
+        }
+        context
+    }
+
+    fn completion_up(_: &mut Self, _: &CompletionUp, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(CompletionEvent::Up);
+    }
+
+    fn completion_down(_: &mut Self, _: &CompletionDown, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(CompletionEvent::Down);
+    }
+
+    fn completion_accept(
+        _: &mut Self,
+        _: &CompletionAccept,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(CompletionEvent::Accept);
+    }
+
+    fn completion_close(_: &mut Self, _: &CompletionClose, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(CompletionEvent::Close);
     }
 
     /// How many rows a multi-line input shows: it grows with its text from
@@ -305,6 +475,7 @@ impl TextInput {
         }
         self.read_only = read_only;
         self.marked_range = None;
+        self.check_token(cx);
         cx.notify();
     }
 
@@ -436,6 +607,7 @@ impl TextInput {
         self.marked_range = None;
         self.goal_x = None;
         self.report_to_platform(PlatformReport::Content);
+        self.check_token(cx);
         cx.notify();
     }
 
@@ -608,6 +780,7 @@ impl TextInput {
         self.selected_range = offset..offset;
         self.goal_x = None;
         self.report_to_platform(PlatformReport::Selection);
+        self.check_token(cx);
         cx.notify();
     }
 
@@ -716,6 +889,7 @@ impl TextInput {
         }
         self.goal_x = None;
         self.report_to_platform(PlatformReport::Selection);
+        self.check_token(cx);
         cx.notify();
     }
 
@@ -780,6 +954,7 @@ impl TextInput {
         self.selected_range = caret..caret;
         self.marked_range = marked;
         cx.emit(TextChanged);
+        self.check_token(cx);
         cx.notify();
     }
 
@@ -1247,8 +1422,9 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked_range = None;
+        self.check_token(cx);
         self.log_platform_call("unmark_text", None, None);
     }
 
@@ -1292,6 +1468,7 @@ impl EntityInputHandler for TextInput {
                     range.start + selected.start..range.start + selected.end
                 });
             cx.emit(TextChanged);
+            self.check_token(cx);
             cx.notify();
         }
         self.log_platform_call(
@@ -1312,6 +1489,7 @@ impl EntityInputHandler for TextInput {
         self.selected_range = self.range_from_utf16(&range_utf16);
         self.selection_reversed = false;
         self.goal_x = None;
+        self.check_token(cx);
         cx.notify();
         self.log_platform_call("set_selected_text_range", Some(&range_utf16), None);
     }
@@ -1368,15 +1546,10 @@ impl Render for TextInput {
                 PlatformReport::None => {}
             }
         }
-        let context = if self.mode.is_multi_line() {
-            MULTI_LINE_CONTEXT
-        } else {
-            CONTEXT
-        };
         div()
             .flex()
             .w_full()
-            .key_context(context)
+            .key_context(self.key_context())
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -1398,6 +1571,10 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::completion_up))
+            .on_action(cx.listener(Self::completion_down))
+            .on_action(cx.listener(Self::completion_accept))
+            .on_action(cx.listener(Self::completion_close))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1702,9 +1879,9 @@ mod tests {
     };
 
     use super::{
-        PlatformReport, TextChanged, TextInput, TextInputEvent, bind_keys, caret_scroll_x,
-        marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary,
-        single_line,
+        CompletionEvent, PlatformReport, TextChanged, TextInput, TextInputEvent, Token, bind_keys,
+        caret_scroll_x, marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16,
+        previous_boundary, single_line,
     };
 
     #[test]
@@ -1845,6 +2022,152 @@ mod tests {
             .detach();
         });
         seen
+    }
+
+    /// Records the [`CompletionEvent`]s the input emits.
+    fn completion_events(
+        input: &Entity<TextInput>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<std::cell::RefCell<Vec<CompletionEvent>>> {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = Rc::clone(&seen);
+        cx.update(|_, cx| {
+            cx.subscribe(input, move |_, event: &CompletionEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        seen
+    }
+
+    fn with_triggers(cx: &mut gpui::Context<TextInput>) -> TextInput {
+        TextInput::multi_line("", "", cx).with_completion_triggers(&['/', '@'])
+    }
+
+    fn set_open(input: &Entity<TextInput>, open: bool, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_completion_open(open, cx)));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_hook_is_off_unless_asked(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "");
+        let seen = completion_events(&input, cx);
+        let keys = events(&input, cx);
+        cx.simulate_input("/co");
+        set_open(&input, true, cx);
+        cx.simulate_keystrokes("enter escape");
+        assert!(
+            seen.borrow().is_empty(),
+            "no completion event without triggers"
+        );
+        assert_eq!(text_of(&input, cx), "/co\n", "Enter still breaks the line");
+        assert_eq!(
+            *keys.borrow(),
+            [TextInputEvent::Cancel],
+            "Esc still cancels"
+        );
+    }
+
+    #[gpui::test]
+    fn keys_go_to_the_popup_only_while_it_is_open(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, with_triggers, "");
+        let seen = completion_events(&input, cx);
+        let keys = events(&input, cx);
+        cx.simulate_input("/c");
+        let token = Token {
+            trigger: '/',
+            query: "c".to_owned(),
+            range: 0..2,
+        };
+        assert_eq!(
+            seen.borrow().last(),
+            Some(&CompletionEvent::TokenChanged(token))
+        );
+        seen.borrow_mut().clear();
+
+        set_open(&input, true, cx);
+        cx.simulate_keystrokes("up down tab enter escape");
+        assert_eq!(
+            *seen.borrow(),
+            [
+                CompletionEvent::Up,
+                CompletionEvent::Down,
+                CompletionEvent::Accept,
+                CompletionEvent::Accept,
+                CompletionEvent::Close,
+            ]
+        );
+        assert_eq!(text_of(&input, cx), "/c", "the popup's keys edit nothing");
+        assert!(keys.borrow().is_empty(), "Esc is the popup's, not a cancel");
+        cx.simulate_keystrokes("ctrl-enter");
+        assert_eq!(
+            *keys.borrow(),
+            [TextInputEvent::Submit],
+            "Ctrl+Enter still submits"
+        );
+
+        seen.borrow_mut().clear();
+        set_open(&input, false, cx);
+        cx.simulate_keystrokes("escape enter");
+        assert_eq!(
+            *keys.borrow(),
+            [TextInputEvent::Submit, TextInputEvent::Cancel]
+        );
+        assert_eq!(text_of(&input, cx), "/c\n", "closed, Enter breaks the line");
+        assert_eq!(
+            *seen.borrow(),
+            [CompletionEvent::TokenCleared],
+            "the line break left the token"
+        );
+    }
+
+    #[gpui::test]
+    fn accept_completion_is_ignored_during_ime_composition(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, with_triggers, "@s");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "\u{ff4b}", None, window, cx);
+            });
+        });
+        let marked = |input: &Entity<TextInput>, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| input.read(cx).marked_range.clone())
+        };
+        assert_eq!(marked(&input, cx), Some(2..5), "the composition is marked");
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| input.accept_completion(&(0..2), "@src", cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(text_of(&input, cx), "@s\u{ff4b}", "the pick is ignored");
+        assert_eq!(marked(&input, cx), Some(2..5), "the composition is kept");
+    }
+
+    #[gpui::test]
+    fn no_token_event_fires_during_ime_composition(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, with_triggers, "");
+        let seen = completion_events(&input, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "@s", None, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(seen.borrow().is_empty(), "nothing while the text is marked");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "@sr", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *seen.borrow(),
+            [CompletionEvent::TokenChanged(Token {
+                trigger: '@',
+                query: "sr".to_owned(),
+                range: 0..3,
+            })],
+            "the committed text is a token"
+        );
     }
 
     #[gpui::test]

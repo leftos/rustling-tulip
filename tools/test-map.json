@@ -343,6 +343,12 @@
     },
     {
       "paths": [
+        "apps/native/src/completion.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^completion::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_chat)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/connection.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^connection::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quit|ui_remote)::/))"
