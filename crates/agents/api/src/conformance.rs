@@ -2,8 +2,8 @@
 //! and its typed options cannot drift apart.
 
 use crate::{
-    AccountsConfig, AccountsFailureKind, AccountsService, Agent, AgentPlugin, PollScope,
-    RecoveredRun, SummarizerRequest, decode_options, validate,
+    AccountsConfig, AccountsFailureKind, AccountsService, Agent, AgentPlugin, CatalogContext,
+    PollScope, RecoveredRun, SummarizerRequest, decode_options, validate,
 };
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 use std::time::Duration;
@@ -43,6 +43,7 @@ pub fn check<A: Agent>(agent: &A) {
     }
     check_screen_rules(agent);
     check_chat(agent);
+    check_catalog(agent);
     check_recovery_and_import(agent);
     check_summarizer(agent);
     check_accounts(agent);
@@ -380,6 +381,26 @@ fn check_summarizer<A: Agent>(agent: &A) {
     let adapted = AgentPlugin::summarizer(agent, &request)
         .unwrap_or_else(|| panic!("the adapter offers no summarizer where the agent does"));
     assert_eq!(adapted.args, spec.args, "the adapter's arguments differ");
+}
+
+/// A catalog read over no roots and no home answers without panicking and
+/// names each entry once, and the adapter answers the agent's own catalog.
+fn check_catalog<A: Agent>(agent: &A) {
+    let ctx = CatalogContext {
+        roots: &[],
+        home: None,
+    };
+    let entries = Agent::command_catalog(agent, &ctx);
+    let mut names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    names.sort_unstable();
+    for pair in names.windows(2) {
+        assert!(pair[0] != pair[1], "the catalog names `{}` twice", pair[0]);
+    }
+    assert_eq!(
+        AgentPlugin::command_catalog(agent, &ctx),
+        entries,
+        "the adapter's catalog differs from the agent's"
+    );
 }
 
 /// A plugin that reads chat screens reads a screen of 1000 empty rows

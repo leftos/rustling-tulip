@@ -18,7 +18,7 @@ Every agent-specific decision lives in that agent's crate. The app (daemon, prot
 
 ## Scope
 
-Inside the seam (the plugin owns it): the CLI's binary name and override variable; its argv for interactive and headless runs; its environment routing (DeepSeek) and the variables it needs passed through; its hook files, hook arguments and hook vocabulary; its screen prompt rules; how its conversation id is chosen or found, its transcripts and resume flags; its recovery choices and shell-typed resume command; its headless stream parser; its option schema and chips; its startup ready signal and prompt file-reference syntax; its tracer-log import; its fake CLI for tests.
+Inside the seam (the plugin owns it): the CLI's binary name and override variable; its argv for interactive and headless runs; its environment routing (DeepSeek) and the variables it needs passed through; its hook files, hook arguments and hook vocabulary; its screen prompt rules; how its conversation id is chosen or found, its transcripts and resume flags; its recovery choices and shell-typed resume command; its command catalog (the built-in, user and project commands and skills a session host offers); its headless stream parser; its option schema and chips; its startup ready signal and prompt file-reference syntax; its tracer-log import; its fake CLI for tests.
 
 Outside the seam (app code, agent-neutral): the plain shell; the PTY, `rt-tracer.exe`, the tracer ABI and reattach; scrollback; tabs and layouts; worktrees, workspaces and git. The hook side the app keeps is the `/hook/{session_id}` route, the hook ordering stamp, the early-event buffer and `apply_status` (`crates/daemon/src/hook_status.rs`, `pty_state.rs`), plus the idle demotions and the byte-volume and title heuristics.
 
@@ -70,6 +70,7 @@ pub trait Agent: Send + Sync + 'static {
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent>;
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation>;
     fn recovery_options(&self, run: &RecoveredRun<'_>) -> Self::Options;
+    fn command_catalog(&self, ctx: &CatalogContext) -> Vec<CatalogEntry>;
     fn shell_resume(&self, opts: &Self::Options, id: &str, hook_files: &[PathBuf]) -> Result<Option<Vec<String>>, AgentError>;
     fn import_rev(&self) -> u32;
     fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<Self::Options>>;
@@ -82,7 +83,7 @@ pub trait Agent: Send + Sync + 'static {
 }
 ```
 
-Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `shell_resume`, `import_tracer_run`, `fake_cli`, and the four user-hooks methods, which default to unsupported) have default bodies.
+Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `command_catalog`, `shell_resume`, `import_tracer_run`, `fake_cli`, and the four user-hooks methods, which default to unsupported) have default bodies.
 
 The optional `accounts(&AccountsConfig) -> Option<Arc<dyn AccountsService>>` (default `None`) gives the daemon an agent's saved-login service; the daemon's hub holds it, an elevated daemon never asks for it, and `conformance::check` also runs `check_accounts`.
 
@@ -106,6 +107,7 @@ The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) an
 | Headless | `parse_headless_line` | The headless reader applies each `HeadlessEvent` |
 | Conversations | `find_conversations` | Recover's candidates, the existence check before a recovery spawn, and the discovery poller for `DiscoverAfterLaunch` |
 | Resume options | `recovery_options` | The options a recovered run spawns with |
+| Command catalog | `command_catalog` | Lists the commands and skills a session host offers, for a `CatalogContext` of the session roots and the home folder: `CatalogEntry { name, kind, description, source, opens_terminal }` with `CatalogKind` (`Command`, `Skill`) and `CatalogSource` (`BuiltIn`, `User`, `Project`); default empty; no wire message carries it yet. The Claude plugin reads its built-ins, the config dir's commands and skills, and each root's `.claude/commands` and `.claude/skills` (`crates/agents/claude/src/catalog.rs`): project beats user beats built-in, at most 500 entries, and a command that opens an overlay is flagged `opens_terminal` |
 | Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the program and its arguments, which the daemon quotes for the shell's family and types, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one |
 | Import | `import_rev`, `import_tracer_run` | The importer offers each tracer log to every plugin and stamps the plugin's revision; the first `Some` becomes the entry, else the app's shell rule applies |
 | Chat | `ChatContext`, `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries(line, known, context)`, where `context` is the agent's `ChatContext`: per-chat state the plugin owns (`()` when it reads each line alone), which `AgentPlugin` type-erases (`new_chat_context`) and the daemon's `ChatState` and `TranscriptLog` hold one of per chat, reset when the transcript restarts or switches (the Claude plugin's is `ScriptBook`, which ties a script's inner calls to it); it reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) |

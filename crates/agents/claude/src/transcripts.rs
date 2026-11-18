@@ -76,6 +76,16 @@ fn claude_home_from(
         Some(row) => Some(OsString::from(row)),
         None => env,
     };
+    home_from_config_dir(config_dir, home)
+}
+
+/// Claude Code's home from a `CLAUDE_CONFIG_DIR` value `config_dir`: that
+/// folder when it is set and not empty, else `<home>/.claude`, `None` when
+/// neither is known.
+pub(crate) fn home_from_config_dir(
+    config_dir: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
     match config_dir {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => home.map(|home| home.join(".claude")),

@@ -588,6 +588,53 @@ pub struct FakeCli {
     pub path_stub: Option<&'static str>,
 }
 
+/// What a catalog entry is invoked as in the chat's `/` catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogKind {
+    /// A command the agent runs.
+    Command,
+    /// A skill the agent loads.
+    Skill,
+}
+
+/// Where a catalog entry was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogSource {
+    /// A command the agent ships itself.
+    BuiltIn,
+    /// A command or skill the user saved under the agent's own home.
+    User,
+    /// A command or skill the session's own folders carry.
+    Project,
+}
+
+/// One entry of a session's command and skill catalog, which the chat's `/`
+/// composer lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogEntry {
+    /// The name the entry is invoked by.
+    pub name: String,
+    /// Whether the entry is a command or a skill.
+    pub kind: CatalogKind,
+    /// The one-line description shown beside the name, when the entry has one.
+    pub description: Option<String>,
+    /// Where the entry was read from.
+    pub source: CatalogSource,
+    /// Whether invoking the entry opens an overlay or dialog in the terminal
+    /// that the chat cannot answer, so the chat must send the user there.
+    pub opens_terminal: bool,
+}
+
+/// The folders a session's catalog is read from: the session's worktree
+/// roots (or its working folder when it has none) and the daemon user's home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogContext<'a> {
+    /// The session's worktree roots, or its working folder when it has none.
+    pub roots: &'a [PathBuf],
+    /// The daemon user's home folder, when it is known.
+    pub home: Option<&'a Path>,
+}
+
 /// Implemented once per supported CLI, over the agent's own typed options.
 /// The daemon never calls it directly: it reaches every agent through the
 /// [`AgentPlugin`] this crate implements for it, so the daemon doesn't need
@@ -910,6 +957,13 @@ pub trait Agent: Send + Sync + 'static {
         repo_relative.to_owned()
     }
 
+    /// The commands and skills a session with `ctx`'s roots and home can
+    /// invoke, sorted by name with one entry per name. Defaults to an empty
+    /// catalog, for an agent that lists none.
+    fn command_catalog(&self, _ctx: &CatalogContext<'_>) -> Vec<CatalogEntry> {
+        Vec::new()
+    }
+
     /// What the agent's input box and dialog show on a rendered screen whose
     /// visible rows, top to bottom, are `rows`; `None` for an agent whose
     /// screen the chat does not mirror. The prompt's id is left empty: the
@@ -1194,6 +1248,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::file_reference`].
     fn file_reference(&self, repo_relative: &str) -> String;
+
+    /// See [`Agent::command_catalog`].
+    fn command_catalog(&self, ctx: &CatalogContext<'_>) -> Vec<CatalogEntry>;
 
     /// See [`Agent::read_chat_screen`].
     fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen>;
@@ -1485,6 +1542,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn file_reference(&self, repo_relative: &str) -> String {
         Agent::file_reference(self, repo_relative)
+    }
+
+    fn command_catalog(&self, ctx: &CatalogContext<'_>) -> Vec<CatalogEntry> {
+        Agent::command_catalog(self, ctx)
     }
 
     fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen> {
@@ -1801,6 +1862,17 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_test_agent_with_no_override_returns_an_empty_catalog() {
+        let agent = TestAgent::new(crate::ConversationPlan::None);
+        let ctx = CatalogContext {
+            roots: &[],
+            home: None,
+        };
+        assert_eq!(Agent::command_catalog(&agent, &ctx), Vec::new());
+        assert_eq!(AgentPlugin::command_catalog(&agent, &ctx), Vec::new());
     }
 
     /// An agent that keeps every default the trait offers.

@@ -9,6 +9,7 @@
 
 pub mod accounts;
 mod activity;
+mod catalog;
 mod chat_entries;
 mod dialogs;
 mod hooks;
@@ -29,12 +30,12 @@ pub use scripts::ScriptBook;
 pub use transcripts::encode_project_dir;
 
 use agent_api::{
-    ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal,
-    ConversationPlan, ConversationQuery, DraftReading, EnvPlan, FoundConversation, HeadlessEvent,
-    HookPlan, HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun,
-    Refusal, ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext, SummarizerRequest,
-    SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal, ViewReading,
-    ViewStep, hook_vocabulary, workspace_prelude,
+    ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal, CatalogContext,
+    CatalogEntry, ConversationPlan, ConversationQuery, DraftReading, EnvPlan, FoundConversation,
+    HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal,
+    RecoveredRun, Refusal, ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext,
+    SummarizerRequest, SummarizerSpec, TracerRun, TranscriptLineFacts, UserHooksState, ViewGoal,
+    ViewReading, ViewStep, hook_vocabulary, workspace_prelude,
 };
 use directories::UserDirs;
 use options::{ClaudeProvider, Effort, PermissionMode};
@@ -688,6 +689,12 @@ impl Agent for ClaudePlugin {
     /// Claude reads a file a prompt names with `@` in front of its path.
     fn file_reference(&self, repo_relative: &str) -> String {
         rules::file_reference(repo_relative)
+    }
+
+    /// The built-in commands, the user's own and the session's folders'
+    /// commands and skills, read from Claude Code's home and its roots.
+    fn command_catalog(&self, ctx: &CatalogContext<'_>) -> Vec<CatalogEntry> {
+        catalog::catalog(ctx)
     }
 
     /// Claude's input box, dialog or overlay, read off the screen's rows.
