@@ -180,10 +180,7 @@
 - [ ] RT-1863 Keep a seeded gates override off the machine's slot locks and cutover flag
 - [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
 - [ ] RT-1887 Let the driver find a fetch card's Reveal and Fetch whole folder buttons · release vNext
-- [ ] RT-1888 Add a native-shot view that draws Settings › Accounts' account rows · release vNext
-- [ ] RT-1889 Give each rt.ps1 native-shot run its own gate log · release vNext
-- [ ] RT-1890 Keep a driven run's account login off Anthropic's real endpoints · release vNext
-- [ ] RT-1891 Check the sidebar header's title fits on the real text system · release vNext
+- [ ] RT-1932 Map the follow-tab and tab-close files in the test map
 
 ## Elevated daemon and security
 
@@ -203,6 +200,14 @@
 ## Chat mirror
 
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies · release vNext
+  - [ ] RT-1917 Measure whether a command pasted into Claude Code's prompt runs, and how overlay commands behave · release vNext
+  - [ ] RT-1919 Serve a session's command and skill catalog to clients · release vNext
+  - [ ] RT-1922 List the session's commands and skills in the chat composer on / · release vNext
+  - [ ] RT-1923 List matching worktree files in the chat composer on @ · release vNext
+  - [ ] RT-1924 Attach images and files in the desktop chat composer · release vNext
+  - [ ] RT-1925 Show the session's model in the chat · release vNext
+  - [ ] RT-1926 Switch the session's model and effort from the chat's pills · release vNext
+  - [ ] RT-1927 Offer commands and files on the phone composer as you type / or @ · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
@@ -258,10 +263,6 @@
 - [ ] RT-308 Show the focused session's name without its UUID in the status bar
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
 - [ ] RT-1882 Polish found by the v0.16.0-alpha smoke run · release vNext
-  - [ ] RT-1884 Say "1 file", not "1 files", on a fetched folder's card · release vNext
-  - [ ] RT-1885 Keep the accounts popover's header on screen in a short window · release vNext
-  - [ ] RT-1886 Give the phone key editor's label field a placeholder · release vNext
-  - [ ] RT-1883 Draw a failed account login's message after the login's own output · release vNext
 - [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying
 - [ ] RT-1895 Drop an armed confirm when another one-press control is pressed
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
@@ -302,6 +303,7 @@
 - [ ] RT-1620 Keep the status bar readable at narrow widths with CPU and RAM pills
 - [ ] RT-1725 Remove the single-variant SidebarChrome enum and its always-true checks
 - [ ] RT-1762 Follow Markdown links and stretches in a popped-out pane window
+- [ ] RT-1929 Keep the daemon troubleshooting flyout on screen in a short window
 
 ## Terminal, panes and links
 
@@ -385,6 +387,7 @@
 
 ## Claude accounts
 
+- [ ] RT-1928 Keep a second account row's usage column readable in Settings › Accounts
 - [ ] RT-1466 Keep Settings › Accounts' reset time on one line and the Dashboard's subagent name uncut while there is room
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
@@ -484,7 +487,6 @@
 - [ ] RT-1290 Touch no disk for a client's worktree_path until it is vouched for
 - [ ] RT-1297 Tidy the fetch toasts: git's raw error, a folder link's missing name
 - [ ] RT-1360 Browse each machine's files in its own paths with a built-in file manager
-  - [ ] RT-1361 Tell clients each host's OS and roots, and list a host folder by its native path · release vNext
   - [ ] RT-1363 Open a file-manager tab on any machine
   - [ ] RT-1364 Dock a file tree for each machine in the sidebar
   - [ ] RT-1365 Open a terminal path's folder in the file manager from Ctrl+click
@@ -502,6 +504,7 @@
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-106 Phone files: open, share and keep host files from a tapped path · release vNext
   - [ ] RT-1899 Keep fetched copies on the phone, visible in Files, refreshed when changed and cleared after 30 days · release vNext
+    - [ ] RT-1934 Fetch, refresh and sweep the phone's copies, with a Storage row in Settings · release vNext
   - [ ] RT-1900 Show a fetched file in a phone viewer page · release vNext
   - [ ] RT-1901 Share a fetched copy from the phone through the iOS share sheet · release vNext
   - [ ] RT-1902 Open a path tapped in the phone's chat or terminal · release vNext
@@ -551,7 +554,6 @@
 - [ ] RT-1880 Show the lifted key and drop line while dragging in phone Settings › Keys
 - [ ] RT-1881 Flush a pending dead key before a phone grid key sends
 - [ ] RT-1904 Lay the phone app out for the iPad and for the iPhone in landscape · release vNext
-  - [ ] RT-1905 Pick the phone layout from the window size · release vNext
   - [ ] RT-1906 Show Home and the selected session side by side on the iPad and in phone landscape · release vNext
   - [ ] RT-1907 Fill an iPhone's landscape screen with the session's terminal · release vNext
   - [ ] RT-1908 Declare iPad and landscape in the iOS bundle and re-claim the terminal size on a rotation · release vNext
@@ -560,6 +562,7 @@
 - [ ] RT-1913 Keep the phone's Quick dock and Show prompt from re-sizing the session's PTY
 - [ ] RT-1914 Keep the phone terminal's keyboard-down height when the fixed rows outgrow the keyboard-up page
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
+- [ ] RT-1931 Pinch to zoom an image in the phone viewer
 
 ## Dashboard, Gates and Linear
 
@@ -820,14 +823,14 @@
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111, RT-1917, RT-1919, RT-1922, RT-1923, RT-1924, RT-1925, RT-1926, RT-1927
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [phone-files.md](phone-files.md) — RT-106, RT-1899, RT-1900, RT-1901, RT-1902, RT-1903
 - [push-relay.md](push-relay.md) — RT-1519
 - [remote-access.md](remote-access.md) — Remote hosts and connections
-- [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1361, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
+- [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
 - [remote-update.md](remote-update.md) — RT-1353, RT-1355, RT-1397, Updates and installer
 - [screen-status.md](screen-status.md) — RT-289
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-792, Remote hosts and connections
-- [tablet-layout.md](tablet-layout.md) — RT-1904, RT-1905, RT-1906, RT-1907, RT-1908, RT-1909, RT-1914
+- [tablet-layout.md](tablet-layout.md) — RT-1904, RT-1906, RT-1907, RT-1908, RT-1909, RT-1914
