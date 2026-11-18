@@ -9,6 +9,10 @@
 //! Files dropped on a pane go the same way: on a remote session each one
 //! uploads in turn and the returned paths paste together; on a local one
 //! their own paths paste.
+//!
+//! The chat composer's image paste, drop and Attach always upload, to the
+//! session's host whichever it is, This PC included, and the returned paths
+//! are inserted at the composer's caret.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +23,7 @@ use gpui::{Context, ImageFormat};
 use protocol::{ClientMessage, DaemonMessage, FEATURE_UPLOAD_FILE, UPLOAD_MAX_BYTES};
 
 use crate::RootView;
+use crate::chat::PaneView;
 use crate::notices::ToastKind;
 use crate::target::HostKey;
 
@@ -29,6 +34,8 @@ const UNSUPPORTED_TITLE: &str =
 const FAILED_TITLE: &str = "Couldn't paste the image";
 /// The toast a drop holding folders shows on a remote session.
 const FOLDERS_TITLE: &str = "Folders can't be dropped into a remote session";
+/// The toast a drop holding folders shows on a chat.
+const COMPOSER_FOLDERS_TITLE: &str = "Folders can't be attached";
 /// The toast a dropped file that could not go up shows.
 const DROP_FAILED_TITLE: &str = "Couldn't drop the file";
 
@@ -49,13 +56,21 @@ impl UploadKind {
     }
 }
 
-/// An upload sent and not yet answered: which pane pasted it, showing
-/// which session on which host, the drop's files not yet sent and the host
-/// paths returned so far. An image paste is a drop of one.
+/// Where an upload's returned paths go: the pane that pasted or took the
+/// drop, or the session's chat composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UploadTarget {
+    Pane(String),
+    Composer,
+}
+
+/// An upload sent and not yet answered: where its paths go, for which
+/// session on which host, the drop's files not yet sent and the host paths
+/// returned so far. An image paste is a drop of one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingUpload {
     host: HostKey,
-    pane_id: String,
+    target: UploadTarget,
     session_id: String,
     kind: UploadKind,
     remaining: Vec<PathBuf>,
@@ -173,6 +188,39 @@ impl RootView {
             tracing::debug!(%slot_id, "a local pane's image paste; not uploaded");
             return;
         }
+        let target = UploadTarget::Pane(slot_id.to_owned());
+        self.upload_image(host, target, session_id, (name, bytes), cx);
+    }
+
+    /// Session `session_id`'s chat composer pasted the image `bytes` named
+    /// `name`: it goes up to the session's host, This PC included, unless
+    /// that host cannot take it or it is over the cap, which a toast says
+    /// instead.
+    pub(crate) fn on_chat_paste_image(
+        &mut self,
+        session_id: &str,
+        name: &str,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.loaded_chat_host(session_id) else {
+            tracing::debug!(session = %session_id, "a chat paste with no loaded chat; not uploaded");
+            return;
+        };
+        self.upload_image(host, UploadTarget::Composer, session_id, (name, bytes), cx);
+    }
+
+    /// Uploads the image `bytes` named `name`, for `session_id` on `host`,
+    /// its path going to `target`; a host that cannot take it, or an image
+    /// over the cap, shows a toast instead.
+    fn upload_image(
+        &mut self,
+        host: HostKey,
+        target: UploadTarget,
+        session_id: &str,
+        (name, bytes): (&str, &[u8]),
+        cx: &mut Context<Self>,
+    ) {
         if !self
             .conn_of(&host)
             .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE))
@@ -206,7 +254,7 @@ impl RootView {
         );
         let pending = PendingUpload {
             host,
-            pane_id: slot_id.to_owned(),
+            target,
             session_id: session_id.to_owned(),
             kind: UploadKind::Image,
             remaining: Vec::new(),
@@ -253,6 +301,12 @@ impl RootView {
         if paths.is_empty() {
             return;
         }
+        // The grid's drop layer takes every drop on the main window, a chat
+        // pane's included: there the files go to the composer.
+        if self.view_shown(pane_id, Some(&session_id)) == PaneView::Chat {
+            self.drop_files_on_chat(&session_id, paths, cx);
+            return;
+        }
         if host == HostKey::Local {
             let local: Vec<String> = paths
                 .iter()
@@ -262,6 +316,44 @@ impl RootView {
             view.update(cx, |pane, cx| pane.paste_text(&text, &session_id, cx));
             return;
         }
+        let target = UploadTarget::Pane(pane_id.to_owned());
+        self.upload_drop(host, target, session_id, paths, cx);
+    }
+
+    /// `paths` were dropped on session `session_id`'s chat, or picked with
+    /// its Attach: each file uploads in turn to the host its chat is loaded
+    /// from, This PC included, and the returned paths are inserted in its
+    /// composer once the last is answered. Folders are skipped with a
+    /// toast. With the chat no longer loaded nothing is sent.
+    #[doc(hidden)]
+    pub fn drop_files_on_chat(
+        &mut self,
+        session_id: &str,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let Some(host) = self.loaded_chat_host(session_id) else {
+            tracing::debug!(session = %session_id, "a chat drop with no loaded chat; not uploaded");
+            return;
+        };
+        let target = UploadTarget::Composer;
+        self.upload_drop(host, target, session_id.to_owned(), paths, cx);
+    }
+
+    /// Uploads the files among `paths` one at a time, for `session_id` on
+    /// `host`, their paths going to `target`; a host that cannot take them
+    /// shows a toast instead, and folders are skipped with one.
+    fn upload_drop(
+        &mut self,
+        host: HostKey,
+        target: UploadTarget,
+        session_id: String,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
         if !self
             .conn_of(&host)
             .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE))
@@ -273,11 +365,15 @@ impl RootView {
         let (files, folders) = split_drop(paths, Path::is_dir);
         if folders > 0 {
             tracing::info!(?host, folders, "drop upload: folders skipped");
-            self.push_toast(ToastKind::Warning, FOLDERS_TITLE, None, cx);
+            let title = match target {
+                UploadTarget::Pane(_) => FOLDERS_TITLE,
+                UploadTarget::Composer => COMPOSER_FOLDERS_TITLE,
+            };
+            self.push_toast(ToastKind::Warning, title, None, cx);
         }
         let pending = PendingUpload {
             host,
-            pane_id: pane_id.to_owned(),
+            target,
             session_id,
             kind: UploadKind::Drop,
             remaining: files,
@@ -320,22 +416,31 @@ impl RootView {
         self.paste_uploaded(&pending, cx);
     }
 
-    /// Pastes `pending`'s returned paths into the pane it came from, while
-    /// that pane still shows that session on that host.
+    /// Pastes `pending`'s returned paths where they go: into the pane it
+    /// came from, while that pane still shows that session on that host; or
+    /// at the caret of that session's chat composer, followed by a space,
+    /// while its chat is loaded from that host.
     fn paste_uploaded(&self, pending: &PendingUpload, cx: &mut Context<Self>) {
         if pending.uploaded.is_empty() {
             return;
         }
+        let pane_id = match &pending.target {
+            UploadTarget::Pane(pane_id) => pane_id,
+            UploadTarget::Composer => {
+                self.insert_in_composer(pending, cx);
+                return;
+            }
+        };
         let Some(view) = self
             .panes
-            .get(&pending.pane_id)
+            .get(pane_id)
             .filter(|slot| {
                 *slot.host() == pending.host && slot.session() == Some(&pending.session_id)
             })
             .map(|slot| slot.view().clone())
         else {
             tracing::debug!(
-                pane = %pending.pane_id,
+                pane = %pane_id,
                 session = %pending.session_id,
                 "paste upload: the pane no longer shows the session; path dropped"
             );
@@ -345,6 +450,24 @@ impl RootView {
         view.update(cx, |pane, cx| {
             pane.paste_text(&text, &pending.session_id, cx);
         });
+    }
+
+    /// Inserts `pending`'s returned paths and one space at the caret of
+    /// its session's chat composer, while that chat is loaded from its host
+    /// with a composer.
+    fn insert_in_composer(&self, pending: &PendingUpload, cx: &mut Context<Self>) {
+        let input = (self.loaded_chat_host(&pending.session_id).as_ref() == Some(&pending.host))
+            .then(|| self.chat_composer_input(&pending.session_id))
+            .flatten();
+        let Some(input) = input else {
+            tracing::debug!(
+                session = %pending.session_id,
+                "paste upload: the chat has no composer now; path dropped"
+            );
+            return;
+        };
+        let text = format!("{} ", joined_paths(&pending.uploaded));
+        input.update(cx, |input, cx| input.replace_from_app(&text, cx));
     }
 
     /// Takes `host`'s `FileUploaded` answer to [`Self::on_file_uploaded`].

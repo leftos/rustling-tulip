@@ -22,8 +22,8 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Autocapitalize, Bounds, ClickEvent, Context, Div, ElementId, Entity,
     Focusable, Hsla, KeyDownEvent, Keystroke, MouseUpEvent, Pixels, Point, ScrollEvent,
-    ScrollHandle, SharedString, Size, Subscription, Task, TextInputAction, TextInputConfiguration,
-    Window, WindowId, canvas, div, point, prelude::*, px, relative,
+    ScrollHandle, SharedString, Size, Stateful, Subscription, Task, TextInputAction,
+    TextInputConfiguration, Window, WindowId, canvas, div, point, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -59,7 +59,7 @@ use crate::sidebar::{agent_up, runtime_label, session_view_key};
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::target::HostKey;
-use crate::text_input::{CompletionEvent, TextChanged, TextInput, TextInputEvent};
+use crate::text_input::{CompletionEvent, ImagePasted, TextChanged, TextInput, TextInputEvent};
 pub(crate) use crate::text_select::{SelectDraw, select_text};
 use crate::text_select::{TextRegistry, align_shift, painted_mark};
 use crate::ui_theme::{UiTheme, theme};
@@ -79,6 +79,8 @@ const EMPTY_NOTE: &str = "No messages yet";
 
 /// What an empty composer says.
 const COMPOSER_PLACEHOLDER: &str = "Send a message (Ctrl+Enter)";
+/// The name of the file type Attach's file picker offers: every file.
+const ATTACH_FILTER: &str = "All files";
 /// How many rows the composer grows between.
 const COMPOSER_MIN_ROWS: usize = 2;
 const COMPOSER_MAX_ROWS: usize = 6;
@@ -237,7 +239,7 @@ pub(crate) struct Composer {
     files: FileSearch,
     /// The debounce timer of the next file search.
     file_timer: Option<Task<()>>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
 }
 
 impl Composer {
@@ -2540,6 +2542,7 @@ impl RootView {
                 TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
                     .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
                     .with_completion_triggers(COMPLETION_TRIGGERS)
+                    .with_image_paste()
             };
             input.set_text(draft, cx);
             input
@@ -2557,6 +2560,10 @@ impl RootView {
         let completions = cx.subscribe(&input, move |this, _, event: &CompletionEvent, cx| {
             this.on_completion_event(&id, event, cx);
         });
+        let id = session_id.to_owned();
+        let images = cx.subscribe(&input, move |this, _, event: &ImagePasted, cx| {
+            this.on_chat_paste_image(&id, &event.name, &event.bytes, cx);
+        });
         // The draft's set_text told its token before these subscriptions
         // were active, so the input's own token is folded as if it had just
         // changed.
@@ -2567,7 +2574,7 @@ impl RootView {
                 completion: CompletionState::default(),
                 files: FileSearch::default(),
                 file_timer: None,
-                _subscriptions: [keys, edits, completions],
+                _subscriptions: [keys, edits, completions, images],
             });
         }
         if let Some(token) = token {
@@ -3426,8 +3433,71 @@ impl RootView {
         chat.cards.refusal(&prompt.id).map(ToOwned::to_owned)
     }
 
+    /// The host session `session_id`'s chat is loaded from; none while it
+    /// is not loaded (still loading or gone).
+    pub(crate) fn loaded_chat_host(&self, session_id: &str) -> Option<HostKey> {
+        let chat = self.chat.sessions.get(session_id)?;
+        if chat.request.is_some() {
+            return None;
+        }
+        self.chat.hosts.get(session_id).cloned()
+    }
+
+    /// Session `session_id`'s composer input, while its chat is loaded with
+    /// one.
+    pub(crate) fn chat_composer_input(&self, session_id: &str) -> Option<Entity<TextInput>> {
+        let chat = self.chat.sessions.get(session_id)?;
+        chat.composer
+            .as_ref()
+            .map(|composer| composer.input.clone())
+    }
+
+    /// Session `session_id`'s Attach button (`chat-attach`), beside Send:
+    /// it asks this PC's file picker for a file to upload.
+    fn attach_button(
+        session_id: &str,
+        enabled: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = session_id.to_owned();
+        primary_button(
+            fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "chat-attach",
+            ButtonSize::Compact,
+            enabled,
+            Layer::Base,
+            t,
+        )
+        .child("Attach")
+        .when(enabled, |attach| {
+            attach.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.attach_to_chat(&id, cx);
+            }))
+        })
+    }
+
+    /// Attach: the file this PC's file picker returns uploads to session
+    /// `session_id`'s host as a drop on its chat does. A cancelled pick does
+    /// nothing.
+    fn attach_to_chat(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let picked = (self.pick_file)(cx, None, crate::FileFilter::new(ATTACH_FILTER, &[]));
+        let id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                tracing::debug!(session = %id, "chat attach: the pick was cancelled");
+                return;
+            };
+            // Fails only when the root view is gone, and the chat with it.
+            this.update(cx, |this, cx| this.drop_files_on_chat(&id, &[path], cx))
+                .ok();
+        })
+        .detach();
+    }
+
     /// The selectors of the buttons beside session `session_id`'s
-    /// composer: Send.
+    /// composer that send: Send. Attach (`chat-attach`) is not listed.
     #[must_use]
     pub fn chat_composer_actions(&self, session_id: &str) -> Vec<&'static str> {
         let Some(chat) = self.chat.sessions.get(session_id) else {
@@ -3663,6 +3733,7 @@ impl RootView {
         let cards = loaded.and_then(|chat| self.card_area(session_id, chat, cx));
         let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
         let keys_for = session_id.to_owned();
+        let drop_for = session_id.to_owned();
         div()
             .driver_id(|| name)
             .flex()
@@ -3670,6 +3741,14 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .size_full()
+            // A pop-out's chat takes its own drops; in the main window the
+            // grid's drop layer takes them first and `drop_files` sends a
+            // chat pane's to the composer.
+            .on_drop(
+                cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
+                    this.drop_files_on_chat(&drop_for, paths.paths(), cx);
+                }),
+            )
             .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if let Some(key) = card_key(&event.keystroke)
                     && this.chat_pane_key(&keys_for, key, window, cx)
@@ -4054,6 +4133,7 @@ impl RootView {
                 this.send_composer(&id, cx);
             }))
         });
+        let attach = Self::attach_button(session_id, !disabled, &t, cx);
         Some(
             div()
                 .flex_none()
@@ -4073,6 +4153,7 @@ impl RootView {
                         .items_end()
                         .gap(px(8.0))
                         .child(field)
+                        .child(attach)
                         .child(send),
                 )
                 .children(quick)
