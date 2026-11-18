@@ -159,6 +159,37 @@ pub fn scan(
     limits: Limits,
     cancel: &CancellationToken,
 ) -> Result<Scan, ScanError> {
+    match walk_short(root, limits, cancel)? {
+        (found, None) => Ok(found),
+        (_, Some(stopped)) => Err(stopped),
+    }
+}
+
+/// [`scan`] answered as what it listed when a limit stopped it, beside
+/// whether one did, for a caller that wants the files found before the stop
+/// rather than a refusal. A cancel or the root failing to read is still an
+/// error.
+///
+/// # Errors
+/// The cancel, or the root itself failing to read.
+pub fn scan_stopping_short(
+    root: &CanonicalRoot,
+    limits: Limits,
+    cancel: &CancellationToken,
+) -> Result<(Scan, bool), ScanError> {
+    let (found, stopped) = walk_short(root, limits, cancel)?;
+    Ok((found, stopped.is_some()))
+}
+
+/// The walk [`scan`] and [`scan_stopping_short`] share: what it listed, and
+/// the limit error that stopped it short, if one did. A cancel or the root
+/// failing to read is an error; a folder below the root that fails to read is
+/// counted in [`Scan::unlisted`].
+fn walk_short(
+    root: &CanonicalRoot,
+    limits: Limits,
+    cancel: &CancellationToken,
+) -> Result<(Scan, Option<ScanError>), ScanError> {
     let mut walk = Walk {
         found: Scan::default(),
         files: 0,
@@ -185,10 +216,18 @@ pub fn scan(
             if cancel.is_cancelled() {
                 return Err(ScanError::Cancelled);
             }
-            walk.take(classify(&dir, &prefix, entry))?;
+            match walk.take(classify(&dir, &prefix, entry)) {
+                Ok(()) => {}
+                Err(
+                    stopped @ (ScanError::Files { .. }
+                    | ScanError::Bytes { .. }
+                    | ScanError::Visits { .. }),
+                ) => return Ok((walk.found, Some(stopped))),
+                Err(err) => return Err(err),
+            }
         }
     }
-    Ok(walk.found)
+    Ok((walk.found, None))
 }
 
 /// A walk under way: what it found, and what it has counted against its

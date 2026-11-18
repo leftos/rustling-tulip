@@ -230,6 +230,14 @@ export const FEATURE_CHAT_DRAFT = "chat_draft";
 export const FEATURE_CHAT_CLEAR_DRAFT = "chat_clear_draft";
 
 /**
+ * `Welcome.features` entry: the daemon searches a session's folder for the
+ * files a chat composer's `@` mention names ([`ClientMessage::SearchFiles`],
+ * answered with [`DaemonMessage::FileMatches`]). A client offers its mention
+ * popup only on a host that lists it.
+ */
+export const FEATURE_FILE_SEARCH = "file_search";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -5081,6 +5089,16 @@ export type ClientMessage =
    */
   | { type: "chat_clear_draft"; session_id: string; request_id?: string | null }
   /**
+   * Search the session's folder for the files whose path matches `query`,
+   * for a chat composer's `@` mention: answered to the requester alone
+   * with [`DaemonMessage::FileMatches`] carrying this `request_id`.
+   * `limit` is the client's cap on the matches returned, absent or zero
+   * counting as every match there is, and no answer carries more than 50.
+   * The folder is the session's first member worktree, else its cwd, the
+   * one an `UploadFile` saves into.
+   */
+  | { type: "search_files"; session_id: string; query: string; limit?: number | null; request_id?: string | null }
+  /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this
    * `request_id`, then the changed lines as
@@ -6331,6 +6349,15 @@ export type DaemonMessage =
    */
   | { type: "chat_draft"; session_id: string; request_id?: string | null; text: string; cleared: boolean }
   /**
+   * The answer to [`ClientMessage::SearchFiles`], sent to the requester
+   * with its `request_id`: the session folder's files whose path matches
+   * the query, best first, each with the reference the session's agent
+   * reads it by. `truncated` says more files matched than `matches`
+   * carries. An unknown session, or one with no folder, is answered with
+   * no matches and `truncated` false.
+   */
+  | { type: "file_matches"; session_id: string; matches?: FileMatch[]; truncated?: boolean; request_id?: string | null }
+  /**
    * The answer to [`ClientMessage::LoadSummary`], sent to the requester
    * with its `request_id`: every stretch line of the session's chat as it
    * stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -6354,6 +6381,17 @@ export type DaemonMessage =
    * `wakeup_at`: When the earliest pending wakeup fires.
    */
   | { type: "chat_work"; session_id: string; subagents?: WorkSubagent[]; shells?: WorkShell[]; wakeup_at?: string | null };
+
+/** One file a [`DaemonMessage::FileMatches`] answer carries. */
+export interface FileMatch {
+  /** The file's path relative to the session's folder, `/`-separated. */
+  path: string;
+  /**
+   * How the session's agent reads that file in a prompt, as its plugin's
+   * `file_reference` forms it.
+   */
+  reference: string;
+}
 
 /**
  * A single resolved script invocation. The dialog renders these in the

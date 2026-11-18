@@ -11,18 +11,28 @@
 //! ([`crate::inject::send_draft`]), answering only a refusal.
 //! `ChatClearDraft` empties that box without reading the draft out
 //! ([`crate::chat_draft::clear_draft`]), answering only a refusal.
+//! `SearchFiles` lists the files of the session's folder for the composer's
+//! `@` mentions ([`search_files`]), answering the requester with a
+//! `FileMatches`.
 
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::Hub;
 use super::connection::ConnCtx;
 use crate::chat_mirror::LoadError;
+use crate::file_fetch;
+use crate::folder_pack;
+use crate::git_inspect::run_git_read;
 use crate::inject::{TypeTarget, check_typed_text, type_message};
 use crate::sync::lock;
 use crate::{chat_answer, chat_draft, inject};
 use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
-use protocol::{ChatAnswerKind, ClientMessage, DaemonMessage};
+use protocol::{AgentId, ChatAnswerKind, ClientMessage, DaemonMessage, FileMatch};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 /// Handle the chat messages `dispatch` routes here.
@@ -82,6 +92,21 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             session_id,
             request_id,
         } => clear_draft(hub, ctx, &session_id, request_id),
+        ClientMessage::SearchFiles {
+            session_id,
+            query,
+            limit,
+            request_id,
+        } => search_files(
+            hub,
+            ctx,
+            FileSearch {
+                session_id,
+                query,
+                limit,
+                request_id,
+            },
+        ),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
 }
@@ -280,6 +305,348 @@ pub(super) fn refuse(
         code: Some(code.to_owned()),
         request_id,
     });
+}
+
+/// The most matches one file-search answer carries.
+const MAX_FILE_MATCHES: usize = 50;
+
+/// What a search's walk may take on: the folder fetch's file and visit
+/// limits without its byte cap, since a search reads no file.
+const SEARCH_LIMITS: folder_pack::Limits = folder_pack::Limits {
+    files: 20_000,
+    bytes: u64::MAX,
+    visits: 200_000,
+};
+
+/// How git lists a work tree for a search: tracked and untracked files, never
+/// the ignored ones, each path once (without `--deduplicate` an unmerged path
+/// is printed once per stage), NUL-separated so a name holding a newline or a
+/// tab stays one path.
+const LS_FILES: &[&str] = &[
+    "ls-files",
+    "-co",
+    "--deduplicate",
+    "--exclude-standard",
+    "-z",
+];
+
+/// One `SearchFiles` request's fields.
+struct FileSearch {
+    session_id: String,
+    query: String,
+    limit: Option<u32>,
+    request_id: Option<String>,
+}
+
+/// What one search asks of a session's folder.
+struct SearchAsk<'a> {
+    query: &'a str,
+    cap: usize,
+    limits: folder_pack::Limits,
+}
+
+/// One file search's answer, made off the async threads.
+struct FileSearchAnswer {
+    matches: Vec<FileMatch>,
+    /// More matched than `matches` carries, or the walk stopped at a limit
+    /// before the folder was read whole.
+    truncated: bool,
+}
+
+/// Answer a `SearchFiles` request. The session's folder and agent are read
+/// here, and the listing, the ranking and the agent's references are made on
+/// a task of their own, since both git and the walk are slow. A session with
+/// no folder, or a listing that fails, is answered with no matches.
+fn search_files(hub: &Hub, ctx: &ConnCtx<'_>, request: FileSearch) {
+    let FileSearch {
+        session_id,
+        query,
+        limit,
+        request_id,
+    } = request;
+    let Some((folder, agent)) = search_root(hub, &session_id) else {
+        debug!(
+            session_id = %session_id,
+            "file search: the session has no folder"
+        );
+        let _ = ctx.out_tx.send(DaemonMessage::FileMatches {
+            session_id,
+            matches: Vec::new(),
+            truncated: false,
+            request_id,
+        });
+        return;
+    };
+    let out_tx = (*ctx.out_tx).clone();
+    tokio::spawn(async move {
+        let git = Handle::current();
+        let joined = tokio::task::spawn_blocking(move || {
+            let ask = SearchAsk {
+                query: &query,
+                cap: match_cap(limit),
+                limits: SEARCH_LIMITS,
+            };
+            search_folder(&folder, &ask, &agent, &git)
+        })
+        .await;
+        let (matches, truncated) = match joined {
+            Ok(Ok(answer)) => (answer.matches, answer.truncated),
+            Ok(Err(err)) => {
+                warn!(
+                    session_id = %session_id,
+                    error = format!("{err:#}"),
+                    "file search: listing the session folder failed"
+                );
+                (Vec::new(), false)
+            }
+            Err(err) => {
+                warn!(
+                    session_id = %session_id,
+                    error = %err,
+                    "file search: the search task failed"
+                );
+                (Vec::new(), false)
+            }
+        };
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::FileMatches {
+            session_id,
+            matches,
+            truncated,
+            request_id,
+        });
+    });
+}
+
+/// The folder a session's file search covers and the agent whose references
+/// it forms: the first member's worktree, else the cwd, the rule an
+/// `UploadFile` saves into.
+fn search_root(hub: &Hub, session_id: &str) -> Option<(PathBuf, AgentId)> {
+    let record = hub.sessions.get(session_id)?;
+    let record = lock(&record);
+    let member = record
+        .members
+        .first()
+        .map(|member| member.worktree_path.clone());
+    let folder = member
+        .filter(|path| !path.is_empty())
+        .or_else(|| record.current_cwd.clone().filter(|path| !path.is_empty()))?;
+    Some((PathBuf::from(folder), record.agent.clone()))
+}
+
+/// Everything one file search does off the async threads: the listing (git's
+/// in a work tree, the walk elsewhere), the paths a folder link would put
+/// outside the session folder, the ranking and the agent's references.
+///
+/// `git` drives the daemon's bounded git runner from this thread, so no part
+/// of the search runs on a runtime worker.
+fn search_folder(
+    folder: &Path,
+    ask: &SearchAsk<'_>,
+    agent: &AgentId,
+    git: &Handle,
+) -> anyhow::Result<FileSearchAnswer> {
+    let (paths, walk_stopped) = listed_files(folder, ask.limits, git)?;
+    let (paths, truncated) = rank_matches(&paths, ask.query, ask.cap);
+    Ok(FileSearchAnswer {
+        matches: form_matches(paths, agent),
+        truncated: truncated || walk_stopped,
+    })
+}
+
+/// The files `folder` holds, `/`-separated and relative to it, beside whether
+/// the walk stopped at a limit: git's own listing inside a work tree, so its
+/// ignore rules apply, else the folder walk. The git listing drops what lies
+/// under a link, which git would otherwise list from outside the folder.
+fn listed_files(
+    folder: &Path,
+    limits: folder_pack::Limits,
+    git: &Handle,
+) -> anyhow::Result<(Vec<String>, bool)> {
+    let work_tree = git
+        .block_on(run_git_read(
+            folder,
+            &["rev-parse", "--is-inside-work-tree"],
+        ))
+        .is_ok_and(|answer| answer.trim() == "true");
+    if !work_tree {
+        return walk_files(folder, limits);
+    }
+    let listed = git.block_on(run_git_read(folder, LS_FILES))?;
+    Ok((drop_under_links(folder, parse_listing(&listed)), false))
+}
+
+/// The files a folder that is not a git work tree holds, by the folder
+/// fetch's walk with the limits a search allows, and whether the walk stopped
+/// at one of them before the folder was read whole.
+fn walk_files(folder: &Path, limits: folder_pack::Limits) -> anyhow::Result<(Vec<String>, bool)> {
+    let root = file_fetch::confine_dir(folder, "")?;
+    let (scan, stopped) =
+        folder_pack::scan_stopping_short(&root, limits, &CancellationToken::new())?;
+    Ok((
+        scan.files.into_iter().map(|file| file.name).collect(),
+        stopped,
+    ))
+}
+
+/// The paths of a `git ls-files -z` answer, each once, in git's order.
+fn parse_listing(listed: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for path in listed.split('\0').filter(|path| !path.is_empty()) {
+        if seen.insert(path) {
+            paths.push(path.to_owned());
+        }
+    }
+    paths
+}
+
+/// `paths` without those lying under a link inside `folder`: a link among a
+/// path's folders names a folder outside the session folder, which git lists
+/// from, so such a path is never served.
+fn drop_under_links(folder: &Path, paths: Vec<String>) -> Vec<String> {
+    let mut checked: HashMap<PathBuf, bool> = HashMap::new();
+    paths
+        .into_iter()
+        .filter(|path| !under_a_link(folder, path, &mut checked))
+        .collect()
+}
+
+/// Whether one of `path`'s folders, below `folder`, is a link. Each folder is
+/// looked at once per search, `checked` holding what it read.
+fn under_a_link(folder: &Path, path: &str, checked: &mut HashMap<PathBuf, bool>) -> bool {
+    let mut parent = String::new();
+    let mut folders = path.split('/');
+    folders.next_back();
+    for segment in folders {
+        if !parent.is_empty() {
+            parent.push('/');
+        }
+        parent.push_str(segment);
+        if linked_folder(folder, &parent, checked) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the folder `parent`, relative to `folder`, is a link: read once,
+/// `checked` keeping what it read.
+fn linked_folder(folder: &Path, parent: &str, checked: &mut HashMap<PathBuf, bool>) -> bool {
+    let path = folder.join(parent);
+    if let Some(linked) = checked.get(&path) {
+        return *linked;
+    }
+    let linked = is_link(&path);
+    checked.insert(path, linked);
+    linked
+}
+
+/// Whether `path` is a link: a reparse point of any kind on Windows, where a
+/// junction is one, and any symlink elsewhere. A path that does not read is
+/// counted as a link, so nothing it holds is listed.
+fn is_link(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return true;
+    };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `limit`'s cap on one answer: absent or zero counts as every match, and
+/// never more than [`MAX_FILE_MATCHES`].
+fn match_cap(limit: Option<u32>) -> usize {
+    match limit {
+        Some(count) if count > 0 => (count as usize).min(MAX_FILE_MATCHES),
+        _ => MAX_FILE_MATCHES,
+    }
+}
+
+/// The paths of `paths` that match `query`, best first, and whether more
+/// matched than `cap` carries. A file name starting with the query ranks
+/// before a path segment starting with it, which ranks before the path
+/// holding it; the shorter path, then the alphabetically first, breaks a tie.
+/// An empty query lists the paths alphabetically. Matching ignores case.
+fn rank_matches(paths: &[String], query: &str, cap: usize) -> (Vec<String>, bool) {
+    if query.is_empty() {
+        let mut sorted = alphabetically(paths);
+        let truncated = sorted.len() > cap;
+        sorted.truncate(cap);
+        return (sorted.into_iter().map(str::to_owned).collect(), truncated);
+    }
+    let query = query.to_lowercase();
+    let mut matched: Vec<(u8, String, &str)> = paths
+        .iter()
+        .filter_map(|path| {
+            let lowered = path.to_lowercase();
+            rank_of(&lowered, &query).map(|rank| (rank, lowered, path.as_str()))
+        })
+        .collect();
+    let truncated = matched.len() > cap;
+    matched.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.2.len().cmp(&right.2.len()))
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(right.2))
+    });
+    matched.truncate(cap);
+    (
+        matched
+            .into_iter()
+            .map(|(_, _, path)| path.to_owned())
+            .collect(),
+        truncated,
+    )
+}
+
+/// `paths` alphabetically, ignoring case, their own bytes breaking a tie that
+/// ignores it: each path's lowercased form is made once, for the whole sort.
+fn alphabetically(paths: &[String]) -> Vec<&str> {
+    let mut keyed: Vec<(String, &str)> = paths
+        .iter()
+        .map(|path| (path.to_lowercase(), path.as_str()))
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+    keyed.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Where the lowercased `path` stands against the lowercased `query`: `0` its
+/// file name starts with it, `1` a path segment starts with it, `2` the path
+/// holds it, `None` not at all.
+fn rank_of(lowered: &str, query: &str) -> Option<u8> {
+    let name = lowered.rsplit('/').next().unwrap_or(lowered);
+    if name.starts_with(query) {
+        return Some(0);
+    }
+    if lowered.split('/').any(|segment| segment.starts_with(query)) {
+        return Some(1);
+    }
+    lowered.contains(query).then_some(2)
+}
+
+/// `paths` as an answer's matches, each reference formed by `agent`'s plugin;
+/// a session whose agent is not registered reads a file by its bare path.
+fn form_matches(paths: Vec<String>, agent: &AgentId) -> Vec<FileMatch> {
+    let plugin = agent_registry::plugin(agent);
+    paths
+        .into_iter()
+        .map(|path| {
+            let reference =
+                plugin.map_or_else(|| path.clone(), |plugin| plugin.file_reference(&path));
+            FileMatch { path, reference }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4308,6 +4675,330 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "tests assert preconditions with expect and fail on an unexpected message"
+)]
+mod search_files_tests {
+    use super::super::test_support::{
+        self, ScratchDir, dispatch_on, idle_record, next_message, test_hub,
+    };
+    use super::{
+        LS_FILES, MAX_FILE_MATCHES, SEARCH_LIMITS, SearchAsk, form_matches, listed_files,
+        match_cap, parse_listing, rank_matches, search_folder,
+    };
+    use crate::file_tail::hooks::make_dir_link;
+    #[cfg(windows)]
+    use crate::file_tail::hooks::make_junction;
+    use crate::folder_pack;
+    use protocol::{ClientMessage, DaemonMessage};
+    use std::path::Path;
+    use tokio::runtime::Handle;
+    use tokio::sync::mpsc;
+
+    /// `list` as owned strings.
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    /// Run `step` as the daemon runs a search: on a blocking thread, driving
+    /// git from there.
+    async fn off_worker<T: Send + 'static>(step: impl FnOnce(Handle) -> T + Send + 'static) -> T {
+        tokio::task::spawn_blocking(move || step(Handle::current()))
+            .await
+            .expect("the search thread joins")
+    }
+
+    /// Write `contents` to `path`, making its folders.
+    fn write(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(path, contents).expect("write file");
+    }
+
+    /// Run `git -C repo args`, failing the test when git refuses.
+    fn git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn search_files_ranks_name_prefix_then_segment_prefix_then_substring() {
+        let found = paths(&[
+            "README.md",
+            "notes/calibration.md",
+            "crates/lib/mod.rs",
+            "src/lib.rs",
+            "SRC/LIB.md",
+            "src/helpers.rs",
+        ]);
+        let (matches, truncated) = rank_matches(&found, "lib", MAX_FILE_MATCHES);
+        assert!(!truncated);
+        assert_eq!(
+            matches,
+            [
+                "SRC/LIB.md",
+                "src/lib.rs",
+                "crates/lib/mod.rs",
+                "notes/calibration.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_files_breaks_ties_by_length_then_name() {
+        let found = paths(&["dir/a.txt", "a.txt", "z/a.txt", "ab.txt", "aa.txt"]);
+        let (matches, truncated) = rank_matches(&found, "a", MAX_FILE_MATCHES);
+        assert!(!truncated);
+        assert_eq!(
+            matches,
+            ["a.txt", "aa.txt", "ab.txt", "z/a.txt", "dir/a.txt"]
+        );
+    }
+
+    #[test]
+    fn search_files_caps_at_fifty_and_says_truncated() {
+        let found: Vec<String> = (0..60).map(|index| format!("f{index:02}.txt")).collect();
+        let first_fifty: Vec<String> = (0..50).map(|index| format!("f{index:02}.txt")).collect();
+        for limit in [None, Some(0), Some(500)] {
+            let (matches, truncated) = rank_matches(&found, "f", match_cap(limit));
+            assert_eq!(matches, first_fifty, "limit {limit:?}");
+            assert!(truncated, "limit {limit:?}");
+        }
+        let (five, truncated) = rank_matches(&found, "f", match_cap(Some(5)));
+        assert_eq!(five, first_fifty[..5]);
+        assert!(truncated);
+        let (matches, truncated) = rank_matches(&first_fifty, "f", match_cap(None));
+        assert_eq!(matches, first_fifty);
+        assert!(!truncated, "fifty of fifty is not truncated");
+    }
+
+    #[test]
+    fn search_files_with_an_empty_query_lists_the_first_paths() {
+        let found = paths(&["b.txt", "aaaa.txt", "a.txt", "B/zz.txt"]);
+        let (matches, truncated) = rank_matches(&found, "", MAX_FILE_MATCHES);
+        assert!(!truncated);
+        assert_eq!(matches, ["a.txt", "aaaa.txt", "b.txt", "B/zz.txt"]);
+        let (two, truncated) = rank_matches(&found, "", 2);
+        assert_eq!(two, ["a.txt", "aaaa.txt"]);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn search_files_lists_tracked_and_untracked_but_not_ignored() {
+        let scratch = ScratchDir::new("files-git");
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create the repo folder");
+        test_support::git_init(&repo);
+        write(&repo.join(".gitignore"), "ignored.txt\n");
+        write(&repo.join("tracked.txt"), "tracked");
+        write(&repo.join("untracked.txt"), "untracked");
+        write(&repo.join("ignored.txt"), "ignored");
+        git(&repo, &["add", ".gitignore", "tracked.txt"]);
+        let (mut files, stopped) = off_worker(move |git| listed_files(&repo, SEARCH_LIMITS, &git))
+            .await
+            .expect("the listing reads");
+        assert!(!stopped);
+        files.sort_unstable();
+        assert_eq!(files, [".gitignore", "tracked.txt", "untracked.txt"]);
+    }
+
+    #[tokio::test]
+    async fn search_files_walks_a_folder_that_is_not_a_git_tree() {
+        let scratch = ScratchDir::new("files-walk");
+        let folder = scratch.path().join("plain");
+        write(&folder.join("keep.txt"), "keep");
+        write(&folder.join("node_modules").join("pkg").join("a.js"), "a");
+        write(&folder.join("target").join("debug").join("b.bin"), "b");
+        let (files, stopped) = off_worker(move |git| listed_files(&folder, SEARCH_LIMITS, &git))
+            .await
+            .expect("the walk passes");
+        assert!(!stopped);
+        assert_eq!(files, ["keep.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_path_outside_the_session_folder_is_never_listed() {
+        let scratch = ScratchDir::new("files-outside");
+        let folder = scratch.path().join("folder");
+        let outside = scratch.path().join("outside");
+        write(&folder.join("inside.txt"), "inside");
+        write(&outside.join("secret.txt"), "secret");
+        if !make_dir_link(&folder.join("linked"), &outside) {
+            return;
+        }
+        let (files, stopped) = off_worker(move |git| listed_files(&folder, SEARCH_LIMITS, &git))
+            .await
+            .expect("the walk passes");
+        assert!(!stopped);
+        assert_eq!(files, ["inside.txt"]);
+    }
+
+    #[test]
+    fn search_files_forms_each_reference_through_the_agent() {
+        let agent = agent_registry::default_agent();
+        let matches = form_matches(paths(&["src/lib.rs"]), &agent);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, "src/lib.rs");
+        let plugin = agent_registry::plugin(&agent).expect("the default agent is registered");
+        assert_eq!(matches[0].reference, plugin.file_reference("src/lib.rs"));
+        assert_eq!(matches[0].reference, "@src/lib.rs");
+    }
+
+    #[tokio::test]
+    async fn search_files_for_an_unknown_session_answers_nothing() {
+        let (hub, _scratch) = test_hub("files-unknown");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::SearchFiles {
+            session_id: "nope".to_owned(),
+            query: "lib".to_owned(),
+            limit: None,
+            request_id: Some("req-1".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::FileMatches {
+                session_id,
+                matches,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "nope");
+                assert_eq!(matches.len(), 0);
+                assert!(!truncated);
+                assert_eq!(request_id.as_deref(), Some("req-1"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_files_answers_the_request_id() {
+        let (hub, scratch) = test_hub("files-answer");
+        let folder = scratch.path().join("proj");
+        write(&folder.join("lib.rs"), "lib");
+        let mut record = idle_record("s1");
+        record.current_cwd = Some(folder.display().to_string());
+        hub.sessions.insert(record);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::SearchFiles {
+            session_id: "s1".to_owned(),
+            query: "LIB".to_owned(),
+            limit: Some(1),
+            request_id: Some("req-42".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::FileMatches {
+                session_id,
+                matches,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-42"));
+                assert_eq!(matches.len(), 1);
+                assert_eq!(matches[0].path, "lib.rs");
+                assert_eq!(matches[0].reference, "@lib.rs");
+                assert!(!truncated);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Link `link` to the folder `target` as the OS's own directory link: on
+    /// Windows a junction, whose contents git lists as if they were the
+    /// repository's, and a symlink elsewhere. Whether one was made.
+    fn make_search_link(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            make_junction(link, target)
+        }
+        #[cfg(not(windows))]
+        {
+            make_dir_link(link, target)
+        }
+    }
+
+    /// A repository holding `inside.txt`, and beside it a folder outside the
+    /// repository holding `secret.txt`, linked into it as `linked`: whether
+    /// the link could be made at all (Windows without junctions).
+    fn repo_with_an_outside_link(tag: &str) -> Option<(ScratchDir, std::path::PathBuf)> {
+        let scratch = ScratchDir::new(tag);
+        let repo = scratch.path().join("repo");
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir_all(&repo).expect("create the repo folder");
+        std::fs::create_dir_all(&outside).expect("create the outside folder");
+        test_support::git_init(&repo);
+        write(&repo.join("inside.txt"), "inside");
+        write(&outside.join("secret.txt"), "secret");
+        make_search_link(&repo.join("linked"), &outside).then_some((scratch, repo))
+    }
+
+    #[tokio::test]
+    async fn search_files_drops_a_git_listed_path_under_a_folder_link() {
+        let Some((scratch, repo)) = repo_with_an_outside_link("files-linked") else {
+            return;
+        };
+        let _scratch = scratch;
+        let (files, stopped) = off_worker(move |git| listed_files(&repo, SEARCH_LIMITS, &git))
+            .await
+            .expect("the listing reads");
+        assert!(!stopped);
+        assert_eq!(files, ["inside.txt"]);
+    }
+
+    #[test]
+    fn search_files_lists_a_conflicted_path_once() {
+        let listed = "conflict.txt\0conflict.txt\0conflict.txt\0other.txt\0";
+        assert_eq!(parse_listing(listed), ["conflict.txt", "other.txt"]);
+        assert!(LS_FILES.contains(&"--deduplicate"), "{LS_FILES:?}");
+    }
+
+    #[tokio::test]
+    async fn search_files_searches_what_a_stopped_walk_listed() {
+        let scratch = ScratchDir::new("files-stopped");
+        let folder = scratch.path().join("plain");
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            write(&folder.join(name), "x");
+        }
+        let agent = agent_registry::default_agent();
+        let limits = folder_pack::Limits {
+            files: 2,
+            bytes: u64::MAX,
+            visits: 200_000,
+        };
+        let answer = off_worker(move |git| {
+            let ask = SearchAsk {
+                query: "",
+                cap: MAX_FILE_MATCHES,
+                limits,
+            };
+            search_folder(&folder, &ask, &agent, &git)
+        })
+        .await
+        .expect("the search runs");
+        assert_eq!(answer.matches.len(), 2, "the files listed before the stop");
+        assert!(answer.truncated, "a stopped walk answers truncated");
+        let names = ["one.txt", "two.txt", "three.txt"];
+        for found in &answer.matches {
+            assert!(names.contains(&found.path.as_str()), "{}", found.path);
         }
     }
 }

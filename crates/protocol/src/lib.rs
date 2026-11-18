@@ -185,6 +185,12 @@ pub const FEATURE_CHAT_DRAFT: &str = "chat_draft";
 /// Clear only on a host that lists it.
 pub const FEATURE_CHAT_CLEAR_DRAFT: &str = "chat_clear_draft";
 
+/// `Welcome.features` entry: the daemon searches a session's folder for the
+/// files a chat composer's `@` mention names ([`ClientMessage::SearchFiles`],
+/// answered with [`DaemonMessage::FileMatches`]). A client offers its mention
+/// popup only on a host that lists it.
+pub const FEATURE_FILE_SEARCH: &str = "file_search";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -6400,6 +6406,21 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Search the session's folder for the files whose path matches `query`,
+    /// for a chat composer's `@` mention: answered to the requester alone
+    /// with [`DaemonMessage::FileMatches`] carrying this `request_id`.
+    /// `limit` is the client's cap on the matches returned, absent or zero
+    /// counting as every match there is, and no answer carries more than 50.
+    /// The folder is the session's first member worktree, else its cwd, the
+    /// one an `UploadFile` saves into.
+    SearchFiles {
+        session_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Load a session's summary for this connection: every stretch line as
     /// it stands, answered with [`DaemonMessage::Summary`] carrying this
     /// `request_id`, then the changed lines as
@@ -8001,6 +8022,21 @@ pub enum DaemonMessage {
         text: String,
         cleared: bool,
     },
+    /// The answer to [`ClientMessage::SearchFiles`], sent to the requester
+    /// with its `request_id`: the session folder's files whose path matches
+    /// the query, best first, each with the reference the session's agent
+    /// reads it by. `truncated` says more files matched than `matches`
+    /// carries. An unknown session, or one with no folder, is answered with
+    /// no matches and `truncated` false.
+    FileMatches {
+        session_id: String,
+        #[serde(default)]
+        matches: Vec<FileMatch>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
     /// with its `request_id`: every stretch line of the session's chat as it
     /// stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -8036,6 +8072,16 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wakeup_at: Option<DateTime<Utc>>,
     },
+}
+
+/// One file a [`DaemonMessage::FileMatches`] answer carries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileMatch {
+    /// The file's path relative to the session's folder, `/`-separated.
+    pub path: String,
+    /// How the session's agent reads that file in a prompt, as its plugin's
+    /// `file_reference` forms it.
+    pub reference: String,
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
@@ -18496,6 +18542,97 @@ mod tests {
             } => {
                 assert_eq!(request_id, None);
                 assert!(!cleared);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_files_message_round_trips() {
+        let msg = ClientMessage::SearchFiles {
+            session_id: "s1".to_string(),
+            query: "lib".to_string(),
+            limit: Some(5),
+            request_id: Some("req-files".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"search_files","session_id":"s1","query":"lib","limit":5,"request_id":"req-files"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::SearchFiles {
+                session_id,
+                query,
+                limit,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(query, "lib");
+                assert_eq!(limit, Some(5));
+                assert_eq!(request_id.as_deref(), Some("req-files"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"search_files","session_id":"s1","query":""}"#;
+        match serde_json::from_str::<ClientMessage>(bare).expect("deserialize") {
+            ClientMessage::SearchFiles {
+                query,
+                limit,
+                request_id,
+                ..
+            } => {
+                assert_eq!(query, "");
+                assert_eq!(limit, None);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_matches_message_round_trips() {
+        let msg = DaemonMessage::FileMatches {
+            session_id: "s1".to_string(),
+            matches: vec![FileMatch {
+                path: "src/lib.rs".to_string(),
+                reference: "@src/lib.rs".to_string(),
+            }],
+            truncated: true,
+            request_id: Some("req-files".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"file_matches","session_id":"s1","matches":[{"path":"src/lib.rs","reference":"@src/lib.rs"}],"truncated":true,"request_id":"req-files"}"#
+        );
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::FileMatches {
+                session_id,
+                matches,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(matches.len(), 1);
+                assert_eq!(matches[0].path, "src/lib.rs");
+                assert_eq!(matches[0].reference, "@src/lib.rs");
+                assert!(truncated);
+                assert_eq!(request_id.as_deref(), Some("req-files"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"file_matches","session_id":"s1"}"#;
+        match serde_json::from_str::<DaemonMessage>(bare).expect("deserialize") {
+            DaemonMessage::FileMatches {
+                matches,
+                truncated,
+                request_id,
+                ..
+            } => {
+                assert_eq!(matches.len(), 0);
+                assert!(!truncated);
+                assert_eq!(request_id, None);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
