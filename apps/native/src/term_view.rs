@@ -977,6 +977,21 @@ impl TerminalPane {
         Some(point(origin.x + px(x), origin.y + px(y)))
     }
 
+    /// The top of the cursor's row in points from the pane's top, shown or
+    /// hidden, as the last layout draws it: the padding, then a line per
+    /// row above it.
+    ///
+    /// Returns:
+    ///     The row's top, or `None` before the first layout.
+    #[must_use]
+    pub fn cursor_row_top(&self) -> Option<f32> {
+        let (_, cell) = self.layout?;
+        let (row, _) = self.term.snapshot().cursor_point?;
+        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
+        let row = row as f32;
+        Some(crate::PADDING + row * cell.height)
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }

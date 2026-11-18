@@ -1378,18 +1378,6 @@ impl RootView {
         Some(self.panes.get(&slot_id)?.view.clone())
     }
 
-    /// The phone resized its terminal (the keyboard rose or fell): the next
-    /// changed size the terminal measures claims the PTY. Does nothing with
-    /// none open.
-    ///
-    /// Args:
-    ///     cx: The root's context.
-    pub fn phone_terminal_resized(&self, cx: &mut Context<Self>) {
-        if let Some(view) = self.phone_terminal_view() {
-            view.update(cx, |pane, _| pane.mark_resized());
-        }
-    }
-
     /// Whether slot `slot_id` is the phone's terminal.
     pub(crate) fn is_phone_terminal(&self, slot_id: &str) -> bool {
         self.phone_terminal

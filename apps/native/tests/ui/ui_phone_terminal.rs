@@ -183,6 +183,16 @@ fn first_resize_claim(sent: &[ClientMessage], id: &str) -> Option<bool> {
     })
 }
 
+/// The rows of the first `Resize` for session `id` in `sent`, if any.
+fn first_resize_rows(sent: &[ClientMessage], id: &str) -> Option<u16> {
+    sent.iter().find_map(|msg| match msg {
+        ClientMessage::Resize {
+            session_id, rows, ..
+        } if session_id == id => Some(*rows),
+        _ => None,
+    })
+}
+
 #[gpui::test]
 fn the_first_resize_claims_the_pty_size(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -1072,7 +1082,7 @@ fn quick_types_into_the_terminal(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_rising_keyboard_claims_the_size_again(cx: &mut TestAppContext) {
+fn a_rising_keyboard_keeps_the_size(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_terminal(cx, &dir);
     phone_update(&mut h, |phone, cx| {
@@ -1087,9 +1097,167 @@ fn a_rising_keyboard_claims_the_size_again(cx: &mut TestAppContext) {
     let sent = h.host(&saved_remote()).sent();
     assert_eq!(
         first_resize_claim(&sent, "n"),
-        Some(true),
-        "the shorter terminal claims the size: {sent:?}"
+        None,
+        "the keyboard sends no resize: {sent:?}"
     );
+}
+
+#[gpui::test]
+fn a_falling_keyboard_keeps_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(px(336.0))), cx);
+    });
+    h.host(&saved_remote()).sent();
+
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(px(0.0))), cx);
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_claim(&sent, "n"),
+        None,
+        "the keyboard sends no resize: {sent:?}"
+    );
+}
+
+/// Shell session `n`'s Terminal page opened under a `keyboard`-tall
+/// on-screen keyboard, everything sent drained, with the rows of the first
+/// `Resize` it sent.
+fn opened_under<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    keyboard: Pixels,
+) -> (Harness<'a>, Option<u16>) {
+    let mut h = open_phone(cx, dir);
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(keyboard)), cx);
+    });
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).pty("n", b"");
+    h.cx.run_until_parked();
+    let sent = h.host(&saved_remote()).sent();
+    (h, first_resize_rows(&sent, "n"))
+}
+
+/// The rows of the first `Resize` shell session `n` sends when its
+/// Terminal page opens under a `keyboard`-tall on-screen keyboard.
+fn rows_opened_under(cx: &mut TestAppContext, keyboard: Pixels) -> Option<u16> {
+    let dir = TestDir::new();
+    opened_under(cx, &dir, keyboard).1
+}
+
+/// Numbered lines `line 0` up to `line {count - 1}`, each ended, so the
+/// cursor ends on the row under the last.
+fn numbered_lines(count: usize) -> Vec<u8> {
+    (0..count)
+        .flat_map(|index| format!("line {index}\r\n").into_bytes())
+        .collect()
+}
+
+/// Whether row `row` of the phone's terminal for `n` shows: its first
+/// cell's centre lies inside the terminal's visible area.
+fn shows_row(h: &mut Harness<'_>, row: usize) -> bool {
+    let area = h.bounds("phone-session-terminal");
+    let slot = slot_id("n");
+    let at = h
+        .root(|root, cx| root.pane_cell_center(&slot, 0, row, cx))
+        .expect("the terminal has been laid out");
+    area.contains(&at)
+}
+
+/// A vertical touch pan of `dy` over the phone's terminal, then the lift.
+fn pan_terminal(h: &mut Harness<'_>, dy: Pixels) {
+    let at = h.bounds("phone-session-terminal").center();
+    let pan = |delta: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), delta)),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: gpui::ScrollSource::Touch,
+    };
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    h.cx.simulate_event(pan(dy, TouchPhase::Moved));
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+}
+
+/// The text the phone's terminal for `n` shows.
+fn terminal_text(h: &mut Harness<'_>) -> String {
+    h.root(|root, cx| {
+        root.phone_terminal_view()
+            .map(|pane| pane.read(cx).visible_text())
+    })
+    .expect("the terminal is open")
+}
+
+/// Whether `sent` holds any `Resize` or `SendInput` for session `id`.
+fn sends_size_or_input(sent: &[ClientMessage], id: &str) -> bool {
+    sent.iter().any(|msg| match msg {
+        ClientMessage::Resize { session_id, .. } | ClientMessage::SendInput { session_id, .. } => {
+            session_id == id
+        }
+        _ => false,
+    })
+}
+
+#[gpui::test]
+fn the_cursor_row_shows_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, rows) = opened_under(cx, &dir, px(336.0));
+    let rows = usize::from(rows.expect("the page claims a size"));
+    assert!(shows_row(&mut h, 0), "a fresh screen's cursor row shows");
+
+    h.host(&saved_remote()).pty("n", &numbered_lines(rows + 5));
+    h.cx.run_until_parked();
+
+    assert!(shows_row(&mut h, rows - 1), "the cursor's last row shows");
+    assert!(!shows_row(&mut h, 0), "row 0 is under the keyboard's cover");
+}
+
+#[gpui::test]
+fn a_drag_over_the_terminal_pans_without_sending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, rows) = opened_under(cx, &dir, px(336.0));
+    let rows = usize::from(rows.expect("the page claims a size"));
+    h.host(&saved_remote()).pty("n", &numbered_lines(rows + 20));
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    let text = terminal_text(&mut h);
+    assert!(!shows_row(&mut h, 0), "row 0 starts hidden");
+
+    pan_terminal(&mut h, px(302.0));
+
+    assert!(shows_row(&mut h, 0), "the drag pans row 0 into sight");
+    assert_eq!(terminal_text(&mut h), text, "the pan scrolls no history");
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sends_size_or_input(&sent, "n"),
+        "a pan sends nothing: {sent:?}"
+    );
+
+    draw_keyboard(&mut h, false);
+    pan_terminal(&mut h, px(302.0));
+
+    assert_ne!(
+        terminal_text(&mut h),
+        text,
+        "with the keyboard down the drag scrolls the history"
+    );
+}
+
+#[gpui::test]
+fn a_terminal_opened_under_the_keyboard_takes_the_keyboard_down_rows(
+    down: &mut TestAppContext,
+    up: &mut TestAppContext,
+) {
+    let down_rows = rows_opened_under(down, px(0.0));
+    let up_rows = rows_opened_under(up, px(336.0));
+
+    assert!(down_rows.is_some(), "the page claims a size");
+    assert_eq!(up_rows, down_rows, "the keyboard-down rows");
 }
 
 /// A pending single-select question `id` with two options.
@@ -1119,7 +1287,64 @@ fn question_prompt(id: &str) -> ChatPrompt {
 #[gpui::test]
 fn the_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = open_phone(cx, &dir);
+    let mut h = sheet_over_terminal(cx, &dir);
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+    assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
+}
+
+#[gpui::test]
+fn a_drag_on_the_prompt_sheet_puts_it_away_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = sheet_over_terminal(cx, &dir);
+    draw_keyboard(&mut h, true);
+    h.host(&saved_remote()).sent();
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet is up");
+
+    drag_sheet(&mut h, px(60.0), 5);
+
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "the drag puts it away"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    let claimed_or_typed = sent.iter().any(|msg| match msg {
+        ClientMessage::Resize {
+            session_id, claim, ..
+        } => session_id == "a" && *claim,
+        ClientMessage::SendInput { session_id, .. } => session_id == "a",
+        _ => false,
+    });
+    assert!(
+        !claimed_or_typed,
+        "the drag types and claims nothing: {sent:?}"
+    );
+}
+
+/// A downward pan over the prompt sheet's handle: `steps` movements of
+/// `dy`, then the lift.
+fn drag_sheet(h: &mut Harness<'_>, dy: Pixels, steps: usize) {
+    let at = h.bounds("phone-prompt-handle").center();
+    let pan = |delta: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), delta)),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: gpui::ScrollSource::Touch,
+    };
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    for _ in 0..steps {
+        h.cx.simulate_event(pan(dy, TouchPhase::Moved));
+    }
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+}
+
+/// Session `a` on its Terminal page with a pending question's prompt sheet
+/// drawn over it.
+fn sheet_over_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = open_phone(cx, dir);
     h.click_on(&row("a"));
     let sent = h.host(&saved_remote()).sent();
     let request = sent.iter().find_map(|msg| match msg {
@@ -1155,10 +1380,7 @@ fn the_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
             },
         });
     h.cx.run_until_parked();
-
-    assert!(drawn(&mut h, "phone-prompt-sheet"));
-    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
-    assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
+    h
 }
 
 // ── Putting the keyboard away ──────────────────────────────────────────────

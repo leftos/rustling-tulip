@@ -7,7 +7,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, Div, Entity, Pixels, Window, div, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, HitboxBehavior,
+    ScrollEvent, Window, canvas, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -17,6 +18,7 @@ use super::key_bar::KeyBar;
 use super::key_grid::{self, KeyAction};
 use super::session::Page;
 use super::session_view::{KeySurface, QuickTarget};
+use super::terminal_fit::{self, Pan};
 use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
@@ -36,24 +38,32 @@ const BAR_KEY_MAX: f32 = 96.0;
 /// The Hide key's label, pinned at the bar's right end.
 const HIDE_LABEL: &str = "Hide";
 
+/// The points one line of a line-counted scroll pans the terminal by.
+const PAN_LINE: f32 = 20.0;
+
 impl PhoneRoot {
     /// Opens the shown session's terminal while its Terminal page shows and
     /// closes it otherwise; a terminal newly opened gets a fresh key bar,
     /// the keyboard's focus and the bar's sticky Ctrl for typed text. While
-    /// it is open, a changed bottom inset (the keyboard rose or fell) has
-    /// its next size claim the PTY, and the terminal records whether the
-    /// keyboard is up, which decides whether a tap puts it away.
+    /// it is open, the terminal records whether the keyboard is up, which
+    /// decides whether a tap puts it away, and keeps `hidden`, the height
+    /// the keyboard covers, for the page to draw it at its keyboard-down
+    /// height; the keyboard never re-sizes it. The pan over the hidden rows
+    /// starts over when the page opens or closes and while the keyboard is
+    /// down.
     pub(super) fn sync_terminal(
         &mut self,
         keyboard_up: bool,
-        inset_bottom: Pixels,
+        hidden: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((host, session_id)) = self.wanted_terminal(cx) else {
+            self.terminal_hidden = 0.0;
+            self.terminal_pan = Pan::default();
+            self.terminal_watch = None;
             // Only the terminal this sync opened is closed here.
             if self.terminal_open.take().is_some() {
-                self.terminal_inset = None;
                 self.root.update(cx, RootView::close_phone_terminal);
             }
             return;
@@ -71,23 +81,36 @@ impl PhoneRoot {
                 "phone: the terminal page opened"
             );
             self.terminal_open = Some(wanted);
-            self.terminal_inset = None;
+            self.terminal_pan = Pan::default();
             *self.key_bar.borrow_mut() = KeyBar::new();
             self.terminal_quick = false;
             if let Some(pane) = self.terminal_pane(cx) {
                 pane.read(cx).focus_handle().focus(window, cx);
                 let filter = self.typed_ctrl(cx);
                 pane.update(cx, |pane, _| pane.set_typed_filter(Some(filter)));
+                self.terminal_watch = Some(cx.observe(&pane, |this, _, cx| this.follow_cursor(cx)));
             }
         }
-        if self
-            .terminal_inset
-            .is_some_and(|stored| stored != inset_bottom)
-        {
-            self.root
-                .update(cx, |root, cx| root.phone_terminal_resized(cx));
+        self.terminal_hidden = hidden;
+        self.terminal_pan = if keyboard_up {
+            self.terminal_pan.clamped(hidden)
+        } else {
+            Pan::default()
+        };
+        self.terminal_need = self.cursor_need(cx);
+    }
+
+    /// After the terminal redraws: the page redraws too when the cursor's
+    /// row moved what the pan must show, so the row stays in sight.
+    fn follow_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.terminal_hidden <= 0.0 {
+            return;
         }
-        self.terminal_inset = Some(inset_bottom);
+        let need = self.cursor_need(cx);
+        if (need - self.terminal_need).abs() > f32::EPSILON {
+            self.terminal_need = need;
+            cx.notify();
+        }
     }
 
     /// The session whose terminal shows now: the shown one, while its shown
@@ -121,20 +144,37 @@ impl PhoneRoot {
     }
 
     /// The Terminal page's body: the terminal filling it, the Quick replies
-    /// while they are open, and the key bar.
+    /// while they are open, and the key bar. The terminal sits in a clip
+    /// box at its keyboard-down height, so a raised keyboard hides its top
+    /// rows rather than shrinking it, and the pan picks the rows shown.
     pub(super) fn terminal_page(
         &self,
         session_id: &str,
         keyboard_up: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let screen = div()
-            .driver_id(|| "phone-session-terminal".to_owned())
+        let hidden = self.terminal_hidden;
+        let (top, bottom) = self
+            .terminal_pan
+            .effective(hidden, self.cursor_need(cx))
+            .edges(hidden);
+        let pane = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(top))
+            .bottom(px(bottom))
             .flex()
             .flex_col()
+            .children(self.terminal_pane(cx));
+        let screen = div()
+            .driver_id(|| "phone-session-terminal".to_owned())
+            .relative()
             .flex_1()
             .min_h_0()
-            .children(self.terminal_pane(cx));
+            .overflow_hidden()
+            .child(pane)
+            .child(Self::terminal_pan_layer(cx));
         let t = theme(cx);
         let quick = self.terminal_quick.then(|| {
             div()
@@ -153,6 +193,65 @@ impl PhoneRoot {
             .child(screen)
             .children(quick)
             .child(self.key_bar_row(keyboard_up, cx))
+    }
+
+    /// An empty layer over the terminal's clip box that, before the
+    /// terminal sees a vertical drag over the box, pans the terminal while
+    /// the drag can move the pan; at either bound the drag goes on to the
+    /// terminal's own scroll. It acts only where a hit test reaches it, so
+    /// a layer over it (the prompt sheet, its scrim) takes its own drags. A
+    /// pan sends nothing to the session.
+    fn terminal_pan_layer(cx: &Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                        return;
+                    }
+                    let delta_y = f32::from(event.delta.pixel_delta(px(PAN_LINE)).y);
+                    let consumed = this
+                        .update(cx, |this, cx| {
+                            let need = this.cursor_need(cx);
+                            let (pan, consumed) =
+                                this.terminal_pan
+                                    .drag_shown(delta_y, this.terminal_hidden, need);
+                            this.terminal_pan = pan;
+                            if consumed {
+                                cx.notify();
+                            }
+                            // A pan's still start and lift move nothing, and
+                            // reaching the terminal they would count as input
+                            // and claim its size.
+                            let still = delta_y.abs() <= f32::EPSILON;
+                            consumed || (still && this.terminal_hidden > 0.0)
+                        })
+                        .unwrap_or(false);
+                    if consumed {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// The least pan that keeps the open terminal's cursor row in sight
+    /// above the raised keyboard; none without a laid-out terminal.
+    fn cursor_need(&self, cx: &App) -> f32 {
+        if self.terminal_hidden <= 0.0 {
+            return 0.0;
+        }
+        let row_top = self
+            .terminal_pane(cx)
+            .and_then(|pane| pane.read(cx).cursor_row_top());
+        row_top.map_or(0.0, |top| {
+            terminal_fit::cursor_need(self.terminal_hidden, top)
+        })
     }
 
     /// The key bar: one sideways-scrolling row of the grid's keys in order,

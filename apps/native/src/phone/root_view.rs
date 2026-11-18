@@ -55,8 +55,16 @@ pub struct PhoneRoot {
     pub(super) prompt_sheet: SheetState,
     /// The session whose terminal the Terminal page opened, while open.
     pub(super) terminal_open: Option<(HostKey, String)>,
-    /// The bottom inset the open terminal last drew with.
-    pub(super) terminal_inset: Option<Pixels>,
+    /// How much of the open terminal the raised keyboard hides, in points.
+    pub(super) terminal_hidden: f32,
+    /// How far the open terminal is panned to show the rows the keyboard
+    /// hides.
+    pub(super) terminal_pan: super::terminal_fit::Pan,
+    /// The pan the open terminal's cursor row last needed, so its redraw
+    /// redraws the page only when that changes.
+    pub(super) terminal_need: f32,
+    /// The open terminal's redraws, watched for its cursor's row.
+    pub(super) terminal_watch: Option<gpui::Subscription>,
     /// The Terminal page's key bar, shared with the terminal's typed text
     /// so a sticky Ctrl reaches the soft keyboard's next character.
     pub(super) key_bar: Rc<RefCell<KeyBar>>,
@@ -170,7 +178,10 @@ impl PhoneRoot {
             composer_dock: super::composer::Dock::None,
             prompt_sheet: SheetState::default(),
             terminal_open: None,
-            terminal_inset: None,
+            terminal_hidden: 0.0,
+            terminal_pan: super::terminal_fit::Pan::default(),
+            terminal_need: 0.0,
+            terminal_watch: None,
             key_bar: Rc::new(RefCell::new(KeyBar::new())),
             terminal_quick: false,
             tray: super::tray::Tray::default(),
@@ -1155,7 +1166,11 @@ impl Render for PhoneRoot {
             .unwrap_or_else(|| window.insets());
         let padding = content_padding(&insets);
         let keyboard_up = crate::keyboard::is_up(&insets);
-        self.sync_terminal(keyboard_up, padding.bottom, window, cx);
+        let hidden = super::terminal_fit::hidden_height(
+            f32::from(insets.safe_area.bottom),
+            f32::from(insets.ime.bottom),
+        );
+        self.sync_terminal(keyboard_up, hidden, window, cx);
         let body = if let Some(page) = self.session_page(keyboard_up, cx) {
             page
         } else if let Some(page) = self.settings_page(window, cx) {
@@ -1202,8 +1217,10 @@ impl Render for PhoneRoot {
             })
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
-            .child(padded().size_full().child(body))
+            // The guard registers first, so its capture runs before any
+            // layer's in the body.
             .child(Self::pan_guard(cx))
+            .child(padded().size_full().child(body))
             .children(self.copied_chip_layer(padding.top, cx))
             .children(sheet)
             .children(prompt_sheet)

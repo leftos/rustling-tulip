@@ -20,7 +20,7 @@ The iPhone web app in `apps/pwa` is frozen: it is still built, shipped and serve
   A public listing needs its own design first: App Review wants a reviewer to reach a live backend and an app that works without installing another app (guidelines 2.1 and 4.2.3(i)), which a tailnet-only app needing the Tailscale app does not meet without a demo mode.
 - **Push:** native push goes through the relay [push-relay.md](./push-relay.md) designs (RT-1137), which holds the Apple and Firebase keys that every user's self-hosted daemon cannot hold; the payload is encrypted daemon to phone and the app's notification extension decrypts it. The daemon's own Web Push for the web app is unchanged (see "Push").
 - **Recent output:** for monitor and respond, the daemon renders the session's screen to text (the visible screen and the last lines) and sends that, not raw scrollback.
-- **Size:** when the phone and the desktop show the same session, the PTY takes the size of the client that last sent input to it, or of the phone when its terminal opens (RT-184); Claude's terminal UI redraws on each switch.
+- **Size:** when the phone and the desktop show the same session, the PTY takes the size of the client that last sent input to it, or of the phone when its terminal opens (RT-184); Claude's terminal UI redraws on each switch. The phone's on-screen keyboard never changes that size: it hides the terminal's lower rows rather than shrinking the PTY (RT-1911).
 - **What the app shows and how it alerts** is in [off-orca.md](./off-orca.md) (sections 2, 3 and 5).
 
 ## Phone screens

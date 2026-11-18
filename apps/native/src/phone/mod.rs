@@ -26,6 +26,7 @@ mod settings;
 mod settings_view;
 pub(crate) mod sheet;
 mod sweep;
+mod terminal_fit;
 mod terminal_view;
 mod tray;
 
