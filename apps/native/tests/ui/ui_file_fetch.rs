@@ -954,6 +954,7 @@ fn a_relative_link_is_not_read_against_other_worktrees(cx: &mut TestAppContext) 
         id: stat_id,
         kind: PathKind::Missing,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();
@@ -1005,6 +1006,7 @@ fn a_plain_ctrl_click_after_asking_opens_by_the_gesture(cx: &mut TestAppContext)
         id: stat_id,
         kind: PathKind::File,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();
@@ -1186,6 +1188,7 @@ fn a_link_outside_every_folder_is_fetched_by_its_host_path(cx: &mut TestAppConte
         id: stat_id,
         kind: PathKind::File,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();
@@ -1235,6 +1238,7 @@ fn a_link_inside_a_session_folder_stays_repo_relative_on_a_host_serving_paths(
         id: stat.expect("one StatPath is sent"),
         kind: PathKind::File,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();
@@ -1297,6 +1301,7 @@ fn a_relative_link_from_an_outside_cwd_tries_its_host_path_first(cx: &mut TestAp
         id: stat_id,
         kind: PathKind::File,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();
@@ -1348,6 +1353,7 @@ fn a_link_in_a_sibling_worktree_stays_repo_relative_on_a_host_serving_paths(
         id: stat.expect("one StatPath is sent"),
         kind: PathKind::File,
         size: 0,
+        modified: None,
     });
 
     let sent = h.host(&saved_remote()).sent();

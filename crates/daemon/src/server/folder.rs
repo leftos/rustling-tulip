@@ -544,7 +544,7 @@ fn list_entry(entry: &std::fs::DirEntry) -> Option<DirEntry> {
         name,
         kind,
         size,
-        modified: modified.and_then(unix_ms),
+        modified: modified.and_then(folder_pack::unix_ms),
         link,
         hidden,
     })
@@ -579,16 +579,6 @@ fn is_hidden(_name: &str, own: Option<&std::fs::Metadata>) -> bool {
 #[cfg(not(windows))]
 fn is_hidden(name: &str, _own: Option<&std::fs::Metadata>) -> bool {
     name.starts_with('.')
-}
-
-/// `time` in milliseconds since the Unix epoch, negative before it.
-fn unix_ms(time: std::time::SystemTime) -> Option<i64> {
-    match time.duration_since(std::time::UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_millis()).ok(),
-        Err(before) => i64::try_from(before.duration().as_millis())
-            .ok()
-            .map(|ms| -ms),
-    }
 }
 
 /// Answer the `GetHostInfo` `id` from a task of its own ([`host_info`],
@@ -671,6 +661,7 @@ fn spawn_stat(
             id,
             kind: stat.kind,
             size: stat.size,
+            modified: stat.modified,
         });
     });
 }
@@ -1716,7 +1707,7 @@ mod tests {
                     !matches!(msg, DaemonMessage::Error { .. }),
                     "nothing is refused on a tailnet connection: {msg:?}"
                 );
-                if let DaemonMessage::PathStat { id, kind, size } = msg {
+                if let DaemonMessage::PathStat { id, kind, size, .. } = msg {
                     stats.push((id, kind, size));
                 }
             }
@@ -2104,7 +2095,7 @@ mod tests {
             })
             .await;
             for msg in seen {
-                if let DaemonMessage::PathStat { id, kind, size } = msg {
+                if let DaemonMessage::PathStat { id, kind, size, .. } = msg {
                     stats.push((id, kind, size));
                 }
             }
@@ -2728,6 +2719,68 @@ mod tests {
         }
     }
 
+    /// How far a reported modified time may sit from the file's own, which
+    /// covers a filesystem that stores times at a coarser grain.
+    const MODIFIED_SLACK_MS: i64 = 2_000;
+
+    /// `path`'s own modified time in milliseconds since the Unix epoch, as
+    /// this test reads it: the value a stat of `path` is compared against.
+    fn own_modified(path: &Path) -> i64 {
+        let time = std::fs::metadata(path)
+            .expect("metadata")
+            .modified()
+            .expect("a modified time");
+        match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_millis()).expect("within i64"),
+            Err(before) => -i64::try_from(before.duration().as_millis()).expect("within i64"),
+        }
+    }
+
+    #[test]
+    fn stat_path_reports_modified() {
+        let (hub, _scratch, repo) = repo_hub("folder-stat-modified");
+        let request = Request {
+            repo_id: "r1".to_owned(),
+            worktree_path: None,
+            path: "a.txt".to_owned(),
+            listing: Listing::NotAsked,
+        };
+        let stat = stat_request(&hub, &request);
+        assert_eq!(stat.kind, PathKind::File);
+        let own = own_modified(&repo.join("a.txt"));
+        let got = stat.modified.expect("a file's modified time");
+        assert!((got - own).abs() <= MODIFIED_SLACK_MS, "{got} vs {own}");
+    }
+
+    #[test]
+    fn stat_host_path_reports_modified() {
+        let (_hub, scratch, _repo) = repo_hub("folder-stat-host-modified");
+        let file = scratch.path().join("host.txt");
+        std::fs::write(&file, "hello").expect("write host.txt");
+        let (stat, resolved) = stat_host(&crate::host_path::shown(&file));
+        assert_eq!(stat.kind, PathKind::File);
+        assert!(resolved.is_some(), "the host path resolved");
+        let own = own_modified(&file);
+        let got = stat.modified.expect("a file's modified time");
+        assert!((got - own).abs() <= MODIFIED_SLACK_MS, "{got} vs {own}");
+    }
+
+    #[test]
+    fn a_missing_path_has_no_modified() {
+        let (hub, scratch, _repo) = repo_hub("folder-stat-missing-modified");
+        let request = Request {
+            repo_id: "r1".to_owned(),
+            worktree_path: None,
+            path: "nope.txt".to_owned(),
+            listing: Listing::NotAsked,
+        };
+        let stat = stat_request(&hub, &request);
+        assert_eq!((stat.kind, stat.modified), (PathKind::Missing, None));
+        let absent = crate::host_path::shown(&scratch.path().join("absent.txt"));
+        let (host, _) = stat_host(&absent);
+        assert_eq!((host.kind, host.modified), (PathKind::Missing, None));
+    }
+
     #[test]
     fn a_worktree_path_equal_to_the_worktrees_root_is_refused() {
         let (hub, _scratch, _repo) = repo_hub("folder-worktrees-root");
@@ -2752,13 +2805,8 @@ mod tests {
         );
         let dir = resolve(&hub, &request(&worktrees.join("wt1"), "")).expect("a worktree");
         assert!(dir.path().join("w.txt").exists());
-        assert_eq!(
-            stat_request(&hub, &request(&worktrees.join("wt1"), "w.txt")),
-            folder_pack::PathStat {
-                kind: PathKind::File,
-                size: 1
-            }
-        );
+        let stat = stat_request(&hub, &request(&worktrees.join("wt1"), "w.txt"));
+        assert_eq!((stat.kind, stat.size), (PathKind::File, 1));
     }
 
     #[test]

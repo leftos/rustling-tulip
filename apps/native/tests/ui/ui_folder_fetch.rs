@@ -225,6 +225,7 @@ fn stat(h: &mut Harness<'_>, id: &str, kind: PathKind) {
         id: id.to_owned(),
         kind,
         size: 0,
+        modified: None,
     });
 }
 

@@ -7547,12 +7547,18 @@ pub enum DaemonMessage {
         files: u64,
         bytes: u64,
     },
-    /// The answer to [`ClientMessage::StatPath`]: what the path names, and
-    /// its size in bytes for a file (0 for anything else).
+    /// The answer to [`ClientMessage::StatPath`]: what the path names, its
+    /// size in bytes for a file (0 for anything else), and when it last
+    /// changed.
     PathStat {
         id: String,
         kind: PathKind,
         size: u64,
+        /// When it last changed, in milliseconds since the Unix epoch (UTC),
+        /// when the host can say; absent from a host that cannot, and from a
+        /// missing or refused path.
+        #[serde(default)]
+        modified: Option<i64>,
     },
     /// The answer to [`ClientMessage::GetHostInfo`]: the host's OS, its
     /// user's home folder (none when the host cannot say) and its roots
@@ -17768,6 +17774,7 @@ mod tests {
                 id: "s1".to_string(),
                 kind,
                 size: 7,
+                modified: Some(1_700_000_000_123),
             };
             let json = serde_json::to_string(&stat).expect("serialize");
             assert!(json.contains(r#""type":"path_stat""#), "{json}");
@@ -17777,11 +17784,54 @@ mod tests {
                     id,
                     kind: back,
                     size,
+                    modified,
                 } => {
                     assert_eq!((id.as_str(), back, size), ("s1", kind, 7));
+                    assert_eq!(modified, Some(1_700_000_000_123));
                 }
                 other => panic!("unexpected variant: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn path_stat_carries_its_modified_time() {
+        let stat = DaemonMessage::PathStat {
+            id: "s1".to_string(),
+            kind: PathKind::File,
+            size: 7,
+            modified: Some(-1_700_000_000_123),
+        };
+        let json = serde_json::to_string(&stat).expect("serialize");
+        assert!(json.contains(r#""modified":-1700000000123"#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::PathStat {
+                kind,
+                size,
+                modified,
+                ..
+            } => {
+                assert_eq!(
+                    (kind, size, modified),
+                    (PathKind::File, 7, Some(-1_700_000_000_123))
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let bare: DaemonMessage =
+            serde_json::from_str(r#"{"type":"path_stat","id":"s1","kind":"file","size":7}"#)
+                .expect("a stat without modified decodes");
+        match bare {
+            DaemonMessage::PathStat {
+                kind,
+                size,
+                modified,
+                ..
+            } => {
+                assert_eq!((kind, size, modified), (PathKind::File, 7, None));
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 

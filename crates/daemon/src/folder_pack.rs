@@ -357,11 +357,14 @@ fn place(path: PathBuf, prefix: &str, name: &str, file_type: FileType) -> Visit 
     }
 }
 
-/// What a `StatPath` path names, and its size for a file.
+/// What a `StatPath` path names, its size for a file and when it last
+/// changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathStat {
     pub kind: PathKind,
     pub size: u64,
+    /// Milliseconds since the Unix epoch (UTC), as [`unix_ms`] converts it.
+    pub modified: Option<i64>,
 }
 
 impl PathStat {
@@ -369,7 +372,18 @@ impl PathStat {
     pub const MISSING: Self = Self {
         kind: PathKind::Missing,
         size: 0,
+        modified: None,
     };
+}
+
+/// `time` in milliseconds since the Unix epoch, negative before it.
+pub(crate) fn unix_ms(time: std::time::SystemTime) -> Option<i64> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).ok(),
+        Err(before) => i64::try_from(before.duration().as_millis())
+            .ok()
+            .map(|ms| -ms),
+    }
 }
 
 /// What `rel` names under `root`, resolved as a folder fetch resolves it
@@ -381,20 +395,20 @@ pub fn stat(root: &Path, rel: &str) -> PathStat {
     let Ok(target) = file_fetch::resolve_inside(root, rel) else {
         return PathStat::MISSING;
     };
-    match std::fs::symlink_metadata(&target) {
-        Ok(meta) if meta.is_dir() => PathStat {
-            kind: PathKind::Dir,
-            size: 0,
-        },
-        Ok(meta) if meta.is_file() => PathStat {
-            kind: PathKind::File,
-            size: meta.len(),
-        },
-        Ok(_) => PathStat {
-            kind: PathKind::Other,
-            size: 0,
-        },
-        Err(_) => PathStat::MISSING,
+    let Ok(meta) = std::fs::symlink_metadata(&target) else {
+        return PathStat::MISSING;
+    };
+    let (kind, size) = if meta.is_dir() {
+        (PathKind::Dir, 0)
+    } else if meta.is_file() {
+        (PathKind::File, meta.len())
+    } else {
+        (PathKind::Other, 0)
+    };
+    PathStat {
+        kind,
+        size,
+        modified: meta.modified().ok().and_then(unix_ms),
     }
 }
 
@@ -1121,13 +1135,8 @@ mod tests {
         // A request naming one is a file, refused promptly.
         let err = confine_dir(&root, "CON").expect_err("a file is no folder");
         assert!(format!("{err:#}").contains("is not a folder"), "{err:#}");
-        assert_eq!(
-            stat(&root, "CON"),
-            PathStat {
-                kind: PathKind::File,
-                size: 4
-            }
-        );
+        let con = stat(&root, "CON");
+        assert_eq!((con.kind, con.size), (PathKind::File, 4));
         for name in ["CON", "nul.txt"] {
             std::fs::remove_file(canonical.join(name)).expect("clean up");
         }
@@ -1138,22 +1147,11 @@ mod tests {
         let (_base, root, outside) = root_with_outside("pack-stat");
         write(&root.join("a.txt"), "abc");
         std::fs::create_dir_all(root.join("sub")).expect("create sub");
-        assert_eq!(
-            stat(&root, "a.txt"),
-            PathStat {
-                kind: PathKind::File,
-                size: 3
-            }
-        );
+        let file = stat(&root, "a.txt");
+        assert_eq!((file.kind, file.size), (PathKind::File, 3));
         for rel in ["", ".", "sub"] {
-            assert_eq!(
-                stat(&root, rel),
-                PathStat {
-                    kind: PathKind::Dir,
-                    size: 0
-                },
-                "{rel:?}"
-            );
+            let dir = stat(&root, rel);
+            assert_eq!((dir.kind, dir.size), (PathKind::Dir, 0), "{rel:?}");
         }
         let outside_abs = outside.join("secret.txt");
         let outside_abs = outside_abs.to_str().expect("utf-8 temp path");

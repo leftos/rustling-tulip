@@ -5999,10 +5999,15 @@ export type DaemonMessage =
    */
   | { type: "folder_fetch_started"; id: string; resolved_path: string; files: number; bytes: number }
   /**
-   * The answer to [`ClientMessage::StatPath`]: what the path names, and
-   * its size in bytes for a file (0 for anything else).
+   * The answer to [`ClientMessage::StatPath`]: what the path names, its
+   * size in bytes for a file (0 for anything else), and when it last
+   * changed.
+   *
+   * `modified`: When it last changed, in milliseconds since the Unix epoch (UTC),
+   * when the host can say; absent from a host that cannot, and from a
+   * missing or refused path.
    */
-  | { type: "path_stat"; id: string; kind: PathKind; size: number }
+  | { type: "path_stat"; id: string; kind: PathKind; size: number; modified?: number | null }
   /**
    * The answer to [`ClientMessage::GetHostInfo`]: the host's OS, its
    * user's home folder (none when the host cannot say) and its roots
