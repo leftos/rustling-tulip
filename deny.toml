@@ -6,6 +6,10 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 unmaintained = "workspace"
+ignore = [
+    # chrono carries the wire's and the saved files' timestamps across every crate, so it stays until a maintained replacement is in.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained and no maintained replacement is in place yet" },
+]
 
 [licenses]
 allow = [
