@@ -73,6 +73,12 @@ pub const FEATURE_SESSION_FOLDERS: &str = "session_folders";
 /// client sends them only when the connected daemon lists it.
 pub const FEATURE_HOST_PATHS: &str = "host_paths";
 
+/// `Welcome.features` entry: the host answers [`ClientMessage::GetHostInfo`]
+/// with its OS, home folder and roots, and lists any folder its user can
+/// read by its absolute host path ([`ClientMessage::ListDir`]). A client
+/// sends them only when the connected daemon lists it.
+pub const FEATURE_HOST_BROWSE: &str = "host_browse";
+
 /// `Welcome.features` entry: the daemon keeps a default shell for plain-shell
 /// sessions and for the shell that hosts an interactive agent
 /// ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -3306,6 +3312,43 @@ pub enum PathKind {
     Unknown,
 }
 
+/// The OS a host runs, as [`DaemonMessage::HostInfo`] reports it: it sets
+/// how the host's paths are spelled.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostOsKind {
+    Windows,
+    #[serde(rename = "macos")]
+    MacOs,
+    Linux,
+    /// An OS this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One entry of a host folder, as [`DaemonMessage::DirListing`] lists it.
+/// `kind`, `size` and `modified` describe what a link points to; a link
+/// whose target is missing is listed with `link` set and
+/// [`PathKind::Missing`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirEntry {
+    /// The entry's file name.
+    pub name: String,
+    pub kind: PathKind,
+    /// The size in bytes of a file, 0 for anything else.
+    pub size: u64,
+    /// When it last changed, in milliseconds since the Unix epoch (UTC), when
+    /// the host can say.
+    pub modified: Option<i64>,
+    /// The entry is a link (a symlink or a junction).
+    #[serde(default)]
+    pub link: bool,
+    /// The host hides it: the hidden attribute on Windows, a leading `.`
+    /// elsewhere.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
 /// Where an environment variable is set.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -5513,6 +5556,30 @@ pub enum ClientMessage {
         id: String,
         path: String,
     },
+    /// Ask the host for its OS, its user's home folder and its roots: the
+    /// daemon answers with [`DaemonMessage::HostInfo`]. Sent only to a
+    /// daemon listing [`FEATURE_HOST_BROWSE`].
+    GetHostInfo {
+        /// Client-assigned request id, echoed on the answer.
+        id: String,
+    },
+    /// List one page of the folder at `path`, an absolute path on the host
+    /// resolved as [`ClientMessage::FetchHostFile`] resolves it (a
+    /// filesystem root included): the daemon answers with
+    /// [`DaemonMessage::DirListing`]. Entries come folders first, then by
+    /// name case-insensitively. `cursor` is the `next_cursor` of the page
+    /// before (none for the first page); `limit` is the most entries one
+    /// page holds (none or 0: 1000; at most 3000). Sent only to a daemon
+    /// listing [`FEATURE_HOST_BROWSE`].
+    ListDir {
+        /// Client-assigned request id, echoed on the answer.
+        id: String,
+        path: String,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// List the folders this session's link paths may lie in: the daemon
     /// answers with [`DaemonMessage::SessionFolders`]. A hint for choosing
     /// which `repo_id` and `worktree_path` to fetch with: the check at fetch
@@ -7465,6 +7532,29 @@ pub enum DaemonMessage {
         id: String,
         kind: PathKind,
         size: u64,
+    },
+    /// The answer to [`ClientMessage::GetHostInfo`]: the host's OS, its
+    /// user's home folder (none when the host cannot say) and its roots
+    /// (each drive on Windows, as `C:\`; `/` elsewhere), as display text.
+    HostInfo {
+        id: String,
+        os: HostOsKind,
+        home: Option<String>,
+        roots: Vec<String>,
+    },
+    /// The answer to [`ClientMessage::ListDir`]: one page of the folder's
+    /// entries, in order. `path` is the path exactly as the client sent it,
+    /// so it can be sent again for the next page or a subfolder.
+    /// `next_cursor` is sent back for the next page; none ends the listing.
+    /// `error` says why the folder could not be listed (with no entries).
+    DirListing {
+        id: String,
+        path: String,
+        entries: Vec<DirEntry>,
+        #[serde(default)]
+        next_cursor: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// The answer to [`ClientMessage::ListSessionFolders`]: a workspace's
     /// member worktrees, registered paths and git worktrees, in member order,
@@ -17692,6 +17782,157 @@ mod tests {
             without_error,
             DaemonMessage::SessionFolders { error: None, .. }
         ));
+    }
+
+    #[test]
+    fn get_host_info_and_host_info_round_trip() {
+        let msg = ClientMessage::GetHostInfo {
+            id: "i1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"get_host_info""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::GetHostInfo { id } => assert_eq!(id, "i1"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        for (os, wire) in [
+            (HostOsKind::Windows, "windows"),
+            (HostOsKind::MacOs, "macos"),
+            (HostOsKind::Linux, "linux"),
+        ] {
+            let info = DaemonMessage::HostInfo {
+                id: "i1".to_string(),
+                os,
+                home: Some("/home/me".to_string()),
+                roots: vec!["/".to_string()],
+            };
+            let json = serde_json::to_string(&info).expect("serialize");
+            assert!(json.contains(r#""type":"host_info""#), "{json}");
+            assert!(json.contains(&format!(r#""os":"{wire}""#)), "{json}");
+            match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+                DaemonMessage::HostInfo {
+                    id,
+                    os: back,
+                    home,
+                    roots,
+                } => {
+                    assert_eq!((id.as_str(), back), ("i1", os));
+                    assert_eq!(home.as_deref(), Some("/home/me"));
+                    assert_eq!(roots, ["/"]);
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+        assert_eq!(FEATURE_HOST_BROWSE, "host_browse");
+    }
+
+    #[test]
+    fn an_unknown_host_info_os_reads_as_unknown() {
+        let info: DaemonMessage = serde_json::from_str(
+            r#"{"type":"host_info","id":"i1","os":"plan9","home":null,"roots":[]}"#,
+        )
+        .expect("an unknown os decodes in place");
+        assert!(matches!(
+            info,
+            DaemonMessage::HostInfo {
+                os: HostOsKind::Unknown,
+                home: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn list_dir_round_trips_and_defaults_its_cursor_and_limit() {
+        let msg = ClientMessage::ListDir {
+            id: "d1".to_string(),
+            path: r"C:\Users".to_string(),
+            cursor: Some("1notes.txt\0notes.txt".to_string()),
+            limit: Some(500),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"list_dir""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ListDir {
+                id,
+                path,
+                cursor,
+                limit,
+            } => {
+                assert_eq!((id.as_str(), path.as_str()), ("d1", r"C:\Users"));
+                assert_eq!(cursor.as_deref(), Some("1notes.txt\0notes.txt"));
+                assert_eq!(limit, Some(500));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let bare: ClientMessage =
+            serde_json::from_str(r#"{"type":"list_dir","id":"d1","path":"/"}"#)
+                .expect("a missing cursor and limit decode as none");
+        assert!(matches!(
+            bare,
+            ClientMessage::ListDir {
+                cursor: None,
+                limit: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dir_listing_round_trips_and_defaults_its_cursor_and_error() {
+        let entry = DirEntry {
+            name: "notes.txt".to_string(),
+            kind: PathKind::File,
+            size: 7,
+            modified: Some(1_700_000_000_000),
+            link: true,
+            hidden: true,
+        };
+        let answer = DaemonMessage::DirListing {
+            id: "d1".to_string(),
+            path: "/home/me".to_string(),
+            entries: vec![entry.clone()],
+            next_cursor: Some("1notes.txt\0notes.txt".to_string()),
+            error: Some("nope".to_string()),
+        };
+        let json = serde_json::to_string(&answer).expect("serialize");
+        assert!(json.contains(r#""type":"dir_listing""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::DirListing {
+                id,
+                path,
+                entries,
+                next_cursor,
+                error,
+            } => {
+                assert_eq!((id.as_str(), path.as_str()), ("d1", "/home/me"));
+                assert_eq!(entries, [entry]);
+                assert_eq!(next_cursor.as_deref(), Some("1notes.txt\0notes.txt"));
+                assert_eq!(error.as_deref(), Some("nope"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let bare: DaemonMessage = serde_json::from_str(
+            r#"{"type":"dir_listing","id":"d1","path":"/","entries":[
+                {"name":"a","kind":"dir","size":0,"modified":null}]}"#,
+        )
+        .expect("a missing cursor, error, link and hidden decode as defaults");
+        match bare {
+            DaemonMessage::DirListing {
+                entries,
+                next_cursor: None,
+                error: None,
+                ..
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert!(!entries[0].link && !entries[0].hidden, "{entries:?}");
+                assert_eq!(entries[0].kind, PathKind::Dir);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]

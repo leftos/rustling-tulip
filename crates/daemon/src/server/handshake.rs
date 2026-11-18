@@ -284,6 +284,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_FILE_TAIL,
     protocol::FEATURE_FOLDER_FETCH,
     protocol::FEATURE_HOST_PATHS,
+    protocol::FEATURE_HOST_BROWSE,
     protocol::FEATURE_SESSION_FOLDERS,
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
@@ -834,6 +835,14 @@ mod tests {
         assert!(
             DAEMON_FEATURES.contains(&protocol::FEATURE_HOST_PATHS),
             "every daemon serves a host path fetch and stat"
+        );
+    }
+
+    #[test]
+    fn host_browse_is_listed_in_daemon_features() {
+        assert!(
+            DAEMON_FEATURES.contains(&protocol::FEATURE_HOST_BROWSE),
+            "every daemon serves host info and a host folder listing"
         );
     }
 

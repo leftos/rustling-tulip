@@ -20,7 +20,7 @@ A file manager in the native client that browses each machine's own file system 
 
 ## Steps
 
-- [ ] Host info and paged listing: the reply with OS, home and roots; `ListDir` under the reach ruling above; `docs/wire-protocol.md`.
+- [x] Host info and paged listing: the reply with OS, home and roots; `ListDir` under the reach ruling above; `docs/wire-protocol.md`.
 - [x] Fetch by absolute path, reusing the streaming and archive paths (RT-1823).
 - [ ] The file-manager tab: `TabContent` variant (additive; `Unknown` absorbs it in older clients), location bar, listing view, the read-only actions; This PC behind the same seam.
 - [ ] The sidebar panel: a docked file tree per machine over the same listing.

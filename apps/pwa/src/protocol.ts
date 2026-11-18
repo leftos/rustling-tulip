@@ -79,6 +79,14 @@ export const FEATURE_SESSION_FOLDERS = "session_folders";
 export const FEATURE_HOST_PATHS = "host_paths";
 
 /**
+ * `Welcome.features` entry: the host answers [`ClientMessage::GetHostInfo`]
+ * with its OS, home folder and roots, and lists any folder its user can
+ * read by its absolute host path ([`ClientMessage::ListDir`]). A client
+ * sends them only when the connected daemon lists it.
+ */
+export const FEATURE_HOST_BROWSE = "host_browse";
+
+/**
  * `Welcome.features` entry: the daemon keeps a default shell for plain-shell
  * sessions and for the shell that hosts an interactive agent
  * ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
@@ -2508,6 +2516,41 @@ export type PathKind =
   /** Something inside the root that is neither a file nor a folder. */
   | "other";
 
+/**
+ * The OS a host runs, as [`DaemonMessage::HostInfo`] reports it: it sets
+ * how the host's paths are spelled.
+ */
+export type HostOsKind =
+  | "windows"
+  | "macos"
+  | "linux";
+
+/**
+ * One entry of a host folder, as [`DaemonMessage::DirListing`] lists it.
+ * `kind`, `size` and `modified` describe what a link points to; a link
+ * whose target is missing is listed with `link` set and
+ * [`PathKind::Missing`].
+ */
+export interface DirEntry {
+  /** The entry's file name. */
+  name: string;
+  kind: PathKind;
+  /** The size in bytes of a file, 0 for anything else. */
+  size: number;
+  /**
+   * When it last changed, in milliseconds since the Unix epoch (UTC), when
+   * the host can say.
+   */
+  modified: number | null;
+  /** The entry is a link (a symlink or a junction). */
+  link?: boolean;
+  /**
+   * The host hides it: the hidden attribute on Windows, a leading `.`
+   * elsewhere.
+   */
+  hidden?: boolean;
+}
+
 /** Where an environment variable is set. */
 export type EnvScope =
   /** The daemon's own process environment. */
@@ -4308,6 +4351,27 @@ export type ClientMessage =
    */
   | { type: "stat_host_path"; id: string; path: string }
   /**
+   * Ask the host for its OS, its user's home folder and its roots: the
+   * daemon answers with [`DaemonMessage::HostInfo`]. Sent only to a
+   * daemon listing [`FEATURE_HOST_BROWSE`].
+   *
+   * `id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "get_host_info"; id: string }
+  /**
+   * List one page of the folder at `path`, an absolute path on the host
+   * resolved as [`ClientMessage::FetchHostFile`] resolves it (a
+   * filesystem root included): the daemon answers with
+   * [`DaemonMessage::DirListing`]. Entries come folders first, then by
+   * name case-insensitively. `cursor` is the `next_cursor` of the page
+   * before (none for the first page); `limit` is the most entries one
+   * page holds (none or 0: 1000; at most 3000). Sent only to a daemon
+   * listing [`FEATURE_HOST_BROWSE`].
+   *
+   * `id`: Client-assigned request id, echoed on the answer.
+   */
+  | { type: "list_dir"; id: string; path: string; cursor?: string | null; limit?: number | null }
+  /**
    * List the folders this session's link paths may lie in: the daemon
    * answers with [`DaemonMessage::SessionFolders`]. A hint for choosing
    * which `repo_id` and `worktree_path` to fetch with: the check at fetch
@@ -5921,6 +5985,20 @@ export type DaemonMessage =
    * its size in bytes for a file (0 for anything else).
    */
   | { type: "path_stat"; id: string; kind: PathKind; size: number }
+  /**
+   * The answer to [`ClientMessage::GetHostInfo`]: the host's OS, its
+   * user's home folder (none when the host cannot say) and its roots
+   * (each drive on Windows, as `C:\`; `/` elsewhere), as display text.
+   */
+  | { type: "host_info"; id: string; os: HostOsKind; home: string | null; roots: string[] }
+  /**
+   * The answer to [`ClientMessage::ListDir`]: one page of the folder's
+   * entries, in order. `path` is the path exactly as the client sent it,
+   * so it can be sent again for the next page or a subfolder.
+   * `next_cursor` is sent back for the next page; none ends the listing.
+   * `error` says why the folder could not be listed (with no entries).
+   */
+  | { type: "dir_listing"; id: string; path: string; entries: DirEntry[]; next_cursor?: string | null; error?: string | null }
   /**
    * The answer to [`ClientMessage::ListSessionFolders`]: a workspace's
    * member worktrees, registered paths and git worktrees, in member order,

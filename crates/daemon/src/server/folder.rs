@@ -23,7 +23,14 @@
 //! same stream, walk and stat once resolved. A filesystem root is never
 //! walked.
 //!
-//! Every fetch and stat served to a tailnet device is logged once
+//! `ListDir` lists one page of a host folder resolved the same way (a
+//! filesystem root included; [`list_host`]), folders first, then by name
+//! case-insensitively; its cursor is the last entry's sort key, so each page
+//! reads the folder again and keeps no state. `GetHostInfo` answers the
+//! host's OS, home folder and roots ([`host_info`]). Both run under the same
+//! permits and bound.
+//!
+//! Every fetch, stat and listing served to a tailnet device is logged once
 //! ([`audit_read`], [`audited`]), with the bytes a fetch sent.
 //!
 //! A folder that passes its walk is answered with `FolderFetchStarted`, then
@@ -42,7 +49,10 @@ use crate::sync::lock;
 use crate::{git, history};
 use anyhow::Context as _;
 use futures::future::join_all;
-use protocol::{ClientMessage, DaemonMessage, RepoEntry, SessionFolder, SessionMember};
+use protocol::{
+    ClientMessage, DaemonMessage, DirEntry, HostOsKind, PathKind, RepoEntry, SessionFolder,
+    SessionMember,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -263,7 +273,9 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         }
         msg @ (ClientMessage::FetchHostFile { .. }
         | ClientMessage::FetchHostFolder { .. }
-        | ClientMessage::StatHostPath { .. }) => handle_host(hub, msg, ctx).await,
+        | ClientMessage::StatHostPath { .. }
+        | ClientMessage::GetHostInfo { .. }
+        | ClientMessage::ListDir { .. }) => handle_host(hub, msg, ctx).await,
         other => debug!(?other, "folder: not a folder message"),
     }
 }
@@ -289,8 +301,355 @@ async fn handle_host(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             let answer = answer_host_stat(work.gate, id.clone(), path);
             spawn_stat(ctx, id, device, answer);
         }
+        ClientMessage::GetHostInfo { id } => spawn_host_info(ctx, work.gate, id),
+        ClientMessage::ListDir {
+            id,
+            path,
+            cursor,
+            limit,
+        } => {
+            let page = ListPage {
+                cursor,
+                limit: page_limit(limit),
+            };
+            spawn_listing(ctx, work, id, path, page);
+        }
         other => debug!(?other, "folder: not a host path message"),
     }
+}
+
+/// The most entries a `ListDir` page holds when the client names no limit.
+const DEFAULT_LIST_LIMIT: usize = 1000;
+
+/// The most entries a `ListDir` page ever holds.
+const MAX_LIST_LIMIT: usize = 3000;
+
+/// The most entries a folder may hold to be listed: each page reads the
+/// whole folder again.
+const MAX_LIST_ENTRIES: usize = 100_000;
+
+/// The page of a folder one `ListDir` asks for.
+struct ListPage {
+    /// The sort key of the last entry already sent, if any.
+    cursor: Option<String>,
+    /// The most entries to send.
+    limit: usize,
+}
+
+/// A page's size for the client's `limit`: none or 0 is the default, and
+/// anything over [`MAX_LIST_LIMIT`] is clamped to it.
+fn page_limit(limit: Option<u32>) -> usize {
+    match limit {
+        None | Some(0) => DEFAULT_LIST_LIMIT,
+        Some(n) => usize::try_from(n).map_or(MAX_LIST_LIMIT, |n| n.min(MAX_LIST_LIMIT)),
+    }
+}
+
+/// What a `ListDir` found: the `DirListing` fields, and the canonical path
+/// the request resolved to (listed or refused), for the audit.
+struct Listed {
+    path: String,
+    entries: Vec<DirEntry>,
+    next_cursor: Option<String>,
+    error: Option<String>,
+    canonical: Option<PathBuf>,
+}
+
+impl Listed {
+    /// A listing of `path`, as the client sent it, that failed for `error`.
+    fn refused(path: &str, error: String) -> Self {
+        debug!(%path, %error, "folder: a ListDir was refused");
+        Self {
+            path: path.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+            error: Some(error),
+            canonical: None,
+        }
+    }
+}
+
+/// Answer the `ListDir` `id` from a task of its own, and log a listing
+/// served to a tailnet device.
+fn spawn_listing(ctx: &ConnCtx<'_>, work: FetchWork, id: String, path: String, page: ListPage) {
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        let listed = answer_listing(work.gate, &id, &path, page).await;
+        if let (Some(device), Some(canonical)) = (work.device, &listed.canonical) {
+            audit_read("list", &device, &id, canonical);
+        }
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::DirListing {
+            id,
+            path: listed.path,
+            entries: listed.entries,
+            next_cursor: listed.next_cursor,
+            error: listed.error,
+        });
+    });
+}
+
+/// The listing `id` of `path`: [`list_host`], bounded and under one of
+/// `gate`'s permits, its connection's.
+async fn answer_listing(gate: Arc<Semaphore>, id: &str, path: &str, page: ListPage) -> Listed {
+    let asked = path.to_owned();
+    match file_work(gate, STEP_BOUND, move || {
+        list_host(&asked, &page, MAX_LIST_ENTRIES)
+    })
+    .await
+    {
+        Ok(listed) => listed,
+        Err(StepWait::TimedOut) => Listed::refused(path, resolve_timed_out(path)),
+        Err(StepWait::Failed(err)) => {
+            warn!(%id, error = %err, "folder: a ListDir failed");
+            Listed::refused(path, format!("listing {path} failed"))
+        }
+    }
+}
+
+/// One page of the folder the absolute `path` names ([`resolve_host`]; a
+/// filesystem root included), refusing a folder of more than `cap` entries.
+/// The answer names `path` as the client sent it, whatever the outcome, so
+/// a client can send it again; a path that resolved keeps its canonical
+/// folder for the audit, refused or not. Disk work.
+fn list_host(path: &str, page: &ListPage, cap: usize) -> Listed {
+    let canonical = match resolve_host(path) {
+        Ok(canonical) => canonical,
+        Err(error) => return Listed::refused(path, error),
+    };
+    let (entries, next_cursor, error) = match list_resolved(path, &canonical, page, cap) {
+        Ok((entries, next_cursor)) => (entries, next_cursor, None),
+        Err(error) => {
+            debug!(%path, %error, "folder: a ListDir was refused");
+            (Vec::new(), None, Some(error))
+        }
+    };
+    Listed {
+        path: path.to_owned(),
+        entries,
+        next_cursor,
+        error,
+        canonical: Some(canonical),
+    }
+}
+
+/// One page of the resolved folder `canonical`, or why not, naming `path`
+/// as the client sent it. Disk work.
+fn list_resolved(
+    path: &str,
+    canonical: &Path,
+    page: &ListPage,
+    cap: usize,
+) -> Result<(Vec<DirEntry>, Option<String>), String> {
+    match std::fs::metadata(canonical) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(format!("{path} is not a folder")),
+        Err(err) => return Err(format!("reading metadata of {path}: {err}")),
+    }
+    let mut keyed = match read_folder(canonical, cap) {
+        Ok(keyed) => keyed,
+        Err(Unlisted::TooMany) => return Err(format!("{path} holds more than {cap} entries")),
+        Err(Unlisted::Unreadable(err)) => return Err(format!("{path} could not be read: {err}")),
+    };
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(one_page(keyed, page))
+}
+
+/// Why a folder was not read.
+enum Unlisted {
+    /// It holds more entries than the cap.
+    TooMany,
+    /// Reading it failed.
+    Unreadable(std::io::Error),
+}
+
+/// Every entry of the folder `dir` with its sort key ([`list_key`]), in no
+/// order, or why not: more than `cap` entries (counted before any is
+/// skipped), or the folder unreadable. Every entry is counted against the
+/// cap before any is looked at, so a folder over it costs no entry's
+/// metadata. A name that is not valid Unicode is skipped, as the folder walk
+/// skips it. Disk work.
+fn read_folder(dir: &Path, cap: usize) -> Result<Vec<(String, DirEntry)>, Unlisted> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(Unlisted::Unreadable)? {
+        if found.len() >= cap {
+            return Err(Unlisted::TooMany);
+        }
+        found.push(entry.map_err(Unlisted::Unreadable)?);
+    }
+    Ok(found
+        .iter()
+        .filter_map(list_entry)
+        .map(|listed| (list_key(&listed), listed))
+        .collect())
+}
+
+/// The entries of `keyed`, sorted, that come after `page`'s cursor, at most
+/// its limit, and the cursor of the page after when any are left.
+fn one_page(keyed: Vec<(String, DirEntry)>, page: &ListPage) -> (Vec<DirEntry>, Option<String>) {
+    let mut after = keyed
+        .into_iter()
+        .skip_while(|(key, _)| {
+            page.cursor
+                .as_deref()
+                .is_some_and(|cursor| key.as_str() <= cursor)
+        })
+        .peekable();
+    let mut entries = Vec::new();
+    let mut last = None;
+    while entries.len() < page.limit {
+        let Some((key, entry)) = after.next() else {
+            break;
+        };
+        entries.push(entry);
+        last = Some(key);
+    }
+    let next_cursor = after.peek().and(last);
+    (entries, next_cursor)
+}
+
+/// An entry's sort key, and so its cursor: folders (`0`) before the rest
+/// (`1`), then the name lowercased, then the name itself.
+fn list_key(entry: &DirEntry) -> String {
+    let rank = if entry.kind == PathKind::Dir {
+        '0'
+    } else {
+        '1'
+    };
+    format!("{rank}{}\0{}", entry.name.to_lowercase(), entry.name)
+}
+
+/// `entry` as a listing names it: `kind`, `size` and `modified` of what a
+/// link points to (a dangling link is [`PathKind::Missing`]), `link` and
+/// `hidden` of the entry itself. None for a name that is not valid Unicode.
+/// Only a link (or an entry whose own metadata did not read) is followed
+/// with a metadata call of its own. Disk work.
+fn list_entry(entry: &std::fs::DirEntry) -> Option<DirEntry> {
+    let name = entry.file_name().into_string().ok()?;
+    // Not followed on any platform: the entry itself.
+    let own = entry.metadata().ok();
+    let link = own
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_symlink());
+    let hidden = is_hidden(&name, own.as_ref());
+    let (kind, size, modified) = match &own {
+        Some(meta) if !link => described(meta),
+        _ => match std::fs::metadata(entry.path()) {
+            Ok(meta) => described(&meta),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (PathKind::Missing, 0, None),
+            Err(_) => (PathKind::Other, 0, None),
+        },
+    };
+    Some(DirEntry {
+        name,
+        kind,
+        size,
+        modified: modified.and_then(unix_ms),
+        link,
+        hidden,
+    })
+}
+
+/// The kind, size (a file's, else 0) and change time `meta` describes.
+fn described(meta: &std::fs::Metadata) -> (PathKind, u64, Option<std::time::SystemTime>) {
+    let kind = if meta.is_dir() {
+        PathKind::Dir
+    } else if meta.is_file() {
+        PathKind::File
+    } else {
+        PathKind::Other
+    };
+    let size = if kind == PathKind::File {
+        meta.len()
+    } else {
+        0
+    };
+    (kind, size, meta.modified().ok())
+}
+
+/// Whether the host hides the entry `name`: its hidden attribute on Windows.
+#[cfg(windows)]
+fn is_hidden(_name: &str, own: Option<&std::fs::Metadata>) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    own.is_some_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+}
+
+/// Whether the host hides the entry `name`: a leading `.` off Windows.
+#[cfg(not(windows))]
+fn is_hidden(name: &str, _own: Option<&std::fs::Metadata>) -> bool {
+    name.starts_with('.')
+}
+
+/// `time` in milliseconds since the Unix epoch, negative before it.
+fn unix_ms(time: std::time::SystemTime) -> Option<i64> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).ok(),
+        Err(before) => i64::try_from(before.duration().as_millis())
+            .ok()
+            .map(|ms| -ms),
+    }
+}
+
+/// Answer the `GetHostInfo` `id` from a task of its own ([`host_info`],
+/// bounded and under one of `gate`'s permits). Not audited: it reads no
+/// file. A step that fails or does not finish in time answers the OS alone.
+fn spawn_host_info(ctx: &ConnCtx<'_>, gate: Arc<Semaphore>, id: String) {
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        let (home, roots) = match file_work(gate, STEP_BOUND, host_info).await {
+            Ok(found) => found,
+            Err(wait) => {
+                warn!(%id, ?wait, "folder: a GetHostInfo found no home or roots");
+                (None, Vec::new())
+            }
+        };
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::HostInfo {
+            id,
+            os: host_os(),
+            home,
+            roots,
+        });
+    });
+}
+
+/// The OS this daemon runs on.
+fn host_os() -> HostOsKind {
+    if cfg!(windows) {
+        HostOsKind::Windows
+    } else if cfg!(target_os = "macos") {
+        HostOsKind::MacOs
+    } else if cfg!(target_os = "linux") {
+        HostOsKind::Linux
+    } else {
+        HostOsKind::Unknown
+    }
+}
+
+/// The daemon user's home folder and the host's roots, as display text.
+fn host_info() -> (Option<String>, Vec<String>) {
+    let home = directories::UserDirs::new().map(|dirs| host_path::shown(dirs.home_dir()));
+    (home, host_roots())
+}
+
+/// The host's logical drives, as `C:\`: the drive mask alone, so no drive's
+/// media is touched.
+#[cfg(windows)]
+fn host_roots() -> Vec<String> {
+    // SAFETY: `GetLogicalDrives` takes no argument and only returns a mask.
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (b'A'..=b'Z')
+        .zip(0u32..)
+        .filter(|(_, bit)| mask & (1 << bit) != 0)
+        .map(|(letter, _)| format!("{}:\\", char::from(letter)))
+        .collect()
+}
+
+/// The host's one root, `/`.
+#[cfg(not(windows))]
+fn host_roots() -> Vec<String> {
+    vec!["/".to_owned()]
 }
 
 /// Answer the stat `id` with what `answer` finds, from a task of its own,
@@ -326,7 +685,7 @@ pub(super) fn audit_device(auth: &AuthKind) -> Option<String> {
 }
 
 /// Log one read of `path` served to the tailnet `device`: `kind` is
-/// `fetch_file`, `fetch_folder`, `stat` or `tail`.
+/// `fetch_file`, `fetch_folder`, `stat`, `list` or `tail`.
 pub(super) fn audit_read(kind: &str, device: &str, id: &str, path: &Path) {
     let path = host_path::shown(path);
     info!(%kind, %device, %id, %path, "served a host file read to a tailnet device");
@@ -1887,6 +2246,486 @@ mod tests {
             "{seen:?}"
         );
         assert!(!capture.text().contains(AUDIT_LINE), "{}", capture.text());
+    }
+
+    /// `GetHostInfo` and `ListDir`: the host's OS and roots, and a host
+    /// folder listed by its absolute path.
+    mod host_browse {
+        use super::*;
+
+        fn list_dir(
+            id: &str,
+            path: &Path,
+            cursor: Option<&str>,
+            limit: Option<u32>,
+        ) -> ClientMessage {
+            ClientMessage::ListDir {
+                id: id.to_owned(),
+                path: path.to_string_lossy().into_owned(),
+                cursor: cursor.map(str::to_owned),
+                limit,
+            }
+        }
+
+        /// One `DirListing`'s path, entries, next cursor and error.
+        type Page = (String, Vec<DirEntry>, Option<String>, Option<String>);
+
+        /// Read `client` until the `DirListing` for `id`.
+        async fn listed(client: &mut MemClient, id: &str) -> Page {
+            let seen = read_until(
+                client,
+                |msg| matches!(msg, DaemonMessage::DirListing { id: got, .. } if got == id),
+            )
+            .await;
+            match seen.into_iter().last() {
+                Some(DaemonMessage::DirListing {
+                    path,
+                    entries,
+                    next_cursor,
+                    error,
+                    ..
+                }) => (path, entries, next_cursor, error),
+                other => unreachable!("read until a DirListing, got {other:?}"),
+            }
+        }
+
+        fn names(entries: &[DirEntry]) -> Vec<&str> {
+            entries.iter().map(|entry| entry.name.as_str()).collect()
+        }
+
+        fn entry<'a>(entries: &'a [DirEntry], name: &str) -> &'a DirEntry {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| unreachable!("{name} is listed: {entries:?}"))
+        }
+
+        fn page(cursor: Option<&str>, limit: usize) -> ListPage {
+            ListPage {
+                cursor: cursor.map(str::to_owned),
+                limit,
+            }
+        }
+
+        /// A fresh folder under the scratch dir holding `files` (each one
+        /// byte) and `dirs`.
+        fn folder_of(scratch: &ScratchDir, name: &str, files: &[&str], dirs: &[&str]) -> PathBuf {
+            let folder = scratch.path().join(name);
+            std::fs::create_dir_all(&folder).expect("create the folder");
+            for file in files {
+                std::fs::write(folder.join(file), "x").expect("write a file");
+            }
+            for dir in dirs {
+                std::fs::create_dir(folder.join(dir)).expect("create a folder");
+            }
+            folder
+        }
+
+        fn shown_canonical(path: &Path) -> String {
+            crate::host_path::shown(&std::fs::canonicalize(path).expect("canonical"))
+        }
+
+        #[tokio::test]
+        async fn list_dir_orders_folders_first_and_pages_by_cursor() {
+            let (hub, scratch, _repo) = repo_hub("host-list-pages");
+            let folder = folder_of(&scratch, "pages", &["c.txt", "B.txt", "a.txt"], &["b", "A"]);
+            let (mut client, _session, _) = local_session(&hub).await;
+            client.send(&list_dir("d1", &folder, None, Some(3)));
+            let (path, first, cursor, error) = listed(&mut client, "d1").await;
+            assert_eq!(error, None);
+            assert_eq!(path, folder.to_string_lossy(), "named as sent");
+            assert_eq!(names(&first), ["A", "b", "a.txt"]);
+            assert_eq!(cursor.as_deref(), Some("1a.txt\0a.txt"));
+            assert_eq!(entry(&first, "A").kind, PathKind::Dir);
+            let file = entry(&first, "a.txt");
+            assert_eq!(
+                (file.kind, file.size, file.link),
+                (PathKind::File, 1, false)
+            );
+            assert!(file.modified.is_some_and(|ms| ms > 0), "{file:?}");
+
+            client.send(&list_dir("d2", &folder, cursor.as_deref(), Some(3)));
+            let (_, second, cursor, error) = listed(&mut client, "d2").await;
+            assert_eq!(error, None);
+            assert_eq!(names(&second), ["B.txt", "c.txt"]);
+            assert_eq!(cursor, None, "the last page ends the listing");
+        }
+
+        #[test]
+        fn list_dir_pages_empty_short_and_exactly_full_folders_with_no_cursor() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-cases");
+            let empty = folder_of(&scratch, "empty", &[], &[]);
+            let listed = list_host(&empty.to_string_lossy(), &page(None, 5), MAX_LIST_ENTRIES);
+            assert_eq!(
+                (listed.entries.len(), listed.next_cursor, listed.error),
+                (0, None, None)
+            );
+
+            let short = folder_of(&scratch, "short", &["a", "b"], &[]);
+            let listed = list_host(&short.to_string_lossy(), &page(None, 5), MAX_LIST_ENTRIES);
+            assert_eq!(names(&listed.entries), ["a", "b"]);
+            assert_eq!(listed.next_cursor, None);
+
+            let full = folder_of(&scratch, "full", &["a", "b", "c"], &[]);
+            let listed = list_host(&full.to_string_lossy(), &page(None, 3), MAX_LIST_ENTRIES);
+            assert_eq!(names(&listed.entries), ["a", "b", "c"]);
+            assert_eq!(
+                listed.next_cursor, None,
+                "a page that holds the rest ends it"
+            );
+
+            let listed = list_host(
+                &full.to_string_lossy(),
+                &page(Some("1a\0a"), 3),
+                MAX_LIST_ENTRIES,
+            );
+            assert_eq!(
+                names(&listed.entries),
+                ["b", "c"],
+                "the cursor's entry is not sent again"
+            );
+        }
+
+        #[test]
+        fn list_dir_limit_defaults_to_1000_and_is_clamped_to_3000() {
+            assert_eq!(page_limit(None), 1000);
+            assert_eq!(page_limit(Some(0)), 1000);
+            assert_eq!(page_limit(Some(7)), 7);
+            assert_eq!(page_limit(Some(3000)), 3000);
+            assert_eq!(page_limit(Some(5000)), 3000);
+        }
+
+        #[test]
+        fn list_dir_refuses_a_folder_over_the_entry_cap() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-cap");
+            let folder = folder_of(&scratch, "many", &["a", "b", "c"], &["d"]);
+            let path = folder.to_string_lossy().into_owned();
+            let at_cap = list_host(&path, &page(None, 10), 4);
+            assert_eq!((at_cap.entries.len(), at_cap.error), (4, None));
+            let over = list_host(&path, &page(None, 10), 3);
+            assert!(over.entries.is_empty(), "{:?}", over.entries);
+            assert_eq!(
+                over.error,
+                Some(format!("{path} holds more than 3 entries"))
+            );
+            assert_eq!(MAX_LIST_ENTRIES, 100_000);
+        }
+
+        #[test]
+        fn list_dir_serves_a_filesystem_root() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-root");
+            let root = scratch.path().ancestors().last().expect("a root");
+            let listed = list_host(&root.to_string_lossy(), &page(None, 3000), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            assert_eq!(listed.path, root.to_string_lossy());
+            assert!(!listed.entries.is_empty(), "a root holds something");
+        }
+
+        #[test]
+        fn list_dir_answers_the_path_as_sent_not_as_resolved() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-as-sent");
+            let target = folder_of(&scratch, "real", &["a.txt"], &[]);
+            let via = scratch.path().join("via");
+            assert!(make_dir_link(&via, &target), "made a folder link");
+            let sent = via.to_string_lossy().into_owned();
+            let listed = list_host(&sent, &page(None, 10), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            assert_eq!(names(&listed.entries), ["a.txt"]);
+            assert_eq!(listed.path, sent, "the path a client can send again");
+            assert_eq!(
+                listed.canonical,
+                Some(std::fs::canonicalize(&target).expect("canonical")),
+                "the audit names the folder read"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tailnet_list_dir_of_a_file_is_audited() {
+            let (hub, scratch, _repo) = repo_hub("host-list-audit-file");
+            let file = outside_folder(&scratch).join("notes.txt");
+            let capture = LogCapture::default();
+            let _guard = tracing::subscriber::set_default(capture.subscriber());
+            let (_, token) = crate::sync::lock(&hub.devices)
+                .issue(&test_peer(), chrono::Utc::now())
+                .expect("issue a device token");
+            let (mut client, _session) = mem_session(&hub, AuthKind::Tailnet(test_peer()));
+            client.send(&hello(&token, None));
+            read_until(&mut client, |msg| {
+                matches!(msg, DaemonMessage::Welcome { .. })
+            })
+            .await;
+            client.send(&list_dir("f1", &file, None, None));
+            let (_, entries, _, error) = listed(&mut client, "f1").await;
+            assert!(entries.is_empty(), "{entries:?}");
+            assert_eq!(error, Some(format!("{} is not a folder", file.display())));
+            client.send(&list_dir("m1", &file.with_file_name("nope"), None, None));
+            listed(&mut client, "m1").await;
+            let text = capture.text();
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|line| line.contains(AUDIT_LINE))
+                .collect();
+            assert_eq!(lines.len(), 1, "the resolved file only: {text}");
+            for field in [
+                "kind=list".to_owned(),
+                "id=f1".to_owned(),
+                format!("path={}", shown_canonical(&file)),
+            ] {
+                assert!(lines[0].contains(&field), "{field} in {}", lines[0]);
+            }
+        }
+
+        #[tokio::test]
+        async fn list_dir_of_a_missing_path_a_file_or_a_relative_path_says_why() {
+            let (hub, scratch, _repo) = repo_hub("host-list-refused");
+            let outside = outside_folder(&scratch);
+            let (mut client, _session, _) = local_session(&hub).await;
+            let missing = outside.join("nope");
+            let file = outside.join("notes.txt");
+            let rows = [
+                (
+                    "m",
+                    missing.clone(),
+                    format!("{} does not exist", missing.display()),
+                ),
+                (
+                    "f",
+                    file.clone(),
+                    format!("{} is not a folder", file.display()),
+                ),
+                (
+                    "r",
+                    PathBuf::from("notes"),
+                    "the path must be absolute".to_owned(),
+                ),
+            ];
+            for (id, path, why) in rows {
+                client.send(&list_dir(id, &path, None, None));
+                let (shown, entries, cursor, error) = listed(&mut client, id).await;
+                assert_eq!(error.as_deref(), Some(why.as_str()), "{id}");
+                assert_eq!(shown, path.to_string_lossy(), "named as sent: {id}");
+                assert!(entries.is_empty() && cursor.is_none(), "{id}");
+            }
+        }
+
+        #[test]
+        fn list_dir_refuses_a_network_or_device_path_by_its_text() {
+            for path in [r"\\srv\share", "//?/C:/x"] {
+                let listed = list_host(path, &page(None, 10), MAX_LIST_ENTRIES);
+                assert!(listed.error.is_some(), "{path}");
+                assert!(listed.entries.is_empty(), "{path}");
+                assert_eq!(listed.canonical, None, "{path}");
+            }
+        }
+
+        #[test]
+        fn list_dir_follows_a_link_entry_to_its_kind_and_lists_a_dangling_one_as_missing() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-links");
+            let folder = folder_of(&scratch, "links", &[], &[]);
+            let target = folder_of(&scratch, "target", &["t.txt"], &[]);
+            let doomed = folder_of(&scratch, "doomed", &[], &[]);
+            assert!(
+                make_dir_link(&folder.join("to-target"), &target),
+                "made a link"
+            );
+            assert!(
+                make_dir_link(&folder.join("dangling"), &doomed),
+                "made a link"
+            );
+            std::fs::remove_dir(&doomed).expect("remove the link's target");
+            let listed = list_host(&folder.to_string_lossy(), &page(None, 10), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            let followed = entry(&listed.entries, "to-target");
+            assert_eq!((followed.kind, followed.link), (PathKind::Dir, true));
+            let dangling = entry(&listed.entries, "dangling");
+            assert_eq!((dangling.kind, dangling.link), (PathKind::Missing, true));
+            assert_eq!(
+                names(&listed.entries),
+                ["to-target", "dangling"],
+                "folders first"
+            );
+        }
+
+        #[test]
+        fn list_dir_lists_a_link_whose_target_is_a_unc_path() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-unc");
+            let folder = folder_of(&scratch, "unc", &["plain.txt"], &[]);
+            let link = folder.join("share");
+            #[cfg(windows)]
+            let made =
+                std::os::windows::fs::symlink_dir(r"\\localhost\rt-no-such-share", &link).is_ok();
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink("//srv/rt-no-such-share", &link).is_ok();
+            // Without the symlink privilege on Windows no such link can be
+            // made: a junction cannot name a network path.
+            if !made {
+                return;
+            }
+            let listed = list_host(&folder.to_string_lossy(), &page(None, 10), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            let share = entry(&listed.entries, "share");
+            assert!(share.link, "{share:?}");
+            assert_eq!(names(&listed.entries).len(), 2, "{:?}", listed.entries);
+        }
+
+        #[test]
+        fn list_dir_skips_a_name_that_is_not_unicode() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-unicode");
+            let folder = folder_of(&scratch, "names", &["ok.txt"], &[]);
+            #[cfg(windows)]
+            let odd = {
+                use std::os::windows::ffi::OsStringExt as _;
+                std::ffi::OsString::from_wide(&[0xD800, u16::from(b'x')])
+            };
+            #[cfg(unix)]
+            let odd = {
+                use std::os::unix::ffi::OsStrExt as _;
+                std::ffi::OsStr::from_bytes(b"\xffx").to_owned()
+            };
+            // A filesystem that refuses such a name (APFS) has none to skip.
+            if std::fs::write(folder.join(&odd), "x").is_err() {
+                return;
+            }
+            let listed = list_host(&folder.to_string_lossy(), &page(None, 10), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            assert_eq!(names(&listed.entries), ["ok.txt"]);
+        }
+
+        #[test]
+        fn list_dir_marks_a_hidden_entry() {
+            let (_hub, scratch, _repo) = repo_hub("host-list-hidden");
+            #[cfg(windows)]
+            let folder = {
+                let folder = folder_of(&scratch, "hidden", &["secret.txt", "plain.txt"], &[]);
+                let hid = std::process::Command::new("attrib")
+                    .arg("+h")
+                    .arg(folder.join("secret.txt"))
+                    .status()
+                    .expect("run attrib");
+                assert!(hid.success(), "attrib +h");
+                folder
+            };
+            #[cfg(unix)]
+            let folder = folder_of(&scratch, "hidden", &[".secret.txt", "plain.txt"], &[]);
+            let secret = if cfg!(windows) {
+                "secret.txt"
+            } else {
+                ".secret.txt"
+            };
+            let listed = list_host(&folder.to_string_lossy(), &page(None, 10), MAX_LIST_ENTRIES);
+            assert_eq!(listed.error, None);
+            assert!(
+                entry(&listed.entries, secret).hidden,
+                "{:?}",
+                listed.entries
+            );
+            assert!(
+                !entry(&listed.entries, "plain.txt").hidden,
+                "{:?}",
+                listed.entries
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tailnet_list_dir_is_audited_and_a_local_one_is_not() {
+            let (hub, scratch, _repo) = repo_hub("host-list-audit");
+            let outside = outside_folder(&scratch);
+            let capture = LogCapture::default();
+            let _guard = tracing::subscriber::set_default(capture.subscriber());
+            let (mut local, _local_session, _) = local_session(&hub).await;
+            local.send(&list_dir("l1", &outside, None, None));
+            listed(&mut local, "l1").await;
+            assert!(!capture.text().contains(AUDIT_LINE), "{}", capture.text());
+
+            let (_, token) = crate::sync::lock(&hub.devices)
+                .issue(&test_peer(), chrono::Utc::now())
+                .expect("issue a device token");
+            let (mut client, _session) = mem_session(&hub, AuthKind::Tailnet(test_peer()));
+            client.send(&hello(&token, None));
+            read_until(&mut client, |msg| {
+                matches!(msg, DaemonMessage::Welcome { .. })
+            })
+            .await;
+            client.send(&list_dir("a1", &outside, None, None));
+            let (_, entries, _, error) = listed(&mut client, "a1").await;
+            assert_eq!((names(&entries), error), (vec!["notes.txt"], None));
+            client.send(&ClientMessage::GetHostInfo {
+                id: "i1".to_owned(),
+            });
+            read_until(&mut client, |msg| {
+                matches!(msg, DaemonMessage::HostInfo { .. })
+            })
+            .await;
+            let text = capture.text();
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|line| line.contains(AUDIT_LINE))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                1,
+                "one listing, and host info is not audited: {text}"
+            );
+            for field in [
+                "kind=list".to_owned(),
+                format!("device={}", test_peer().name),
+                "id=a1".to_owned(),
+                format!("path={}", shown_canonical(&outside)),
+            ] {
+                assert!(lines[0].contains(&field), "{field} in {}", lines[0]);
+            }
+        }
+
+        #[tokio::test]
+        async fn host_info_names_the_os_home_and_roots() {
+            let (hub, scratch, _repo) = repo_hub("host-info");
+            let (mut client, _session, features) = local_session(&hub).await;
+            assert!(
+                features.iter().any(|f| f == protocol::FEATURE_HOST_BROWSE),
+                "{features:?}"
+            );
+            client.send(&ClientMessage::GetHostInfo {
+                id: "i1".to_owned(),
+            });
+            let seen = read_until(&mut client, |msg| {
+                matches!(msg, DaemonMessage::HostInfo { .. })
+            })
+            .await;
+            let Some(DaemonMessage::HostInfo {
+                id,
+                os,
+                home,
+                roots,
+            }) = seen.into_iter().last()
+            else {
+                unreachable!("read until a HostInfo");
+            };
+            assert_eq!(id, "i1");
+            let expected = if cfg!(windows) {
+                HostOsKind::Windows
+            } else if cfg!(target_os = "macos") {
+                HostOsKind::MacOs
+            } else {
+                HostOsKind::Linux
+            };
+            assert_eq!(os, expected);
+            let user_home =
+                directories::UserDirs::new().map(|dirs| crate::host_path::shown(dirs.home_dir()));
+            assert_eq!(home, user_home);
+            if cfg!(windows) {
+                assert!(
+                    roots.iter().all(|root| {
+                        let bytes = root.as_bytes();
+                        bytes.len() == 3 && bytes[0].is_ascii_uppercase() && &bytes[1..] == br":\"
+                    }),
+                    "{roots:?}"
+                );
+                let drive = shown_canonical(scratch.path())[..3].to_ascii_uppercase();
+                assert!(roots.contains(&drive), "{drive} in {roots:?}");
+            } else {
+                assert_eq!(roots, ["/"]);
+            }
+        }
     }
 
     #[test]
