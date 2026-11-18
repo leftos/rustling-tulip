@@ -1,0 +1,22 @@
+❯ ASK please
+● Three questions coming up.
+
+────────────────────────────────────────
+←  ☒ Next fn  ☒ Tests  ☒ Style  ✔ Submit
+  →
+
+Review your answers
+
+ ● Which function should be added to
+   calc.py next?
+   → div
+ ● Which tests should be written?
+   → add, edge cases, fuzz tests
+ ● Which code style should the
+   functions use?
+   → Plain
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

@@ -93,9 +93,11 @@ const VIM_INSERT_HEAD: &str = "-- INSERT -- · ";
 /// rest of the footer sits on the rows under it.
 const ENTER_TO: &str = "Enter to";
 
-/// The title row of the review step, and the row above its options.
+/// The title row of the review step, the row above its options, and the
+/// label of its first option.
 const REVIEW_TITLE: &str = "Review your answers";
 const REVIEW_READY: &str = "Ready to submit your answers?";
+const SUBMIT_ANSWERS: &str = "Submit answers";
 
 /// The label start of a permission option that saves an allow rule; the
 /// rule follows it.
@@ -730,8 +732,9 @@ fn key_pairs_any(row: &str) -> Option<Vec<ChatOption>> {
 /// An `AskUserQuestion` step: the tab bar, the question row, its options
 /// down to the card's inner rule, then the `Enter to select` footer; or the
 /// review step when `Review your answers` follows the tab bar. A step whose
-/// tab bar has scrolled off the top of the grid reads through
-/// [`parse_question_without_bar`].
+/// tab bar is not readable, scrolled off the top of the grid or wrapped at a
+/// narrow width, reads through [`parse_question_without_bar`], which reads
+/// the review step there from its `Ready to submit your answers?` row.
 fn parse_question(rows: &[String]) -> Option<Parsed> {
     let rules = rule_indices(rows);
     let Some(bar) = (0..rows.len())
@@ -780,13 +783,20 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     }))
 }
 
-/// A question step whose tab bar has scrolled off the top of the grid: its
-/// numbered options, a single question's footer and the `Chat about this`
-/// option every such step draws under its inner rule in view, the
-/// question's rows from the top of the dialog's visible part down to its
-/// first option. It has no tabs, which is what tells it apart from a dialog
-/// read with its bar.
+/// A question step whose tab bar is not readable, scrolled off the top of
+/// the grid or wrapped at a narrow width: its question and numbered options
+/// read by [`question_without_bar`]; failing that, the review step, which
+/// draws no `Enter to select` footer. Neither read has tabs, which is what
+/// tells it apart from a dialog read with its bar.
 fn parse_question_without_bar(rows: &[String]) -> Option<Parsed> {
+    question_without_bar(rows).or_else(|| review_without_bar(rows))
+}
+
+/// A question step whose tab bar is not readable: its numbered options, a
+/// single question's footer and the `Chat about this` option every such step
+/// draws under its inner rule in view, the question's rows from the top of
+/// the dialog's visible part down to its first option.
+fn question_without_bar(rows: &[String]) -> Option<Parsed> {
     let footer = single_question_footer(rows)?;
     let first_option = (0..footer).find(|&index| numbered(&rows[index]).is_some())?;
     let end = option_end(rows, first_option, footer);
@@ -1037,13 +1047,65 @@ fn checkbox(label: &str) -> (Option<bool>, &str) {
     (None, label)
 }
 
-/// The review step: the questions and answers under `Review your answers`,
-/// then `Ready to submit your answers?` and its options, which end at the
-/// first blank row.
+/// The last `Ready to submit your answers?` row drawn as the review step's
+/// own: `Submit answers` is the first non-blank row after it, at most two
+/// rows below, its options end at the first blank row, and nothing under
+/// them but blank rows, rules and a footer's wrapped tail
+/// ([`footer_is_last`]). A reply quoting the step has the input box's `❯`
+/// row or a numbered list under the quoted options instead.
+fn review_ready(rows: &[String]) -> Option<usize> {
+    let ready = (0..rows.len())
+        .rev()
+        .find(|&index| rows[index].trim() == REVIEW_READY)?;
+    let first =
+        find(rows, ready + 1, |row| !row.trim().is_empty()).filter(|&index| index <= ready + 2)?;
+    if numbered(&rows[first])?.label != SUBMIT_ANSWERS {
+        return None;
+    }
+    let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
+    footer_is_last(rows, end - 1).then_some(ready)
+}
+
+/// The review step read with no readable tab bar, from the row its questions
+/// and answers start on ([`review_start`]) down to its options, with no tabs.
+fn review_without_bar(rows: &[String]) -> Option<Parsed> {
+    let ready = review_ready(rows)?;
+    Some(review(rows, review_start(rows, ready), ready, Vec::new()))
+}
+
+/// Where a barless review's questions and answers start: the row under the
+/// `Review your answers` title above `ready` when a wrapped bar leaves it on
+/// screen, else the row under the last rule above it, else the grid's first
+/// row when the whole dialog has scrolled off the top.
+fn review_start(rows: &[String], ready: usize) -> usize {
+    let title = (0..ready)
+        .rev()
+        .find(|&index| rows[index].trim() == REVIEW_TITLE);
+    if let Some(title) = title {
+        return title + 1;
+    }
+    rule_indices(rows)
+        .into_iter()
+        .rev()
+        .find(|&index| index < ready)
+        .map_or(0, |rule| rule + 1)
+}
+
+/// The review step read with its tab bar: the questions and answers under
+/// `title`, then the `Ready to submit your answers?` row and its options.
 fn parse_review(rows: &[String], title: usize, tabs: Vec<ChatQuestionTab>) -> Parsed {
     let Some(ready) = find(rows, title + 1, |row| row.trim() == REVIEW_READY) else {
         return Parsed::HalfDrawn;
     };
+    review(rows, title + 1, ready, tabs)
+}
+
+/// The review step's prompt: the questions and answers in
+/// `rows[body_start..ready]`, the `Ready to submit your answers?` row at
+/// `ready`, and its numbered options, which end at the first blank row.
+/// `body_start` is the row under the title for a review read with its bar,
+/// and [`review_start`]'s for one read without it.
+fn review(rows: &[String], body_start: usize, ready: usize, tabs: Vec<ChatQuestionTab>) -> Parsed {
     let Some(first) = find(rows, ready + 1, |row| numbered(row).is_some()) else {
         return Parsed::HalfDrawn;
     };
@@ -1054,7 +1116,7 @@ fn parse_review(rows: &[String], title: usize, tabs: Vec<ChatQuestionTab>) -> Pa
         ..prompt(
             ChatPromptKind::Review,
             REVIEW_TITLE.to_owned(),
-            review_body(&rows[title + 1..ready]),
+            review_body(&rows[body_start..ready]),
             options,
         )
     })

@@ -22,7 +22,11 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v03-ready-quoting-question-footer--synthesized.txt` is `v03-ready.txt` with a user prompt and a reply quoting a question's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`) written into the blank rows above the idle box: a quoted footer is transcript, not a dialog.
 
+`v03-ready-quoting-review--synthesized.txt` is the same screen with the reply quoting the review step instead (`Ready to submit your answers?` and its `❯ 1. Submit answers` / `2. Cancel` options), and `v03-ready-draft-under-review-quote--synthesized.txt` is that screen with a draft `1. fix the test` in the box: a quoted review is transcript, not a dialog, and so is a draft under one.
+
 `v42-ask-review-cursor-on-cancel--synthesized.txt` is `v42-ask-review.txt` with the cursor moved from `1. Submit answers` to `2. Cancel`, so the review's matched row sits above the cursor.
+
+`v42-ask-review-w40-bar-wrapped--synthesized.txt` is `v42-ask-review.txt`'s dialog re-wrapped to 40 columns, its tab bar hard-wrapped onto two rows, under a prompt and a reply row; `v42-ask-review-w40-bar-scrolled--synthesized.txt` is the same dialog with its rule, tab bar and title scrolled off the top: both read as the review step without tabs.
 
 The `claude--*` files are the `web/src/fixtures/panes/` panes from collie, https://github.com/leftos/collie at commit 82c6bba7, SGR-coloured text under the MIT licence (see `LICENSE-collie` beside them). The exception is `claude--mcp-server-prompt.txt`, a plain-text capture of Claude Code's new-MCP-server dialog taken in this repo.
 

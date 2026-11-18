@@ -757,6 +757,16 @@ mod tests {
                 no_prompt(Ready),
             ),
             (
+                "v03-ready-quoting-review",
+                include_str!("fixtures/v03-ready-quoting-review--synthesized.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "v03-ready-draft-under-review-quote",
+                include_str!("fixtures/v03-ready-draft-under-review-quote--synthesized.txt"),
+                no_prompt(Draft),
+            ),
+            (
                 "claude--fresh-idle",
                 include_str!("fixtures/claude--fresh-idle.txt"),
                 no_prompt(Ready),
@@ -919,6 +929,34 @@ mod tests {
                         ("Tests", true, false),
                         ("Style", true, false),
                     ],
+                    body: Some(REVIEW_BODY),
+                    ..dialog(
+                        Review,
+                        "Review your answers",
+                        &[(1, "Submit answers"), (2, "Cancel")],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "v42-ask-review-w40-bar-wrapped",
+                include_str!("fixtures/v42-ask-review-w40-bar-wrapped--synthesized.txt"),
+                Expected {
+                    tabs: Vec::new(),
+                    body: Some(REVIEW_BODY),
+                    ..dialog(
+                        Review,
+                        "Review your answers",
+                        &[(1, "Submit answers"), (2, "Cancel")],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "v42-ask-review-w40-bar-scrolled",
+                include_str!("fixtures/v42-ask-review-w40-bar-scrolled--synthesized.txt"),
+                Expected {
+                    tabs: Vec::new(),
                     body: Some(REVIEW_BODY),
                     ..dialog(
                         Review,
@@ -1697,6 +1735,8 @@ mod tests {
         let v37 = include_str!("fixtures/v37-ask-other-typed2.txt");
         let v38 = include_str!("fixtures/v38-ask-q3.txt");
         let v42 = include_str!("fixtures/v42-ask-review.txt");
+        let v42_scrolled =
+            include_str!("fixtures/v42-ask-review-w40-bar-scrolled--synthesized.txt");
         let c23 = include_str!("fixtures/c23-perm-bash.txt");
         let v21 = include_str!("fixtures/v21-perm-bash.txt");
         let v51 = include_str!("fixtures/v51-plan-dialog.txt");
@@ -1992,6 +2032,24 @@ mod tests {
             ),
             ("v42-ask-review", v42, ChatAnswerKind::Back, refused.clone()),
             ("v42-ask-review", v42, type_x(), refused.clone()),
+            (
+                "v42-ask-review-w40-bar-scrolled",
+                v42_scrolled,
+                option(1),
+                Ok(vec![digit(1)]),
+            ),
+            (
+                "v42-ask-review-w40-bar-scrolled",
+                v42_scrolled,
+                option(2),
+                Ok(vec![digit(2)]),
+            ),
+            (
+                "v42-ask-review-w40-bar-scrolled",
+                v42_scrolled,
+                option(3),
+                Err(AnswerRefusal::UnknownOption(3)),
+            ),
         ];
         let agent = agent_registry::default_agent();
         let wrong: Vec<String> = cases
