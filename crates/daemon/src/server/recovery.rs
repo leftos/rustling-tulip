@@ -1036,9 +1036,10 @@ mod tests {
     use crate::env_secrets;
     use crate::server::spawn::check_spawn_request_with;
     use crate::server::test_support::{
-        MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_all,
-        dispatch_one, env, env_ref_repo_hub, env_spawn, git_init, git_ok, idle_record, secret_ref,
-        snapshot_of, spawnless_test_hub, test_hub,
+        CLAUDE_HOME_LOCK, MISSING_SECRET_ID, ScratchClaudeHome, UNSET_REF, deepseek_key,
+        deepseek_options, deepseek_spawn, dispatch_all, dispatch_one, env, env_ref_repo_hub,
+        env_spawn, git_init, git_ok, idle_record, secret_ref, snapshot_of, spawnless_test_hub,
+        test_hub,
     };
     use crate::session::SessionEvent;
     use chrono::Utc;
@@ -3025,45 +3026,6 @@ mod tests {
     /// The conversation the recovery-ordering entries record, with a transcript
     /// Claude reads as still holding it.
     const RECOVERY_CONVERSATION: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-
-    /// Serialises the tests that point `CLAUDE_CONFIG_DIR` at a scratch home:
-    /// the variable is process-global and tests run on parallel threads.
-    static CLAUDE_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// A scratch Claude home `CLAUDE_CONFIG_DIR` points at while the guard
-    /// lives, so recovery's transcript check reads it and not the user's own.
-    struct ScratchClaudeHome {
-        path: PathBuf,
-        _var: crate::env_secrets::test_support::EnvVarGuard,
-    }
-
-    impl ScratchClaudeHome {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create scratch claude home");
-            // Callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
-            let var =
-                crate::env_secrets::test_support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &path);
-            Self { path, _var: var }
-        }
-
-        /// A transcript for `folder` and `id`, as Claude Code files one.
-        fn write_transcript(&self, folder: &str, id: &str) {
-            let dir = self
-                .path
-                .join("projects")
-                .join(agent_claude::encode_project_dir(folder));
-            std::fs::create_dir_all(&dir).expect("create the transcript folder");
-            std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
-        }
-    }
-
-    impl Drop for ScratchClaudeHome {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     /// The env lock and a scratch Claude home, for an async test.
     async fn claude_home_scratch(

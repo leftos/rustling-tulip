@@ -13,7 +13,9 @@
 //! ([`crate::chat_draft::clear_draft`]), answering only a refusal.
 //! `SearchFiles` lists the files of the session's folder for the composer's
 //! `@` mentions ([`search_files`]), answering the requester with a
-//! `FileMatches`.
+//! `FileMatches`. `ListCatalog` lists the commands and skills the session's
+//! agent can invoke for the composer's `/` catalog ([`list_catalog`]),
+//! answering the requester with a `Catalog`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,7 +31,10 @@ use crate::inject::{TypeTarget, check_typed_text, type_message};
 use crate::sync::lock;
 use crate::{chat_answer, chat_draft, inject};
 use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
-use protocol::{AgentId, ChatAnswerKind, ClientMessage, DaemonMessage, FileMatch};
+use protocol::{
+    AgentId, CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ClientMessage,
+    DaemonMessage, FileMatch,
+};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -107,6 +112,10 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 request_id,
             },
         ),
+        ClientMessage::ListCatalog {
+            session_id,
+            request_id,
+        } => list_catalog(hub, ctx, session_id, request_id),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
 }
@@ -416,6 +425,102 @@ fn search_files(hub: &Hub, ctx: &ConnCtx<'_>, request: FileSearch) {
             request_id,
         });
     });
+}
+
+/// Answer a `ListCatalog` request. The session's folders and agent are read
+/// here, and the agent's catalog, which reads files, on a task of its own.
+/// An unknown session, one with no agent (a plain shell no agent was typed
+/// into), or one whose agent is not registered, is answered with no entries.
+fn list_catalog(hub: &Hub, ctx: &ConnCtx<'_>, session_id: String, request_id: Option<String>) {
+    let Some((roots, agent)) = catalog_roots(hub, &session_id) else {
+        debug!(session_id = %session_id, "catalog: no such session, or it runs no agent");
+        let _ = ctx.out_tx.send(DaemonMessage::Catalog {
+            session_id,
+            entries: Vec::new(),
+            request_id,
+        });
+        return;
+    };
+    let out_tx = (*ctx.out_tx).clone();
+    tokio::spawn(async move {
+        let joined = tokio::task::spawn_blocking(move || read_catalog(&agent, &roots)).await;
+        let entries = joined.unwrap_or_else(|err| {
+            warn!(
+                session_id = %session_id,
+                error = %err,
+                "catalog: the catalog task failed"
+            );
+            Vec::new()
+        });
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::Catalog {
+            session_id,
+            entries,
+            request_id,
+        });
+    });
+}
+
+/// The folders a session's catalog is read from and its agent: every
+/// member's worktree, else the cwd, else none. `None` for an unknown
+/// session and for one whose snapshot names no agent (a plain shell no agent
+/// was typed into).
+fn catalog_roots(hub: &Hub, session_id: &str) -> Option<(Vec<PathBuf>, AgentId)> {
+    let record = hub.sessions.get(session_id)?;
+    let record = lock(&record);
+    let agent = record.snapshot_agent()?;
+    let mut roots: Vec<PathBuf> = record
+        .members
+        .iter()
+        .map(|member| member.worktree_path.as_str())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if roots.is_empty()
+        && let Some(cwd) = record
+            .current_cwd
+            .as_deref()
+            .filter(|path| !path.is_empty())
+    {
+        roots.push(PathBuf::from(cwd));
+    }
+    Some((roots, agent))
+}
+
+/// `agent`'s catalog over `roots` and the daemon user's home, as wire
+/// entries; empty for an agent that is not registered.
+fn read_catalog(agent: &AgentId, roots: &[PathBuf]) -> Vec<CatalogEntry> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        return Vec::new();
+    };
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    let ctx = agent_api::CatalogContext {
+        roots,
+        home: home.as_deref(),
+    };
+    plugin
+        .command_catalog(&ctx)
+        .into_iter()
+        .map(wire_entry)
+        .collect()
+}
+
+/// `entry` as the wire carries it.
+fn wire_entry(entry: agent_api::CatalogEntry) -> CatalogEntry {
+    CatalogEntry {
+        name: entry.name,
+        kind: match entry.kind {
+            agent_api::CatalogKind::Command => CatalogEntryKind::Command,
+            agent_api::CatalogKind::Skill => CatalogEntryKind::Skill,
+        },
+        description: entry.description,
+        source: match entry.source {
+            agent_api::CatalogSource::BuiltIn => CatalogEntrySource::BuiltIn,
+            agent_api::CatalogSource::User => CatalogEntrySource::User,
+            agent_api::CatalogSource::Project => CatalogEntrySource::Project,
+        },
+        opens_terminal: entry.opens_terminal,
+    }
 }
 
 /// The folder a session's file search covers and the agent whose references
@@ -4687,7 +4792,8 @@ mod tests {
 )]
 mod search_files_tests {
     use super::super::test_support::{
-        self, ScratchDir, dispatch_on, idle_record, next_message, test_hub,
+        self, CLAUDE_HOME_LOCK, ScratchClaudeHome, ScratchDir, dispatch_on, idle_record,
+        next_message, test_hub,
     };
     use super::{
         LS_FILES, MAX_FILE_MATCHES, SEARCH_LIMITS, SearchAsk, form_matches, listed_files,
@@ -4697,7 +4803,9 @@ mod search_files_tests {
     #[cfg(windows)]
     use crate::file_tail::hooks::make_junction;
     use crate::folder_pack;
-    use protocol::{ClientMessage, DaemonMessage};
+    use protocol::{
+        CatalogEntryKind, CatalogEntrySource, ClientMessage, DaemonMessage, SessionMode,
+    };
     use std::path::Path;
     use tokio::runtime::Handle;
     use tokio::sync::mpsc;
@@ -4917,6 +5025,135 @@ mod search_files_tests {
                 assert_eq!(matches[0].path, "lib.rs");
                 assert_eq!(matches[0].reference, "@lib.rs");
                 assert!(!truncated);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_catalog_answers_the_sessions_commands_and_skills() {
+        let _home_lock = CLAUDE_HOME_LOCK.lock().await;
+        let _home = ScratchClaudeHome::new("catalog-answer");
+        let (hub, scratch) = test_hub("catalog-answer");
+        let folder = scratch.path().join("proj");
+        write(
+            &folder.join(".claude/commands/deploy.md"),
+            "Ship the build.\n",
+        );
+        let mut record = idle_record("s1");
+        record.current_cwd = Some(folder.display().to_string());
+        hub.sessions.insert(record);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::ListCatalog {
+            session_id: "s1".to_owned(),
+            request_id: None,
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                ..
+            } => {
+                assert_eq!(session_id, "s1");
+                let deploy = entries
+                    .iter()
+                    .find(|entry| entry.name == "deploy")
+                    .expect("the catalog lists the project's deploy command");
+                assert_eq!(deploy.kind, CatalogEntryKind::Command);
+                assert_eq!(deploy.source, CatalogEntrySource::Project);
+                assert_eq!(deploy.description.as_deref(), Some("Ship the build."));
+                let compact = entries
+                    .iter()
+                    .find(|entry| entry.name == "compact")
+                    .expect("the catalog lists the built-in compact");
+                assert_eq!(compact.source, CatalogEntrySource::BuiltIn);
+                assert!(!compact.opens_terminal);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_catalog_for_an_unknown_session_answers_empty() {
+        let (hub, _scratch) = test_hub("catalog-unknown");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::ListCatalog {
+            session_id: "nope".to_owned(),
+            request_id: Some("req-1".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => {
+                assert_eq!(session_id, "nope");
+                assert_eq!(entries.len(), 0);
+                assert_eq!(request_id.as_deref(), Some("req-1"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_catalog_for_a_plain_shell_answers_empty() {
+        let (hub, scratch) = test_hub("catalog-shell");
+        let folder = scratch.path().join("proj");
+        write(
+            &folder.join(".claude/commands/deploy.md"),
+            "Ship the build.\n",
+        );
+        let mut record = idle_record("sh1");
+        record.mode = SessionMode::PlainShell;
+        record.current_cwd = Some(folder.display().to_string());
+        hub.sessions.insert(record);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::ListCatalog {
+            session_id: "sh1".to_owned(),
+            request_id: Some("req-sh".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => {
+                assert_eq!(session_id, "sh1");
+                assert_eq!(entries.len(), 0);
+                assert_eq!(request_id.as_deref(), Some("req-sh"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_catalog_answers_the_request_id() {
+        let _home_lock = CLAUDE_HOME_LOCK.lock().await;
+        let _home = ScratchClaudeHome::new("catalog-request");
+        let (hub, scratch) = test_hub("catalog-request");
+        let folder = scratch.path().join("proj");
+        std::fs::create_dir_all(&folder).expect("create the session folder");
+        let mut record = idle_record("s1");
+        record.current_cwd = Some(folder.display().to_string());
+        hub.sessions.insert(record);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::ListCatalog {
+            session_id: "s1".to_owned(),
+            request_id: Some("req-42".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-42"));
+                assert!(entries.iter().any(|entry| entry.name == "compact"));
             }
             other => panic!("unexpected reply: {other:?}"),
         }

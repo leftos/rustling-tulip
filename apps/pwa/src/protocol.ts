@@ -238,6 +238,14 @@ export const FEATURE_CHAT_CLEAR_DRAFT = "chat_clear_draft";
 export const FEATURE_FILE_SEARCH = "file_search";
 
 /**
+ * `Welcome.features` entry: the daemon lists the commands and skills a
+ * session's agent can invoke, for a chat composer's `/` catalog
+ * ([`ClientMessage::ListCatalog`], answered with [`DaemonMessage::Catalog`]).
+ * A client offers its `/` catalog only on a host that lists it.
+ */
+export const FEATURE_CHAT_CATALOG = "chat_catalog";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -5099,6 +5107,14 @@ export type ClientMessage =
    */
   | { type: "search_files"; session_id: string; query: string; limit?: number | null; request_id?: string | null }
   /**
+   * List the commands and skills the session's agent can invoke, for a
+   * chat composer's `/` catalog: answered to the requester alone with
+   * [`DaemonMessage::Catalog`] carrying this `request_id`. The catalog is
+   * read on the session's own host, from its member worktrees (else its
+   * cwd) and the daemon user's home.
+   */
+  | { type: "list_catalog"; session_id: string; request_id?: string | null }
+  /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this
    * `request_id`, then the changed lines as
@@ -6363,6 +6379,13 @@ export type DaemonMessage =
    */
   | { type: "file_matches"; session_id: string; matches?: FileMatch[]; truncated?: boolean; request_id?: string | null }
   /**
+   * The answer to [`ClientMessage::ListCatalog`], sent to the requester
+   * with its `request_id`: the commands and skills the session's agent can
+   * invoke, sorted by name. An unknown session, or one with no agent (a
+   * plain shell no agent was typed into), is answered with no entries.
+   */
+  | { type: "catalog"; session_id: string; entries?: CatalogEntry[]; request_id?: string | null }
+  /**
    * The answer to [`ClientMessage::LoadSummary`], sent to the requester
    * with its `request_id`: every stretch line of the session's chat as it
    * stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -6397,6 +6420,39 @@ export interface FileMatch {
    */
   reference: string;
 }
+
+/** One command or skill a [`DaemonMessage::Catalog`] answer carries. */
+export interface CatalogEntry {
+  /** The name the entry is invoked by, without its `/`. */
+  name: string;
+  /** Whether the entry is a command or a skill. */
+  kind: CatalogEntryKind;
+  /** The one-line description shown beside the name, when it has one. */
+  description?: string | null;
+  /** Where the entry was read from. */
+  source: CatalogEntrySource;
+  /**
+   * Invoking the entry opens an overlay or dialog in the terminal that the
+   * chat cannot answer, so the chat sends the user there.
+   */
+  opens_terminal?: boolean;
+}
+
+/** What a [`CatalogEntry`] is invoked as. */
+export type CatalogEntryKind =
+  /** A command the agent runs. */
+  | "command"
+  /** A skill the agent loads. */
+  | "skill";
+
+/** Where a [`CatalogEntry`] was read from. */
+export type CatalogEntrySource =
+  /** A command the agent ships itself. */
+  | "built_in"
+  /** Saved under the agent's own home. */
+  | "user"
+  /** Carried by the session's own folders. */
+  | "project";
 
 /**
  * A single resolved script invocation. The dialog renders these in the

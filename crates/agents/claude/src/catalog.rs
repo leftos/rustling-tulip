@@ -35,8 +35,8 @@ const BUILT_INS: [(&str, &str, bool); 23] = [
         false,
     ),
     ("context", "Show what fills the context window.", false),
-    ("cost", "Show the session's token usage and cost.", false),
-    ("help", "List the available commands.", false),
+    ("cost", "Show the session's token usage and cost.", true),
+    ("help", "List the available commands.", true),
     (
         "init",
         "Write a CLAUDE.md with guidance for this repository.",
@@ -51,8 +51,8 @@ const BUILT_INS: [(&str, &str, bool); 23] = [
     ("config", "Open the agent's settings.", true),
     ("resume", "Resume an earlier conversation.", true),
     (
-        "review",
-        "Review the pending changes or a pull request.",
+        "code-review",
+        "Review the current changes or a pull request.",
         false,
     ),
     (
@@ -60,7 +60,6 @@ const BUILT_INS: [(&str, &str, bool); 23] = [
         "Show the session's account, model and connection status.",
         true,
     ),
-    ("agents", "Manage the subagents a session can use.", true),
     ("mcp", "Manage the MCP servers a session can use.", true),
     (
         "permissions",
@@ -72,17 +71,18 @@ const BUILT_INS: [(&str, &str, bool); 23] = [
         "Manage the hooks that run around the agent's actions.",
         true,
     ),
-    ("doctor", "Check the installation for problems.", true),
+    ("doctor", "Check the installation for problems.", false),
     ("login", "Sign in to a Claude account.", true),
     ("logout", "Sign out of the current Claude account.", true),
     ("export", "Export the conversation.", true),
-    ("add-dir", "Add another folder to the session.", false),
+    ("add-dir", "Add another folder to the session.", true),
     (
         "rewind",
         "Go back to an earlier point in the conversation.",
         true,
     ),
     ("usage", "Show the account's usage and limits.", true),
+    ("plugin", "Manage plugins and their marketplaces.", true),
 ];
 
 /// The commands and skills `ctx`'s session can invoke, sorted by name.
@@ -780,21 +780,28 @@ mod tests {
             "model",
             "config",
             "resume",
-            "agents",
             "mcp",
             "permissions",
             "hooks",
             "memory",
-            "doctor",
             "login",
             "logout",
             "status",
             "usage",
             "rewind",
             "export",
+            "cost",
+            "help",
+            "add-dir",
+            "plugin",
         ];
         let in_chat = [
-            "clear", "compact", "context", "cost", "help", "init", "review", "add-dir",
+            "clear",
+            "compact",
+            "context",
+            "init",
+            "code-review",
+            "doctor",
         ];
         for name in in_terminal {
             let entry = find(&entries, name);
@@ -815,6 +822,37 @@ mod tests {
                 "`{name}` opens the terminal"
             );
         }
+    }
+
+    #[test]
+    fn built_ins_flag_the_overlays_the_spike_measured() {
+        let mut flagged: Vec<&str> = BUILT_INS
+            .iter()
+            .filter(|(_, _, opens_terminal)| *opens_terminal)
+            .map(|(name, _, _)| *name)
+            .collect();
+        flagged.sort_unstable();
+        let mut expected = vec![
+            "model",
+            "config",
+            "resume",
+            "memory",
+            "status",
+            "mcp",
+            "permissions",
+            "hooks",
+            "login",
+            "logout",
+            "export",
+            "add-dir",
+            "rewind",
+            "usage",
+            "cost",
+            "help",
+            "plugin",
+        ];
+        expected.sort_unstable();
+        assert_eq!(flagged, expected);
     }
 
     #[test]

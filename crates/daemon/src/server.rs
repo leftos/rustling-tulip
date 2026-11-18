@@ -977,7 +977,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ChatPullDraft { .. }
         | ClientMessage::ChatSendDraft { .. }
         | ClientMessage::ChatClearDraft { .. }
-        | ClientMessage::SearchFiles { .. }) => {
+        | ClientMessage::SearchFiles { .. }
+        | ClientMessage::ListCatalog { .. }) => {
             chat::handle(hub, m, ctx);
         }
         m @ (ClientMessage::ListAccounts { .. }

@@ -191,6 +191,12 @@ pub const FEATURE_CHAT_CLEAR_DRAFT: &str = "chat_clear_draft";
 /// popup only on a host that lists it.
 pub const FEATURE_FILE_SEARCH: &str = "file_search";
 
+/// `Welcome.features` entry: the daemon lists the commands and skills a
+/// session's agent can invoke, for a chat composer's `/` catalog
+/// ([`ClientMessage::ListCatalog`], answered with [`DaemonMessage::Catalog`]).
+/// A client offers its `/` catalog only on a host that lists it.
+pub const FEATURE_CHAT_CATALOG: &str = "chat_catalog";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -6421,6 +6427,16 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// List the commands and skills the session's agent can invoke, for a
+    /// chat composer's `/` catalog: answered to the requester alone with
+    /// [`DaemonMessage::Catalog`] carrying this `request_id`. The catalog is
+    /// read on the session's own host, from its member worktrees (else its
+    /// cwd) and the daemon user's home.
+    ListCatalog {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Load a session's summary for this connection: every stretch line as
     /// it stands, answered with [`DaemonMessage::Summary`] carrying this
     /// `request_id`, then the changed lines as
@@ -8043,6 +8059,17 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// The answer to [`ClientMessage::ListCatalog`], sent to the requester
+    /// with its `request_id`: the commands and skills the session's agent can
+    /// invoke, sorted by name. An unknown session, or one with no agent (a
+    /// plain shell no agent was typed into), is answered with no entries.
+    Catalog {
+        session_id: String,
+        #[serde(default)]
+        entries: Vec<CatalogEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
     /// with its `request_id`: every stretch line of the session's chat as it
     /// stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -8088,6 +8115,52 @@ pub struct FileMatch {
     /// How the session's agent reads that file in a prompt, as its plugin's
     /// `file_reference` forms it.
     pub reference: String,
+}
+
+/// One command or skill a [`DaemonMessage::Catalog`] answer carries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogEntry {
+    /// The name the entry is invoked by, without its `/`.
+    pub name: String,
+    /// Whether the entry is a command or a skill.
+    pub kind: CatalogEntryKind,
+    /// The one-line description shown beside the name, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where the entry was read from.
+    pub source: CatalogEntrySource,
+    /// Invoking the entry opens an overlay or dialog in the terminal that the
+    /// chat cannot answer, so the chat sends the user there.
+    #[serde(default)]
+    pub opens_terminal: bool,
+}
+
+/// What a [`CatalogEntry`] is invoked as.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogEntryKind {
+    /// A command the agent runs.
+    Command,
+    /// A skill the agent loads.
+    Skill,
+    /// A kind this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where a [`CatalogEntry`] was read from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogEntrySource {
+    /// A command the agent ships itself.
+    BuiltIn,
+    /// Saved under the agent's own home.
+    User,
+    /// Carried by the session's own folders.
+    Project,
+    /// A source this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
@@ -18683,6 +18756,111 @@ mod tests {
                 assert_eq!(matches.len(), 0);
                 assert!(!truncated);
                 assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_catalog_round_trips() {
+        let msg = ClientMessage::ListCatalog {
+            session_id: "s1".to_string(),
+            request_id: Some("req-cat".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"list_catalog","session_id":"s1","request_id":"req-cat"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ListCatalog {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-cat"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"list_catalog","session_id":"s1"}"#;
+        match serde_json::from_str::<ClientMessage>(bare).expect("deserialize") {
+            ClientMessage::ListCatalog { request_id, .. } => assert_eq!(request_id, None),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn catalog_round_trips_with_and_without_a_description() {
+        let msg = DaemonMessage::Catalog {
+            session_id: "s1".to_string(),
+            entries: vec![
+                CatalogEntry {
+                    name: "compact".to_string(),
+                    kind: CatalogEntryKind::Command,
+                    description: Some("Compress the conversation.".to_string()),
+                    source: CatalogEntrySource::BuiltIn,
+                    opens_terminal: false,
+                },
+                CatalogEntry {
+                    name: "deploy".to_string(),
+                    kind: CatalogEntryKind::Skill,
+                    description: None,
+                    source: CatalogEntrySource::Project,
+                    opens_terminal: true,
+                },
+            ],
+            request_id: Some("req-cat".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"catalog","session_id":"s1","entries":[{"name":"compact","kind":"command","description":"Compress the conversation.","source":"built_in","opens_terminal":false},{"name":"deploy","kind":"skill","source":"project","opens_terminal":true}],"request_id":"req-cat"}"#
+        );
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(
+                    entries[0].description.as_deref(),
+                    Some("Compress the conversation.")
+                );
+                assert_eq!(entries[0].source, CatalogEntrySource::BuiltIn);
+                assert_eq!(entries[1].kind, CatalogEntryKind::Skill);
+                assert_eq!(entries[1].description, None);
+                assert!(entries[1].opens_terminal);
+                assert_eq!(request_id.as_deref(), Some("req-cat"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"catalog","session_id":"s1"}"#;
+        match serde_json::from_str::<DaemonMessage>(bare).expect("deserialize") {
+            DaemonMessage::Catalog {
+                entries,
+                request_id,
+                ..
+            } => {
+                assert_eq!(entries.len(), 0);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_catalog_entry_of_an_unknown_kind_or_source_still_decodes() {
+        let json = r#"{"type":"catalog","session_id":"s1","entries":[{"name":"x","kind":"macro","source":"plugin"},{"name":"y","kind":"command","source":"user","opens_terminal":true}]}"#;
+        match serde_json::from_str::<DaemonMessage>(json).expect("deserialize") {
+            DaemonMessage::Catalog { entries, .. } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].kind, CatalogEntryKind::Unknown);
+                assert_eq!(entries[0].source, CatalogEntrySource::Unknown);
+                assert!(!entries[0].opens_terminal);
+                assert_eq!(entries[1].kind, CatalogEntryKind::Command);
+                assert_eq!(entries[1].source, CatalogEntrySource::User);
             }
             other => panic!("unexpected variant: {other:?}"),
         }

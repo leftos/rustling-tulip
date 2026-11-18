@@ -33,6 +33,44 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
+/// Serialises the tests that point `CLAUDE_CONFIG_DIR` at a scratch home:
+/// the variable is process-global and tests run on parallel threads.
+pub(crate) static CLAUDE_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A scratch Claude home `CLAUDE_CONFIG_DIR` points at while the guard
+/// lives, so a test reads it and not the user's own.
+pub(crate) struct ScratchClaudeHome {
+    path: PathBuf,
+    _var: crate::env_secrets::test_support::EnvVarGuard,
+}
+
+impl ScratchClaudeHome {
+    pub(crate) fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch claude home");
+        // Callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
+        let var = crate::env_secrets::test_support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &path);
+        Self { path, _var: var }
+    }
+
+    /// A transcript for `folder` and `id`, as Claude Code files one.
+    pub(crate) fn write_transcript(&self, folder: &str, id: &str) {
+        let dir = self
+            .path
+            .join("projects")
+            .join(agent_claude::encode_project_dir(folder));
+        std::fs::create_dir_all(&dir).expect("create the transcript folder");
+        std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
+    }
+}
+
+impl Drop for ScratchClaudeHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// A scratch directory for a hub's config, state and worktrees, removed
 /// when the test ends.
 pub(crate) struct ScratchDir {
