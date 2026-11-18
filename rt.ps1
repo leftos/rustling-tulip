@@ -1433,7 +1433,7 @@ function Invoke-NativeShot {
     if ($Release) { $cargoArgs += '--release' }
     $cargoArgs += @('--', $view, $outPath)
     Write-Host "==> Taking a shot of the native client's '$view' view..." -ForegroundColor Cyan
-    Invoke-Gated -Slot heavy -Name shot -Command $cargoArgs
+    Invoke-Gated -Slot heavy -Name "shot-$view-$PID" -Command $cargoArgs
     Test-CargoExitOk 'cargo run -p rustling-tulip-native --example shot'
     Write-Host $outPath
 }

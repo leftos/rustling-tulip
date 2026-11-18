@@ -73,6 +73,20 @@ fn too_old_detail(host: &str) -> String {
     )
 }
 
+/// A count of files, in the singular for one.
+fn files_count(files: u64) -> String {
+    if files == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{files} files")
+    }
+}
+
+/// The detail of a fetched folder's toast: how many files `host` sent.
+fn folder_files_detail(files: u64, host: &str) -> String {
+    format!("{} from {host}", files_count(files))
+}
+
 /// Why a fetch failed, after the host's path of the file once the daemon
 /// named it.
 fn failure_detail(entry: &FetchEntry, reason: &str) -> String {
@@ -805,10 +819,10 @@ impl RootView {
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: format!(
-                "Fetching folder {} from {} ({} files, {size})",
+                "Fetching folder {} from {} ({}, {size})",
                 entry.file_name(),
                 entry.host_label(),
-                announced.files
+                files_count(announced.files)
             ),
             detail: Some(detail),
             key: Some(id.to_owned()),
@@ -1794,7 +1808,7 @@ impl RootView {
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: format!("Fetched folder {}", entry.file_name()),
-            detail: Some(format!("{files} files from {}", entry.host_label())),
+            detail: Some(folder_files_detail(files, entry.host_label())),
             key: Some(id.to_owned()),
             sticky: false,
             actions: vec![FETCH_REVEAL],
@@ -2049,7 +2063,20 @@ fn abort_writer(id: &str, entry: &FetchEntry) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::absolute_root;
+    use super::{absolute_root, files_count, folder_files_detail};
+
+    #[test]
+    fn folder_files_detail_uses_the_singular_for_one_file() {
+        assert_eq!(folder_files_detail(1, "devbox"), "1 file from devbox");
+        assert_eq!(folder_files_detail(2, "devbox"), "2 files from devbox");
+        assert_eq!(folder_files_detail(0, "devbox"), "0 files from devbox");
+    }
+
+    #[test]
+    fn files_count_uses_the_singular_for_one_file() {
+        assert_eq!(files_count(1), "1 file");
+        assert_eq!(files_count(3), "3 files");
+    }
 
     #[test]
     fn a_relative_remote_files_root_is_made_absolute() {

@@ -25,6 +25,10 @@ pub struct GridKey {
 /// The driver id of the bar's pinned Hide button, which no key may take.
 const HIDE_ID: &str = "hide";
 
+/// What the key editor's label field says while the draft has no press to
+/// name it.
+const KEY_LABEL_PLACEHOLDER: &str = "Key label";
+
 /// What a tap on a key does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -271,6 +275,17 @@ impl KeyDraft {
     pub(crate) fn derived_label(&self) -> String {
         let steps: Vec<Step> = self.steps.iter().filter_map(|step| step.step()).collect();
         derived_label(&steps)
+    }
+
+    /// What the label field says: the presses' label, or what to type while
+    /// they name nothing.
+    pub(crate) fn label_placeholder(&self) -> String {
+        let derived = self.derived_label();
+        if derived.is_empty() {
+            KEY_LABEL_PLACEHOLDER.to_owned()
+        } else {
+            derived
+        }
     }
 
     /// Moves the press at `from` to `side` of the one at `to`; an index that
@@ -1472,6 +1487,18 @@ mod tests {
             "PgDn"
         );
         assert_eq!(derived_label(&[]), "");
+    }
+
+    #[test]
+    fn label_placeholder_names_the_field_when_the_draft_has_no_press() {
+        assert_eq!(draft(Vec::new()).label_placeholder(), KEY_LABEL_PLACEHOLDER);
+    }
+
+    #[test]
+    fn label_placeholder_is_the_derived_label_once_a_press_is_set() {
+        let key_draft = draft(vec![draft_step(false, Some(named_step(NamedKey::Esc)))]);
+
+        assert_eq!(key_draft.label_placeholder(), "Esc");
     }
 
     #[test]

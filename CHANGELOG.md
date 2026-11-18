@@ -10,6 +10,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A fetched folder that holds one file now says "1 file", not "1 files", while it fetches and once it is done.
+- The phone's key editor shows a "Key label" hint in its empty label field.
 - The phone's chat shows a question's final Submit or Cancel step even when the terminal is too narrow or short to show its tabs.
 - Raising the phone's keyboard over a session's terminal no longer shrinks it, so the chat keeps reading Claude's questions; drag to see hidden rows.
 - Needs You stays until you answer: opening the session, a Code Mode script's result or the agent's turn ending no longer clears it.

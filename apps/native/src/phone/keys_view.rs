@@ -274,7 +274,7 @@ impl PhoneRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> KeyEditor {
-        let input = cx.new(|cx| TextInput::new(label, draft.derived_label(), cx));
+        let input = cx.new(|cx| TextInput::new(label, draft.label_placeholder(), cx));
         input.read(cx).focus_handle(cx).focus(window, cx);
         let keys = cx.subscribe(&input, |this, _, event: &TextInputEvent, cx| {
             if *event == TextInputEvent::Submit {
@@ -546,7 +546,7 @@ impl PhoneRoot {
         let Some(editor) = self.key_editor.as_ref() else {
             return;
         };
-        let placeholder = editor.draft.derived_label();
+        let placeholder = editor.draft.label_placeholder();
         editor
             .label
             .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
