@@ -196,7 +196,7 @@ What each field needs, and whether the tree has it today (paths at `main` b4b55b
 |---|---|---|---|
 | Label, repo, branch | `SessionSnapshot.label` / `user_label` / `terminal_title` (`crates/protocol/src/lib.rs:587-593`, `:644`), `members[].repo_name` and `branch` (`SessionMember`, `:563-567`); the container accent from the sidebar model | have | |
 | Glyph, state word, age | `status` (`:596`), `status_since` (`:599`), `pending_input` (`:708`), `background` (`:713`), the client's `Leaf.unseen` (`apps/native/src/sidebar.rs:196`) | have | |
-| Linear key, state, priority, title | issue detection plus the daemon's Linear client and cache, designed in [linear-links.md](./linear-links.md) (RT-133, LL.1 to LL.3) | none: no Linear client in the tree (`rg -il linear crates apps` finds only test strings, a `Linear` split layout and the word "linear" in comments) | RT-133, then DB.7 |
+| Linear key, state, priority, title | issue detection plus the daemon's Linear client and cache, documented in [architecture.md](../architecture.md) "Linear issue links" | none: no Linear client in the tree (`rg -il linear crates apps` finds only test strings, a `Linear` split layout and the word "linear" in comments) | RT-133, then DB.7 |
 | Now line, rule 1 | `pending_input`, worded by `needs_you.rs:101` | have | |
 | Now line, rules 2 to 6 | open tool calls, running subagents and background tasks from the transcript; gate claims from the daemon's gate reader, the gate reader in [architecture.md](../architecture.md) "Gates view" (RT-55, around the `gate-state` crate) | transcript side have: the activity reader's `open_calls`, `subagents` and `background` (`ActivitySnapshot`, `crates/agents/api/src/activity.rs`); the gate reader exists (`crates/daemon/src/gate_state.rs`), and the `Stop` hook's `background_tasks` is read only as one flag (`crates/agents/api/src/hook_vocabulary.rs`) | DB.3, DB.4, DB.8 |
 | Summary lines | the summarizer over each turn's last message: `SessionRecord.last_assistant_message` (`crates/daemon/src/session.rs:228`, set at `crates/daemon/src/hook_status.rs:505`, 8 KiB cap); `SessionSnapshot.summary` (`lib.rs:602`), filled from the summary ring | have: finished turns (SA.6) and, while a Dashboard is watched, working refreshes as provisional lines (DB.17, `crates/daemon/src/summarizer/refresh.rs`) | DB.17 |
@@ -254,7 +254,7 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 ### Linear context
 
-The Dashboard reads Linear through the daemon's one Linear client and issue cache, which [linear-links.md](./linear-links.md) designs for RT-133 (LL.1 to LL.3) and whose owner rulings stand here: the key is `LINEAR_API_KEY` through `user_env::resolve` and the env-secrets store, an identifier counts only when its team key is one of the workspace's (fetched daily), and live identifiers are refreshed every 5 minutes in one batched query, a copy older than 1 minute refetched on demand.
+The Dashboard reads Linear through the daemon's one Linear client and issue cache, which [architecture.md](../architecture.md) "Linear issue links" documents and whose rules stand here: the key is `LINEAR_API_KEY` through `user_env::resolve` (the process environment, then the Windows user and system scopes), an identifier counts only when its team key is one of the workspace's (fetched daily), and live identifiers are refreshed every 5 minutes in one batched query, a copy older than 1 minute refetched on demand.
 
 **Orchestrator decision (not an owner ruling):** the Dashboard adds to that client only what its rows need:
 
@@ -262,7 +262,7 @@ The Dashboard reads Linear through the daemon's one Linear client and issue cach
 - **Issue fields**: the card's fields (identifier, title, state and its colour, priority, project, release) and the URL; plus each release's done and total counts for the header's bars, one more query batched with LL.3's refresh. Field names are checked against Linear's schema in DB.7's brief; none is measured here.
 - **Issues Done**: keys found in the session's branch, first prompt and commit messages since it started that Linear reports completed after `started_at`.
 - **Sync age**: the oldest `fetched_at` among the listed sessions' issues.
-- **Without a key**: the Linear column shows the detected key alone, with linear-links.md's no-key notice (set `LINEAR_API_KEY`).
+- **Without a key**: the Linear column shows the detected key alone, with the Linear card's no-key notice (set `LINEAR_API_KEY`).
 
 ### Recent work
 
@@ -370,7 +370,7 @@ The snapshot's `summary` carries the newest two lines (the row's Summary column)
 
 ### Keys
 
-Only the DeepSeek provider takes a key; the Haiku provider uses the Claude login, and Linear's key follows linear-links.md's ruling.
+Only the DeepSeek provider takes a key; the Haiku provider uses the Claude login, and Linear's key follows architecture.md "Linear issue links".
 
 A typed DeepSeek key is stored in **Windows Credential Manager** through the store the env-secrets code already sets up (`keyring-core` and `windows-native-keyring-store`, `crates/daemon/Cargo.toml:81` and `:121`; `env_secrets::init`, `crates/daemon/src/env_secrets.rs:86`), under the same service name rules as env secrets ([env-secrets.md](../env-secrets.md)), user `summarizer/<provider id>`.
 
