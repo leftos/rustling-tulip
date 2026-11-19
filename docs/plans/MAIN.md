@@ -4,7 +4,8 @@
 
 ## Do first
 
-- [ ] RT-1948 Keep phone native-shot views from sweeping the real copies folder · release vNext — High · Build, test and driver tooling
+- [ ] RT-1928 Keep a second account row's usage column readable in Settings › Accounts · release vNext — High · Claude accounts
+- [ ] RT-1968 Let a refused account log in again from its Settings › Accounts row · release vNext — High · Claude accounts
 
 ## Session status and screen reading
 
@@ -184,6 +185,8 @@
 - [ ] RT-1865 Put the remote daemon's log tail in a driven run's failed remote start error
 - [ ] RT-1932 Map the follow-tab and tab-close files in the test map
 - [ ] RT-1943 Map the follow-tab and tab-close files in the test map
+- [ ] RT-1960 Map the follow-tab and tab-close files in tools/test-map.json
+- [ ] RT-1961 Make clippy pass for the iOS simulator target
 
 ## Elevated daemon and security
 
@@ -203,9 +206,7 @@
 ## Chat mirror
 
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies · release vNext
-  - [ ] RT-1925 Show the session's model in the chat · release vNext
   - [ ] RT-1926 Switch the session's model and effort from the chat's pills · release vNext
-  - [ ] RT-1927 Offer commands and files on the phone composer as you type / or @ · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
@@ -237,6 +238,7 @@
 - [ ] RT-1254 Answer a question at narrow widths, with a wide option label, or with a preview
 - [ ] RT-1804 Keep the Chat message box focused after a composer-row button click
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
+- [ ] RT-1952 Tell apart phone composer file chips that share a file name
 
 ## Settings and themes
 
@@ -384,7 +386,6 @@
 
 ## Claude accounts
 
-- [ ] RT-1928 Keep a second account row's usage column readable in Settings › Accounts
 - [ ] RT-1466 Keep Settings › Accounts' reset time on one line and the Dashboard's subagent name uncut while there is room
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
@@ -500,8 +501,6 @@
 - [ ] RT-1471 Sort a new row into its phone Home group as the desktop does
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-106 Phone files: open, share and keep host files from a tapped path · release vNext
-  - [ ] RT-1899 Keep fetched copies on the phone, visible in Files, refreshed when changed and cleared after 30 days · release vNext
-  - [ ] RT-1901 Share a fetched copy from the phone through the iOS share sheet · release vNext
   - [ ] RT-1902 Open a path tapped in the phone's chat or terminal · release vNext
   - [ ] RT-1903 Browse a host folder on the phone and fetch a folder whole · release vNext
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
@@ -558,6 +557,8 @@
 - [ ] RT-1914 Keep the phone terminal's keyboard-down height when the fixed rows outgrow the keyboard-up page
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
 - [ ] RT-1931 Pinch to zoom an image in the phone viewer
+- [ ] RT-1959 Fit two-digit line numbers in the phone viewer's gutter
+- [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 
 ## Dashboard, Gates and Linear
 
@@ -580,14 +581,12 @@
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
 - [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app · release vNext
-  - [ ] RT-136 LL.3: daemon Linear wiring (title scan, 5-min refresh, hover requests) · release vNext
-  - [ ] RT-137 LL.4: detect Linear identifiers in the terminal, Ctrl+click to open · release vNext
-  - [ ] RT-138 LL.5: open Linear issues in the app, with the web as fallback · release vNext
-  - [ ] RT-139 LL.6: Linear hover card over terminal identifiers · release vNext
   - [ ] RT-140 LL.7: Linear state chips in session titles · release vNext
   - [ ] RT-141 LL.8: document Linear issue links and retire their design · release vNext
   - [ ] RT-1945 Merge feat/linear-links to main (#208)
   - [ ] RT-1950 Harden the daemon Linear client's error, team and URL matching
+  - [ ] RT-1965 Fix the Linear hover card's offline, re-ask and dropped-host states
+  - [ ] RT-1969 Show no Linear card on Ctrl for an identifier that moved from under the pointer
 - [ ] RT-464 Absorb all of ops-tower's functionality so ops-tower can be retired
   - [ ] RT-479 Add a Costs tab with ops-tower's subscription-share model
   - [ ] RT-480 Retire ops-tower once its views ship in rustling-tulip
@@ -619,6 +618,7 @@
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
+- [ ] RT-1951 Read the Linear key from the env-secrets store too
 
 ## Repos, workspaces and worktrees
 
@@ -806,6 +806,10 @@
 - [ ] RT-1942 Read a session's catalog from its own CLAUDE_CONFIG_DIR row
 - [ ] RT-1944 Insert uploaded paths in the chat composer without replacing the selection
 - [ ] RT-1949 Open a kept copy as out of date when its host has no connection
+- [ ] RT-1953 Keep the always-on issue underline true at the view's edges and after a sync timeout
+- [ ] RT-1954 Find a Linear identifier at a hard-stitched row break in the terminal
+- [ ] RT-1957 Open the web page without a Windows error box when the Linear app fails to start
+- [ ] RT-1966 Log each phone push round at info in the daemon
 
 ## Design files
 
@@ -814,7 +818,7 @@
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574
+- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574, RT-1951
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1541, RT-1542, RT-1552, RT-1558
@@ -823,13 +827,13 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [linear-links.md](linear-links.md) — RT-133, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
+- [linear-links.md](linear-links.md) — RT-133, RT-140, RT-141, RT-142, RT-1951
 - [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111, RT-1925, RT-1926, RT-1927
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111, RT-1926
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
-- [phone-files.md](phone-files.md) — RT-106, RT-1899, RT-1901, RT-1902, RT-1903
+- [phone-files.md](phone-files.md) — RT-106, RT-1902, RT-1903
 - [push-relay.md](push-relay.md) — RT-1519
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
