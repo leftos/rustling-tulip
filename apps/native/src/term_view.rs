@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -30,7 +31,9 @@ use crate::clipboard_image;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
-use crate::links::{IssueContext, LinkKind, LinkSegment, TerminalLink};
+use crate::linear_card::Card;
+use crate::linear_card_view::{self, CardActions};
+use crate::links::{IssueContext, LinkKind, LinkSegment, TerminalLink, issue_identifier};
 use crate::mouse::{self, CellSize, ClickThrough, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open::{self, LinkAction};
@@ -141,6 +144,9 @@ pub struct TerminalPane {
     issues: IssueContext,
     /// Link mode and the link under the mouse.
     links: LinkHover,
+    /// The issue link under the pointer, its rest timer and the Linear
+    /// card shown.
+    card: IssueCard,
     /// Bumped whenever the terminal's content may have changed: output,
     /// history, a resize or a fresh terminal. Keys the hover's link cache.
     content_generation: u64,
@@ -169,6 +175,34 @@ struct LinkHover {
     /// rebuilds so that new output elsewhere, or a hover on another row of
     /// the same path, keeps the widened link.
     confirmed: Vec<Confirmed>,
+}
+
+/// How long the pointer rests on an issue link before its card shows.
+const CARD_REST: Duration = Duration::from_millis(500);
+
+/// The Linear card's state: the issue link under the pointer, Ctrl held or
+/// not; the rest timer armed for it; the card shown and what it shows.
+#[derive(Default)]
+struct IssueCard {
+    under: Option<TerminalLink>,
+    /// When the rest on `under` shows its card, on the injected clock.
+    deadline: Option<Instant>,
+    timer: Option<Task<()>>,
+    shown: Option<ShownCard>,
+    /// The pointer is over the card.
+    on_card: bool,
+    /// What the root says the card shows; `None` until it says.
+    model: Option<Card>,
+}
+
+/// A card being shown: its link, whether only Ctrl showed it, where it
+/// sits, and the content generation and display offset its link was read
+/// at.
+struct ShownCard {
+    link: TerminalLink,
+    by_ctrl: bool,
+    at: Point<Pixels>,
+    read_at: (u64, usize),
 }
 
 /// The issue links on screen and the content generation and display offset
@@ -607,6 +641,15 @@ pub enum PaneEvent {
         name: String,
         bytes: Vec<u8>,
     },
+    /// The pointer entered the cells of Linear issue `identifier`: the root
+    /// asks the pane's host for it, unless a request for it is in flight.
+    AskLinearIssue { identifier: String },
+    /// The pane shows the Linear card of `identifier`, detected with web
+    /// address `web_url`: the root hands it what the card shows through
+    /// [`TerminalPane::set_linear_card`] and drops any other pane's card.
+    ShowLinearCard { identifier: String, web_url: String },
+    /// The pane hid its Linear card.
+    HideLinearCard,
 }
 
 impl EventEmitter<PaneEvent> for TerminalPane {}
@@ -670,6 +713,7 @@ impl TerminalPane {
             base_dirs: Vec::new(),
             issues: IssueContext::default(),
             links: LinkHover::default(),
+            card: IssueCard::default(),
             content_generation: 0,
             palette: TerminalPalette::default(),
             frame: None,
@@ -2073,7 +2117,295 @@ impl TerminalPane {
         }
         if changed {
             self.check_spaced(cx);
+            self.follow_card(cx);
         }
+    }
+
+    /// The issue link under the pointer, Ctrl held or not.
+    fn issue_under_mouse(&self) -> Option<TerminalLink> {
+        let (row, col) = self.links.cell?;
+        self.link_at(row, col)
+            .filter(|link| link.kind == LinkKind::Issue)
+    }
+
+    /// The pointer or Ctrl changed: the card follows the issue link under
+    /// the pointer.
+    fn follow_card(&mut self, cx: &mut Context<Self>) {
+        let under = self.issue_under_mouse();
+        if under != self.card.under {
+            self.enter_issue(under, cx);
+        }
+        self.card_on_ctrl(cx);
+    }
+
+    /// The pointer moved onto issue link `under`, or off one (`None`): asks
+    /// for the new one and arms its rest timer; the card settles once every
+    /// listener of the move ran, so a move onto the card keeps it.
+    fn enter_issue(&mut self, under: Option<TerminalLink>, cx: &mut Context<Self>) {
+        self.card.timer = None;
+        self.card.deadline = None;
+        if let Some(link) = &under {
+            if let Some(identifier) = issue_identifier(link) {
+                cx.emit(PaneEvent::AskLinearIssue { identifier });
+            }
+            let shown = self
+                .card
+                .shown
+                .as_ref()
+                .is_some_and(|shown| shown.link == *link);
+            if !shown {
+                self.card.deadline = Some((self.now)() + CARD_REST);
+                self.arm_card_tick(cx);
+            }
+        }
+        self.card.under = under;
+        Self::settle_card_later(cx);
+    }
+
+    /// Ctrl held over an issue link shows its card at once; releasing it
+    /// hides a card only Ctrl showed.
+    fn card_on_ctrl(&mut self, cx: &mut Context<Self>) {
+        if !self.links.active {
+            if self.card.shown.as_ref().is_some_and(|shown| shown.by_ctrl) {
+                self.hide_card(cx);
+            }
+            return;
+        }
+        let Some(link) = self.card.under.clone() else {
+            return;
+        };
+        if self
+            .card
+            .shown
+            .as_ref()
+            .is_none_or(|shown| shown.link != link)
+        {
+            self.show_card(link, true, cx);
+        }
+    }
+
+    /// Arms the timer that wakes the pane when the rest on the hovered issue
+    /// link is long enough, or disarms it when no rest is timed.
+    fn arm_card_tick(&mut self, cx: &mut Context<Self>) {
+        self.card.timer = self.card.deadline.map(|deadline| {
+            let delay = deadline.saturating_duration_since((self.now)());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                // Fails only when the pane is gone, and its card with it.
+                this.update(cx, TerminalPane::tick_card).ok();
+            })
+        });
+    }
+
+    /// The rest timer fired: shows the card of the link still under the
+    /// pointer once its rest is long enough. One the timer ran ahead of
+    /// waits for its deadline again.
+    fn tick_card(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.card.deadline else {
+            return;
+        };
+        if deadline > (self.now)() {
+            self.arm_card_tick(cx);
+            return;
+        }
+        self.card.deadline = None;
+        let Some(link) = self.card.under.clone() else {
+            return;
+        };
+        if self.issue_under_mouse().as_ref() != Some(&link) {
+            // New output moved the link under a pointer that stood still.
+            self.follow_card(cx);
+            return;
+        }
+        match self.card.shown.as_mut() {
+            Some(shown) if shown.link == link => shown.by_ctrl = false,
+            _ => self.show_card(link, false, cx),
+        }
+    }
+
+    /// Shows the card of `link` below the hovered row; `by_ctrl` when only
+    /// Ctrl showed it.
+    fn show_card(&mut self, link: TerminalLink, by_ctrl: bool, cx: &mut Context<Self>) {
+        let (Some(at), Some(identifier)) = (self.card_anchor(&link), issue_identifier(&link))
+        else {
+            return;
+        };
+        let web_url = link.target.clone();
+        self.card.shown = Some(ShownCard {
+            link,
+            by_ctrl,
+            at,
+            read_at: self.card_key(),
+        });
+        self.card.model = None;
+        cx.emit(PaneEvent::ShowLinearCard {
+            identifier,
+            web_url,
+        });
+        cx.notify();
+    }
+
+    /// Hides the card, telling the root.
+    fn hide_card(&mut self, cx: &mut Context<Self>) {
+        if self.card.shown.take().is_some() {
+            self.card.model = None;
+            self.card.on_card = false;
+            cx.emit(PaneEvent::HideLinearCard);
+            cx.notify();
+        }
+    }
+
+    /// Settles the card once the listeners of the event being handled ran.
+    fn settle_card_later(cx: &mut Context<Self>) {
+        let pane = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            // Fails only when the pane is gone, and its card with it.
+            pane.update(cx, TerminalPane::settle_card).ok();
+        });
+    }
+
+    /// Hides the card once the pointer is on neither its link nor the card.
+    fn settle_card(&mut self, cx: &mut Context<Self>) {
+        let Some(shown) = &self.card.shown else {
+            return;
+        };
+        if !self.card.on_card && self.card.under.as_ref() != Some(&shown.link) {
+            self.hide_card(cx);
+        }
+    }
+
+    /// The pointer moved onto the card (`over`) or off it.
+    fn on_card_hover(&mut self, over: bool, cx: &mut Context<Self>) {
+        self.card.on_card = over;
+        if !over {
+            Self::settle_card_later(cx);
+        }
+    }
+
+    /// The content generation and display offset links are read at now.
+    fn card_key(&self) -> (u64, usize) {
+        (self.content_generation, self.term.display_offset())
+    }
+
+    /// Where the card of `link` sits: just below the hovered row, at the
+    /// link's first column on that row.
+    fn card_anchor(&self, link: &TerminalLink) -> Option<Point<Pixels>> {
+        let (row, col) = self.links.cell?;
+        let (origin, cell) = self.layout?;
+        let (line, _) = self.grid_point(row, col);
+        let start = link
+            .segments
+            .iter()
+            .find(|segment| segment.row == line)
+            .map_or(col, |segment| segment.start_column);
+        #[expect(clippy::cast_precision_loss, reason = "grid positions are small")]
+        let at = origin
+            + point(
+                px(start as f32 * cell.width),
+                px((row + 1) as f32 * cell.height),
+            );
+        Some(at)
+    }
+
+    /// Hides the card whose link a scroll moved, or new output moved or
+    /// overwrote.
+    fn check_card(&mut self, cx: &mut Context<Self>) {
+        let key = self.card_key();
+        let Some(shown) = &self.card.shown else {
+            return;
+        };
+        if shown.read_at == key {
+            return;
+        }
+        let kept = shown.read_at.1 == key.1 && self.link_still_shown(&shown.link);
+        match self.card.shown.as_mut() {
+            Some(shown) if kept => shown.read_at = key,
+            _ => self.hide_card(cx),
+        }
+    }
+
+    /// Whether `link` still takes the cells it was read at.
+    fn link_still_shown(&self, link: &TerminalLink) -> bool {
+        let Some(segment) = link.segments.first() else {
+            return false;
+        };
+        let offset = i64::try_from(self.term.display_offset()).unwrap_or(i64::MAX);
+        let Ok(row) = usize::try_from(i64::from(segment.row).saturating_add(offset)) else {
+            return false;
+        };
+        row < self.term.size().rows
+            && self.link_at(row, segment.start_column).as_ref() == Some(link)
+    }
+
+    /// The root says what the card shows; kept only while one is shown.
+    pub(crate) fn set_linear_card(&mut self, card: Card, cx: &mut Context<Self>) {
+        if self.card.shown.is_some() && self.card.model.as_ref() != Some(&card) {
+            self.card.model = Some(card);
+            cx.notify();
+        }
+    }
+
+    /// Another pane's card took this one's place.
+    pub(crate) fn drop_linear_card(&mut self, cx: &mut Context<Self>) {
+        if self.card.shown.take().is_some() {
+            self.card.model = None;
+            self.card.on_card = false;
+            cx.notify();
+        }
+    }
+
+    /// The lines of the card the pane shows, top to bottom; `None` while it
+    /// shows none.
+    #[must_use]
+    pub fn linear_card_lines(&self) -> Option<Vec<String>> {
+        self.card.shown.as_ref()?;
+        self.card.model.as_ref().map(Card::lines)
+    }
+
+    /// The card's Open in Linear or title was clicked: opens the issue as a
+    /// Ctrl+click on its link does, at the address the card names.
+    fn open_card(&mut self, cx: &mut Context<Self>) {
+        let Some(shown) = &self.card.shown else {
+            return;
+        };
+        let mut link = shown.link.clone();
+        if let Some(card) = &self.card.model {
+            link.target.clone_from(&card.open_url);
+        }
+        cx.emit(PaneEvent::OpenLink {
+            link,
+            base_dirs: self.base_dirs.clone(),
+            session: self.session_id().map(str::to_owned),
+            action: LinkAction::DefaultApp,
+        });
+    }
+
+    /// The card the pane shows, once the root said what it shows.
+    fn card_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.check_card(cx);
+        let at = self.card.shown.as_ref()?.at;
+        let card = self.card.model.as_ref()?;
+        let pane = cx.entity().downgrade();
+        let hovered = pane.clone();
+        let actions = CardActions {
+            open: Rc::new(move |_, cx| {
+                // Fails only when the pane is gone, and its card with it.
+                pane.update(cx, TerminalPane::open_card).ok();
+            }),
+            hover: Box::new(move |over, _, cx| {
+                // Fails only when the pane is gone, and its card with it.
+                hovered
+                    .update(cx, |this, cx| this.on_card_hover(over, cx))
+                    .ok();
+            }),
+        };
+        Some(linear_card_view::card_at(
+            &self.pane_id,
+            card,
+            at,
+            actions,
+            cx,
+        ))
     }
 
     /// Asks the root to check the spaced readings of the link under a
@@ -2150,15 +2482,17 @@ impl TerminalPane {
                 cx.notify();
             }
             self.check_spaced(cx);
+            self.card_on_ctrl(cx);
         }
     }
 
     /// The pointer left the window: no cell is hovered, so nothing is
-    /// underlined.
+    /// underlined, and the card goes unless the pointer left from it.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
         if self.links.cell.take().is_some() {
             cx.notify();
         }
+        self.follow_card(cx);
     }
 
     /// The link Ctrl+hover underlines: the one under the mouse while Ctrl is
@@ -2713,7 +3047,7 @@ impl Render for TerminalPane {
                 .child(grid.flex_1().h_full()),
             None => pane.child(grid.size_full()),
         };
-        pane.children(tip)
+        pane.children(tip).children(self.card_element(cx))
     }
 }
 
@@ -2769,9 +3103,12 @@ impl TerminalPane {
     }
 
     /// The tip naming the gestures of the link Ctrl+hover underlines, just
-    /// below the hovered cell and kept inside the window.
+    /// below the hovered cell and kept inside the window. An issue link has
+    /// its card instead, which carries the tip's line at its foot.
     fn link_tip(&self, cx: &App) -> Option<AnyElement> {
-        let link = self.hovered_link()?;
+        let link = self
+            .hovered_link()
+            .filter(|link| link.kind != LinkKind::Issue)?;
         let (row, col) = self.links.cell?;
         let (origin, cell) = self.layout?;
         #[expect(clippy::cast_precision_loss, reason = "grid positions are small")]

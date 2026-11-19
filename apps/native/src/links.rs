@@ -422,6 +422,24 @@ impl IssueContext {
     }
 }
 
+/// The identifier of issue link `link`, such as `RT-12`: a bare
+/// identifier's own text, or the identifier in a `linear.app` issue URL.
+/// `None` for a link that is no issue link.
+#[must_use]
+pub fn issue_identifier(link: &TerminalLink) -> Option<String> {
+    if link.kind != LinkKind::Issue {
+        return None;
+    }
+    let text = if is_issue_url(&link.text) {
+        let at = link.text.find(ISSUE_URL_PATH)? + ISSUE_URL_PATH.len();
+        link.text.get(at..)?
+    } else {
+        link.text.as_str()
+    };
+    let end = identifier_at(text, 0)?;
+    text.get(..end).map(str::to_owned)
+}
+
 /// The web address of issue `identifier` in Linear workspace `workspace`.
 #[must_use]
 pub fn issue_web_address(workspace: &str, identifier: &str) -> String {
@@ -1722,8 +1740,9 @@ mod tests {
 
     use super::{
         IssueContext, LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow,
-        can_stitch, detect_links, detect_row_links, group_rows, hyperlink_links, issue_links,
-        issue_web_address, merge_issue_links, spaced_candidates, trim_link_candidate, web_address,
+        can_stitch, detect_links, detect_row_links, group_rows, hyperlink_links, issue_identifier,
+        issue_links, issue_web_address, merge_issue_links, spaced_candidates, trim_link_candidate,
+        web_address,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -3035,6 +3054,26 @@ mod tests {
         ] {
             assert_eq!(split(whole), (whole, None, None), "{whole}");
         }
+    }
+
+    /// The identifier of the one issue link in a row of `text`.
+    fn identifier_of(text: &str) -> Option<String> {
+        let cols = text.chars().count() + 4;
+        let links = merged(&[row(text, cols, false)], cols, &teams(&["RT"]));
+        let link = links.iter().find(|link| link.kind == LinkKind::Issue)?;
+        issue_identifier(link)
+    }
+
+    #[test]
+    fn an_issue_link_names_its_identifier_bare_or_in_its_url() {
+        assert_eq!(identifier_of("see RT-12 now").as_deref(), Some("RT-12"));
+        assert_eq!(
+            identifier_of("see https://linear.app/acme/issue/RT-12/slug now").as_deref(),
+            Some("RT-12")
+        );
+        let url = detect_links("see https://example.com/RT-12 now");
+        assert_eq!(url.len(), 1);
+        assert_eq!(issue_identifier(&url[0]), None, "a URL is no issue link");
     }
 
     /// A context of the teams `keys` in workspace `acme`, a key configured.

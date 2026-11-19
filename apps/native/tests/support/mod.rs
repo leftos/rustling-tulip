@@ -191,6 +191,35 @@ pub fn daemon_features() -> Vec<String> {
     ]
 }
 
+/// A fresh copy of Linear issue `identifier` titled `title`: In Progress,
+/// High, in project `Linear links`, fetched now.
+pub fn linear_issue(identifier: &str, title: &str) -> protocol::LinearIssue {
+    let now = chrono::Utc::now();
+    protocol::LinearIssue {
+        identifier: identifier.to_owned(),
+        title: title.to_owned(),
+        url: format!("https://linear.app/acme/issue/{identifier}"),
+        state: Some(protocol::LinearState {
+            name: "In Progress".to_owned(),
+            kind: protocol::LinearStateKind::Started,
+            color: "#f2c94c".to_owned(),
+        }),
+        priority: 2,
+        priority_label: "High".to_owned(),
+        project: Some("Linear links".to_owned()),
+        releases: vec!["vNext".to_owned()],
+        assignee: Some("Ada".to_owned()),
+        updated_at: Some(now),
+        fetched_at: now,
+        stale: false,
+    }
+}
+
+/// The daemon's `LinearIssues` carrying `issues`.
+pub fn linear_issues(issues: Vec<protocol::LinearIssue>) -> DaemonMessage {
+    DaemonMessage::LinearIssues { issues }
+}
+
 /// The fake daemon's `Welcome` on `protocol_version`, listing
 /// [`daemon_features`].
 pub fn welcome(protocol_version: u32) -> DaemonMessage {
@@ -4518,6 +4547,13 @@ impl<'a> Harness<'a> {
     /// its Linear issue links on screen.
     pub fn underlined_links(&mut self, pane: &str) -> Vec<String> {
         self.root(|root, cx| root.pane_underlined_links(pane, cx))
+    }
+
+    /// The lines of the Linear card `pane` shows, top to bottom; `None`
+    /// while it shows none.
+    pub fn linear_card(&mut self, pane: &str) -> Option<Vec<String>> {
+        self.cx.run_until_parked();
+        self.root(|root, cx| root.pane_linear_card(pane, cx))
     }
 
     pub fn keys(&mut self, keystrokes: &str) {

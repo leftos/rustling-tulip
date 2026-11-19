@@ -1170,6 +1170,9 @@ impl RootView {
                 name,
                 bytes,
             } => self.on_paste_image(slot_id, session_id, name, bytes, cx),
+            PaneEvent::AskLinearIssue { .. }
+            | PaneEvent::ShowLinearCard { .. }
+            | PaneEvent::HideLinearCard => self.on_card_event(slot_id, host, event, cx),
         }
     }
 

@@ -100,6 +100,8 @@ pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
 mod layout_picker;
+mod linear_card;
+mod linear_card_view;
 mod link_menu;
 mod link_menu_view;
 mod links;
@@ -316,7 +318,7 @@ use crate::tabs::{
 };
 use crate::target::HostKey;
 use crate::term::ShellCommand;
-use crate::term_view::ScrollbackReply;
+use crate::term_view::{PaneEvent, ScrollbackReply};
 use crate::themes_view::ThemesModal;
 use crate::ui_theme::{UiTheme, theme};
 use crate::undo::UndoShelf;
@@ -1269,6 +1271,12 @@ pub struct RootView {
     /// Each host's last Linear context, which its panes read issue links
     /// against; written only by [`Self::on_linear_message`].
     linear_contexts: HashMap<HostKey, links::IssueContext>,
+    /// Each host's Linear issues, key flag and requests in flight, which
+    /// the hover card reads; written by [`Self::on_linear_message`] and
+    /// [`Self::ask_linear_issue`].
+    linear_issues: linear_card::LinearCache,
+    /// The Linear card a pane shows: at most one at a time.
+    linear_card: Option<linear_card::CardAnchor>,
     /// When the pending layout save is due, if one is.
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
@@ -1924,6 +1932,8 @@ impl RootView {
             pending_appearance: appearance::InFlightAppearance::default(),
             seen_sessions: HashMap::new(),
             linear_contexts: HashMap::new(),
+            linear_issues: linear_card::LinearCache::default(),
+            linear_card: None,
             ui_save_deadline: None,
             ui_save_timer: None,
             auto_grid_timer: None,
@@ -3438,6 +3448,13 @@ impl RootView {
             .into_iter()
             .map(|link| link.text)
             .collect()
+    }
+
+    /// The lines of the Linear card pane `pane_id` shows, top to bottom;
+    /// `None` while it shows none.
+    #[must_use]
+    pub fn pane_linear_card(&self, pane_id: &str, cx: &App) -> Option<Vec<String>> {
+        self.panes.get(pane_id)?.view().read(cx).linear_card_lines()
     }
 
     /// Ctrl went down or up. Modifier changes reach only the focused
@@ -5427,20 +5444,126 @@ impl RootView {
     }
 
     /// `host`'s Linear context: kept for the panes that attach one of its
-    /// sessions later, and handed to each of its panes now.
+    /// sessions later, and handed to each of its panes now. Its issues fill
+    /// the hover card's cache; a `Welcome` ends its requests in flight.
     fn on_linear_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
-        let DaemonMessage::LinearContext {
-            team_keys,
-            workspace,
-            key_configured,
-        } = msg
+        match msg {
+            DaemonMessage::Welcome { .. } => self.linear_issues.reconnected(host),
+            DaemonMessage::LinearContext {
+                team_keys,
+                workspace,
+                key_configured,
+            } => {
+                let context =
+                    links::IssueContext::new(team_keys, workspace.as_deref(), *key_configured);
+                self.linear_contexts.insert(host.clone(), context.clone());
+                self.linear_issues.set_key_configured(host, *key_configured);
+                for view in self.pane_views_on(host) {
+                    view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
+                }
+                self.refresh_linear_card(host, cx);
+            }
+            DaemonMessage::LinearIssues { issues } => {
+                self.linear_issues.upsert(host, issues);
+                self.refresh_linear_card(host, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// A Linear card event of terminal `slot_id`, a pane of `host`: asks
+    /// for a hovered issue, or shows or hides the pane's card.
+    pub(crate) fn on_card_event(
+        &mut self,
+        slot_id: &str,
+        host: Option<HostKey>,
+        event: &PaneEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match (event, host) {
+            (PaneEvent::AskLinearIssue { identifier }, Some(host)) => {
+                self.ask_linear_issue(&host, identifier);
+            }
+            (
+                PaneEvent::ShowLinearCard {
+                    identifier,
+                    web_url,
+                },
+                Some(host),
+            ) => {
+                let anchor = linear_card::CardAnchor {
+                    host,
+                    pane_id: slot_id.to_owned(),
+                    identifier: identifier.clone(),
+                    web_url: web_url.clone(),
+                };
+                self.show_linear_card(anchor, cx);
+            }
+            (PaneEvent::HideLinearCard, _)
+                if self
+                    .linear_card
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.pane_id == slot_id) =>
+            {
+                self.linear_card = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// A pane of `host` hovered issue `identifier`: asks `host`'s daemon
+    /// for it when it lists `linear_links` and no request for it is in
+    /// flight. The daemon decides whether its copy is fresh.
+    fn ask_linear_issue(&mut self, host: &HostKey, identifier: &str) {
+        let supported = self
+            .conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_LINEAR_LINKS));
+        if supported && self.linear_issues.ask(host, identifier) {
+            self.send_to(
+                host,
+                ClientMessage::GetLinearIssues {
+                    identifiers: vec![identifier.to_owned()],
+                    request_id: None,
+                },
+            );
+        }
+    }
+
+    /// A pane shows the card `anchor` names: any other pane's card goes, so
+    /// one shows at a time, and the pane is told what the card shows.
+    fn show_linear_card(&mut self, anchor: linear_card::CardAnchor, cx: &mut Context<Self>) {
+        let other = self
+            .linear_card
+            .take()
+            .filter(|old| old.pane_id != anchor.pane_id)
+            .and_then(|old| self.panes.get(&old.pane_id))
+            .map(|slot| slot.view().clone());
+        if let Some(view) = other {
+            view.update(cx, term_view::TerminalPane::drop_linear_card);
+        }
+        let host = anchor.host.clone();
+        self.linear_card = Some(anchor);
+        self.refresh_linear_card(&host, cx);
+    }
+
+    /// Tells the pane showing a card of `host` what it shows now.
+    fn refresh_linear_card(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let Some(anchor) = self
+            .linear_card
+            .as_ref()
+            .filter(|anchor| anchor.host == *host)
         else {
             return;
         };
-        let context = links::IssueContext::new(team_keys, workspace.as_deref(), *key_configured);
-        self.linear_contexts.insert(host.clone(), context.clone());
-        for view in self.pane_views_on(host) {
-            view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
+        let card = self.linear_issues.card(
+            host,
+            &anchor.identifier,
+            &anchor.web_url,
+            chrono::Utc::now(),
+        );
+        if let Some(slot) = self.panes.get(&anchor.pane_id) {
+            let view = slot.view().clone();
+            view.update(cx, |pane, cx| pane.set_linear_card(card, cx));
         }
     }
 
@@ -6141,6 +6264,14 @@ impl RootView {
         self.sidebar.clear_host(host);
         self.seen_sessions.remove(host);
         self.linear_contexts.remove(host);
+        self.linear_issues.forget(host);
+        if self
+            .linear_card
+            .as_ref()
+            .is_some_and(|anchor| anchor.host == *host)
+        {
+            self.linear_card = None;
+        }
         self.remote_lists_in.remove(host);
         self.lists_since_welcome.remove(host);
         self.reset_dashboard_for_target(host);

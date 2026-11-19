@@ -13,6 +13,7 @@
 use crate::support;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{
@@ -87,6 +88,8 @@ fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
 
 const BOTH_GESTURES: &str = "pane-link-tip-p1=Ctrl+click to open · Ctrl+Shift+click for options";
 const OPEN_ONLY: &str = "pane-link-tip-p1=Ctrl+click to open";
+/// The foot line of the Linear card over pane `p1`.
+const CARD_FOOT: &str = "linear-card-foot-p1=Ctrl+click to open";
 
 #[gpui::test]
 fn plain_click_on_a_url_opens_nothing(cx: &mut TestAppContext) {
@@ -188,7 +191,11 @@ fn ctrl_click_on_an_identifier_opens_its_linear_page(cx: &mut TestAppContext) {
     h.click(on, Modifiers::none());
     assert_eq!(h.opened(), [], "a plain click opens nothing");
     h.hover(on, ctrl());
-    assert!(drawn(&mut h, OPEN_ONLY), "the tip names the open only");
+    assert!(
+        drawn(&mut h, CARD_FOOT),
+        "the card names the open at its foot"
+    );
+    assert!(!drawn(&mut h, OPEN_ONLY), "the card replaces the Ctrl tip");
     h.click(on, ctrl());
     assert!(!h.in_model("link-menu"), "an issue opens no menu");
     assert_eq!(
@@ -252,6 +259,269 @@ fn each_hosts_team_keys_apply_only_to_its_own_panes(cx: &mut TestAppContext) {
         ["OPS-2"],
         "the remote host's teams"
     );
+}
+
+/// `RT-12` on screen in pane `p1` of This PC, whose daemon has a key and
+/// the team `RT`.
+fn identifier_on_screen<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = attached(cx, dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    h.pty("s1", b"see RT-12 now");
+    h
+}
+
+/// Whether the card over `pane` holds the line `line`.
+fn card_says(h: &mut Harness<'_>, pane: &str, line: &str) -> bool {
+    h.linear_card(pane)
+        .is_some_and(|lines| lines.iter().any(|shown| shown == line))
+}
+
+/// The identifiers of every `GetLinearIssues` in `sent`.
+fn asked(sent: Vec<ClientMessage>) -> Vec<Vec<String>> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetLinearIssues { identifiers, .. } => Some(identifiers),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn resting_500_ms_on_an_identifier_shows_its_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifier_on_screen(cx, &dir);
+    h.send(support::linear_issues(vec![support::linear_issue(
+        "RT-12",
+        "Hover card",
+    )]));
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(499));
+    assert_eq!(h.linear_card("p1"), None, "499 ms is not a rest");
+    assert!(!drawn(&mut h, CARD_FOOT));
+    h.advance(Duration::from_millis(1));
+    assert!(
+        card_says(&mut h, "p1", "Hover card"),
+        "{:?}",
+        h.linear_card("p1")
+    );
+    assert!(card_says(&mut h, "p1", "Project: Linear links"));
+    assert!(drawn(&mut h, CARD_FOOT), "the card is drawn");
+}
+
+#[gpui::test]
+fn ctrl_shows_the_card_at_once_and_releasing_ctrl_hides_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifier_on_screen(cx, &dir);
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, ctrl());
+    assert!(h.linear_card("p1").is_some(), "Ctrl shows the card at once");
+    h.set_modifiers(Modifiers::none());
+    assert_eq!(h.linear_card("p1"), None, "releasing Ctrl hides it");
+    assert!(!drawn(&mut h, CARD_FOOT));
+}
+
+#[gpui::test]
+fn moving_off_the_identifier_and_the_card_hides_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifier_on_screen(cx, &dir);
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(500));
+    assert!(h.linear_card("p1").is_some());
+    let off = h.cell_center("p1", 0, 0);
+    h.hover(off, Modifiers::none());
+    assert_eq!(h.linear_card("p1"), None, "the pointer left both");
+    h.advance(Duration::from_millis(500));
+    assert_eq!(h.linear_card("p1"), None, "and no timer is left to show it");
+}
+
+#[gpui::test]
+fn moving_from_the_identifier_onto_the_card_keeps_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifier_on_screen(cx, &dir);
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(500));
+    let card = h.bounds("linear-card");
+    assert!(card.origin.x >= px(0.0), "the card is drawn");
+    h.hover(card.center(), Modifiers::none());
+    assert!(
+        h.linear_card("p1").is_some(),
+        "the card stays under the pointer"
+    );
+    let far = h.cell_center("p1", 70, 20);
+    h.hover(far, Modifiers::none());
+    assert_eq!(h.linear_card("p1"), None, "leaving the card hides it");
+}
+
+#[gpui::test]
+fn each_hover_entry_asks_once_and_only_a_host_with_linear_links(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1").build();
+    let features = [protocol::FEATURE_LINEAR_LINKS];
+    let mut h = support::remote_in_pane_with_features(cx, &dir, &json!({}), &["r1"], s1, &features);
+    h.send(linear(&["RT"], true));
+    h.pty("a1", b"see RT-12 now");
+    h.host(&saved_remote()).send(linear(&["RT"], true));
+    h.host(&saved_remote()).pty("s1", b"see RT-12 now");
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    let local = h.cell_center("p1", 5, 0);
+    h.hover(local, Modifiers::none());
+    assert_eq!(
+        asked(h.sent()),
+        Vec::<Vec<String>>::new(),
+        "This PC lists no linear_links"
+    );
+
+    let on = h.cell_center("p2", 5, 0);
+    let next = h.cell_center("p2", 6, 0);
+    let off = h.cell_center("p2", 0, 0);
+    h.hover(on, Modifiers::none());
+    h.hover(next, Modifiers::none());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        [vec!["RT-12".to_owned()]],
+        "one ask per entry"
+    );
+    h.hover(off, Modifiers::none());
+    h.hover(on, Modifiers::none());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        Vec::<Vec<String>>::new(),
+        "not again while the first is in flight"
+    );
+    h.host(&saved_remote())
+        .send(support::linear_issues(Vec::new()));
+    h.hover(off, Modifiers::none());
+    h.hover(on, Modifiers::none());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        [vec!["RT-12".to_owned()]],
+        "a reply ends the request, so the next entry asks again"
+    );
+    h.click(on, ctrl());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        Vec::<Vec<String>>::new(),
+        "a Ctrl+click asks nothing"
+    );
+}
+
+/// [`support::remote_in_pane_with_features`] with `linear_links`, `RT-12`
+/// on screen in the remote pane `p2` and the card shown there by Ctrl.
+fn remote_card<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let s1 = session("s1").build();
+    let features = [protocol::FEATURE_LINEAR_LINKS];
+    let mut h = support::remote_in_pane_with_features(cx, dir, &json!({}), &["r1"], s1, &features);
+    h.host(&saved_remote()).send(linear(&["RT"], true));
+    h.host(&saved_remote()).pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p2", 5, 0);
+    h.hover(on, ctrl());
+    h
+}
+
+#[gpui::test]
+fn the_card_says_loading_until_the_reply_fills_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_card(cx, &dir);
+    assert!(
+        card_says(&mut h, "p2", "Fetching from Linear"),
+        "{:?}",
+        h.linear_card("p2")
+    );
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Hover card",
+        )]));
+    assert!(
+        card_says(&mut h, "p2", "Hover card"),
+        "{:?}",
+        h.linear_card("p2")
+    );
+    assert!(!card_says(&mut h, "p2", "Fetching from Linear"));
+}
+
+#[gpui::test]
+fn an_empty_reply_says_linear_has_no_such_issue(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_card(cx, &dir);
+    h.host(&saved_remote())
+        .send(support::linear_issues(Vec::new()));
+    assert!(
+        card_says(&mut h, "p2", "Linear has no issue RT-12."),
+        "{:?}",
+        h.linear_card("p2")
+    );
+}
+
+#[gpui::test]
+fn a_stale_copy_says_linear_was_unreachable_and_how_old_it_is(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_card(cx, &dir);
+    let mut stale = support::linear_issue("RT-12", "Hover card");
+    stale.stale = true;
+    stale.fetched_at = chrono::Utc::now() - chrono::TimeDelta::minutes(25);
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![stale]));
+    assert!(card_says(&mut h, "p2", "Hover card"));
+    assert!(
+        card_says(&mut h, "p2", "Couldn't reach Linear · as of 25m ago"),
+        "{:?}",
+        h.linear_card("p2")
+    );
+}
+
+#[gpui::test]
+fn one_hosts_issues_never_show_on_another_hosts_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1").build();
+    let features = [protocol::FEATURE_LINEAR_LINKS];
+    let mut h = support::remote_in_pane_with_features(cx, &dir, &json!({}), &["r1"], s1, &features);
+    h.send(linear(&["RT"], true));
+    h.send(support::linear_issues(vec![support::linear_issue(
+        "RT-12",
+        "This PC's issue",
+    )]));
+    h.host(&saved_remote()).send(linear(&["RT"], true));
+    h.host(&saved_remote()).pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p2", 5, 0);
+    h.hover(on, ctrl());
+    assert!(
+        !card_says(&mut h, "p2", "This PC's issue"),
+        "{:?}",
+        h.linear_card("p2")
+    );
+    assert!(card_says(&mut h, "p2", "Fetching from Linear"));
+}
+
+#[gpui::test]
+fn no_key_offers_open_in_linear_which_opens_the_issue(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], false));
+    let url = "https://linear.app/acme/issue/RT-12/slug";
+    h.pty("s1", format!("see {url} now").as_bytes());
+    let on = h.cell_center("p1", 10, 0);
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(500));
+    assert!(
+        card_says(
+            &mut h,
+            "p1",
+            "Set LINEAR_API_KEY to see this issue's details."
+        ),
+        "{:?}",
+        h.linear_card("p1")
+    );
+    let open = h.bounds("linear-card-open");
+    assert!(open.origin.x >= px(0.0), "Open in Linear is drawn");
+    h.hover(open.center(), Modifiers::none());
+    h.click(open.center(), Modifiers::none());
+    assert_eq!(h.opened(), [Opened::Url(url.to_owned())]);
 }
 
 #[gpui::test]
