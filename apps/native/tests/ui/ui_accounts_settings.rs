@@ -1624,6 +1624,116 @@ fn login_controls_are_locked_on_a_remote_host(cx: &mut TestAppContext) {
     assert!(writes(&mut h).is_empty(), "Cancel login is locked too");
 }
 
+/// The accounts of the `settings-accounts-rows` shot: main in use with a
+/// model limit, an extra spend, a prepaid balance and the spend toggle on;
+/// ops with an extra spend; lab; spare out of rotation; client refused.
+fn shot_rows() -> Vec<AccountSnapshot> {
+    let extra = |used| protocol::AccountExtraUsage {
+        enabled: true,
+        user_disabled: false,
+        spend_limit_reached: false,
+        limit: None,
+        used: Some(used),
+        currency: Some("USD".to_owned()),
+        resets_at: None,
+    };
+    let prepaid = protocol::AccountPrepaid {
+        amount_minor: 102_003,
+        exponent: 2,
+        currency: Some("USD".to_owned()),
+        auto_reload: None,
+        fetched_at: Some(chrono::Utc::now()),
+    };
+    vec![
+        account(1, "main")
+            .active()
+            .model_limit("Fable", 37.0)
+            .extra_usage(extra(12.4))
+            .prepaid(prepaid)
+            .may_spend_credits(true)
+            .build(),
+        account(2, "ops").extra_usage(extra(1_284.5)).build(),
+        account(3, "lab").five_hour(86.0).seven_day(63.0).build(),
+        account(4, "spare").disabled().five_hour(3.0).build(),
+        account(5, "client")
+            .status(protocol::AccountUsageStatus::ReloginRequired)
+            .build(),
+    ]
+}
+
+#[gpui::test]
+fn every_rows_usage_column_stays_readable_at_1000_by_640(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(640.0)));
+    spend_page(&mut h, shot_rows());
+    for (n, name) in [(1, "main"), (2, "ops"), (3, "lab"), (4, "spare")] {
+        h.scroll_into_view("settings-content", &format!("settings-accounts-row-{n}"));
+        let line = h
+            .bounds(&format!("settings-accounts-name-{n}={name}"))
+            .size
+            .height;
+        let info = h.bounds(&format!("settings-accounts-row-{n}-info"));
+        assert!(
+            info.size.width >= px(320.0),
+            "row {n}'s usage column {info:?} keeps 320 px"
+        );
+        for slug in ["5h", "7d"] {
+            let reset = h.bounds(&format!("settings-accounts-row-{n}-reset-{slug}"));
+            assert!(reset.origin.x >= px(0.0), "row {n}'s {slug} reset is drawn");
+            assert!(
+                reset.size.height <= line * 1.5,
+                "row {n}'s {slug} reset text {reset:?} is one line ({line:?})"
+            );
+            assert!(
+                reset.size.width >= px(80.0),
+                "row {n}'s {slug} reset text {reset:?} keeps room to be read"
+            );
+        }
+    }
+}
+
+/// The refused sign-in's line on the Settings page.
+const RELOGIN_SETTINGS_LINE: &str = "Press Log in again and sign in with this account.";
+
+#[gpui::test]
+fn a_refused_row_offers_log_in_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut list = trio();
+    list.push(
+        account(4, "client")
+            .status(protocol::AccountUsageStatus::ReloginRequired)
+            .build(),
+    );
+    page(&mut h, list, None);
+    assert!(drawn(&mut h, "settings-accounts-relogin-4=Log in again"));
+    assert!(drawn(
+        &mut h,
+        &format!("settings-accounts-reason-4={RELOGIN_SETTINGS_LINE}")
+    ));
+    assert!(
+        !drawn(&mut h, "settings-accounts-relogin-2"),
+        "a healthy row offers no Log in again"
+    );
+    press(&mut h, "settings-accounts-relogin-4");
+    let sent = one_write(&mut h);
+    assert!(
+        matches!(sent, ClientMessage::StartAccountLogin { .. }),
+        "{sent:?}"
+    );
+    h.send(login_msg(
+        AccountLoginState::Started,
+        None,
+        Some(&request_id(&sent)),
+    ));
+    press(&mut h, "settings-accounts-relogin-4");
+    assert!(
+        writes(&mut h).is_empty(),
+        "Log in again waits for the running login"
+    );
+}
+
 /// The newest `ListAccounts` request id in `sent`.
 fn list_id_in(sent: Vec<ClientMessage>) -> Option<String> {
     sent.into_iter().rev().find_map(|msg| match msg {

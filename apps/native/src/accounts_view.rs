@@ -5,8 +5,8 @@
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, Pixels, Window, div, prelude::*, px,
-    relative,
+    AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, Pixels, StyledText, Window, div,
+    prelude::*, px, relative,
 };
 use protocol::{AutoSwitchState, ClientMessage, DaemonMessage, FEATURE_ACCOUNTS};
 
@@ -15,6 +15,7 @@ use crate::accounts::{
 };
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::driver_id::DriverId as _;
+use crate::ellipsis::truncating;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
 use crate::session_menu::popover_frame;
 use crate::target::HostKey;
@@ -622,7 +623,7 @@ impl RootView {
         let spend = [("extra", row.extra), ("prepaid", row.prepaid)]
             .into_iter()
             .filter_map(|(id, line)| {
-                line.map(|line| text_line_view(line, format!("accounts-{id}-{n}"), t, cx))
+                line.map(|line| text_line_view(line, &format!("accounts-{id}-{n}"), t, cx))
             })
             .collect::<Vec<_>>();
         let switch = row.switch.map(|button| {
@@ -758,7 +759,7 @@ const fn tone_color(tone: Tone, t: &UiTheme) -> u32 {
 /// rows' lines with it too.
 pub(crate) fn text_line_view(
     line: TextLine,
-    selector: String,
+    selector: &str,
     t: &UiTheme,
     cx: &mut Context<RootView>,
 ) -> Div {
@@ -782,8 +783,16 @@ pub(crate) fn text_line_view(
                 .flex_1()
                 .min_w_0()
                 .text_color(gpui::rgb(tone_color(line.tone, t)))
-                .child(tagged_text(selector, line.text)),
+                .child(line_text(selector, line.text)),
         )
+}
+
+/// A row's one line of text, tagged `selector=text`: it ends in `…` when
+/// its box is too narrow and never wraps. The Settings page's rows use it
+/// too.
+pub(crate) fn line_text(selector: &str, text: String) -> Div {
+    let tag = format!("{selector}={text}");
+    truncating(&tag, StyledText::new(text)).driver_id(move || tag)
 }
 
 /// A row's window line: its label, bar, percentage and reset text.
@@ -825,10 +834,7 @@ fn window_view(line: WindowLine, n: u32, t: &UiTheme, cx: &mut Context<RootView>
                 } else {
                     t.text_2
                 }))
-                .child(tagged_text(
-                    format!("accounts-reset-{slug}-{n}"),
-                    line.reset,
-                )),
+                .child(line_text(&format!("accounts-reset-{slug}-{n}"), line.reset)),
         )
 }
 
