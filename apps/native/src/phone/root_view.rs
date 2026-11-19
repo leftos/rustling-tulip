@@ -1,20 +1,21 @@
 //! [`PhoneRoot`], the phone's root view, and its push effect plumbing.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FontWeight, IntoElement, Pixels, Render, Stateful,
-    Subscription, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
+    Subscription, Task, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
 };
-use protocol::ClientMessage;
+use protocol::{ClientMessage, PathKind};
 
-use super::fetched::{Entry, Index};
+use super::browser::FolderEnd;
+use super::fetched::{self, Entry, Freshness, HostStat, Index};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
@@ -24,20 +25,40 @@ use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::quick_replies::{ReplyGroup, ReplySet};
 use super::session::SessionPage;
+use super::share::{LoggingShare, ShareSheet};
 use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
 };
 use super::sweep::{self, HostNow};
 use super::{PhoneLayout, content_padding, home, hosts_view};
-use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::connection::State;
 use crate::driver_id::DriverId as _;
+use crate::file_fetch::{self, FetchRequest};
+use crate::open::LinkAction;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
+use crate::{PhoneFetched, PhoneStatAnswer, RootView};
 
 /// The phone's index of kept copies, in the UI folder.
 const FETCHED_FILE: &str = "fetched.json";
+
+/// How long the host may take to answer whether a kept copy changed before
+/// the copy opens as possibly out of date.
+const KEPT_STAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A stat out to a host about a kept copy, until its answer, its timeout
+/// or its host's reset, whichever comes first.
+struct KeptStat {
+    /// The stat's id, as the host echoes it.
+    id: String,
+    /// The host asked.
+    host: HostKey,
+    /// The copy's entry when the stat went out.
+    entry: Entry,
+    /// The timeout's timer; dropping it cancels the timeout.
+    timeout: Task<()>,
+}
 
 /// The wall-clock time in milliseconds since the Unix epoch; 0 before it.
 fn now_ms() -> i64 {
@@ -80,6 +101,8 @@ pub struct PhoneRoot {
     pub(super) terminal_need: f32,
     /// The open terminal's redraws, watched for its cursor's row.
     pub(super) terminal_watch: Option<gpui::Subscription>,
+    /// The viewport size the open terminal was last laid out at.
+    pub(super) terminal_viewport: Option<gpui::Size<gpui::Pixels>>,
     /// The Terminal page's key bar, shared with the terminal's typed text
     /// so a sticky Ctrl reaches the soft keyboard's next character.
     pub(super) key_bar: Rc<RefCell<KeyBar>>,
@@ -132,6 +155,10 @@ pub struct PhoneRoot {
     /// Why the last tap could not open its session, until the next
     /// navigation or tap.
     pub(super) open_note: Option<String>,
+    /// Why the last tapped path did not open (`Not on {host}: {path}`), with
+    /// the session (host and id) whose page it was tapped on, until a tap
+    /// opens something or another page shows.
+    path_note: Option<((HostKey, String), String)>,
     /// The copies the phone keeps of fetched files.
     pub(super) fetched: Index,
     /// Where the index is saved; `None` keeps it in memory only.
@@ -139,6 +166,18 @@ pub struct PhoneRoot {
     /// Why the Storage page's last Clear left copies behind, until the page
     /// is left.
     pub(super) storage_error: Option<String>,
+    /// The viewer page, drawn over the page shown while open.
+    pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
+    /// The platform's share sheet, which the viewer's Share hands its copy.
+    share: Arc<dyn ShareSheet>,
+    /// The host browser, drawn over the page shown while open, under the
+    /// viewer.
+    pub(super) browser: Option<super::browser_view::BrowserPage>,
+    /// The stats out about kept copies, at most one per host and host path.
+    kept_stats: Vec<KeptStat>,
+    /// The modified time a changed copy's host answered with, by the copy's
+    /// host folder and host path, until its fetch again is saved.
+    refetching: HashMap<(String, String), Option<i64>>,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
     /// Redials the dropped saved hosts when the window comes back to the
@@ -156,19 +195,7 @@ impl PhoneRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let root_changed = cx.observe(&root, |this, root, cx| {
-            this.hosts.root_changed(root.read(cx));
-            this.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
-            this.try_open_pending(cx);
-            this.forget_gone_session(cx);
-            this.keep_draft_clear_confirm(cx);
-            this.take_replies(cx);
-            this.sync_sheet(cx);
-            this.push_changed(cx);
-            this.sweep_delivered(cx);
-            this.take_fetched(cx);
-            cx.notify();
-        });
+        let root_changed = cx.observe(&root, |this, root, cx| this.on_root_changed(&root, cx));
         if platform.supported() {
             Self::learn_token(&platform, cx);
         }
@@ -211,6 +238,7 @@ impl PhoneRoot {
             terminal_pan: super::terminal_fit::Pan::default(),
             terminal_need: 0.0,
             terminal_watch: None,
+            terminal_viewport: None,
             key_bar: Rc::new(RefCell::new(KeyBar::new())),
             terminal_quick: false,
             tray: super::tray::Tray::default(),
@@ -232,9 +260,15 @@ impl PhoneRoot {
             sweeps: 0,
             pending_open: None,
             open_note: None,
+            path_note: None,
             fetched,
             fetched_path,
             storage_error: None,
+            viewer: None,
+            share: Arc::new(LoggingShare),
+            browser: None,
+            kept_stats: Vec::new(),
+            refetching: HashMap::new(),
             _root_changed: root_changed,
             _visibility: visibility,
         };
@@ -242,26 +276,137 @@ impl PhoneRoot {
         this
     }
 
+    /// The root view changed: the phone takes what it queued and keeps its
+    /// pages in step with it, then redraws.
+    fn on_root_changed(&mut self, root: &Entity<RootView>, cx: &mut Context<Self>) {
+        self.hosts.root_changed(root.read(cx));
+        self.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
+        self.try_open_pending(cx);
+        self.forget_gone_session(cx);
+        self.keep_draft_clear_confirm(cx);
+        self.take_replies(cx);
+        self.sync_sheet(cx);
+        self.push_changed(cx);
+        self.sweep_delivered(cx);
+        self.take_kept_answers(cx);
+        self.take_browse_answers(cx);
+        self.take_folder_fetches(cx);
+        self.take_fetched(cx);
+        self.take_phone_opens(cx);
+        cx.notify();
+    }
+
     /// Records the root's queued saved fetches in the index, opened now, and
-    /// writes it once.
+    /// writes it once; the last one opens in the viewer page.
     fn take_fetched(&mut self, cx: &mut Context<Self>) {
         let saved = self.root.update(cx, |root, _| root.take_phone_fetched());
-        if saved.is_empty() {
+        let Some(last) = saved.last().cloned() else {
             return;
-        }
+        };
+        // A copy opening is a tap that opened something.
+        self.path_note = None;
         let now = now_ms();
         for saved in saved {
+            // A copy fetched again because it changed keeps the modified
+            // time its host answered with.
+            let modified = self
+                .refetching
+                .remove(&(saved.host.clone(), saved.host_path.clone()))
+                .flatten();
             self.fetched.upsert(Entry {
                 host: saved.host,
                 host_path: saved.host_path,
                 local_path: saved.local_path,
                 size: saved.size,
-                modified: None,
+                modified,
                 fetched_at: now,
                 last_opened: now,
+                folder: false,
             });
         }
         self.write_fetched();
+        self.open_viewer(last, cx);
+    }
+
+    /// Takes the phone's folder fetches that ended: a saved folder is kept
+    /// in the index as one folder, opened now, and the index written once;
+    /// the open browser's result line says how each ended. A folder opens
+    /// nothing.
+    fn take_folder_fetches(&mut self, cx: &mut Context<Self>) {
+        let ended = self
+            .root
+            .update(cx, |root, _| root.phone_browse.take_folders());
+        if ended.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let mut kept = false;
+        for end in ended {
+            match end {
+                FolderEnd::Saved { host, asked, saved } => {
+                    tracing::debug!(path = %saved.local_path, "phone: keeping a fetched folder");
+                    let size = saved.size;
+                    self.fetched.upsert(Entry {
+                        host: saved.host,
+                        host_path: saved.host_path,
+                        local_path: saved.local_path,
+                        size,
+                        modified: None,
+                        fetched_at: now,
+                        last_opened: now,
+                        folder: true,
+                    });
+                    kept = true;
+                    self.browser_fetch_ended(&host, &asked, Ok(size));
+                }
+                FolderEnd::Failed {
+                    host,
+                    asked,
+                    reason,
+                } => self.browser_fetch_ended(&host, &asked, Err(reason)),
+            }
+        }
+        if kept {
+            self.write_fetched();
+        }
+        cx.notify();
+    }
+
+    /// The open browser on `host` hears how the fetch of `asked` ended: its
+    /// size once saved, else why it failed.
+    fn browser_fetch_ended(&mut self, host: &HostKey, asked: &str, outcome: Result<u64, String>) {
+        let Some(page) = self
+            .browser
+            .as_mut()
+            .filter(|page| page.state.host() == host)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(size) => page.state.fetch_done(asked, size),
+            Err(reason) => page.state.fetch_failed(asked, reason),
+        }
+    }
+
+    /// Fetches `host`'s folder `host_path` whole by its host path into the
+    /// copies folder, where a file from that path would land.
+    ///
+    /// # Errors
+    /// Why the fetch is refused, as one line.
+    pub(super) fn fetch_host_folder(
+        &mut self,
+        host: HostKey,
+        host_path: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let request = FetchRequest {
+            open_when_done: false,
+            ..kept_request(host, host_path)
+        };
+        let started = self
+            .root
+            .update(cx, |root, cx| root.phone_fetch_folder(request, cx));
+        started.map(|id| tracing::debug!(%id, "phone: fetching a host folder"))
     }
 
     /// Deletes the copies unopened for the retention time and writes the
@@ -293,6 +438,187 @@ impl PhoneRoot {
         }
     }
 
+    /// Opens the kept copy of `host`'s `host_path` again. With no copy, the
+    /// file is fetched by its host path and opens once saved. With one, a
+    /// host that is open and serves host paths is asked whether its file
+    /// changed: the answer opens the copy or fetches it again, and no answer
+    /// within [`KEPT_STAT_TIMEOUT`] opens the copy as possibly out of date,
+    /// as a host that cannot be asked does at once. While a stat about the
+    /// same copy is out, nothing happens.
+    pub fn open_kept(&mut self, host: HostKey, host_path: String, cx: &mut Context<Self>) {
+        let Some(entry) = self.kept_entry(&host, &host_path, cx) else {
+            tracing::debug!(?host, %host_path, "phone: no kept copy; fetching the file");
+            self.fetch_kept(host, host_path, cx);
+            return;
+        };
+        if self
+            .kept_stats
+            .iter()
+            .any(|stat| stat.host == host && stat.entry.host_path == host_path)
+        {
+            tracing::debug!(?host, %host_path, "phone: a kept copy's stat is already out");
+            return;
+        }
+        let asks = {
+            let root = self.root.read(cx);
+            hosts_view::host_open(root, &host) && root.host_serves_paths(&host)
+        };
+        if !asks {
+            tracing::debug!(?host, %host_path, "phone: the host cannot be asked; opening the kept copy");
+            self.open_kept_copy(&host, &entry, true, cx);
+            return;
+        }
+        self.send_kept_stat(host, entry, cx);
+    }
+
+    /// The latest kept copy of `host`'s `host_path`, if any.
+    fn kept_entry(&self, host: &HostKey, host_path: &str, cx: &App) -> Option<Entry> {
+        let folder = self
+            .root
+            .read(cx)
+            .conn_of(host)
+            .and_then(|conn| file_fetch::host_folder(conn.target()))?;
+        // A fetched folder opens nothing, so it is never a file's copy.
+        self.fetched
+            .entries
+            .iter()
+            .filter(|entry| !entry.folder && entry.host == folder && entry.host_path == host_path)
+            .max_by_key(|entry| entry.fetched_at)
+            .cloned()
+    }
+
+    /// Asks `host` whether `entry`'s file changed, under a fresh id the
+    /// desktop's link stats never see, and starts its timeout.
+    fn send_kept_stat(&mut self, host: HostKey, entry: Entry, cx: &mut Context<Self>) {
+        let id = crate::new_request_id();
+        let request = kept_request(host.clone(), entry.host_path.clone());
+        tracing::debug!(%id, ?host, path = %entry.host_path, "phone: asking whether a kept copy changed");
+        self.root.update(cx, |root, _| {
+            root.phone_stats.register(&host, &id);
+            root.send_to(&host, file_fetch::stat_message(id.clone(), &request));
+        });
+        let timed_out = id.clone();
+        let timeout = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(KEPT_STAT_TIMEOUT).await;
+            // Fails only when the phone's root is gone.
+            this.update(cx, |this, cx| this.kept_stat_timed_out(&timed_out, cx))
+                .ok();
+        });
+        self.kept_stats.push(KeptStat {
+            id,
+            host,
+            entry,
+            timeout,
+        });
+    }
+
+    /// The stat `id` went unanswered for [`KEPT_STAT_TIMEOUT`]: its copy
+    /// opens as possibly out of date, and a later answer is dropped.
+    fn kept_stat_timed_out(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(at) = self.kept_stats.iter().position(|stat| stat.id == id) else {
+            return;
+        };
+        let stat = self.kept_stats.remove(at);
+        // This runs inside the timer's own task, which ends on its own.
+        stat.timeout.detach();
+        tracing::debug!(%id, "phone: a kept copy's stat went unanswered");
+        self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+    }
+
+    /// Takes the answers the root view kept for the phone's stats: each one
+    /// still waited for decides its copy; any other is dropped.
+    fn take_kept_answers(&mut self, cx: &mut Context<Self>) {
+        let answers = self.root.update(cx, |root, _| root.phone_stats.drain());
+        for (id, answer) in answers {
+            let Some(at) = self.kept_stats.iter().position(|stat| stat.id == id) else {
+                tracing::debug!(%id, "phone: dropping a stat answer no longer waited for");
+                continue;
+            };
+            // Dropping the stat cancels its timeout.
+            let stat = self.kept_stats.remove(at);
+            self.on_kept_answer(&stat, answer, cx);
+        }
+    }
+
+    /// `answer` came for `stat`: a file that has not changed opens its copy,
+    /// one that changed is fetched again, and anything else (another kind,
+    /// a host that started over) opens the copy as possibly out of date.
+    fn on_kept_answer(&mut self, stat: &KeptStat, answer: PhoneStatAnswer, cx: &mut Context<Self>) {
+        let PhoneStatAnswer::Stat {
+            kind: PathKind::File,
+            size,
+            modified,
+        } = answer
+        else {
+            tracing::debug!(id = %stat.id, ?answer, "phone: no file answer; opening the kept copy");
+            self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+            return;
+        };
+        match fetched::freshness(&stat.entry, Some(HostStat { size, modified })) {
+            Freshness::Fresh => self.open_kept_copy(&stat.host, &stat.entry, false, cx),
+            Freshness::Changed => {
+                tracing::debug!(id = %stat.id, "phone: the kept copy changed; fetching it again");
+                let key = (stat.entry.host.clone(), stat.entry.host_path.clone());
+                self.refetching.insert(key.clone(), modified);
+                if !self.fetch_kept(stat.host.clone(), stat.entry.host_path.clone(), cx) {
+                    // The tap still shows something: the old copy, marked.
+                    self.refetching.remove(&key);
+                    self.open_kept_copy(&stat.host, &stat.entry, true, cx);
+                }
+            }
+            Freshness::Unknown => self.open_kept_copy(&stat.host, &stat.entry, true, cx),
+        }
+    }
+
+    /// Fetches `host`'s `host_path` by its host path; the saved copy is
+    /// recorded and opens as every phone fetch does. Returns whether the
+    /// fetch started.
+    fn fetch_kept(&mut self, host: HostKey, host_path: String, cx: &mut Context<Self>) -> bool {
+        let request = kept_request(host, host_path);
+        let started = self.root.update(cx, |root, cx| {
+            root.try_start_fetch(request, None, false, cx)
+        });
+        match started {
+            Ok(_) => true,
+            Err(refusal) => {
+                tracing::info!(
+                    reason = refusal.message(),
+                    "phone: a kept copy's fetch was refused"
+                );
+                false
+            }
+        }
+    }
+
+    /// Opens `entry`'s copy from `host` in the viewer page, marked possibly
+    /// out of date when `stale`, and records it opened now.
+    fn open_kept_copy(
+        &mut self,
+        host: &HostKey,
+        entry: &Entry,
+        stale: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let host_label = self.root.read(cx).host_label_of(host);
+        self.fetched
+            .touch_opened(&entry.host, &entry.local_path, now_ms());
+        self.write_fetched();
+        self.open_viewer(
+            PhoneFetched {
+                host: entry.host.clone(),
+                host_path: entry.host_path.clone(),
+                local_path: entry.local_path.clone(),
+                size: entry.size,
+                host_label,
+            },
+            cx,
+        );
+        if let Some(viewer) = self.viewer.as_mut() {
+            viewer.stale = stale;
+        }
+        cx.notify();
+    }
+
     /// A host that connects while the hosts screen's add form is open would
     /// take the form off screen with that screen: Settings' Hosts page shows
     /// it in its place, with the text typed so far and its focus.
@@ -320,6 +646,27 @@ impl PhoneRoot {
         cx.notify();
     }
 
+    /// The same root sharing through `share`; it shares through a sheet that
+    /// only logs until then.
+    #[must_use]
+    pub fn with_share(mut self, share: Arc<dyn ShareSheet>) -> Self {
+        self.share = share;
+        self
+    }
+
+    /// Shares through `share` from now on.
+    pub fn set_share(&mut self, share: Arc<dyn ShareSheet>) {
+        self.share = share;
+    }
+
+    /// Share on the viewer page: hands the open copy, as it is, to the share
+    /// sheet; nothing while the page is closed.
+    pub(super) fn share_viewer(&self) {
+        if let Some(viewer) = &self.viewer {
+            self.share.present(&viewer.path);
+        }
+    }
+
     /// The root view the phone reads and drives.
     #[must_use]
     pub fn root(&self) -> &Entity<RootView> {
@@ -343,6 +690,48 @@ impl PhoneRoot {
     #[must_use]
     pub fn open_note(&self) -> Option<&str> {
         self.open_note.as_deref()
+    }
+
+    /// Why the last path tapped in the session's chat or terminal did not
+    /// open, while the session page says so.
+    #[must_use]
+    pub fn path_note(&self) -> Option<&str> {
+        self.path_note
+            .as_ref()
+            .filter(|(session, _)| self.shown.as_ref() == Some(session))
+            .map(|(_, note)| note.as_str())
+    }
+
+    /// What the root's tapped paths opened, each acted on only while the
+    /// page of the session it was tapped in shows: a folder opens the
+    /// browser at it, and a path not on its host leaves that page's line.
+    fn take_phone_opens(&mut self, cx: &mut Context<Self>) {
+        let opens = self.root.update(cx, |root, _| root.take_phone_opens());
+        for open in opens {
+            let (crate::PhoneOpen::Folder { host, session, .. }
+            | crate::PhoneOpen::Missing { host, session, .. }) = &open;
+            let Some(shown) = self
+                .shown
+                .clone()
+                .filter(|(shown_host, id)| shown_host == host && session.as_ref() == Some(id))
+            else {
+                tracing::debug!(
+                    ?session,
+                    "phone: a tapped path's session is not shown; dropped"
+                );
+                continue;
+            };
+            match open {
+                crate::PhoneOpen::Folder { host, path, .. } => {
+                    self.path_note = None;
+                    self.open_browser(host, path, cx);
+                }
+                crate::PhoneOpen::Missing { note, .. } => {
+                    self.path_note = Some((shown, note));
+                    cx.notify();
+                }
+            }
+        }
     }
 
     /// A tap on a notification for its user info's session: remembered until
@@ -389,8 +778,10 @@ impl PhoneRoot {
                     "phone: a tap's session could not be opened"
                 );
                 self.pending_open = None;
-                // A session page or Settings hides the line, so the note
-                // returns Home.
+                // The viewer, a session page or Settings hides the line, so
+                // the note returns Home.
+                self.close_viewer(cx);
+                self.close_browser(cx);
                 if self.shown.is_some() {
                     self.close_session(cx);
                 }
@@ -482,10 +873,13 @@ impl PhoneRoot {
     /// Shows `host`'s session `session_id` in place of Home, on its chat
     /// when the chat is mirrored, else on its terminal, and loads its chat
     /// while it can show. It opens no tab and lays out no pane, and closes
-    /// Settings.
+    /// the viewer, the browser and Settings.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
+        self.path_note = None;
+        self.close_viewer(cx);
+        self.close_browser(cx);
         self.settings = None;
         self.keep_reply_editor();
         self.keep_key_editor();
@@ -746,6 +1140,7 @@ impl PhoneRoot {
     /// Back from the shown session to Home; its chat unloads.
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
+        self.path_note = None;
         self.shown = None;
         self.page = None;
         self.draft_clear_asking = None;
@@ -771,6 +1166,7 @@ impl PhoneRoot {
         if gone {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
+            self.path_note = None;
             self.page = None;
             self.composer_dock = super::composer::Dock::None;
             self.prompt_sheet = SheetState::default();
@@ -1024,6 +1420,23 @@ impl PhoneRoot {
     }
 }
 
+/// The fetch of `host`'s file at `host_path` by its host path, opening in
+/// the viewer once saved.
+fn kept_request(host: HostKey, host_path: String) -> FetchRequest {
+    FetchRequest {
+        host,
+        repo_id: String::new(),
+        repo_name: String::new(),
+        worktree_path: None,
+        rel_path: host_path,
+        host_path: true,
+        line: None,
+        column: None,
+        open_when_done: true,
+        action: LinkAction::Viewer,
+    }
+}
+
 /// The saved hosts whose connection is open, in saved order.
 fn open_saved_hosts(root: &RootView) -> Vec<HostKey> {
     root.sidebar
@@ -1214,7 +1627,7 @@ impl PhoneRoot {
     }
 
     /// A full-width sheet row of `kind`, at least a touch target tall.
-    fn sheet_button(id: &str, kind: ButtonKind, cx: &Context<Self>) -> Stateful<Div> {
+    pub(super) fn sheet_button(id: &str, kind: ButtonKind, cx: &Context<Self>) -> Stateful<Div> {
         phone_button(id, kind, cx).w_full().min_h(px(TOUCH_TARGET))
     }
 }
@@ -1264,7 +1677,12 @@ impl Render for PhoneRoot {
             f32::from(insets.ime.bottom),
         );
         self.sync_terminal(keyboard_up, hidden, window, cx);
-        let body = if let Some(page) = self.session_page(keyboard_up, cx) {
+        self.browser_next_page(cx);
+        let body = if let Some(page) = self.viewer_page(cx) {
+            page
+        } else if let Some(page) = self.browser_page(cx) {
+            page
+        } else if let Some(page) = self.session_page(keyboard_up, cx) {
             page
         } else if let Some(page) = self.settings_page(window, cx) {
             page
@@ -1276,21 +1694,28 @@ impl Render for PhoneRoot {
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
-        // The sheet is Home's: no session page, Settings or hosts screen
-        // under it.
-        let over_home = self.shown.is_none()
+        // The sheet is Home's: no viewer, browser, session page, Settings or
+        // hosts screen under it.
+        let over_home = self.viewer.is_none()
+            && self.browser.is_none()
+            && self.shown.is_none()
             && self.settings.is_none()
             && hosts_view::any_host_open(self.root.read(cx));
         let sheet = over_home
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten();
+        // The browser's folder sheet, while the browser is the page on top.
+        let browser_sheet = self
+            .viewer
+            .is_none()
+            .then(|| self.browser_sheet_layer(padding.bottom, cx))
+            .flatten();
         self.sync_prompt_sheet(cx);
         let screen_height = window.viewport_size().height;
-        let prompt_sheet = self
-            .shown
-            .is_some()
-            .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
-            .flatten();
+        let prompt_sheet =
+            (self.viewer.is_none() && self.browser.is_none() && self.shown.is_some())
+                .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
+                .flatten();
         let padded = || {
             div()
                 .pt(padding.top)
@@ -1298,15 +1723,18 @@ impl Render for PhoneRoot {
                 .pb(padding.bottom)
                 .pl(padding.left)
         };
-        // The whole window takes a session page's or Settings' back
-        // gesture, so a swipe that starts in the safe area's bands goes
-        // back too.
-        let goes_back = self.shown.is_some() || self.settings.is_some();
+        // The whole window takes the viewer's, the browser's, a session
+        // page's or Settings' back gesture, so a swipe that starts in the
+        // safe area's bands goes back too.
+        let goes_back = self.viewer.is_some()
+            || self.browser.is_some()
+            || self.shown.is_some()
+            || self.settings.is_some();
         div()
             .relative()
             .size_full()
             .when(goes_back, |root| {
-                root.on_back_gesture(cx.listener(Self::screen_back_gesture))
+                root.on_back_gesture(cx.listener(Self::browser_back_gesture))
             })
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
@@ -1316,6 +1744,7 @@ impl Render for PhoneRoot {
             .child(padded().size_full().child(body))
             .children(self.copied_chip_layer(padding.top, cx))
             .children(sheet)
+            .children(browser_sheet)
             .children(prompt_sheet)
             .children(pairing.map(|layer| {
                 padded()

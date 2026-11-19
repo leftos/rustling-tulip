@@ -412,6 +412,14 @@ impl PhoneRoot {
                 .flex()
                 .flex_col()
                 .child(Self::session_header_row(&header, page, &t, cx))
+                .children(self.path_note().map(str::to_owned).map(|note| {
+                    div()
+                        .driver_id(|| "phone-path-note".to_owned())
+                        .px(px(16.0))
+                        .py(px(6.0))
+                        .text_color(gpui::rgb(t.muted))
+                        .child(note)
+                }))
                 .child(body)
                 .children(show_prompt),
         )
@@ -441,6 +449,7 @@ impl PhoneRoot {
         } else {
             None
         };
+        let strip = self.completion_strip(session_id, cx);
         let t = theme(cx);
         let id = session_id.to_owned();
         let field = field_frame(false, Layer::Base, &t)
@@ -486,6 +495,7 @@ impl PhoneRoot {
                 .children(dock)
                 .children(note)
                 .children(chip)
+                .children(strip)
                 .child(
                     div()
                         .flex()
@@ -647,6 +657,44 @@ impl PhoneRoot {
                 .child(send.flex_1())
                 .child(pull.flex_1()),
         )
+    }
+
+    /// The completion strip above the composer's field
+    /// (`phone-completion-strip`): the session's matching commands and files
+    /// as one scrolling row of chips (`phone-completion-{i}`), each a tap
+    /// that inserts its pick and leaves the keyboard as it is. None while
+    /// nothing matches.
+    fn completion_strip(&self, session_id: &str, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let chips = self.root.read(cx).chat_completion_chips(session_id)?;
+        let id = session_id.to_owned();
+        let mut strip = div()
+            .id("phone-completion-strip")
+            .driver_id(|| "phone-completion-strip".to_owned())
+            .flex()
+            .gap(px(COMPOSER_GAP))
+            .min_w_0()
+            .overflow_x_scroll();
+        for (index, chip) in chips.into_iter().enumerate() {
+            strip = strip.child(
+                phone_button(
+                    &format!("phone-completion-{index}"),
+                    ButtonKind::Outlined,
+                    cx,
+                )
+                .min_h(px(TOUCH_TARGET))
+                .flex_none()
+                .whitespace_nowrap()
+                .child(chip)
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.root
+                            .update(cx, |root, cx| root.tap_completion(&id, index, cx));
+                    }
+                })),
+            );
+        }
+        Some(strip)
     }
 
     /// An outlined composer action tagged `selector` reading `label`, a

@@ -1186,9 +1186,26 @@ pub struct PendingStat {
     readings: Vec<FetchRequest>,
     /// The index in `readings` of the one the host is asked about now.
     at: usize,
+    /// The phone's tap the link came from; `None` on the desktop.
+    tap: Option<PhoneTap>,
+}
+
+/// A path tapped on the phone, carried with its own fetch through the ask
+/// for its session's folders and every stat of its readings: the session
+/// whose page it was tapped on, and the path as tapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneTap {
+    pub session: Option<String>,
+    pub path: String,
 }
 
 impl PendingStat {
+    /// The phone's tap the link came from; `None` on the desktop.
+    #[must_use]
+    pub fn tap(&self) -> Option<&PhoneTap> {
+        self.tap.as_ref()
+    }
+
     /// The host the link's pane is on.
     #[must_use]
     pub fn host(&self) -> &HostKey {
@@ -1231,6 +1248,8 @@ pub struct PendingAsk {
     pub(crate) own_roots: Vec<Root>,
     /// How the saved copy opens, as the link's click asked.
     pub(crate) action: LinkAction,
+    /// The phone's tap the link came from; `None` on the desktop.
+    pub(crate) tap: Option<PhoneTap>,
 }
 
 /// What a fetch's done toast offers once the fetch has ended.
@@ -1335,9 +1354,17 @@ impl FetchRegistry {
                 host,
                 readings,
                 at: 0,
+                tap: None,
             },
         );
         Some((id, reading))
+    }
+
+    /// Ties the stat `id` to the phone's `tap` it came from.
+    pub fn tap_stat(&mut self, id: &str, tap: Option<PhoneTap>) {
+        if let Some(stat) = self.stats.get_mut(id) {
+            stat.tap = tap;
+        }
     }
 
     /// Records a link's ask `ask` under a new id and returns it.

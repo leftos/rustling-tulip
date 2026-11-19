@@ -311,6 +311,9 @@ impl ChatMirror {
             // unloads. The strip follows the reply, to this loader only.
             let _ = out_tx.send(reply);
             let _ = out_tx.send(mirror.work_shown.clone());
+            if let Some(model) = mirror.model_on_load(kind, session_id) {
+                let _ = out_tx.send(model);
+            }
         }
         drop(grid);
         // The record was read before the lock: a conversation change or a
@@ -486,6 +489,9 @@ impl ChatMirror {
         mirror.chat = ChatState::starting_with(head, path.is_some());
         mirror.pending.drop_all();
         mirror.summary_sent.clear();
+        // The new conversation names its model at its first reply.
+        mirror.model = None;
+        mirror.update_model(session_id);
         if let Some(writer) = mirror.writer.as_mut() {
             writer.clear();
         }
@@ -548,6 +554,7 @@ impl ChatMirror {
                     mirror.reset(session_id);
                 }
                 mirror.update_work(session_id);
+                mirror.update_model(session_id);
             }
         }
     }
@@ -1250,6 +1257,11 @@ struct SessionMirror {
     screen_work: Option<ScreenWork>,
     /// The `ChatWork` the loaders were last sent.
     work_shown: DaemonMessage,
+    /// The model the transcript's newest main-thread reply names; none
+    /// since the last conversation switch until a reply names one.
+    model: Option<String>,
+    /// The model the chat loaders were last sent in a `ChatModel`.
+    model_shown: Option<String>,
     /// The requests for the stretch lines and their answers, from the first
     /// summary load with a summarizer set.
     writer: Option<SummaryWriter>,
@@ -1289,6 +1301,8 @@ impl SessionMirror {
                 shells: Vec::new(),
                 wakeup_at: None,
             },
+            model: None,
+            model_shown: None,
             writer: None,
         }
     }
@@ -1303,6 +1317,10 @@ impl SessionMirror {
         facts: &TranscriptLineFacts,
     ) {
         self.ended_tasks.extend(facts.ended_tasks.iter().cloned());
+        // Kept while the first read catches up too; sent once it ends.
+        if let Some(model) = &facts.model {
+            self.model = Some(model.clone());
+        }
         let mut change = self.chat.apply_line(plugin, line, facts);
         // A line applied while the first read catches up is an old one,
         // which lands no pending entry.
@@ -1320,6 +1338,38 @@ impl SessionMirror {
         }
         if !facts.ended_tasks.is_empty() {
             self.update_work(session_id);
+        }
+        if facts.model.is_some() {
+            self.update_model(session_id);
+        }
+    }
+
+    /// Send the model to every chat loader when it changed since they were
+    /// last sent it.
+    fn update_model(&mut self, session_id: &str) {
+        if self.model != self.model_shown {
+            self.model_shown.clone_from(&self.model);
+            self.tell(&self.model_message(session_id));
+        }
+    }
+
+    /// The `ChatModel` a new loader of `kind` is sent after its reply and
+    /// the strip: a chat loader's only, once a model was shown.
+    fn model_on_load(&self, kind: LoadKind, session_id: &str) -> Option<DaemonMessage> {
+        (kind == LoadKind::Chat && self.model_shown.is_some())
+            .then(|| self.model_message(session_id))
+    }
+
+    /// The `ChatModel` of the model the chat loaders were last sent, its
+    /// label as the session's agent formats it.
+    fn model_message(&self, session_id: &str) -> DaemonMessage {
+        DaemonMessage::ChatModel {
+            session_id: session_id.to_owned(),
+            model: self.model_shown.clone(),
+            label: self
+                .model_shown
+                .as_deref()
+                .map(|model| self.plugin.model_label(model)),
         }
     }
 

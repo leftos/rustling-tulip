@@ -1,6 +1,7 @@
 //! The Settings › Accounts page: the saved accounts of the host Settings
 //! shows (`settings_host`), one row each with Switch, the alias field, Up
-//! and Down and Remove, then Add current login, Log in a new account and
+//! and Down and Remove (a refused sign-in's row with Log in again first),
+//! then Add current login, Log in a new account and
 //! its Cancel, the running login's status line, and the auto-switch block.
 //! The alias fields, Up and Down and the auto-switch block's values wait
 //! for OK or Apply, which sends them all at once (each with its own request
@@ -25,7 +26,7 @@ use protocol::{
 use crate::accounts::{
     self, AliasChange, Level, Removal, Row, RowActions, SWITCH_FIRST, Tag, WriteAction,
 };
-use crate::accounts_view::text_line_view;
+use crate::accounts_view::{line_text, text_line_view};
 use crate::buttons::{Layer, field_frame};
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_text_size, ui_weight, ui_weight_shift};
@@ -53,6 +54,14 @@ const CANCEL_LOGIN_LABEL: &str = "Cancel login";
 const UP_LABEL: &str = "Up";
 const DOWN_LABEL: &str = "Down";
 const REMOVE_LABEL: &str = "Remove";
+/// A refused sign-in's row button, which starts a login.
+const RELOGIN_LABEL: &str = "Log in again";
+/// The narrowest a row's usage column gets, in px: its controls give way
+/// first.
+const INFO_MIN_WIDTH: f32 = 320.0;
+/// The narrowest a row bar gets, in px, as it gives its room to the reset
+/// text in a narrow usage column.
+const ROW_BAR_MIN_WIDTH: f32 = 60.0;
 /// A row's checkbox allowing the auto-switch to spend its prepaid credits,
 /// and its tooltip while it is live.
 const SPEND_CREDITS_LABEL: &str = "May spend credits";
@@ -74,6 +83,8 @@ const DIM_ROW: f32 = 0.6;
 /// A control of the Accounts page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AccountsControl {
+    /// A refused sign-in's Log in again button.
+    Relogin(u32),
     Switch(u32),
     Alias(u32),
     Up(u32),
@@ -101,6 +112,7 @@ impl AccountsControl {
     /// account's number.
     pub(crate) fn selector_text(self) -> String {
         let part = match self {
+            Self::Relogin(n) => format!("relogin-{n}"),
             Self::Switch(n) => format!("switch-{n}"),
             Self::Alias(n) => format!("alias-{n}"),
             Self::Up(n) => format!("up-{n}"),
@@ -137,7 +149,8 @@ impl AccountsControl {
     const fn admin(self) -> bool {
         matches!(
             self,
-            Self::Alias(_)
+            Self::Relogin(_)
+                | Self::Alias(_)
                 | Self::Up(_)
                 | Self::Down(_)
                 | Self::Remove(_)
@@ -698,27 +711,17 @@ impl RootView {
         let now = Utc::now();
         let admin = !writing && !locked;
         let spend = self.accounts_spend_offered();
+        let page = Page {
+            writing,
+            locked,
+            spend,
+            focused: None,
+        };
         let mut controls: Vec<(AccountsControl, bool)> = Vec::new();
         for (index, account) in list.iter().enumerate() {
             let row = accounts::row(account, switching, writing, now, &Utc);
             let actions = accounts::row_actions(&row, index, list.len());
-            let n = account.number;
-            if let Some(switch) = row.switch.as_ref().filter(|_| actions.switch) {
-                controls.push((AccountsControl::Switch(n), switch.enabled));
-            }
-            controls.push((AccountsControl::Alias(n), !locked));
-            if actions.up {
-                controls.push((AccountsControl::Up(n), admin));
-            }
-            if actions.down {
-                controls.push((AccountsControl::Down(n), admin));
-            }
-            if actions.removal == Removal::Remove {
-                controls.push((AccountsControl::Remove(n), admin));
-            }
-            if spend && row.spend_credits.is_some() {
-                controls.push((AccountsControl::SpendCredits(n), admin));
-            }
+            controls.extend(row_control_list(&row, actions, page, running));
         }
         controls.push((AccountsControl::AddLogin, admin));
         controls.push((AccountsControl::LogIn, admin && !running));
@@ -799,7 +802,9 @@ impl RootView {
                     cx,
                 );
             }
-            AccountsControl::LogIn => {
+            // A refused row's Log in again starts the same login: the
+            // daemon writes the fresh sign-in into the account with its email.
+            AccountsControl::LogIn | AccountsControl::Relogin(_) => {
                 let sent = self.send_account_write(
                     &host,
                     WriteAction::LogIn,
@@ -1171,61 +1176,13 @@ impl RootView {
         content
     }
 
-    /// One account's row: its name line, reason and window lines, then its
-    /// alias field and buttons.
+    /// One account's row: its usage column, then its controls. The controls
+    /// give way first: the usage column keeps [`INFO_MIN_WIDTH`] and the
+    /// buttons wrap onto another line instead.
     fn page_row(&self, row: &Row, actions: RowActions, page: Page, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let n = row.number;
-        let name_line = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_w_0()
-            .child(
-                div()
-                    .flex_none()
-                    .font_weight(ui_weight(cx, FontWeight::BOLD))
-                    .text_color(gpui::rgb(t.text))
-                    .child(tagged_text(
-                        format!("settings-accounts-name-{n}"),
-                        row.name.clone(),
-                    )),
-            )
-            .children(row.detail.clone().map(|detail| {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_color(gpui::rgb(t.subtle))
-                    .child(tagged_text(format!("settings-accounts-detail-{n}"), detail))
-            }))
-            .children(row.tag.map(|tag| tag_chip(tag, n, &t, cx)));
-        let reason = row.reason.map(|reason| {
-            div()
-                .text_color(gpui::rgb(t.text_2))
-                .child(tagged_text(format!("settings-accounts-reason-{n}"), reason))
-        });
-        let windows = row
-            .windows
-            .iter()
-            .map(|line| window_line(line, n, &t, cx))
-            .collect::<Vec<_>>();
-        let spend = [("extra", &row.extra), ("prepaid", &row.prepaid)]
-            .into_iter()
-            .filter_map(|(id, line)| {
-                line.clone()
-                    .map(|line| text_line_view(line, format!("settings-accounts-{id}-{n}"), &t, cx))
-            })
-            .collect::<Vec<_>>();
-        let info = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(name_line)
-            .children(reason)
-            .children(windows)
-            .children(spend);
+        let info = row_info(row, cx);
         let controls = self.row_controls(row, actions, page, cx);
         div()
             .driver_id(move || format!("settings-accounts-row-{n}"))
@@ -1240,8 +1197,9 @@ impl RootView {
             .child(controls)
     }
 
-    /// A row's alias field, Switch, Up, Down and Remove, or the text that
-    /// stands in Remove's place on the account in use.
+    /// A row's buttons over its May spend credits checkbox, right-aligned.
+    /// The column shrinks before the usage column does, and its buttons
+    /// wrap onto a second line when the row is too narrow for them.
     fn row_controls(
         &self,
         row: &Row,
@@ -1249,9 +1207,33 @@ impl RootView {
         page: Page,
         cx: &mut Context<Self>,
     ) -> Div {
-        let t = theme(cx);
+        let buttons = self.row_buttons(row, actions, page, cx);
+        // The checkbox sits under the buttons, so the row keeps the width
+        // its info column needs.
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_w_0()
+            .items_end()
+            .gap(px(4.0))
+            .child(buttons)
+            .children(Self::spend_toggle(row, page, cx))
+    }
+
+    /// A row's Log in again (a refused sign-in only), alias field, Switch,
+    /// Up, Down and Remove, or the text that stands in Remove's place on
+    /// the account in use; Log in again waits while a login runs.
+    fn row_buttons(
+        &self,
+        row: &Row,
+        actions: RowActions,
+        page: Page,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let n = row.number;
-        let admin = !page.writing && !page.locked;
+        let running = self.accounts.login_running(&self.settings_host);
+        let relogin = row.relogin().then(|| relogin_button(n, page, !running, cx));
         let alias = self.alias_view(n, page, cx);
         let switch = row
             .switch
@@ -1266,69 +1248,26 @@ impl RootView {
                     cx,
                 )
             });
-        let up = actions.up.then(|| {
-            locked_tip(
-                settings_button(
-                    AccountsControl::Up(n).control(),
-                    UP_LABEL,
-                    admin,
-                    page.focused,
-                    cx,
-                ),
-                page.locked,
-            )
-        });
-        let down = actions.down.then(|| {
-            locked_tip(
-                settings_button(
-                    AccountsControl::Down(n).control(),
-                    DOWN_LABEL,
-                    admin,
-                    page.focused,
-                    cx,
-                ),
-                page.locked,
-            )
-        });
-        let removal = match actions.removal {
-            Removal::Remove => locked_tip(
-                settings_button(
-                    AccountsControl::Remove(n).control(),
-                    REMOVE_LABEL,
-                    admin,
-                    page.focused,
-                    cx,
-                ),
-                page.locked,
-            )
-            .into_any_element(),
-            Removal::SwitchFirst => div()
-                .text_color(gpui::rgb(t.subtle))
-                .child(tagged_text(
-                    format!("settings-accounts-switch-first-{n}"),
-                    SWITCH_FIRST,
-                ))
-                .into_any_element(),
-        };
-        let buttons = div()
+        let up = actions
+            .up
+            .then(|| admin_button(AccountsControl::Up(n), UP_LABEL, page, cx));
+        let down = actions
+            .down
+            .then(|| admin_button(AccountsControl::Down(n), DOWN_LABEL, page, cx));
+        let removal = removal_view(actions.removal, n, page, cx);
+        div()
             .flex()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .gap(px(6.0))
+            .max_w_full()
+            .children(relogin)
             .child(alias)
             .children(switch)
             .children(up)
             .children(down)
-            .child(removal);
-        // The checkbox sits under the buttons, so the row keeps the width
-        // its info column needs.
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .items_end()
-            .gap(px(4.0))
-            .child(buttons)
-            .children(Self::spend_toggle(row, page, cx))
+            .child(removal)
     }
 
     /// A row's May spend credits checkbox, while the host lists the feature
@@ -1612,7 +1551,8 @@ fn auto_hold(
                 .rate_window_minutes
                 .map(|at| HostPending::AutoRule(AutoRule::Window(at))),
         )),
-        AccountsControl::Switch(_)
+        AccountsControl::Relogin(_)
+        | AccountsControl::Switch(_)
         | AccountsControl::Alias(_)
         | AccountsControl::Up(_)
         | AccountsControl::Down(_)
@@ -1719,6 +1659,159 @@ const fn pct_color(level: Level, t: &UiTheme) -> u32 {
     }
 }
 
+/// One row's controls in drawing order, each with whether it takes input
+/// now; `running` says a login runs, which holds Log in again.
+fn row_control_list(
+    row: &Row,
+    actions: RowActions,
+    page: Page,
+    running: bool,
+) -> Vec<(AccountsControl, bool)> {
+    let n = row.number;
+    let admin = !page.writing && !page.locked;
+    let relogin = (
+        row.relogin(),
+        AccountsControl::Relogin(n),
+        admin && !running,
+    );
+    let switch = row
+        .switch
+        .as_ref()
+        .filter(|_| actions.switch)
+        .map(|switch| (true, AccountsControl::Switch(n), switch.enabled));
+    let rest = [
+        (true, AccountsControl::Alias(n), !page.locked),
+        (actions.up, AccountsControl::Up(n), admin),
+        (actions.down, AccountsControl::Down(n), admin),
+        (
+            actions.removal == Removal::Remove,
+            AccountsControl::Remove(n),
+            admin,
+        ),
+        (
+            page.spend && row.spend_credits.is_some(),
+            AccountsControl::SpendCredits(n),
+            admin,
+        ),
+    ];
+    std::iter::once(relogin)
+        .chain(switch)
+        .chain(rest)
+        .filter(|(shown, _, _)| *shown)
+        .map(|(_, control, live)| (control, live))
+        .collect()
+}
+
+/// A row's usage column: its name line, the line saying why it needs
+/// attention (a refused sign-in's says to press Log in again), its window
+/// lines and its spend lines, never narrower than [`INFO_MIN_WIDTH`].
+fn row_info(row: &Row, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let n = row.number;
+    let reason = row.settings_reason().map(|reason| {
+        div()
+            .text_color(gpui::rgb(t.text_2))
+            .child(tagged_text(format!("settings-accounts-reason-{n}"), reason))
+    });
+    let windows = row
+        .windows
+        .iter()
+        .map(|line| window_line(line, n, &t, cx))
+        .collect::<Vec<_>>();
+    let spend = [("extra", &row.extra), ("prepaid", &row.prepaid)]
+        .into_iter()
+        .filter_map(|(id, line)| {
+            line.clone()
+                .map(|line| text_line_view(line, &format!("settings-accounts-{id}-{n}"), &t, cx))
+        })
+        .collect::<Vec<_>>();
+    div()
+        .driver_id(move || format!("settings-accounts-row-{n}-info"))
+        .flex_1()
+        .min_w(px(INFO_MIN_WIDTH))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(name_line(row, &t, cx))
+        .children(reason)
+        .children(windows)
+        .children(spend)
+}
+
+/// A row's name, the muted detail after it and its tag.
+fn name_line(row: &Row, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
+    let n = row.number;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w_0()
+        .child(
+            div()
+                .flex_none()
+                .font_weight(ui_weight(cx, FontWeight::BOLD))
+                .text_color(gpui::rgb(t.text))
+                .child(tagged_text(
+                    format!("settings-accounts-name-{n}"),
+                    row.name.clone(),
+                )),
+        )
+        .children(row.detail.clone().map(|detail| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(gpui::rgb(t.subtle))
+                .child(tagged_text(format!("settings-accounts-detail-{n}"), detail))
+        }))
+        .children(row.tag.map(|tag| tag_chip(tag, n, t, cx)))
+}
+
+/// A row's admin button `control` labelled `label`: live while no write is
+/// pending on this machine, its tooltip saying why while locked.
+fn admin_button(
+    control: AccountsControl,
+    label: &'static str,
+    page: Page,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let live = !page.writing && !page.locked;
+    locked_tip(
+        settings_button(control.control(), label, live, page.focused, cx),
+        page.locked,
+    )
+}
+
+/// A refused row's Log in again button: an admin button that also waits
+/// while a login runs (`idle` false), its label tagged for the specs.
+fn relogin_button(n: u32, page: Page, idle: bool, cx: &mut Context<RootView>) -> Div {
+    let live = idle && !page.writing && !page.locked;
+    let control = AccountsControl::Relogin(n).control();
+    let button = locked_tip(
+        settings_button(control, RELOGIN_LABEL, live, page.focused, cx),
+        page.locked,
+    );
+    div()
+        .driver_id(move || format!("settings-accounts-relogin-{n}={RELOGIN_LABEL}"))
+        .child(button)
+}
+
+/// A row's Remove button, or the text standing in its place on the account
+/// in use.
+fn removal_view(removal: Removal, n: u32, page: Page, cx: &mut Context<RootView>) -> AnyElement {
+    match removal {
+        Removal::Remove => {
+            admin_button(AccountsControl::Remove(n), REMOVE_LABEL, page, cx).into_any_element()
+        }
+        Removal::SwitchFirst => div()
+            .text_color(gpui::rgb(theme(cx).subtle))
+            .child(tagged_text(
+                format!("settings-accounts-switch-first-{n}"),
+                SWITCH_FIRST,
+            ))
+            .into_any_element(),
+    }
+}
+
 /// A row's tag after its name.
 fn tag_chip(tag: Tag, n: u32, t: &UiTheme, cx: &mut Context<RootView>) -> Div {
     let (fill, text) = match tag {
@@ -1749,9 +1842,11 @@ fn window_line(
 ) -> Div {
     let label = line.label.as_str();
     let slug = accounts::label_slug(label);
+    let reset_id = format!("settings-accounts-row-{n}-reset-{slug}");
     let (width, height) = ROW_BAR;
     let bar = div()
-        .flex_none()
+        .flex_shrink(1.0)
+        .min_w(px(ROW_BAR_MIN_WIDTH))
         .w(px(width))
         .h(px(height))
         .rounded(px(height / 2.0))
@@ -1792,15 +1887,18 @@ fn window_line(
         )
         .child(
             div()
-                .flex_1()
+                .driver_id(move || reset_id)
+                // Sized by its text, so a narrow column shrinks the bar
+                // and the text together.
+                .flex_auto()
                 .min_w_0()
                 .text_color(gpui::rgb(if line.used_up {
                     t.danger_text
                 } else {
                     t.text_2
                 }))
-                .child(tagged_text(
-                    format!("settings-accounts-reset-{slug}-{n}"),
+                .child(line_text(
+                    &format!("settings-accounts-reset-{slug}-{n}"),
                     line.reset.clone(),
                 )),
         )

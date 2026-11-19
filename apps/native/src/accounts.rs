@@ -32,6 +32,8 @@ const STALE_AFTER_MINUTES: i64 = 10;
 pub(crate) const NO_ACTIVE_ACCOUNT: &str = "No active account";
 /// The second line of a row whose sign-in the provider refused.
 pub(crate) const RELOGIN_LINE: &str = "Log in again from Settings › Accounts";
+/// The same row's line on the Settings page, beside its Log in again button.
+pub(crate) const RELOGIN_SETTINGS_LINE: &str = "Press Log in again and sign in with this account.";
 /// The line of a row whose store the daemon cannot write.
 pub(crate) const STORE_READ_ONLY: &str = "Store read-only";
 /// The trigger of a switch the user asked for, which raises no toast.
@@ -759,6 +761,24 @@ pub(crate) struct Row {
     pub(crate) switch: Option<SwitchButton>,
 }
 
+impl Row {
+    /// Whether the provider refused the account's sign-in, so the user must
+    /// log in again.
+    pub(crate) fn relogin(&self) -> bool {
+        self.reason == Some(RELOGIN_LINE)
+    }
+
+    /// The row's line on the Settings page: a refused sign-in says what to
+    /// press there; any other reason reads as in the popover.
+    pub(crate) fn settings_reason(&self) -> Option<&'static str> {
+        if self.relogin() {
+            Some(RELOGIN_SETTINGS_LINE)
+        } else {
+            self.reason
+        }
+    }
+}
+
 /// How a row's text line is coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tone {
@@ -1418,11 +1438,12 @@ mod tests {
     };
 
     use super::{
-        AccountsState, AliasChange, ChipCandidate, Level, Login, RELOGIN_LINE, Removal, RowActions,
-        STORE_READ_ONLY, Segment, Tag, Tone, WriteAction, account_toast, add_login_note, age_text,
-        alias_change, bar, checked_line, chip, chip_host, cooldown_segments, forecast, header,
-        hysteresis_step, label_slug, login_status, minor_money, money, moved_order, paused_line,
-        row, row_actions, strategy_segments, threshold_step, window_segments,
+        AccountsState, AliasChange, ChipCandidate, Level, Login, RELOGIN_LINE,
+        RELOGIN_SETTINGS_LINE, Removal, RowActions, STORE_READ_ONLY, Segment, Tag, Tone,
+        WriteAction, account_toast, add_login_note, age_text, alias_change, bar, checked_line,
+        chip, chip_host, cooldown_segments, forecast, header, hysteresis_step, label_slug,
+        login_status, minor_money, money, moved_order, paused_line, row, row_actions,
+        strategy_segments, threshold_step, window_segments,
     };
     use crate::target::HostKey;
 
@@ -2001,6 +2022,30 @@ mod tests {
             forecast(Some(&dry), now(), &Utc).as_deref(),
             Some("Runs dry at 18:00 · back 20:00 · 3 accounts")
         );
+    }
+
+    #[test]
+    fn a_relogin_row_says_on_the_settings_page_what_to_press() {
+        let mut refused = account(5, "client");
+        refused.status = AccountUsageStatus::ReloginRequired;
+        let refused = row(&refused, None, false, now(), &Utc);
+        assert!(refused.relogin());
+        assert_eq!(refused.reason, Some(RELOGIN_LINE), "the popover's line");
+        assert_eq!(
+            refused.settings_reason(),
+            Some(RELOGIN_SETTINGS_LINE),
+            "the Settings page's line"
+        );
+
+        let mut read_only = account(3, "lab");
+        read_only.status = AccountUsageStatus::StoreUnwritable;
+        let read_only = row(&read_only, None, false, now(), &Utc);
+        assert!(!read_only.relogin());
+        assert_eq!(read_only.settings_reason(), Some(STORE_READ_ONLY));
+
+        let ready = row(&account(2, "ops"), None, false, now(), &Utc);
+        assert!(!ready.relogin());
+        assert_eq!(ready.settings_reason(), None);
     }
 
     #[test]

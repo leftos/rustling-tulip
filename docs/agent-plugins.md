@@ -89,7 +89,7 @@ The optional `accounts(&AccountsConfig) -> Option<Arc<dyn AccountsService>>` (de
 
 The `accounts` module of `agent-api` holds the config, the `Send + Sync` service the hub shares with no lock, and its row types. The service has `snapshot`, `poll(PollScope::OnDemand)` (a `PollReport` of the new snapshot and `next_poll_in`) and `begin_shutdown(bound)` (stops new credential refreshes and waits for in-flight ones; true once idle).
 
-The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and the associated `ChatContext` and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
+The trait also carries `chat_entries`, `chat_line_facts` (the chat mirror; its `TranscriptLineFacts.model` names the model a main-thread, model-written reply used), `model_label` (the model id in the form a person reads, the id itself by default; the Claude plugin formats `claude-opus-5-5` as `Opus 5.5`) and the associated `ChatContext` and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
 
 | Capability | Method | What the app does with it |
 |---|---|---|

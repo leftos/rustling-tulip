@@ -220,6 +220,21 @@ pub(crate) fn language_for_path(path: &Path) -> Option<&'static str> {
         .map(|(_, language)| *language)
 }
 
+/// The extensions the viewer draws as an image, lower-cased.
+const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// Whether `path` names an image the viewer draws.
+#[must_use]
+pub(crate) fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+}
+
 /// Where an opened file goes: the viewer, or out to an external app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -361,6 +376,26 @@ mod tests {
         assert_eq!(language_for_path(Path::new("notes.weird")), None);
         assert_eq!(check(&probe(5, b"hello")), Ok(()));
         assert_eq!(decode(b"hello"), Ok("hello".to_owned()));
+    }
+
+    #[test]
+    fn is_image_path_matches_the_viewer_image_types() {
+        for name in [
+            "shot.png",
+            "shot.PNG",
+            "shot.jpg",
+            "shot.JPEG",
+            "shot.jpeg",
+            "shot.Gif",
+            "shot.webp",
+            "shot.bmp",
+            "shot.Bmp",
+        ] {
+            assert!(is_image_path(Path::new(name)), "{name} is an image");
+        }
+        for name in ["vector.svg", "notes.png.txt", "blob", "readme.md"] {
+            assert!(!is_image_path(Path::new(name)), "{name} is not an image");
+        }
     }
 
     #[test]

@@ -39,6 +39,11 @@ pub struct Entry {
     /// When the copy was last opened.
     #[serde(default)]
     pub last_opened: i64,
+    /// Whether the copy is a folder fetched whole, kept and swept as one
+    /// item; an index written before folders were kept reads every entry as
+    /// a file.
+    #[serde(default)]
+    pub folder: bool,
 }
 
 /// The copies the phone keeps, as `fetched.json` holds them.
@@ -50,10 +55,6 @@ pub struct Index {
 }
 
 /// How a copy compares to the host's file.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
     /// The host's file is the one the copy holds.
@@ -65,10 +66,6 @@ pub enum Freshness {
 }
 
 /// What the host answered when asked about its file.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostStat {
     /// The host file's size in bytes.
@@ -119,26 +116,42 @@ impl Index {
         std::fs::rename(&tmp, path)
     }
 
-    /// Records `entry`, replacing an earlier copy of the same host path.
+    /// Records `entry`, replacing an earlier entry for the same copy: the
+    /// same host and local path. Two copies of one host path (fetched
+    /// through a repo and by the host path) stay two entries.
+    ///
+    /// No entry is ever inside a folder entry of the same host, so a copy is
+    /// swept and counted once: a folder drops every entry inside it, which
+    /// its fetch replaced on disk, and a file inside a kept folder adds no
+    /// entry and marks that folder opened when the file was.
     pub fn upsert(&mut self, entry: Entry) {
+        if entry.folder {
+            self.entries.retain(|kept| {
+                kept.host != entry.host || !is_inside(&entry.local_path, &kept.local_path)
+            });
+        } else if let Some(folder) = self.entries.iter_mut().find(|kept| {
+            kept.folder && kept.host == entry.host && is_inside(&kept.local_path, &entry.local_path)
+        }) {
+            folder.last_opened = folder.last_opened.max(entry.last_opened);
+            return;
+        }
         match self
             .entries
             .iter_mut()
-            .find(|kept| kept.host == entry.host && kept.host_path == entry.host_path)
+            .find(|kept| kept.host == entry.host && kept.local_path == entry.local_path)
         {
             Some(kept) => *kept = entry,
             None => self.entries.push(entry),
         }
     }
 
-    /// Marks the copy at `host` and `host_path` as opened at `now`; when no
+    /// Marks the copy of `host` at `local_path` as opened at `now`; when no
     /// entry is there, nothing changes.
-    #[expect(dead_code, reason = "used by the open-again flow, not built yet")]
-    pub fn touch_opened(&mut self, host: &str, host_path: &str, now: i64) {
+    pub fn touch_opened(&mut self, host: &str, local_path: &str, now: i64) {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.host == host && entry.host_path == host_path)
+            .find(|entry| entry.host == host && entry.local_path == local_path)
         {
             entry.last_opened = now;
         }
@@ -241,6 +254,16 @@ impl Index {
     }
 }
 
+/// Whether the copy at `path` lies inside the folder copy at `folder`, both
+/// relative to the copies folder and `/` separated: below it by whole
+/// segments, so `docs2/x` is not inside `docs` and `docs` is not inside
+/// itself.
+fn is_inside(folder: &str, path: &str) -> bool {
+    path.strip_prefix(folder)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| !rest.is_empty())
+}
+
 /// Whether `entry` went unopened for [`RETENTION_MS`] before `now`.
 fn is_expired(entry: &Entry, now: i64) -> bool {
     now.saturating_sub(entry.last_opened) >= RETENTION_MS
@@ -292,10 +315,6 @@ fn remove_copy(
 /// A copy or an answer without a modified time is compared by size alone, so
 /// only two present times that differ can make a same-sized copy `Changed`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the open-again flow, not built yet")
-)]
 pub fn freshness(entry: &Entry, answer: Option<HostStat>) -> Freshness {
     let Some(answer) = answer else {
         return Freshness::Unknown;
@@ -430,7 +449,148 @@ mod tests {
             modified: Some(1_700_000_000_000),
             fetched_at: 1_700_000_000_000,
             last_opened: 1_700_000_000_000,
+            folder: false,
         }
+    }
+
+    /// A folder entry for `local_path`, `size` bytes in all, last opened at
+    /// `last_opened`.
+    fn folder_at(local_path: &str, size: u64, last_opened: i64) -> Entry {
+        let mut copy = opened_at(local_path, last_opened);
+        copy.size = size;
+        copy.folder = true;
+        copy
+    }
+
+    #[test]
+    fn an_index_without_the_folder_field_reads_every_entry_as_a_file() {
+        let dir = TestDir::new("no-folder-field");
+        let path = dir.index_path();
+        std::fs::write(
+            &path,
+            r#"{"entries":[
+                {"host":"host-a","host_path":"/abs/a.txt","local_path":"host-a/root/abs/a.txt",
+                 "size":3,"modified":5,"fetched_at":7,"last_opened":9},
+                {"host":"host-a","host_path":"/abs/dir","local_path":"host-a/root/abs/dir",
+                 "size":40,"modified":null,"fetched_at":7,"last_opened":9}
+            ]}"#,
+        )
+        .expect("write an index from before folders");
+
+        let index = Index::read(&path);
+
+        assert_eq!(index.entries.len(), 2);
+        assert!(
+            index.entries.iter().all(|entry| !entry.folder),
+            "an entry without the field is a file: {:?}",
+            index.entries
+        );
+        assert_eq!(index.entries[1].size, 40, "the other fields still read");
+    }
+
+    #[test]
+    fn sweep_removes_an_expired_folder_whole() {
+        let dir = TestDir::new("sweep-folder");
+        let root = dir.0.join("copies");
+        let folder = root.join("host-a/root/abs/dir");
+        std::fs::create_dir_all(folder.join("sub/deeper")).expect("create the folder copy");
+        std::fs::write(folder.join("top.txt"), b"hi").expect("write a file");
+        std::fs::write(folder.join("sub/mid.txt"), b"hi").expect("write a nested file");
+        std::fs::write(folder.join("sub/deeper/low.txt"), b"hi").expect("write a deep file");
+        let kept = root.join("host-a/root/abs/kept.txt");
+        std::fs::write(&kept, b"hi").expect("write a recent file copy");
+        let now = 1_800_000_000_000;
+        let mut index = Index::default();
+        index.upsert(folder_at("host-a/root/abs/dir", 6, now - 30 * DAY_MS));
+        let recent = opened_at("host-a/root/abs/kept.txt", now - DAY_MS);
+        index.upsert(recent.clone());
+
+        index.sweep(&root, now).expect("sweep the copies");
+
+        assert_eq!(index.entries, [recent], "the folder leaves as one entry");
+        assert!(
+            !folder.exists(),
+            "the folder goes with its files and subfolders"
+        );
+        assert!(kept.exists(), "a copy beside it is kept");
+        assert!(
+            root.join("host-a/root/abs").exists(),
+            "the folder holding it stays"
+        );
+    }
+
+    #[test]
+    fn recording_a_folder_drops_the_entries_inside_it() {
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/root/abs/docs/guide.md", 1));
+        index.upsert(opened_at("host-a/root/abs/docs/sub/deep.md", 1));
+        let outside = opened_at("host-a/root/abs/other.md", 1);
+        index.upsert(outside.clone());
+        let mut other_host = opened_at("host-a/root/abs/docs/guide.md", 1);
+        other_host.host = "host-b".to_owned();
+        index.upsert(other_host.clone());
+        let folder = folder_at("host-a/root/abs/docs", 300, 2);
+
+        index.upsert(folder.clone());
+
+        assert_eq!(
+            index.entries,
+            [outside, other_host, folder],
+            "only the entries inside the folder on its host leave"
+        );
+    }
+
+    #[test]
+    fn a_file_saved_inside_a_kept_folder_adds_no_entry_and_touches_the_folder() {
+        let mut index = Index::default();
+        index.upsert(folder_at("host-a/root/abs/docs", 300, 1));
+
+        index.upsert(opened_at("host-a/root/abs/docs/sub/guide.md", 50));
+
+        assert_eq!(index.entries.len(), 1, "no entry for the file: {index:?}");
+        assert!(index.entries[0].folder);
+        assert_eq!(
+            index.entries[0].last_opened, 50,
+            "the folder is marked opened when the file was"
+        );
+    }
+
+    #[test]
+    fn the_total_counts_a_file_inside_a_folder_once() {
+        let mut index = Index::default();
+        index.upsert(entry("host-a/root/abs/docs/guide.md"));
+        index.upsert(folder_at("host-a/root/abs/docs", 300, 1));
+        index.upsert(entry("host-a/root/abs/docs/guide.md"));
+
+        assert_eq!(
+            index.total_size(),
+            300,
+            "the file counts through its folder"
+        );
+    }
+
+    #[test]
+    fn a_sibling_with_a_shared_name_prefix_is_not_inside() {
+        let mut index = Index::default();
+        let sibling = opened_at("host-a/root/abs/docs2/x.md", 1);
+        index.upsert(sibling.clone());
+        index.upsert(folder_at("host-a/root/abs/docs", 300, 1));
+        let later = opened_at("host-a/root/abs/docs2/y.md", 1);
+        index.upsert(later.clone());
+
+        assert_eq!(index.entries.len(), 3, "{index:?}");
+        assert!(index.entries.contains(&sibling), "kept beside the folder");
+        assert!(index.entries.contains(&later), "recorded beside it");
+    }
+
+    #[test]
+    fn the_total_counts_a_folder_once_with_its_size() {
+        let mut index = Index::default();
+        index.upsert(entry("host-a/root/abs/file.txt"));
+        index.upsert(folder_at("host-a/root/abs/dir", 300, 1_700_000_000_000));
+
+        assert_eq!(index.entries.len(), 2, "a file and a folder: two items");
+        assert_eq!(index.total_size(), 12 + 300);
     }
 
     #[test]
@@ -496,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_the_same_host_path() {
+    fn upsert_replaces_the_same_local_copy() {
         let mut index = Index::default();
         index.upsert(entry("host-a/abs/file.txt"));
         let mut changed = entry("host-a/abs/file.txt");
@@ -506,6 +666,17 @@ mod tests {
 
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].size, 99);
+
+        // The same host file fetched through a repo lands in another copy.
+        index.upsert(entry("host-a/repo/file.txt"));
+
+        assert_eq!(
+            index.entries.len(),
+            2,
+            "a second copy of the same host path is kept beside the first"
+        );
+        assert_eq!(index.entries[0].local_path, "host-a/abs/file.txt");
+        assert_eq!(index.entries[1].local_path, "host-a/repo/file.txt");
     }
 
     #[test]

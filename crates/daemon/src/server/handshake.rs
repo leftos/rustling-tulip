@@ -300,6 +300,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CHAT_CLEAR_DRAFT,
     protocol::FEATURE_FILE_SEARCH,
     protocol::FEATURE_CHAT_CATALOG,
+    protocol::FEATURE_CHAT_MODEL,
     protocol::FEATURE_RESUME_SESSION,
     protocol::FEATURE_LAUNCH_LAST,
     protocol::FEATURE_PRESET_JOB_REPEAT,
@@ -720,6 +721,24 @@ mod tests {
             }
         }
         assert_eq!(kinds, ["agents", "agent_settings", "repos", "sessions"]);
+    }
+
+    #[test]
+    fn welcome_lists_chat_model() {
+        let welcome = welcome_message(
+            22,
+            TEST_DAEMON_ID,
+            ConnectionOrigin::Local,
+            HeldServices::default(),
+        );
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_CHAT_MODEL)
+            ),
+            "{welcome:?}"
+        );
     }
 
     #[test]

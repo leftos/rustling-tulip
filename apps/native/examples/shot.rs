@@ -89,6 +89,15 @@
 //! name over a row per group, its title over its reply count and a chevron.
 //! `phone-settings-reply-group` shows the agent set's `common` group open:
 //! the header's title `Group` over its Title row and its five replies.
+//! `phone-viewer` shows the `phone-home` fixture's viewer page over a saved
+//! Rust file: the header with `Back`, the file's name, its host and its path
+//! on that host, over the file's highlighted lines.
+//! `phone-viewer-md` shows that page over a saved Markdown file: the header
+//! over the file's rendered Markdown.
+//! `phone-browser` shows the `phone-home` fixture's host browser over Home on
+//! "box"'s checkout: the header with `Back`, the host, the folder's path and
+//! `Show hidden`, over the parent row, the folders and then the files of the
+//! host's two pages, a hidden folder and file left out.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -115,9 +124,9 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
-    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, PaneFollow, ScriptFacts,
-    SessionSnapshot, SplitDirection, StretchLine, SummarySource, ToolKind, ToolOutcome, WorkShell,
-    WorkSubagent,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, DirEntry, GridNode, PaneFollow,
+    PathKind, ScriptFacts, SessionSnapshot, SplitDirection, StretchLine, SummarySource, ToolKind,
+    ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::builtin_themes::DRACULA;
 use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
@@ -136,9 +145,9 @@ use rustling_tulip_native::{
     Activity, AppToast, AppToastKind, AskBlock, AskBox, AskChoice, Assets, CardText, Clock,
     Connection, FOOTER_HEIGHT, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure,
-    Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, SystemToastPlacer,
-    TOAST_CARD_WIDTH, TextInput, ToastKind, ToastPresses, ToastSpec, Transport, TypedRow,
-    ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
+    Opener, PhoneFetched, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker,
+    SystemToastPlacer, TOAST_CARD_WIDTH, TextInput, ToastKind, ToastPresses, ToastSpec, Transport,
+    TypedRow, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -169,6 +178,45 @@ const PHONE_WINDOW_SIZE: (u16, u16) = (390, 844);
 /// insets the iPhone simulator reported in the gpui iOS spike.
 const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
+/// The folder under the shot's temp dir the phone shots' fetched copies
+/// sit in.
+const SHOT_PHONE_COPIES: &str = "copies";
+/// The Rust file the `phone-viewer` shot fetches, as its name and its path
+/// on the host.
+const SHOT_PHONE_RS_NAME: &str = "server.rs";
+const SHOT_PHONE_RS_PATH: &str = "/Users/builder/source/rustling-tulip/crates/daemon/src/server.rs";
+/// The Rust file the `phone-viewer` shot shows.
+const SHOT_PHONE_RS: &str = r"//! Where a session's terminal is drawn.
+//!
+//! The pane follows the grid the daemon streams.
+
+use std::sync::Arc;
+
+/// How many rows a pane keeps before it trims.
+const KEEP_ROWS: usize = 10_000;
+
+/// A session's terminal as the client draws it.
+pub struct Terminal {
+    /// The rows the daemon sent, oldest first.
+    rows: Vec<Arc<str>>,
+}
+
+impl Terminal {
+    /// Appends `row`, trimming the oldest once the cap is reached.
+    pub fn push(&mut self, row: Arc<str>) {
+        if self.rows.len() == KEEP_ROWS {
+            self.rows.remove(0);
+        }
+        self.rows.push(row);
+    }
+}
+";
+/// The Markdown file the `phone-viewer-md` shot fetches, as its name and
+/// its path on the host.
+const SHOT_PHONE_MD_NAME: &str = "README.md";
+const SHOT_PHONE_MD_PATH: &str = "/Users/builder/source/rustling-tulip/README.md";
+/// The Markdown file the `phone-viewer-md` shot shows.
+const SHOT_PHONE_MD: &str = "# Rustling Tulip\n\nA native client for many parallel agent sessions.\n\n## What it does\n\n- Runs each session in its own terminal on the host that owns it.\n- Keeps the sidebar, tabs and panes in step across hosts.\n\n```sh\ncargo run --release\n```\n";
 /// How many session rows the `phone-home` shot's Home lists.
 const PHONE_HOME_ROWS: usize = 4;
 /// The working session whose sheet the `phone-sheet` shot opens, and
@@ -336,10 +384,13 @@ enum View {
     PhoneSettingsKeyEdit,
     PhoneSettingsReplies,
     PhoneSettingsReplyGroup,
+    PhoneViewer,
+    PhoneViewerMd,
+    PhoneBrowser,
 }
 
 impl View {
-    const ALL: [Self; 61] = [
+    const ALL: [Self; 64] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -401,6 +452,9 @@ impl View {
         Self::PhoneSettingsKeyEdit,
         Self::PhoneSettingsReplies,
         Self::PhoneSettingsReplyGroup,
+        Self::PhoneViewer,
+        Self::PhoneViewerMd,
+        Self::PhoneBrowser,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -418,6 +472,9 @@ impl View {
                 | Self::PhoneSettingsKeyEdit
                 | Self::PhoneSettingsReplies
                 | Self::PhoneSettingsReplyGroup
+                | Self::PhoneViewer
+                | Self::PhoneViewerMd
+                | Self::PhoneBrowser
         )
     }
 
@@ -484,6 +541,9 @@ impl View {
             Self::PhoneSettingsKeyEdit => "phone-settings-key-edit",
             Self::PhoneSettingsReplies => "phone-settings-replies",
             Self::PhoneSettingsReplyGroup => "phone-settings-reply-group",
+            Self::PhoneViewer => "phone-viewer",
+            Self::PhoneViewerMd => "phone-viewer-md",
+            Self::PhoneBrowser => "phone-browser",
         }
     }
 
@@ -539,7 +599,10 @@ impl View {
             | Self::PhoneSettingsKeys
             | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
-            | Self::PhoneSettingsReplyGroup => PHONE_WINDOW_SIZE,
+            | Self::PhoneSettingsReplyGroup
+            | Self::PhoneViewer
+            | Self::PhoneViewerMd
+            | Self::PhoneBrowser => PHONE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -589,7 +652,10 @@ impl View {
             | Self::PhoneSettingsKeys
             | Self::PhoneSettingsKeyEdit
             | Self::PhoneSettingsReplies
-            | Self::PhoneSettingsReplyGroup => true,
+            | Self::PhoneSettingsReplyGroup
+            | Self::PhoneViewer
+            | Self::PhoneViewerMd
+            | Self::PhoneBrowser => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -863,6 +929,9 @@ impl Shot {
             | View::PhoneSettingsKeyEdit
             | View::PhoneSettingsReplies
             | View::PhoneSettingsReplyGroup
+            | View::PhoneViewer
+            | View::PhoneViewerMd
+            | View::PhoneBrowser
             | View::Toast => None,
         }
     }
@@ -912,7 +981,11 @@ impl Shot {
         };
         let layout = serde_json::to_vec_pretty(&state)
             .with_context(|| format!("serializing the layout for {}", saved.display()))?;
-        std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
+        std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))?;
+        if matches!(self.view, View::PhoneViewer | View::PhoneViewerMd) {
+            return self.seed_phone_viewer();
+        }
+        Ok(())
     }
 
     /// Writes the `themes` shot's user themes: one good, one that does not
@@ -942,6 +1015,25 @@ impl Shot {
             VIEWER_FILE
         };
         self.ui_dir.join(file)
+    }
+
+    /// The fetched copy the `phone-viewer` or `phone-viewer-md` shot's page
+    /// shows, under the shot's copies folder.
+    fn seed_phone_viewer(&self) -> Result<()> {
+        let (host_path, text) = if self.view == View::PhoneViewerMd {
+            (SHOT_PHONE_MD_PATH, SHOT_PHONE_MD)
+        } else {
+            (SHOT_PHONE_RS_PATH, SHOT_PHONE_RS)
+        };
+        let path = self
+            .ui_dir
+            .join(SHOT_PHONE_COPIES)
+            .join(shot_phone_local_path(host_path));
+        let dir = path
+            .parent()
+            .with_context(|| format!("the copy {} has no folder", path.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -1572,6 +1664,9 @@ fn start_phone_home_shot(
     // The phone opens no This PC connection: "box" takes the first pair.
     let remote = start_box_daemon(shot.view, now, &failure)?;
     let deps = deps(shot.view, remote, None, &shot.ui_dir);
+    // The phone's root sweeps its copies folder as it opens: point it at the
+    // shot's own folder first, never the real one.
+    let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
     let window_size = shot.view.window_size();
     let (width, height) = window_size;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
@@ -1586,6 +1681,7 @@ fn start_phone_home_shot(
             move |window, cx| {
                 show_cloaked(window, window_size);
                 let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
+                root.update(cx, |root, _| root.set_remote_files_root(copies));
                 cx.new(|cx| {
                     PhoneRoot::new(root, Arc::new(UnsupportedPlatform), window, cx)
                         .with_insets_override(Some(phone_insets()))
@@ -1663,6 +1759,12 @@ async fn capture_phone_home(
         }
     }
     open_phone_screen(shot.view, handle, cx).await?;
+    if matches!(shot.view, View::PhoneViewer | View::PhoneViewerMd) {
+        open_phone_viewer(shot, handle, cx).await?;
+    }
+    if shot.view == View::PhoneBrowser {
+        open_phone_browser(handle, cx).await?;
+    }
     if shot.view == View::PhoneSessionSheet {
         let card = handle.update(cx, |phone, _, cx| {
             phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
@@ -1673,6 +1775,151 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// The copies-folder path of a fetch of `host_path` from the shot's host.
+fn shot_phone_local_path(host_path: &str) -> String {
+    format!("{SHOT_TAILNET_HOST}/root{host_path}")
+}
+
+/// Hands the phone the saved fetch the `phone-viewer` or `phone-viewer-md`
+/// view's page shows, under the shot's copies folder, and checks the page
+/// opened on it.
+async fn open_phone_viewer(
+    shot: &Shot,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let (name, host_path, text) = if shot.view == View::PhoneViewerMd {
+        (SHOT_PHONE_MD_NAME, SHOT_PHONE_MD_PATH, SHOT_PHONE_MD)
+    } else {
+        (SHOT_PHONE_RS_NAME, SHOT_PHONE_RS_PATH, SHOT_PHONE_RS)
+    };
+    let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
+    let saved = PhoneFetched {
+        host: SHOT_TAILNET_HOST.to_owned(),
+        host_path: host_path.to_owned(),
+        local_path: shot_phone_local_path(host_path),
+        size: u64::try_from(text.len()).context("the fixture's size")?,
+        host_label: SHOT_TAILNET_HOST.to_owned(),
+    };
+    handle.update(cx, |phone, _, cx| {
+        phone.root().update(cx, |root, cx| {
+            root.set_remote_files_root(copies);
+            root.phone_file_saved(saved, cx);
+        });
+    })?;
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let header = handle.update(cx, |phone, _, _| phone.viewer_header())?;
+    let Some((shown, _, _, _)) = header else {
+        bail!("the {} view's page did not open", shot.view.name());
+    };
+    if shown != name {
+        bail!(
+            "the {} view's page shows {shown:?}, not {name}",
+            shot.view.name()
+        );
+    }
+    Ok(())
+}
+
+/// The folder the `phone-browser` shot's browser opens at on "box".
+const SHOT_BROWSE_PATH: &str = "/Users/builder/source/rustling-tulip";
+/// The cursor of the `phone-browser` shot's second page.
+const SHOT_BROWSE_CURSOR: &str = "page-2";
+/// The rows the `phone-browser` shot's browser lists: both pages' entries,
+/// the hidden ones left out.
+const SHOT_BROWSE_ROWS: [&str; 10] = [
+    "apps",
+    "crates",
+    "docs",
+    "tools",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "deny.toml",
+    "rt.ps1",
+    "rust-toolchain.toml",
+];
+
+/// Opens the `phone-browser` view's browser on "box"'s checkout and checks
+/// it lists both of the host's pages.
+async fn open_phone_browser(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let host = HostKey::of(&Target::tailnet(SHOT_TAILNET_HOST, Some(8787)));
+    handle.update(cx, |phone, _, cx| {
+        phone.open_browser(host, SHOT_BROWSE_PATH.to_owned(), cx);
+    })?;
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let rows = handle.update(cx, |phone, _, _| phone.browser_rows())?;
+    if rows != SHOT_BROWSE_ROWS {
+        bail!("the phone-browser view lists {rows:?}, not {SHOT_BROWSE_ROWS:?}");
+    }
+    Ok(())
+}
+
+/// "box"'s answer to the `phone-browser` shot's host info request `id`: a
+/// Mac.
+fn shot_host_info(id: &str) -> DaemonMessage {
+    DaemonMessage::HostInfo {
+        id: id.to_owned(),
+        os: protocol::HostOsKind::MacOs,
+        home: Some("/Users/builder".to_owned()),
+        roots: vec!["/".to_owned()],
+    }
+}
+
+/// One entry of the `phone-browser` shot's listing, changed `hours` before
+/// `now`.
+fn shot_dir_entry(now: DateTime<Utc>, name: &str, size: Option<u64>, hours: i64) -> DirEntry {
+    DirEntry {
+        name: name.to_owned(),
+        kind: if size.is_some() {
+            PathKind::File
+        } else {
+            PathKind::Dir
+        },
+        size: size.unwrap_or(0),
+        modified: Some((now - chrono::Duration::hours(hours)).timestamp_millis()),
+        link: false,
+        hidden: name.starts_with('.'),
+    }
+}
+
+/// "box"'s answer to the `phone-browser` shot's listing `id`: the folders
+/// and the first files with a cursor, then for that cursor the rest.
+fn shot_dir_listing(now: DateTime<Utc>, id: &str, cursor: Option<&str>) -> DaemonMessage {
+    let (entries, next_cursor) = if cursor == Some(SHOT_BROWSE_CURSOR) {
+        (
+            vec![
+                shot_dir_entry(now, "deny.toml", Some(1_204), 24 * 40),
+                shot_dir_entry(now, "rt.ps1", Some(48_310), 30),
+                shot_dir_entry(now, "rust-toolchain.toml", Some(96), 24 * 400),
+            ],
+            None,
+        )
+    } else {
+        (
+            vec![
+                shot_dir_entry(now, ".git", None, 1),
+                shot_dir_entry(now, "apps", None, 2),
+                shot_dir_entry(now, "crates", None, 5),
+                shot_dir_entry(now, "docs", None, 26),
+                shot_dir_entry(now, "tools", None, 24 * 9),
+                shot_dir_entry(now, ".gitignore", Some(312), 24 * 60),
+                shot_dir_entry(now, "Cargo.lock", Some(184_532), 3),
+                shot_dir_entry(now, "Cargo.toml", Some(4_820), 3),
+                shot_dir_entry(now, "README.md", Some(12_406), 24 * 3),
+            ],
+            Some(SHOT_BROWSE_CURSOR.to_owned()),
+        )
+    };
+    DaemonMessage::DirListing {
+        id: id.to_owned(),
+        path: SHOT_BROWSE_PATH.to_owned(),
+        entries,
+        next_cursor,
+        error: None,
+    }
 }
 
 /// Opens the screen a phone view shows past Home: the `phone-terminal`
@@ -1884,7 +2131,10 @@ fn drive(
         | View::PhoneSettingsKeys
         | View::PhoneSettingsKeyEdit
         | View::PhoneSettingsReplies
-        | View::PhoneSettingsReplyGroup => Ok(()),
+        | View::PhoneSettingsReplyGroup
+        | View::PhoneViewer
+        | View::PhoneViewerMd
+        | View::PhoneBrowser => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -3465,6 +3715,10 @@ impl FakeDaemon {
             }
             View::Perf => vec![protocol::FEATURE_PERF_MONITOR.to_owned()],
             View::HostRebind => vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()],
+            View::PhoneBrowser => vec![
+                protocol::FEATURE_HOST_PATHS.to_owned(),
+                protocol::FEATURE_HOST_BROWSE.to_owned(),
+            ],
             _ => Vec::new(),
         };
         conn.on_welcome(version, features.clone(), None);
@@ -3542,10 +3796,14 @@ impl FakeDaemon {
                 prompt: None,
             },
         };
-        vec![
+        let mut replies = vec![
             chat_reply(session_id, request_id, screen),
             chat_work(self.now, session_id),
-        ]
+        ];
+        if self.view == View::Chat {
+            replies.push(chat_model(session_id));
+        }
+        replies
     }
 
     /// The replies to `msg`; requests the views do not need go unanswered.
@@ -3611,6 +3869,10 @@ impl FakeDaemon {
             }
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::ListShellChoices => shot_shell_choices(),
+            ClientMessage::GetHostInfo { id } => shot_host_info(id),
+            ClientMessage::ListDir { id, cursor, .. } => {
+                shot_dir_listing(self.now, id, cursor.as_deref())
+            }
             ClientMessage::GetAgentUserHooks { agent, request_id } => {
                 DaemonMessage::AgentUserHooks {
                     agent: agent.clone(),
@@ -4659,6 +4921,16 @@ fn chat_work(now: DateTime<Utc>, session_id: &str) -> DaemonMessage {
             from_screen: false,
         }],
         wakeup_at: Some(now + chrono::Duration::minutes(4)),
+    }
+}
+
+/// The `chat` shot's model pill: the model its session's main agent answers
+/// with.
+fn chat_model(session_id: &str) -> DaemonMessage {
+    DaemonMessage::ChatModel {
+        session_id: session_id.to_owned(),
+        model: Some("claude-opus-5-5".to_owned()),
+        label: Some("Opus 5.5".to_owned()),
     }
 }
 

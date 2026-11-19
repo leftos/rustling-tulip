@@ -22,23 +22,24 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Autocapitalize, Bounds, ClickEvent, Context, Div, ElementId, Entity,
     Focusable, Hsla, KeyDownEvent, Keystroke, MouseUpEvent, Pixels, Point, ScrollEvent,
-    ScrollHandle, SharedString, Size, Subscription, Task, TextInputAction, TextInputConfiguration,
-    Window, WindowId, canvas, div, point, prelude::*, px, relative,
+    ScrollHandle, SharedString, Size, Stateful, Subscription, Task, TextInputAction,
+    TextInputConfiguration, Window, WindowId, canvas, div, point, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
-    AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT,
-    FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
+    AgentDescriptor, CatalogEntry, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CATALOG,
+    FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL,
+    FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
-    self, ChatLoads, ChatLog, ChatMode, ComposerLine, ComposerNote, DisplayRow, DraftClear,
-    DraftPull, FILE_SEARCH_DEBOUNCE, FILE_SEARCH_LIMIT, FILE_TRIGGER, FileSearch, PaneView,
-    PaneViews, PromptStack, RowShape, RunItem, RunSummary, RunningWork, ScriptRow, SendTracker,
-    Strip, SuggestionChip, ViewKey,
+    self, COMMAND_TRIGGER, ChatLoads, ChatLog, ChatMode, CommandCatalog, ComposerLine,
+    ComposerNote, DisplayRow, DraftClear, DraftPull, FILE_SEARCH_DEBOUNCE, FILE_SEARCH_LIMIT,
+    FILE_TRIGGER, FileSearch, PaneView, PaneViews, PromptStack, RowShape, RunItem, RunSummary,
+    RunningWork, ScriptRow, SendTracker, Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
@@ -59,7 +60,7 @@ use crate::sidebar::{agent_up, runtime_label, session_view_key};
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::target::HostKey;
-use crate::text_input::{CompletionEvent, TextChanged, TextInput, TextInputEvent};
+use crate::text_input::{CompletionEvent, ImagePasted, TextChanged, TextInput, TextInputEvent};
 pub(crate) use crate::text_select::{SelectDraw, select_text};
 use crate::text_select::{TextRegistry, align_shift, painted_mark};
 use crate::ui_theme::{UiTheme, theme};
@@ -79,6 +80,8 @@ const EMPTY_NOTE: &str = "No messages yet";
 
 /// What an empty composer says.
 const COMPOSER_PLACEHOLDER: &str = "Send a message (Ctrl+Enter)";
+/// The name of the file type Attach's file picker offers: every file.
+const ATTACH_FILTER: &str = "All files";
 /// How many rows the composer grows between.
 const COMPOSER_MIN_ROWS: usize = 2;
 const COMPOSER_MAX_ROWS: usize = 6;
@@ -164,6 +167,12 @@ pub(crate) struct SessionChat {
     /// The work running beside the chat, for its strip; a `Chat` reply
     /// leaves it as it is.
     work: RunningWork,
+    /// The model the session's main agent answers with, as the daemon's last
+    /// `ChatModel` named it: the id a later switch of the model uses.
+    model: Option<String>,
+    /// That model in the form a person reads, as the agent plugin formatted
+    /// it; none while the daemon sent no label.
+    label: Option<String>,
     /// The screen's last composer state; none until the chat loaded.
     composer_state: Option<ComposerState>,
     /// Esc was sent to interrupt the running turn; held until the next
@@ -233,17 +242,24 @@ struct AnswerDoc {
 pub(crate) struct Composer {
     input: Entity<TextInput>,
     completion: CompletionState,
+    /// Whether the completion is the phone's tap-only strip: the input never
+    /// enters the popup's key context, so Return stays a line break and Up,
+    /// Down, Tab and Esc keep their own behaviour.
+    tap_only: bool,
     /// The search of the session's files for the `@` token.
     files: FileSearch,
     /// The debounce timer of the next file search.
     file_timer: Option<Task<()>>,
-    _subscriptions: [Subscription; 3],
+    /// The session's commands and skills for the `/` token.
+    commands: CommandCatalog,
+    _subscriptions: [Subscription; 4],
 }
 
 impl Composer {
-    /// Tells the input whether the popup is open, so its keys go to it.
+    /// Tells the input whether the popup is open, so its keys go to it; the
+    /// phone's tap-only strip never takes its keys.
     fn sync_completion(&self, cx: &mut App) {
-        let open = self.completion.is_open();
+        let open = self.completion.is_open() && !self.tap_only;
         self.input
             .update(cx, |input, cx| input.set_completion_open(open, cx));
     }
@@ -277,6 +293,33 @@ impl Composer {
             self.completion.set_items(Vec::new());
         }
     }
+
+    /// The caret now sits in `token`, or none: a `/` token on a host that
+    /// offers the catalog (`offered`) shows the cached entries matching its
+    /// query, or, with none cached and none awaited, returns the request id
+    /// of the catalog request to send; leaving it removes the rows the
+    /// catalog gave.
+    fn follow_command_token(&mut self, token: Option<&Token>, offered: bool) -> Option<String> {
+        let Some(token) = token.filter(|token| token.trigger == COMMAND_TRIGGER) else {
+            if self.commands.token_left() {
+                self.completion.set_items(Vec::new());
+            }
+            return None;
+        };
+        if !offered {
+            return None;
+        }
+        if let Some(rows) = self.commands.rows_for(&token.query) {
+            self.completion.set_items(rows);
+            return None;
+        }
+        if !self.commands.wants_fetch() {
+            return None;
+        }
+        let request_id = new_request_id();
+        self.commands.sent(request_id.clone());
+        Some(request_id)
+    }
 }
 
 /// A card's single-line text box and its subscriptions.
@@ -299,6 +342,12 @@ impl SessionChat {
     /// The work running beside the chat.
     pub(crate) fn work(&self) -> &RunningWork {
         &self.work
+    }
+
+    /// The label the chat's model pill shows: the model's label, else its
+    /// id; none while no model is known.
+    fn model_label(&self) -> Option<&str> {
+        self.label.as_deref().or(self.model.as_deref())
     }
 
     /// The composer's text, empty before the composer is made.
@@ -422,8 +471,8 @@ impl SessionChat {
 
     /// Applies one chat message: a `Chat` that answers this chat's load or
     /// that the daemon sent unasked (a reset that keeps open cards open), an
-    /// append, a screen change, or the running work. A reply to an older
-    /// load changes nothing. Returns whether it applied.
+    /// append, a screen change, the running work, or the session's model. A
+    /// reply to an older load changes nothing. Returns whether it applied.
     fn apply(&mut self, msg: DaemonMessage, now: Instant) -> bool {
         match msg {
             DaemonMessage::Chat {
@@ -439,7 +488,14 @@ impl SessionChat {
                         self.log.load(entries, hidden);
                     }
                     Some(_) => return false,
-                    None => self.log.reset(entries, hidden),
+                    None => {
+                        self.log.reset(entries, hidden);
+                        // The chat started over: its agent's commands may
+                        // have changed, so the next `/` asks again.
+                        if let Some(composer) = self.composer.as_mut() {
+                            composer.commands.forget();
+                        }
+                    }
                 }
                 self.take_screen(&screen, now);
                 self.refresh_docs();
@@ -465,6 +521,10 @@ impl SessionChat {
                 wakeup_at,
                 ..
             } => self.work.set(subagents, shells, wakeup_at),
+            DaemonMessage::ChatModel { model, label, .. } => {
+                self.model = model;
+                self.label = label;
+            }
             _ => return false,
         }
         true
@@ -1271,6 +1331,17 @@ impl RootView {
             .get(session_id)
             .map(|chat| chat.log.entries().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The label the `chat-model` pill draws for session `session_id`'s
+    /// chat; none while no pane shows its chat or no model is known.
+    #[must_use]
+    pub fn chat_model_label(&self, session_id: &str) -> Option<String> {
+        self.chat
+            .sessions
+            .get(session_id)?
+            .model_label()
+            .map(str::to_owned)
     }
 
     /// Session `session_id`'s running-work strip as drawn now; none while
@@ -2250,7 +2321,8 @@ impl RootView {
             DaemonMessage::Chat { .. }
             | DaemonMessage::ChatAppend { .. }
             | DaemonMessage::ChatScreenChanged { .. }
-            | DaemonMessage::ChatWork { .. } => self.on_chat_message(msg, cx),
+            | DaemonMessage::ChatWork { .. }
+            | DaemonMessage::ChatModel { .. } => self.on_chat_message(msg, cx),
             msg @ DaemonMessage::ChatDraft { .. } => self.on_chat_draft(msg, cx),
             DaemonMessage::Summary {
                 session_id,
@@ -2279,6 +2351,11 @@ impl RootView {
                 request_id,
                 ..
             } => self.on_file_matches(&session_id, matches, request_id.as_deref(), cx),
+            DaemonMessage::Catalog {
+                session_id,
+                entries,
+                request_id,
+            } => self.on_catalog(&session_id, entries, request_id.as_deref(), cx),
             DaemonMessage::SessionRemoved { session_id } => {
                 let untails = self.chat.tails.close_session(&session_id);
                 self.send_untails(untails);
@@ -2334,16 +2411,17 @@ impl RootView {
         cx.notify();
     }
 
-    /// A `Chat`, `ChatAppend`, `ChatScreenChanged` or `ChatWork`: it
-    /// updates the chat of a session a chat pane shows; one for any other
-    /// session, or a reply to an older load, is dropped.
+    /// A `Chat`, `ChatAppend`, `ChatScreenChanged`, `ChatWork` or
+    /// `ChatModel`: it updates the chat of a session a chat pane shows; one
+    /// for any other session, or a reply to an older load, is dropped.
     pub(crate) fn on_chat_message(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
         let now = (self.now)();
         let session_id = match &msg {
             DaemonMessage::Chat { session_id, .. }
             | DaemonMessage::ChatAppend { session_id, .. }
             | DaemonMessage::ChatScreenChanged { session_id, .. }
-            | DaemonMessage::ChatWork { session_id, .. } => session_id.clone(),
+            | DaemonMessage::ChatWork { session_id, .. }
+            | DaemonMessage::ChatModel { session_id, .. } => session_id.clone(),
             _ => return,
         };
         let work = matches!(msg, DaemonMessage::ChatWork { .. });
@@ -2533,13 +2611,15 @@ impl RootView {
         let input = cx.new(|cx| {
             let mut input = if phone {
                 let mut input = TextInput::multi_line("", PHONE_COMPOSER_PLACEHOLDER, cx)
-                    .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS);
+                    .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS)
+                    .with_completion_triggers(COMPLETION_TRIGGERS);
                 input.set_text_input_configuration(phone_composer_configuration(), cx);
                 input
             } else {
                 TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
                     .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
                     .with_completion_triggers(COMPLETION_TRIGGERS)
+                    .with_image_paste()
             };
             input.set_text(draft, cx);
             input
@@ -2557,6 +2637,10 @@ impl RootView {
         let completions = cx.subscribe(&input, move |this, _, event: &CompletionEvent, cx| {
             this.on_completion_event(&id, event, cx);
         });
+        let id = session_id.to_owned();
+        let images = cx.subscribe(&input, move |this, _, event: &ImagePasted, cx| {
+            this.on_chat_paste_image(&id, &event.name, &event.bytes, cx);
+        });
         // The draft's set_text told its token before these subscriptions
         // were active, so the input's own token is folded as if it had just
         // changed.
@@ -2565,9 +2649,11 @@ impl RootView {
             chat.composer = Some(Composer {
                 input,
                 completion: CompletionState::default(),
+                tap_only: phone,
                 files: FileSearch::default(),
                 file_timer: None,
-                _subscriptions: [keys, edits, completions],
+                commands: CommandCatalog::default(),
+                _subscriptions: [keys, edits, completions, images],
             });
         }
         if let Some(token) = token {
@@ -2605,6 +2691,42 @@ impl RootView {
         }
     }
 
+    /// Whether session `session_id`'s host offers its command catalog.
+    fn catalog_offered(&self, session_id: &str) -> bool {
+        self.conn_of(&self.chat.host_of(session_id))
+            .is_some_and(|conn| conn.supports(FEATURE_CHAT_CATALOG))
+    }
+
+    /// Folds a token change or clear from session `session_id`'s composer
+    /// into its command catalog, sending the one `ListCatalog` a first `/`
+    /// token on a host that offers it asks for; any other event leaves it
+    /// alone.
+    fn fold_command_token(&mut self, session_id: &str, event: &CompletionEvent) {
+        let token = match event {
+            CompletionEvent::TokenChanged(token) => Some(token),
+            CompletionEvent::TokenCleared => None,
+            _ => return,
+        };
+        let offered = self.catalog_offered(session_id);
+        let Some(request_id) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+            .and_then(|composer| composer.follow_command_token(token, offered))
+        else {
+            return;
+        };
+        let host = self.chat.host_of(session_id);
+        self.send_to(
+            &host,
+            ClientMessage::ListCatalog {
+                session_id: session_id.to_owned(),
+                request_id: Some(request_id),
+            },
+        );
+    }
+
     /// Folds what session `session_id`'s composer told of its completion
     /// token or the popup's keys into its [`CompletionState`]: Up and Down
     /// move the selection, Tab and Enter (`Accept`) put the pick in place of
@@ -2616,6 +2738,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.fold_file_token(session_id, event, cx);
+        self.fold_command_token(session_id, event);
         let Some(composer) = self
             .chat
             .sessions
@@ -2666,11 +2789,32 @@ impl RootView {
         self.on_completion_event(session_id, &CompletionEvent::Accept, cx);
     }
 
+    /// A tap on row `index` of session `session_id`'s completion strip: it
+    /// accepts that row and leaves the keyboard as it is, so the phone's
+    /// field keeps its focus and the keyboard neither rises nor lowers.
+    pub(crate) fn tap_completion(
+        &mut self,
+        session_id: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            return;
+        };
+        composer.completion.select(index);
+        self.on_completion_event(session_id, &CompletionEvent::Accept, cx);
+    }
+
     /// Offers `items` in session `session_id`'s completion popup, the first
     /// selected; the popup shows them while the composer's caret sits in a
     /// `/` or `@` token. The specs give it a fixed list; the session's
-    /// commands and files feed it later. Nothing happens before the
-    /// composer is made.
+    /// commands and files feed it from their own answers. Nothing happens
+    /// before the composer is made.
     pub fn set_chat_completion_items(
         &mut self,
         session_id: &str,
@@ -2687,6 +2831,7 @@ impl RootView {
         };
         composer.completion.set_items(items);
         composer.files.items_given();
+        composer.commands.items_given();
         composer.sync_completion(cx);
         cx.notify();
     }
@@ -2762,6 +2907,45 @@ impl RootView {
         cx.notify();
     }
 
+    /// A `Catalog` answering session `session_id`'s pending catalog request:
+    /// its entries are cached for the composer's `/` tokens, and while the
+    /// caret sits in one, those matching its query become the popup's rows.
+    /// Any other is dropped.
+    fn on_catalog(
+        &mut self,
+        session_id: &str,
+        entries: Vec<CatalogEntry>,
+        request_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            tracing::debug!(%session_id, "command catalog for a chat with no composer: dropped");
+            return;
+        };
+        let count = entries.len();
+        if !composer.commands.answered(request_id, entries) {
+            tracing::debug!(%session_id, "command catalog for no pending request: dropped");
+            return;
+        }
+        tracing::debug!(%session_id, count, "command catalog cached for the composer");
+        let query = composer
+            .completion
+            .token()
+            .filter(|token| token.trigger == COMMAND_TRIGGER)
+            .map(|token| token.query.clone());
+        let Some(rows) = query.and_then(|query| composer.commands.rows_for(&query)) else {
+            return;
+        };
+        composer.completion.set_items(rows);
+        composer.sync_completion(cx);
+        cx.notify();
+    }
+
     /// Session `session_id`'s completion popup while it shows: its rows'
     /// labels and the selected row.
     #[must_use]
@@ -2772,6 +2956,17 @@ impl RootView {
             let labels = state.items().iter().map(|item| item.label.clone());
             (labels.collect(), state.selected())
         })
+    }
+
+    /// Session `session_id`'s completion while it shows, as the phone's strip
+    /// lists it: each item's short chip text, in the popup's order.
+    #[must_use]
+    pub fn chat_completion_chips(&self, session_id: &str) -> Option<Vec<String>> {
+        let composer = self.chat.sessions.get(session_id)?.composer.as_ref()?;
+        let state = &composer.completion;
+        state
+            .is_open()
+            .then(|| state.items().iter().map(CompletionItem::chip).collect())
     }
 
     /// Session `session_id`'s completion popup above the composer field
@@ -3426,8 +3621,71 @@ impl RootView {
         chat.cards.refusal(&prompt.id).map(ToOwned::to_owned)
     }
 
+    /// The host session `session_id`'s chat is loaded from; none while it
+    /// is not loaded (still loading or gone).
+    pub(crate) fn loaded_chat_host(&self, session_id: &str) -> Option<HostKey> {
+        let chat = self.chat.sessions.get(session_id)?;
+        if chat.request.is_some() {
+            return None;
+        }
+        self.chat.hosts.get(session_id).cloned()
+    }
+
+    /// Session `session_id`'s composer input, while its chat is loaded with
+    /// one.
+    pub(crate) fn chat_composer_input(&self, session_id: &str) -> Option<Entity<TextInput>> {
+        let chat = self.chat.sessions.get(session_id)?;
+        chat.composer
+            .as_ref()
+            .map(|composer| composer.input.clone())
+    }
+
+    /// Session `session_id`'s Attach button (`chat-attach`), beside Send:
+    /// it asks this PC's file picker for a file to upload.
+    fn attach_button(
+        session_id: &str,
+        enabled: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = session_id.to_owned();
+        primary_button(
+            fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "chat-attach",
+            ButtonSize::Compact,
+            enabled,
+            Layer::Base,
+            t,
+        )
+        .child("Attach")
+        .when(enabled, |attach| {
+            attach.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.attach_to_chat(&id, cx);
+            }))
+        })
+    }
+
+    /// Attach: the file this PC's file picker returns uploads to session
+    /// `session_id`'s host as a drop on its chat does. A cancelled pick does
+    /// nothing.
+    fn attach_to_chat(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let picked = (self.pick_file)(cx, None, crate::FileFilter::new(ATTACH_FILTER, &[]));
+        let id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                tracing::debug!(session = %id, "chat attach: the pick was cancelled");
+                return;
+            };
+            // Fails only when the root view is gone, and the chat with it.
+            this.update(cx, |this, cx| this.drop_files_on_chat(&id, &[path], cx))
+                .ok();
+        })
+        .detach();
+    }
+
     /// The selectors of the buttons beside session `session_id`'s
-    /// composer: Send.
+    /// composer that send: Send. Attach (`chat-attach`) is not listed.
     #[must_use]
     pub fn chat_composer_actions(&self, session_id: &str) -> Vec<&'static str> {
         let Some(chat) = self.chat.sessions.get(session_id) else {
@@ -3598,6 +3856,25 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Opens a file link tapped in session `session_id`'s phone chat as a
+    /// tapped path: resolved as the desktop chat resolves it, then the host
+    /// says whether it names a file, which the viewer opens, or a folder,
+    /// which the browser opens. A `#fragment` is not passed.
+    pub fn phone_chat_file_link(
+        &mut self,
+        session_id: &str,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link = crate::link_menu_view::ChatFileLink {
+            path,
+            anchor: None,
+            menu: false,
+        };
+        self.chat_file_link(session_id, link, window, cx);
+    }
+
     fn answer_doc(&self, session_id: &str, answer_id: &str) -> Option<&MdDoc> {
         let chat = self.chat.sessions.get(session_id)?;
         chat.docs.get(answer_id).map(|answer| answer.doc.as_ref())
@@ -3663,6 +3940,7 @@ impl RootView {
         let cards = loaded.and_then(|chat| self.card_area(session_id, chat, cx));
         let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
         let keys_for = session_id.to_owned();
+        let drop_for = session_id.to_owned();
         div()
             .driver_id(|| name)
             .flex()
@@ -3670,6 +3948,14 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .size_full()
+            // A pop-out's chat takes its own drops; in the main window the
+            // grid's drop layer takes them first and `drop_files` sends a
+            // chat pane's to the composer.
+            .on_drop(
+                cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
+                    this.drop_files_on_chat(&drop_for, paths.paths(), cx);
+                }),
+            )
             .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if let Some(key) = card_key(&event.keystroke)
                     && this.chat_pane_key(&keys_for, key, window, cx)
@@ -3739,7 +4025,7 @@ impl RootView {
             finals: BTreeSet::new(),
             min_run: PHONE_MIN_RUN,
             select: select.as_ref(),
-            link_route: LinkRoute::WebOnly,
+            link_route: LinkRoute::Phone,
             ..self.row_look(PHONE_PANE, session_id, cx)
         };
         let (main, strip) = match &self.chat.phone_refused {
@@ -4054,6 +4340,7 @@ impl RootView {
                 this.send_composer(&id, cx);
             }))
         });
+        let attach = Self::attach_button(session_id, !disabled, &t, cx);
         Some(
             div()
                 .flex_none()
@@ -4073,6 +4360,7 @@ impl RootView {
                         .items_end()
                         .gap(px(8.0))
                         .child(field)
+                        .child(attach)
                         .child(send),
                 )
                 .children(quick)
@@ -4088,12 +4376,13 @@ impl RootView {
     }
 
     /// Session `session_id`'s Quick reply row under the composer field
-    /// (`chat-quick`): the agent reply set's groups in order, a gap between
-    /// groups, every reply a chip (`chat-quick-{group}-{reply}`) sending its
-    /// own text as a chat message and leaving the composer's text alone. A
-    /// chip is live whenever `chat`'s composer could send that reply's text:
-    /// no disabling note, no send in flight and no card up. None when the set
-    /// holds no reply.
+    /// (`chat-quick`): the model pill (`chat-model`) first, then the agent
+    /// reply set's groups in order, a gap between groups, every reply a chip
+    /// (`chat-quick-{group}-{reply}`) sending its own text as a chat message
+    /// and leaving the composer's text alone. A chip is live whenever
+    /// `chat`'s composer could send that reply's text: no disabling note, no
+    /// send in flight and no card up. None when neither a model nor a reply
+    /// is known.
     fn quick_row(
         &self,
         session_id: &str,
@@ -4104,7 +4393,10 @@ impl RootView {
         let shift = crate::fonts::ui_weight_shift(cx);
         let saved = &self.sidebar.ui_state().phone_agent_replies;
         let groups = quick_replies::groups(saved.as_deref(), ReplySet::Agent);
-        if groups.iter().all(|group| group.replies.is_empty()) {
+        let pill = chat
+            .model_label()
+            .map(|label| model_pill(offset, label, &t));
+        if groups.iter().all(|group| group.replies.is_empty()) && pill.is_none() {
             return None;
         }
         let mut row = div()
@@ -4112,7 +4404,8 @@ impl RootView {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(QUICK_GROUP_GAP));
+            .gap(px(QUICK_GROUP_GAP))
+            .children(pill);
         for (group_index, group) in groups
             .iter()
             .enumerate()
@@ -4315,6 +4608,30 @@ const DISABLED_OPACITY: f32 = 0.5;
 /// of one group.
 const QUICK_GROUP_GAP: f32 = 12.0;
 const QUICK_CHIP_GAP: f32 = 4.0;
+
+/// The model pill's least height and label size, in px: a Quick reply
+/// chip's, which is a compact button's.
+const MODEL_PILL_HEIGHT: f32 = 28.0;
+const MODEL_PILL_TEXT_SIZE: f32 = 12.0;
+
+/// The chat's model pill: its label, read-only, muted and chip-sized, at
+/// the start of the composer's Quick replies line.
+fn model_pill(offset: i8, label: &str, t: &UiTheme) -> AnyElement {
+    div()
+        .driver_id(|| "chat-model".to_owned())
+        .flex_none()
+        .flex()
+        .items_center()
+        .h(ui_px_at(offset, MODEL_PILL_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(ButtonSize::Compact.radius()))
+        .border_1()
+        .border_color(gpui::rgb(t.line_strong))
+        .text_size(ui_px_at(offset, MODEL_PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
+        .child(label.to_owned())
+        .into_any_element()
+}
 
 /// Whether the composer's note row `line` disables the composer, and with
 /// it the suggestion chip's Send and Pull.
@@ -5616,5 +5933,37 @@ mod tests {
             !in_handle_area(Some(spots), point(px(110.0), px(350.0))),
             "inside the end's square but below the layer, where it is clipped"
         );
+    }
+
+    /// A `ChatModel` for `s1` naming `model` and `label`.
+    fn model_report(model: Option<&str>, label: Option<&str>) -> DaemonMessage {
+        DaemonMessage::ChatModel {
+            session_id: "s1".to_owned(),
+            model: model.map(str::to_owned),
+            label: label.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_chat_model_message_sets_the_sessions_model() {
+        let mut chat = SessionChat::default();
+        assert!(chat.apply(
+            model_report(Some("claude-opus-5-5"), Some("Opus 5.5")),
+            Instant::now(),
+        ));
+        assert_eq!(chat.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(chat.model_label(), Some("Opus 5.5"));
+    }
+
+    #[test]
+    fn a_cleared_chat_model_clears_it() {
+        let mut chat = SessionChat::default();
+        assert!(chat.apply(
+            model_report(Some("claude-opus-5-5"), Some("Opus 5.5")),
+            Instant::now(),
+        ));
+        assert!(chat.apply(model_report(None, None), Instant::now()));
+        assert_eq!(chat.model, None);
+        assert_eq!(chat.model_label(), None, "the pill draws nothing again");
     }
 }

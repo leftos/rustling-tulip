@@ -1269,17 +1269,25 @@ mod unix {
 
     /// [`identity_of`] for a raw `stat`, converted as [`MetadataExt::dev`](std::os::unix::fs::MetadataExt::dev)
     /// converts it, so the two compare.
-    #[cfg_attr(
-        target_os = "macos",
-        expect(
-            clippy::cast_sign_loss,
-            reason = "macOS's dev_t is signed; std's MetadataExt::dev casts it to u64 the same way"
-        )
-    )]
     fn identity_of_stat(stat: &libc::stat) -> DirIdentity {
         let mut id = [0_u8; 16];
         id[..8].copy_from_slice(&stat.st_ino.to_le_bytes());
-        (stat.st_dev as u64, id)
+        (device_key(stat.st_dev), id)
+    }
+
+    /// A device id as the `u64` key [`MetadataExt::dev`](std::os::unix::fs::MetadataExt::dev) uses, widened
+    /// without a sign-losing cast: Apple's `dev_t` is `i32`. A device id is never negative, so widening its
+    /// unsigned form reports the same value.
+    #[cfg(target_vendor = "apple")]
+    fn device_key(dev: libc::dev_t) -> u64 {
+        u64::from(dev.cast_unsigned())
+    }
+
+    /// A device id as the `u64` key [`MetadataExt::dev`](std::os::unix::fs::MetadataExt::dev) uses: elsewhere
+    /// `dev_t` is already unsigned, so it needs no widening.
+    #[cfg(not(target_vendor = "apple"))]
+    fn device_key(dev: libc::dev_t) -> u64 {
+        dev
     }
 
     /// The modification time of a raw `stat`; `None` for one before the epoch.

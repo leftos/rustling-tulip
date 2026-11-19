@@ -55,6 +55,15 @@ const DIGIT_WIDTH_RATIO: f32 = 0.6;
 const LINE_HEIGHT_RATIO: f32 = 1.4;
 /// The room between the text and the gutter, in px.
 const TEXT_PAD_LEFT: f32 = 8.0;
+/// The viewer tab the phone's viewer page reads its file under, which no
+/// layout lists.
+pub(crate) const PHONE_VIEWER_ID: &str = "phone-viewer";
+
+/// The driver id of viewer tab `tab_id`'s body.
+pub(crate) fn viewer_body_id(tab_id: &str) -> String {
+    format!("viewer-{tab_id}")
+}
+
 /// The header's file name and folder, as their ellipsis probe ids.
 const PATH_NAME: &str = "viewer-path-name";
 const PATH_FOLDER: &str = "viewer-path-folder";
@@ -166,10 +175,9 @@ struct Rows {
     colors: [Hsla; 6],
     /// The theme the rows draw in.
     theme: UiTheme,
-    /// The root view, which a press or a drag on a row updates.
-    root: WeakEntity<RootView>,
-    /// The viewer body's focus, which a press on a row takes.
-    focus: FocusHandle,
+    /// The root view, which a press on a row updates, and the viewer body's
+    /// focus, which the press takes; `None` where a press selects nothing.
+    press: Option<(WeakEntity<RootView>, FocusHandle)>,
 }
 
 impl Rows {
@@ -254,7 +262,9 @@ impl Rows {
             .items_center()
             .when(hovered, |row| row.bg(gpui::rgb(t.hover_bg)))
             .when(selected, |row| row.bg(gpui::rgba(t.input_selection)))
-            .on_mouse_down(MouseButton::Left, self.on_press(index))
+            .when_some(self.on_press(index), |row, press| {
+                row.on_mouse_down(MouseButton::Left, press)
+            })
             .child(
                 div()
                     .driver_id(move || selector)
@@ -279,17 +289,24 @@ impl Rows {
     }
 
     /// A left press on row `index`: the body takes the keyboard and the row
-    /// is selected, or with Shift the run from the anchor to it.
-    fn on_press(&self, index: usize) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
-        let (root, focus, tab_id) = (self.root.clone(), self.focus.clone(), self.tab_id.clone());
-        move |event, window, cx| {
-            focus.focus(window, cx);
-            // Fails only when the view is gone, and the tab with it.
-            root.update(cx, |root, cx| {
-                root.press_viewer_line(&tab_id, index, event.modifiers.shift, cx);
-            })
-            .ok();
-        }
+    /// is selected, or with Shift the run from the anchor to it. `None`
+    /// where a press selects nothing.
+    fn on_press(
+        &self,
+        index: usize,
+    ) -> Option<impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static> {
+        let (root, focus) = self.press.clone()?;
+        let tab_id = self.tab_id.clone();
+        Some(
+            move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                focus.focus(window, cx);
+                // Fails only when the view is gone, and the tab with it.
+                root.update(cx, |root, cx| {
+                    root.press_viewer_line(&tab_id, index, event.modifiers.shift, cx);
+                })
+                .ok();
+            },
+        )
     }
 
     /// How a segment of a line is drawn: its syntax colour and its find
@@ -340,8 +357,9 @@ impl RootView {
 
     /// Gives every viewer tab its state, deriving where its file comes from,
     /// drops the state of tabs that are gone, and starts reading the file of
-    /// every tab not read yet.
-    pub(crate) fn reconcile_viewer_tabs(&mut self, cx: &mut Context<Self>) {
+    /// every tab not read yet. The phone's reserved viewer tab, which no
+    /// layout lists, is kept.
+    pub fn reconcile_viewer_tabs(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<(String, String)> = self
             .tabs
             .tabs()
@@ -355,15 +373,12 @@ impl RootView {
                 | TabContent::Unknown => None,
             })
             .collect();
-        self.viewer_tabs
-            .retain(|tab_id, _| paths.iter().any(|(id, _)| id == tab_id));
+        self.viewer_tabs.retain(|tab_id, _| {
+            tab_id == PHONE_VIEWER_ID || paths.iter().any(|(id, _)| id == tab_id)
+        });
         let opens_local_files = self.capabilities().opens_local_files();
         let download_root = self.remote_files_root.as_ref().ok().map(PathBuf::as_path);
-        let markdown_default = if self.sidebar.ui_state().viewer_markdown_rendered {
-            MarkdownMode::Rendered
-        } else {
-            MarkdownMode::Source
-        };
+        let markdown_default = self.viewer_markdown_default();
         for (tab_id, path) in paths {
             self.viewer_tabs.entry(tab_id).or_insert_with(|| {
                 let origin =
@@ -371,6 +386,42 @@ impl RootView {
                 ViewerTab::new(path, origin, markdown_default)
             });
         }
+        self.start_viewer_reads(cx);
+    }
+
+    /// How a Markdown file shows when its tab opens: rendered or as source,
+    /// as the user last chose.
+    fn viewer_markdown_default(&self) -> MarkdownMode {
+        if self.sidebar.ui_state().viewer_markdown_rendered {
+            MarkdownMode::Rendered
+        } else {
+            MarkdownMode::Source
+        }
+    }
+
+    /// Opens the phone's viewer page's file at `path` under the reserved
+    /// tab [`PHONE_VIEWER_ID`], replacing the file it held, and starts
+    /// reading it.
+    pub(crate) fn open_phone_viewer(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let opens_local_files = self.capabilities().opens_local_files();
+        let download_root = self.remote_files_root.as_ref().ok().map(PathBuf::as_path);
+        let origin = viewer_tab::derive_origin(&path, download_root, opens_local_files);
+        let path = path
+            .into_os_string()
+            .into_string()
+            .unwrap_or_else(|raw| raw.to_string_lossy().into_owned());
+        let tab = ViewerTab::new(path, origin, self.viewer_markdown_default());
+        self.viewer_tabs.insert(PHONE_VIEWER_ID.to_owned(), tab);
+        self.start_viewer_reads(cx);
+    }
+
+    /// Drops the phone's reserved viewer tab and the file it held.
+    pub(crate) fn close_phone_viewer(&mut self) {
+        self.viewer_tabs.remove(PHONE_VIEWER_ID);
+    }
+
+    /// Starts reading the file of every viewer tab not read yet.
+    fn start_viewer_reads(&mut self, cx: &mut Context<Self>) {
         let reads: Vec<(String, PathBuf, u64)> = self
             .viewer_tabs
             .iter_mut()
@@ -921,29 +972,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let t = theme(cx);
+        let (banner, lines) = self.viewer_body(tab_id, true, cx)?;
         let tab = self.viewer_tabs.get(tab_id)?;
-        let body = format!("viewer-{tab_id}");
-        let banner = tab.note().map(|note| {
-            let selector = format!("viewer-banner-{tab_id}");
-            div()
-                .driver_id(move || selector)
-                .flex_none()
-                .px(px(HEADER_PAD_LEFT))
-                .py(px(10.0))
-                .text_color(gpui::rgb(t.muted))
-                .child(note)
-        });
-        let root = cx.entity().downgrade();
-        let lines = tab.text().map(|text| match tab.markdown() {
-            Some(MarkdownMode::Rendered) => match tab.markdown_doc() {
-                Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks, &theme(cx)),
-                // The document is being parsed.
-                None => div().flex_1(),
-            },
-            Some(MarkdownMode::Source) | None => {
-                self.viewer_lines(tab_id, tab, text, root, &theme(cx))
-            }
-        });
+        let body = viewer_body_id(tab_id);
         let (key_tab, move_tab) = (tab_id.to_owned(), tab_id.to_owned());
         let (up_tab, up_out_tab) = (tab_id.to_owned(), tab_id.to_owned());
         Some(
@@ -983,15 +1014,49 @@ impl RootView {
         )
     }
 
+    /// Viewer tab `tab_id`'s banner that says why no lines show, and the
+    /// file's lines or its rendered Markdown; `None` without the tab. A
+    /// press on a line selects it only when `interactive`.
+    pub(crate) fn viewer_body(
+        &self,
+        tab_id: &str,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<(Option<Div>, Option<Div>)> {
+        let t = theme(cx);
+        let tab = self.viewer_tabs.get(tab_id)?;
+        let banner = tab.note().map(|note| {
+            let selector = format!("viewer-banner-{tab_id}");
+            div()
+                .driver_id(move || selector)
+                .flex_none()
+                .px(px(HEADER_PAD_LEFT))
+                .py(px(10.0))
+                .text_color(gpui::rgb(t.muted))
+                .child(note)
+        });
+        let root = interactive.then(|| cx.entity().downgrade());
+        let lines = tab.text().map(|text| match tab.markdown() {
+            Some(MarkdownMode::Rendered) => match tab.markdown_doc() {
+                Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks, &t),
+                // The document is being parsed.
+                None => div().flex_1(),
+            },
+            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text, root, &t),
+        });
+        Some((banner, lines))
+    }
+
     /// The file's lines in the terminal font, each under its line number,
     /// scrolled to the line an open asked for; a press or a drag on them
-    /// updates `root`'s selection.
+    /// updates `root`'s selection, and with no `root` a press selects
+    /// nothing.
     fn viewer_lines(
         &self,
         tab_id: &str,
         tab: &ViewerTab,
         text: &Arc<ViewerText>,
-        root: WeakEntity<RootView>,
+        root: Option<WeakEntity<RootView>>,
         t: &UiTheme,
     ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
@@ -1019,8 +1084,7 @@ impl RootView {
             gutter_width,
             colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color(t)))),
             theme: *t,
-            root,
-            focus: self.viewer_focus.clone(),
+            press: root.map(|root| (root, self.viewer_focus.clone())),
         };
         if let Some(row) = tab.take_jump() {
             tab.scroll()

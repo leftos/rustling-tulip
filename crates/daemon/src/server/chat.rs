@@ -926,23 +926,95 @@ mod tests {
         }
     }
 
-    /// The next message that is not a `ChatWork`: every load's reply is
-    /// followed by the strip, which the tests of other messages skip.
+    /// Whether `msg` is a strip or a model, which follow a load's reply and
+    /// which the tests of other messages skip.
+    fn is_strip_or_model(msg: &DaemonMessage) -> bool {
+        matches!(
+            msg,
+            DaemonMessage::ChatWork { .. } | DaemonMessage::ChatModel { .. }
+        )
+    }
+
+    /// The next message that is not a `ChatWork` or a `ChatModel`: every
+    /// load's reply is followed by the strip, and by the model when one is
+    /// known, which the tests of other messages skip.
     async fn next_message(inbox: &mut Inbox) -> DaemonMessage {
         loop {
             let msg = test_support::next_message(inbox).await;
-            if !matches!(msg, DaemonMessage::ChatWork { .. }) {
+            if !is_strip_or_model(&msg) {
                 return msg;
             }
         }
     }
 
-    /// The messages waiting on `inbox` but the strips.
+    /// The messages waiting on `inbox` but the strips and the models.
     fn drain(inbox: &mut Inbox) -> Vec<DaemonMessage> {
         test_support::drain(inbox)
             .into_iter()
-            .filter(|msg| !matches!(msg, DaemonMessage::ChatWork { .. }))
+            .filter(|msg| !is_strip_or_model(msg))
             .collect()
+    }
+
+    /// A model's id and label, as a `ChatModel` carries them.
+    type ModelShown = (Option<String>, Option<String>);
+
+    fn model_shown(msg: DaemonMessage) -> Option<ModelShown> {
+        match msg {
+            DaemonMessage::ChatModel { model, label, .. } => Some((model, label)),
+            _ => None,
+        }
+    }
+
+    /// The next `ChatModel` on `inbox`, skipping every other message.
+    async fn next_model(inbox: &mut Inbox) -> ModelShown {
+        loop {
+            if let Some(shown) = model_shown(test_support::next_message(inbox).await) {
+                return shown;
+            }
+        }
+    }
+
+    /// The models on `inbox` before the first message `last` matches, which
+    /// it consumes.
+    async fn models_until(
+        inbox: &mut Inbox,
+        last: impl Fn(&DaemonMessage) -> bool,
+    ) -> Vec<ModelShown> {
+        let mut models = Vec::new();
+        loop {
+            let msg = test_support::next_message(inbox).await;
+            if last(&msg) {
+                return models;
+            }
+            models.extend(model_shown(msg));
+        }
+    }
+
+    /// Whether `msg` is a `Chat` or a `ChatAppend` carrying entry `id`.
+    fn carries(msg: &DaemonMessage, id: &str) -> bool {
+        match msg {
+            DaemonMessage::Chat { entries, .. } | DaemonMessage::ChatAppend { entries, .. } => {
+                entries.iter().any(|entry| id_of(entry) == id)
+            }
+            _ => false,
+        }
+    }
+
+    /// A main-thread reply `uuid` at second `n` that names `model`.
+    fn reply(uuid: &str, n: usize, model: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "uuid": uuid, "timestamp": stamp(n),
+            "message": {"id": format!("msg-{uuid}"), "role": "assistant", "type": "message",
+                "model": model, "content": [{"type": "text", "text": "Done."}]},
+        })
+        .to_string()
+    }
+
+    const OPUS: &str = "claude-opus-5-5";
+    const SONNET: &str = "claude-sonnet-4-5";
+
+    fn shown(model: &str, label: &str) -> ModelShown {
+        (Some(model.to_owned()), Some(label.to_owned()))
     }
 
     /// A subagent's and a shell's ids, as a strip lists them.
@@ -1342,6 +1414,143 @@ mod tests {
             next_work(&mut a_rx).await,
             (ids(&["a1"]), ids(&["b1"])),
             "the same Stop again sent no strip before the changed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_model_is_sent_on_load() {
+        let fx = Fixture::new("chat-model-on-load", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown(OPUS, "Opus 5.5"),
+            "the first read's model"
+        );
+        fx.load(2, &b_tx, "rb").await;
+        let reply = test_support::next_message(&mut b_rx).await;
+        assert!(
+            matches!(reply, DaemonMessage::Chat { .. }),
+            "the reply comes first, got {reply:?}"
+        );
+        let strip = test_support::next_message(&mut b_rx).await;
+        assert!(
+            matches!(strip, DaemonMessage::ChatWork { .. }),
+            "then the strip, got {strip:?}"
+        );
+        assert_eq!(
+            model_shown(test_support::next_message(&mut b_rx).await),
+            Some(shown(OPUS, "Opus 5.5")),
+            "then the model"
+        );
+        assert!(
+            test_support::drain(&mut a_rx)
+                .into_iter()
+                .all(|msg| model_shown(msg).is_none()),
+            "B's load sends A no model"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_model_reaches_loaders_when_it_changes() {
+        let fx = Fixture::new("chat-model-change", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let (summary_tx, mut summary_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        fx.load(2, &b_tx, "rb").await;
+        fx.load_summary(3, &summary_tx, "rc").await;
+        for (name, inbox) in [("a", &mut a_rx), ("b", &mut b_rx)] {
+            assert_eq!(next_model(inbox).await, shown(OPUS, "Opus 5.5"), "{name}");
+        }
+        fx.append("conv-a", &[user(3), reply("a-4", 4, SONNET), user(5)]);
+        for (name, inbox) in [("a", &mut a_rx), ("b", &mut b_rx)] {
+            assert_eq!(
+                models_until(inbox, |msg| carries(msg, "u-5")).await,
+                [shown(SONNET, "Sonnet 4.5")],
+                "{name}: once"
+            );
+        }
+        assert!(
+            test_support::drain(&mut summary_rx)
+                .into_iter()
+                .all(|msg| model_shown(msg).is_none()),
+            "a summary loader gets no model"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_chat_model_when_nothing_changed() {
+        let fx = Fixture::new("chat-model-unchanged", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_model(&mut a_rx).await, shown(OPUS, "Opus 5.5"));
+        fx.append("conv-a", &[user(3), reply("a-4", 4, OPUS)]);
+        fx.append("conv-a", &[user(5), reply("a-6", 6, SONNET)]);
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown(SONNET, "Sonnet 4.5"),
+            "the same model again sent none before the changed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_model_sends_none_on_load() {
+        let fx = Fixture::new("chat-model-none", Some("conv-a"));
+        fx.append("conv-a", &[user(1), answer("a-2", 2, "Done.")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let mut models = models_until(&mut a_rx, |msg| carries(msg, "u-1")).await;
+        fx.append("conv-a", &[user(3)]);
+        models.extend(models_until(&mut a_rx, |msg| carries(msg, "u-3")).await);
+        assert_eq!(models, Vec::<ModelShown>::new());
+    }
+
+    #[tokio::test]
+    async fn catching_up_sends_the_newest_model_once() {
+        let fx = Fixture::new("chat-model-catch-up", Some("conv-a"));
+        fx.append(
+            "conv-a",
+            &[
+                user(1),
+                reply("a-2", 2, OPUS),
+                user(3),
+                reply("a-4", 4, SONNET),
+            ],
+        );
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let mut models = models_until(&mut a_rx, |msg| carries(msg, "u-3")).await;
+        fx.append("conv-a", &[user(5)]);
+        models.extend(models_until(&mut a_rx, |msg| carries(msg, "u-5")).await);
+        assert_eq!(models, [shown(SONNET, "Sonnet 4.5")]);
+    }
+
+    #[tokio::test]
+    async fn a_conversation_switch_sends_a_cleared_model() {
+        let fx = Fixture::new("chat-model-switch", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        fx.transcript("conv-b");
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_model(&mut a_rx).await, shown(OPUS, "Opus 5.5"));
+        fx.hub.sessions.update("s1", |record| {
+            record.conversation_id = Some("conv-b".to_owned());
+        });
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            (None, None),
+            "the switch clears it"
+        );
+        fx.append("conv-b", &[user(3), reply("a-4", 4, SONNET)]);
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown(SONNET, "Sonnet 4.5"),
+            "the new conversation's first reply names it"
         );
     }
 

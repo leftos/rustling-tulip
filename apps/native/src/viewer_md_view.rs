@@ -33,6 +33,7 @@ use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
+use crate::viewer_tab_view::PHONE_VIEWER_ID;
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The tooltip of the toggle a document over the render cap disables.
@@ -191,6 +192,10 @@ pub(crate) enum LinkRoute {
     /// A desktop chat answer's: what [`Self::WebOnly`] follows, and a file
     /// link, opened in its default app, or its link menu on Shift.
     Chat,
+    /// A phone chat answer's: what [`Self::WebOnly`] follows, and a file
+    /// link, its path (the fragment dropped) opened as a tapped path on the
+    /// phone: the viewer for a file, the browser for a folder.
+    Phone,
 }
 
 impl LinkRoute {
@@ -199,7 +204,7 @@ impl LinkRoute {
         match self {
             Self::ViewerTab => true,
             Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
-            Self::Chat => matches!(
+            Self::Chat | Self::Phone => matches!(
                 target,
                 LinkTarget::Url(_) | LinkTarget::Stretchtext { .. } | LinkTarget::File { .. }
             ),
@@ -238,7 +243,7 @@ impl LinkClick {
                 let prefer_viewer = prefers_viewer(window.modifiers());
                 root.follow_md_link(&self.tab_id, target, prefer_viewer, window, cx);
             }
-            (LinkRoute::WebOnly | LinkRoute::Chat, LinkTarget::Url(url)) => {
+            (LinkRoute::WebOnly | LinkRoute::Chat | LinkRoute::Phone, LinkTarget::Url(url)) => {
                 root.dispatch_open(
                     &crate::target::HostKey::Local,
                     OpenJob::Url(url),
@@ -250,10 +255,13 @@ impl LinkClick {
             (LinkRoute::Chat, LinkTarget::File { path, anchor }) => {
                 self.chat_file(root, &path, anchor.as_deref(), window, cx);
             }
+            (LinkRoute::Phone, LinkTarget::File { path, .. }) => {
+                self.phone_file(root, &path, window, cx);
+            }
             (LinkRoute::WebOnly, _) => {
                 tracing::debug!("a chat answer follows only web links");
             }
-            (LinkRoute::Chat, _) => {
+            (LinkRoute::Chat | LinkRoute::Phone, _) => {
                 tracing::debug!("a chat answer follows only web and file links");
             }
         }
@@ -279,6 +287,21 @@ impl LinkClick {
             menu: window.modifiers().shift,
         };
         root.chat_file_link(session_id, link, window, cx);
+    }
+
+    /// Opens a phone chat answer's file link at `path` as a tapped path.
+    fn phone_file(
+        &self,
+        root: &mut RootView,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<RootView>,
+    ) {
+        let Some((session_id, _)) = &self.stretchtext else {
+            tracing::debug!("a file link outside a chat answer");
+            return;
+        };
+        root.phone_chat_file_link(session_id, path, window, cx);
     }
 }
 
@@ -1166,6 +1189,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The phone's viewer follows only a jump within its page.
+        if tab_id == PHONE_VIEWER_ID && !matches!(target, LinkTarget::Anchor(_)) {
+            tracing::debug!(tab_id, "the phone's viewer follows no link out of its page");
+            return;
+        }
         let Some(tab) = self.viewer_tabs.get(tab_id) else {
             return;
         };
@@ -1509,6 +1537,7 @@ mod tests {
             targets.iter().map(|target| route.follows(target)).collect()
         };
         assert_eq!(follows(LinkRoute::Chat), [true, true, true, false, false]);
+        assert_eq!(follows(LinkRoute::Phone), [true, true, true, false, false]);
         assert_eq!(
             follows(LinkRoute::WebOnly),
             [true, true, false, false, false]

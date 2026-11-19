@@ -7,6 +7,8 @@
 
 use std::ops::Range;
 
+use crate::chat::{COMMAND_TRIGGER, OPENS_TERMINAL_NOTE, STRIP_SEPARATOR};
+
 /// The trigger that counts only at a line's start.
 const LINE_START_TRIGGER: char = '/';
 
@@ -39,6 +41,31 @@ impl CompletionItem {
             insert: insert.into(),
         }
     }
+
+    /// The short text the phone's completion strip shows for this row: a
+    /// command's `/name`, with ` · terminal` after it when the command opens
+    /// in the terminal, or a file's last path part (`src/a/b.rs` gives
+    /// `b.rs`).
+    #[must_use]
+    pub fn chip(&self) -> String {
+        if !self.insert.starts_with(COMMAND_TRIGGER) {
+            return last_path_part(&self.label).to_owned();
+        }
+        let terminal = self
+            .label
+            .rsplit_once(STRIP_SEPARATOR)
+            .is_some_and(|(_, last)| last == OPENS_TERMINAL_NOTE);
+        if terminal {
+            format!("{}{}terminal", self.insert, STRIP_SEPARATOR)
+        } else {
+            self.insert.clone()
+        }
+    }
+}
+
+/// The last part of `path`: what follows its last `/` or `\`.
+fn last_path_part(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// The token the caret at byte `caret` of `text` sits in, for one of
@@ -296,6 +323,26 @@ mod tests {
         assert_eq!(state.pick(), Some((3..6, "/compact".to_owned())));
         state.dismiss();
         assert_eq!(state.pick(), None, "Esc shut it");
+    }
+
+    #[test]
+    fn a_chip_is_a_short_text_for_the_phones_strip() {
+        let command = CompletionItem::new("/compact \u{b7} Compress the conversation", "/compact");
+        assert_eq!(command.chip(), "/compact");
+        let overlay = CompletionItem::new("/config \u{b7} opens in the terminal", "/config");
+        assert_eq!(overlay.chip(), "/config \u{b7} terminal");
+        let described = CompletionItem::new(
+            "/review \u{b7} Review the branch \u{b7} opens in the terminal",
+            "/review",
+        );
+        assert_eq!(described.chip(), "/review \u{b7} terminal");
+        let file = CompletionItem::new("src/a/b.rs", "@./src/a/b.rs");
+        assert_eq!(file.chip(), "b.rs");
+        assert_eq!(
+            CompletionItem::new("C:\\r1\\main.rs", "@./main.rs").chip(),
+            "main.rs",
+            "a Windows path too"
+        );
     }
 
     #[test]

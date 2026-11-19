@@ -23,8 +23,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use gpui::{Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, point, px};
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
-    ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_CLEAR_DRAFT,
+    CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ChatEntry, ChatOption,
+    ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen, ClientMessage, ComposerState,
+    DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT,
     FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, GridNode, ScriptFacts,
     SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
@@ -87,6 +88,16 @@ fn reply(request_id: Option<&str>, entries: Vec<ChatEntry>) -> DaemonMessage {
         hidden: 0,
         screen: screen(),
         request_id: request_id.map(str::to_owned),
+    }
+}
+
+/// A `ChatModel` for `session_id`, the daemon's report of the model its
+/// main agent answers with.
+fn chat_model(session_id: &str, model: Option<&str>, label: Option<&str>) -> DaemonMessage {
+    DaemonMessage::ChatModel {
+        session_id: session_id.to_owned(),
+        model: model.map(str::to_owned),
+        label: label.map(str::to_owned),
     }
 }
 
@@ -172,6 +183,11 @@ fn drawn_now(h: &mut Harness<'_>, selector: &str) -> bool {
 
 fn shows_chat(h: &mut Harness<'_>) -> bool {
     h.root(|root, _| root.pane_shows_chat("p1"))
+}
+
+/// The text `s1`'s chat-model pill draws; none while it draws nothing.
+fn pill_label(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_model_label("s1"))
 }
 
 #[gpui::test]
@@ -2547,6 +2563,169 @@ fn leaving_the_at_token_drops_the_file_rows(cx: &mut TestAppContext) {
     );
 }
 
+// The composer's `/` popup, over the session's commands and skills.
+
+/// `s1`'s chat loaded on a host offering the command catalog, its
+/// composer holding the keyboard, everything sent so far drained.
+fn cataloging<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = loaded_listing(cx, dir, &[FEATURE_CHAT_CATALOG]);
+    h.click_on("chat-composer");
+    h.sent();
+    h
+}
+
+/// The request ids of the `ListCatalog`s for `s1` sent since the last
+/// drain.
+fn catalog_requests(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListCatalog {
+                session_id,
+                request_id,
+            } if session_id == "s1" => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one `ListCatalog` sent since the last drain: its request id.
+fn one_catalog_request(h: &mut Harness<'_>) -> Option<String> {
+    let sent = catalog_requests(h);
+    assert_eq!(sent.len(), 1, "one catalog request: {sent:?}");
+    assert!(sent[0].is_some(), "it carries a request id");
+    sent[0].clone()
+}
+
+/// A command named `name`, with its description and overlay flag.
+fn command(name: &str, description: Option<&str>, opens_terminal: bool) -> CatalogEntry {
+    CatalogEntry {
+        name: name.to_owned(),
+        kind: CatalogEntryKind::Command,
+        description: description.map(str::to_owned),
+        source: CatalogEntrySource::BuiltIn,
+        opens_terminal,
+    }
+}
+
+/// The host's commands: `compact`, `config` (an overlay) and
+/// `code-review`, in that order.
+fn host_commands() -> Vec<CatalogEntry> {
+    vec![
+        command("compact", Some("Compress the conversation"), false),
+        command("config", None, true),
+        command("code-review", Some("Review the branch"), false),
+    ]
+}
+
+/// The popup's rows for [`host_commands`] on `/co`.
+fn host_command_rows() -> (Vec<String>, usize) {
+    rows(&[
+        "/compact \u{b7} Compress the conversation",
+        "/config \u{b7} opens in the terminal",
+        "/code-review \u{b7} Review the branch",
+    ])
+}
+
+/// The daemon answers the catalog request `request_id` with `entries`.
+fn cataloged(h: &mut Harness<'_>, request_id: Option<String>, entries: Vec<CatalogEntry>) {
+    h.send(DaemonMessage::Catalog {
+        session_id: "s1".to_owned(),
+        entries,
+        request_id,
+    });
+}
+
+#[gpui::test]
+fn slash_popup_lists_the_hosts_commands_and_inserts_the_pick(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cataloging(cx, &dir);
+    type_text(&mut h, "/co");
+    let id = one_catalog_request(&mut h);
+    assert_eq!(completion(&mut h), None, "nothing before the answer");
+    cataloged(&mut h, id, host_commands());
+    assert_eq!(completion(&mut h), Some(host_command_rows()));
+    assert!(painted(&mut h, "chat-completion"));
+    h.keys("enter");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/compact "),
+        "the pick inserts the command's name"
+    );
+    assert_eq!(sends(&mut h), Vec::new(), "a pick only inserts");
+}
+
+#[gpui::test]
+fn a_second_slash_uses_the_cached_catalog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cataloging(cx, &dir);
+    type_text(&mut h, "/co");
+    let id = one_catalog_request(&mut h);
+    cataloged(&mut h, id, host_commands());
+    h.keys("enter");
+    h.keys("enter");
+    type_text(&mut h, "/conf");
+    assert_eq!(catalog_requests(&mut h), Vec::new(), "no second request");
+    assert_eq!(
+        completion(&mut h),
+        Some(rows(&["/config \u{b7} opens in the terminal"]))
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/compact \n/conf"));
+}
+
+#[gpui::test]
+fn a_host_without_the_catalog_opens_no_popup_and_sends_no_request(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_listing(cx, &dir, &[]);
+    h.click_on("chat-composer");
+    h.sent();
+    type_text(&mut h, "/co");
+    assert_eq!(catalog_requests(&mut h), Vec::new());
+    assert_eq!(completion(&mut h), None);
+    assert!(!painted(&mut h, "chat-completion"));
+}
+
+#[gpui::test]
+fn a_stale_catalog_answer_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cataloging(cx, &dir);
+    type_text(&mut h, "/co");
+    let id = one_catalog_request(&mut h);
+    cataloged(&mut h, Some("another-request".to_owned()), host_commands());
+    assert_eq!(completion(&mut h), None, "another request's answer");
+    cataloged(&mut h, None, host_commands());
+    assert_eq!(completion(&mut h), None, "an answer naming no request");
+    cataloged(&mut h, id.clone(), host_commands());
+    assert_eq!(completion(&mut h), Some(host_command_rows()));
+    cataloged(&mut h, id, vec![command("clear", None, false)]);
+    assert_eq!(
+        completion(&mut h),
+        Some(host_command_rows()),
+        "an answer applies once"
+    );
+}
+
+#[gpui::test]
+fn a_restarted_chat_refetches_the_catalog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cataloging(cx, &dir);
+    type_text(&mut h, "/co");
+    let first = one_catalog_request(&mut h);
+    cataloged(&mut h, first.clone(), host_commands());
+    assert_eq!(completion(&mut h), Some(host_command_rows()));
+    h.send(reply(None, vec![]));
+    type_text(&mut h, " ");
+    assert_eq!(completion(&mut h), None, "leaving the token drops the rows");
+    h.keys("enter");
+    type_text(&mut h, "/co");
+    let second = one_catalog_request(&mut h);
+    assert_ne!(second, first);
+    cataloged(&mut h, first, host_commands());
+    assert_eq!(completion(&mut h), None, "the old request's answer");
+    cataloged(&mut h, second, vec![command("compact", None, false)]);
+    assert_eq!(completion(&mut h), Some(rows(&["/compact"])));
+}
+
 /// Options whose third field is the description drawn under the label.
 fn described(list: &[(u32, &str, Option<&str>)]) -> Vec<ChatOption> {
     list.iter()
@@ -2874,6 +3053,79 @@ fn an_empty_quick_reply_group_draws_no_section(cx: &mut TestAppContext) {
         "the group with a reply draws its section"
     );
     assert!(painted(&mut h, "chat-quick-1-0"), "with its reply");
+}
+
+#[gpui::test]
+fn the_chat_shows_the_sessions_model_as_a_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Opus 5.5"));
+}
+
+#[gpui::test]
+fn a_model_change_updates_the_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+    h.send(chat_model("s1", Some("claude-sonnet-9"), Some("Sonnet 9")));
+
+    assert!(painted(&mut h, "chat-model"), "the pill is still drawn");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Sonnet 9"));
+}
+
+#[gpui::test]
+fn a_cleared_model_removes_the_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+    assert!(painted(&mut h, "chat-model"));
+
+    h.send(chat_model("s1", None, None));
+
+    assert!(!drawn_now(&mut h, "chat-model"), "the pill is gone");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn a_chat_with_no_model_draws_no_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+
+    assert!(!painted(&mut h, "chat-model"), "no model, no pill");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn a_chat_model_for_another_session_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s2", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(!painted(&mut h, "chat-model"), "s1 shows no pill");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn the_pill_shows_with_no_quick_replies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    support::seed_ui(&dir, &serde_json::json!({ "phone_agent_replies": [] }));
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(painted(&mut h, "chat-model"), "the line holds the pill");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Opus 5.5"));
+    assert!(
+        !painted(&mut h, "chat-quick-group-0"),
+        "and no quick reply chip"
+    );
 }
 
 #[gpui::test]

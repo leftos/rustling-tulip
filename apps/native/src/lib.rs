@@ -518,9 +518,107 @@ pub struct PhoneFetched {
     pub local_path: String,
     /// The file's size in bytes.
     pub size: u64,
+    /// The host as the fetch's toasts name it.
+    pub host_label: String,
+}
+
+/// What came for a stat the phone sent about a kept copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhoneStatAnswer {
+    /// The host's `PathStat`: what the path names, its size and modified
+    /// time.
+    Stat {
+        kind: protocol::PathKind,
+        size: u64,
+        modified: Option<i64>,
+    },
+    /// The host started over before it answered, so no answer will come.
+    Dropped,
+}
+
+/// The stats the phone sent about its kept copies, by id, apart from the
+/// desktop's link stats: the root view takes an answer to one of these ids
+/// before the desktop's stat handling sees it, and the phone drains what
+/// came. An id stays until its answer or its host's next `Welcome`, so a
+/// late answer the phone no longer waits for is still kept from the
+/// desktop's handling.
+#[derive(Debug, Default)]
+pub(crate) struct PhoneStats {
+    out: HashMap<String, HostKey>,
+    came: Vec<(String, PhoneStatAnswer)>,
+}
+
+impl PhoneStats {
+    /// The phone sent `host` the stat `id`.
+    pub(crate) fn register(&mut self, host: &HostKey, id: &str) {
+        self.out.insert(id.to_owned(), host.clone());
+    }
+
+    /// Takes `host`'s answer to the stat `id`; `false` when `id` is not a
+    /// phone stat out to `host`.
+    pub(crate) fn answer(&mut self, host: &HostKey, id: &str, answer: PhoneStatAnswer) -> bool {
+        if self.out.get(id) != Some(host) {
+            return false;
+        }
+        self.out.remove(id);
+        self.came.push((id.to_owned(), answer));
+        true
+    }
+
+    /// `host` said `Welcome` again: every stat out to it is dropped
+    /// unanswered. Returns whether any was.
+    pub(crate) fn host_reset(&mut self, host: &HostKey) -> bool {
+        let dropped: Vec<String> = self
+            .out
+            .iter()
+            .filter(|(_, out_host)| *out_host == host)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dropped {
+            self.out.remove(id);
+            self.came.push((id.clone(), PhoneStatAnswer::Dropped));
+        }
+        !dropped.is_empty()
+    }
+
+    /// What came since the last drain.
+    pub(crate) fn drain(&mut self) -> Vec<(String, PhoneStatAnswer)> {
+        std::mem::take(&mut self.came)
+    }
+}
+
+/// What a path tapped on the phone opens once its host said what it names,
+/// queued for the phone's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PhoneOpen {
+    /// A folder: the browser opens at `path` on `host`, while the page of
+    /// `session`, where it was tapped, shows.
+    Folder {
+        host: HostKey,
+        session: Option<String>,
+        path: String,
+    },
+    /// Nothing on the host: the page of `session` on `host`, where it was
+    /// tapped, says `note` while it shows.
+    Missing {
+        host: HostKey,
+        session: Option<String>,
+        note: String,
+    },
 }
 
 impl RootView {
+    /// Queues `open`, what a tapped path names, for the phone's root.
+    pub(crate) fn phone_open(&mut self, open: PhoneOpen, cx: &mut Context<Self>) {
+        self.phone_opens.push(open);
+        cx.notify();
+    }
+
+    /// What tapped paths opened since the last take.
+    pub(crate) fn take_phone_opens(&mut self) -> Vec<PhoneOpen> {
+        std::mem::take(&mut self.phone_opens)
+    }
+
     /// Queues the phone's saved file fetch `saved` for the phone's root,
     /// which records it as it observes this view.
     pub fn phone_file_saved(&mut self, saved: PhoneFetched, cx: &mut Context<Self>) {
@@ -1592,6 +1690,13 @@ pub struct RootView {
     remote_files_root: Result<PathBuf, String>,
     /// The phone's saved file fetches, until the phone's root takes them.
     phone_fetched: Vec<PhoneFetched>,
+    /// What paths tapped on the phone opened, until the phone's root takes
+    /// them.
+    phone_opens: Vec<PhoneOpen>,
+    /// The stats the phone sent about its kept copies, and their answers.
+    pub(crate) phone_stats: PhoneStats,
+    /// The phone browser's host answers and each connection's host info.
+    pub(crate) phone_browse: phone::browser::Inbox,
     /// The updater, the update ready to install and the last check.
     update: update_view::UpdateUi,
 }
@@ -2084,6 +2189,9 @@ impl RootView {
                 .map(file_fetch_view::absolute_root)
                 .map_err(|err| format!("{err:#}")),
             phone_fetched: Vec::new(),
+            phone_opens: Vec::new(),
+            phone_stats: PhoneStats::default(),
+            phone_browse: phone::browser::Inbox::default(),
             update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);
@@ -5688,6 +5796,12 @@ impl RootView {
         self.on_push_message(host, &msg, cx);
         self.on_linear_message(host, &msg, cx);
         if self.phone_replies.on_message(host, &msg) {
+            cx.notify();
+        }
+        if matches!(msg, DaemonMessage::Welcome { .. }) && self.phone_stats.host_reset(host) {
+            cx.notify();
+        }
+        if matches!(msg, DaemonMessage::Welcome { .. }) && self.phone_browse.host_reset(host) {
             cx.notify();
         }
         if self.on_panel_message(host, &msg, window, cx) {

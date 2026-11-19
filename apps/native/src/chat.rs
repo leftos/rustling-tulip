@@ -10,11 +10,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::completion::CompletionItem;
 use crate::stretchtext;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
-    ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
+    CatalogEntry, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
     ComposerState, ScriptFacts, ToolKind, WorkShell, WorkSubagent,
 };
 
@@ -2126,6 +2127,126 @@ impl FileSearch {
     pub fn items_given(&mut self) {
         self.showing = false;
     }
+}
+
+/// The completion trigger whose token lists the session's commands and
+/// skills.
+pub const COMMAND_TRIGGER: char = '/';
+
+/// How many rows the `/` filter gives at most.
+pub const COMMAND_ROW_CAP: usize = 50;
+
+/// What a `/` row says of an entry that opens an overlay or dialog in the
+/// terminal.
+pub const OPENS_TERMINAL_NOTE: &str = "opens in the terminal";
+
+/// One composer's copy of its session's command catalog: the entries the
+/// host answered with, fetched once and filtered locally for each `/`
+/// token, the request id of the catalog request awaiting its answer, and
+/// whether the popup's items are the catalog's rows.
+#[derive(Debug, Default)]
+pub struct CommandCatalog {
+    entries: Option<Vec<CatalogEntry>>,
+    pending: Option<String>,
+    showing: bool,
+}
+
+impl CommandCatalog {
+    /// Whether a `/` token must ask the host for the catalog: none is
+    /// cached and none is awaited.
+    #[must_use]
+    pub fn wants_fetch(&self) -> bool {
+        self.entries.is_none() && self.pending.is_none()
+    }
+
+    /// A catalog request went out under `request_id`; an answer to any
+    /// other no longer applies.
+    pub fn sent(&mut self, request_id: String) {
+        self.pending = Some(request_id);
+    }
+
+    /// An answer carrying `request_id` arrived with `entries`: whether it
+    /// answers the pending request, in which case its entries are cached.
+    pub fn answered(&mut self, request_id: Option<&str>, entries: Vec<CatalogEntry>) -> bool {
+        let ours = request_id.is_some() && self.pending.as_deref() == request_id;
+        if ours {
+            self.pending = None;
+            self.entries = Some(entries);
+        }
+        ours
+    }
+
+    /// The rows for a `/` token holding `query`, from the cached catalog;
+    /// None while nothing is cached. Rows given make the popup's items the
+    /// catalog's.
+    pub fn rows_for(&mut self, query: &str) -> Option<Vec<CompletionItem>> {
+        let rows = slash_rows(self.entries.as_deref()?, query);
+        self.showing = true;
+        Some(rows)
+    }
+
+    /// The caret left the `/` token, or sits in another trigger's: returns
+    /// whether the popup's items came from the catalog, and so must go.
+    pub fn token_left(&mut self) -> bool {
+        std::mem::take(&mut self.showing)
+    }
+
+    /// The popup's items were given from elsewhere: leaving the token no
+    /// longer removes them.
+    pub fn items_given(&mut self) {
+        self.showing = false;
+    }
+
+    /// The chat started over: the cached catalog and the pending request
+    /// are dropped, so the next `/` token asks again. Rows already shown
+    /// stay until the caret leaves their token.
+    pub fn forget(&mut self) {
+        self.entries = None;
+        self.pending = None;
+    }
+}
+
+/// The `/` popup's rows for `query` over `entries`: those whose name starts
+/// with it (ignoring case), then those that only contain it, each group in
+/// catalog order, at most [`COMMAND_ROW_CAP`]. A row shows `/name`, the
+/// entry's description and [`OPENS_TERMINAL_NOTE`] when they apply, and
+/// inserts `/name`.
+#[must_use]
+pub fn slash_rows(entries: &[CatalogEntry], query: &str) -> Vec<CompletionItem> {
+    let query = query.to_lowercase();
+    let lowered: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.name.to_lowercase())
+        .collect();
+    let prefixed = entries
+        .iter()
+        .zip(&lowered)
+        .filter(|(_, name)| name.starts_with(&query));
+    let contained = entries
+        .iter()
+        .zip(&lowered)
+        .filter(|(_, name)| !name.starts_with(&query) && name.contains(&query));
+    prefixed
+        .chain(contained)
+        .take(COMMAND_ROW_CAP)
+        .map(|(entry, _)| slash_row(entry))
+        .collect()
+}
+
+/// One entry's `/` row: `/name`, then its description and
+/// [`OPENS_TERMINAL_NOTE`] when they apply; it inserts `/name`.
+fn slash_row(entry: &CatalogEntry) -> CompletionItem {
+    let insert = format!("{COMMAND_TRIGGER}{}", entry.name);
+    let mut label = insert.clone();
+    if let Some(description) = entry.description.as_deref() {
+        label.push_str(STRIP_SEPARATOR);
+        label.push_str(description);
+    }
+    if entry.opens_terminal {
+        label.push_str(STRIP_SEPARATOR);
+        label.push_str(OPENS_TERMINAL_NOTE);
+    }
+    CompletionItem::new(label, insert)
 }
 
 /// What the composer says after a pull answered with `cleared`: none when
@@ -4994,5 +5115,111 @@ mod file_search_tests {
         assert!(search.answered(Some("r2")));
         search.items_given();
         assert!(!search.token_left(), "items given from elsewhere stay");
+    }
+}
+
+#[cfg(test)]
+mod command_catalog_tests {
+    use super::{CommandCatalog, slash_rows};
+    use crate::completion::CompletionItem;
+    use protocol::{CatalogEntry, CatalogEntryKind, CatalogEntrySource};
+
+    fn entry(name: &str, description: Option<&str>, opens_terminal: bool) -> CatalogEntry {
+        CatalogEntry {
+            name: name.to_owned(),
+            kind: CatalogEntryKind::Command,
+            description: description.map(str::to_owned),
+            source: CatalogEntrySource::BuiltIn,
+            opens_terminal,
+        }
+    }
+
+    fn named(name: &str) -> CatalogEntry {
+        entry(name, None, false)
+    }
+
+    fn inserts(rows: &[CompletionItem]) -> Vec<&str> {
+        rows.iter().map(|row| row.insert.as_str()).collect()
+    }
+
+    #[test]
+    fn the_slash_filter_puts_prefix_matches_before_substring_ones() {
+        let entries = [
+            named("decompose"),
+            entry("code-review", Some("Review the branch"), false),
+            named("help"),
+            entry("Config", Some("Open the settings"), true),
+            named("recon"),
+            entry("compact", None, true),
+        ];
+        let rows = slash_rows(&entries, "cO");
+        assert_eq!(
+            inserts(&rows),
+            [
+                "/code-review",
+                "/Config",
+                "/compact",
+                "/decompose",
+                "/recon"
+            ],
+            "prefix matches first, then substring ones, each in catalog order"
+        );
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "/code-review \u{b7} Review the branch",
+                "/Config \u{b7} Open the settings \u{b7} opens in the terminal",
+                "/compact \u{b7} opens in the terminal",
+                "/decompose",
+                "/recon",
+            ]
+        );
+        assert_eq!(slash_rows(&entries, "").len(), entries.len(), "every entry");
+        assert_eq!(slash_rows(&entries, "zz"), Vec::new());
+    }
+
+    #[test]
+    fn the_slash_filter_is_capped_at_fifty() {
+        let entries: Vec<CatalogEntry> = (0..30)
+            .map(|i| named(&format!("x-cmd{i:02}")))
+            .chain((0..40).map(|i| named(&format!("cmd{i:02}"))))
+            .collect();
+        let rows = slash_rows(&entries, "cmd");
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0].insert, "/cmd00", "the prefix matches lead");
+        assert_eq!(rows[39].insert, "/cmd39");
+        assert_eq!(rows[40].insert, "/x-cmd00", "then the substring ones");
+        assert_eq!(rows[49].insert, "/x-cmd09");
+    }
+
+    #[test]
+    fn a_catalog_answer_applies_only_for_the_pending_request() {
+        let mut catalog = CommandCatalog::default();
+        assert!(catalog.wants_fetch());
+        assert_eq!(catalog.rows_for("co"), None, "nothing cached yet");
+        catalog.sent("r1".to_owned());
+        assert!(!catalog.wants_fetch(), "one request in flight");
+        assert!(!catalog.answered(Some("r0"), vec![named("compact")]));
+        assert!(!catalog.answered(None, vec![named("compact")]));
+        assert!(catalog.answered(Some("r1"), vec![named("compact")]));
+        assert!(
+            !catalog.answered(Some("r1"), vec![named("clear")]),
+            "an answer applies once"
+        );
+        assert!(!catalog.wants_fetch(), "the answer is cached");
+        let rows = catalog.rows_for("co").unwrap_or_default();
+        assert_eq!(inserts(&rows), ["/compact"]);
+        assert!(catalog.token_left(), "the popup showed the catalog's rows");
+
+        catalog.forget();
+        assert!(catalog.wants_fetch(), "a forgotten catalog is asked again");
+        assert_eq!(catalog.rows_for("co"), None);
+        catalog.sent("r2".to_owned());
+        catalog.forget();
+        assert!(
+            !catalog.answered(Some("r2"), vec![named("compact")]),
+            "the pending request is forgotten with it"
+        );
     }
 }

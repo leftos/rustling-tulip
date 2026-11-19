@@ -1,6 +1,8 @@
 //! Pasting an image into a remote agent session: the upload to its host, the
 //! returned path pasted back into the pane that pasted, and the toasts when
-//! the host cannot take it.
+//! the host cannot take it. The chat composer's image paste, drop and Attach
+//! upload to the session's host, a local one included, and insert the
+//! returned paths at the composer's caret.
 
 #![expect(
     clippy::expect_used,
@@ -13,10 +15,13 @@ use crate::support;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use gpui::{ImageFormat, Modifiers, TestAppContext};
+use gpui::{
+    ClipboardEntry, ClipboardItem, ClipboardString, ExternalPaths, FileDropEvent, Image,
+    ImageFormat, Modifiers, TestAppContext,
+};
 use protocol::{
-    ClientMessage, DaemonMessage, FEATURE_UPLOAD_FILE, ImagePaste, SessionSnapshot, SplitDirection,
-    UPLOAD_MAX_BYTES,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_UPLOAD_FILE, ImagePaste,
+    SessionSnapshot, SplitDirection, UPLOAD_MAX_BYTES,
 };
 use support::{Fixture, Harness, TestDir, pane, remote_pane, session, split, tab};
 
@@ -663,5 +668,343 @@ fn a_refused_upload_mid_drop_pastes_what_was_uploaded_and_stops(cx: &mut TestApp
         support::input_to(&sent, "b1"),
         b"/work/one.txt",
         "the path already returned is pasted"
+    );
+}
+
+/// The title of the toast a host that cannot take an upload shows.
+const UNSUPPORTED_TITLE: &str =
+    "This host can't receive pasted images or files until it is updated";
+
+/// The request id of the last `LoadChat` for `session_id` among `sent`.
+fn chat_load_request(sent: &[ClientMessage], session_id: &str) -> Option<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id: id,
+                request_id,
+            } if id == session_id => request_id.clone(),
+            _ => None,
+        })
+        .next_back()
+}
+
+/// `session_id`'s chat loaded with no rows, the reply echoing `request_id`.
+fn chat_reply(session_id: &str, request_id: &str) -> DaemonMessage {
+    DaemonMessage::Chat {
+        session_id: session_id.to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: Some(request_id.to_owned()),
+    }
+}
+
+/// The remote session `b1` in pane `p2` switched to its chat, loaded, on a
+/// host listing `features`, its composer focused and everything sent so far
+/// drained.
+fn remote_chat<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
+    let mut h = support::remote_in_pane_with_features(
+        cx,
+        dir,
+        &serde_json::json!({}),
+        &[],
+        session("b1").build(),
+        features,
+    );
+    h.click_on("pane-view-chat-p2");
+    let sent = h.host(&support::saved_remote()).sent();
+    let id = chat_load_request(&sent, "b1").expect("the pane asks its host for the chat");
+    h.host(&support::saved_remote()).send(chat_reply("b1", &id));
+    h.click_on("chat-composer");
+    h.host(&support::saved_remote()).sent();
+    h.sent();
+    h
+}
+
+/// This PC's session `s1` in pane `p1` switched to its chat, loaded, on a
+/// daemon listing `upload_file`, its composer focused and everything sent so
+/// far drained.
+fn local_chat<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture::single(session("s1").build());
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.reconnect_with_features(&[FEATURE_UPLOAD_FILE]);
+    h.load(&fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on("pane-view-chat-p1");
+    let id = chat_load_request(&h.sent(), "s1").expect("the toggle asks for the chat");
+    h.send(chat_reply("s1", &id));
+    h.click_on("chat-composer");
+    h.sent();
+    h
+}
+
+/// The text in session `session_id`'s chat composer.
+fn composer_of(h: &mut Harness<'_>, session_id: &str) -> Option<String> {
+    h.root(|root, cx| root.chat_composer_text(session_id, cx))
+}
+
+#[gpui::test]
+fn an_image_pasted_in_the_chat_composer_uploads_and_inserts_its_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    h.set_clipboard_image(ImageFormat::Png, png.clone());
+    h.keys("secondary-v");
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.session_id, "b1");
+    assert_eq!(upload.name, "paste.png");
+    assert_eq!(upload.bytes, png, "the clipboard's own bytes go up");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some(""),
+        "nothing is inserted before the host answers"
+    );
+
+    answer(&mut h, &upload, "/work/.tmp/rt-uploads/paste-1.png");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some("/work/.tmp/rt-uploads/paste-1.png "),
+        "the host path and one space are inserted at the caret"
+    );
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        !has_input(&sent),
+        "nothing is typed into the terminal: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_local_chat_paste_also_uploads(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = local_chat(cx, &dir);
+    h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
+    h.keys("secondary-v");
+    let sent = h.sent();
+    let [upload]: [Upload; 1] = uploads_in(&sent)
+        .try_into()
+        .expect("a local chat's image paste uploads too");
+    assert_eq!(upload.session_id, "s1");
+    assert_eq!(upload.name, "paste.png");
+    assert_eq!(upload.bytes, [1, 2, 3]);
+
+    h.send(DaemonMessage::FileUploaded {
+        request_id: upload.request_id.clone(),
+        session_id: upload.session_id.clone(),
+        path: "C:/work/.tmp/rt-uploads/paste.png".to_owned(),
+    });
+    assert_eq!(
+        composer_of(&mut h, "s1").as_deref(),
+        Some("C:/work/.tmp/rt-uploads/paste.png "),
+        "the returned path is inserted"
+    );
+    let sent = h.sent();
+    assert!(
+        !has_input(&sent),
+        "nothing is typed into the terminal: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_drop_on_the_chat_uploads_each_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let one = file_in(&files, "one.txt", b"first");
+    let two = file_in(&files, "two.txt", b"second");
+    h.root_update(|root, _window, cx| root.drop_files_on_chat("b1", &[one, two], cx));
+    let first = the_upload(&mut h);
+    assert_eq!(first.session_id, "b1");
+    assert_eq!(first.name, "one.txt");
+    assert_eq!(first.bytes, b"first");
+
+    answer(&mut h, &first, "/work/one.txt");
+    let second = the_upload(&mut h);
+    assert_eq!(second.name, "two.txt");
+    assert_eq!(second.bytes, b"second");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some(""),
+        "nothing is inserted before the last answer"
+    );
+
+    answer(&mut h, &second, "/work/my two.txt");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some(r#"/work/one.txt "/work/my two.txt" "#),
+        "both host paths are inserted together, the spaced one quoted"
+    );
+}
+
+#[gpui::test]
+fn attach_uploads_the_picked_files(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.set_picked_file(None);
+    h.click_on("chat-attach");
+    assert_eq!(h.file_asks(), 1, "Attach asks for a file");
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "a cancelled pick uploads nothing: {sent:?}"
+    );
+
+    let files = TestDir::new();
+    let picked = file_in(&files, "notes.md", b"# notes");
+    h.set_picked_file(picked.to_str());
+    h.click_on("chat-attach");
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.session_id, "b1");
+    assert_eq!(upload.name, "notes.md");
+    assert_eq!(upload.bytes, b"# notes");
+    answer(&mut h, &upload, "/work/notes.md");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some("/work/notes.md ")
+    );
+}
+
+#[gpui::test]
+fn a_chat_paste_on_a_host_without_uploads_shows_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[]);
+    h.set_clipboard_image(ImageFormat::Png, vec![1, 2, 3]);
+    h.keys("secondary-v");
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert!(
+        toasts(&mut h).contains(&(UNSUPPORTED_TITLE.to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some(""),
+        "nothing is inserted"
+    );
+}
+
+#[gpui::test]
+fn a_real_drop_on_a_chat_pane_uploads_to_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let file = file_in(&files, "drop.txt", b"dropped");
+    let over = h.bounds("pane-chat-p2").center();
+    h.cx.simulate_event(FileDropEvent::Entered {
+        position: over,
+        paths: ExternalPaths(vec![file].into()),
+    });
+    h.cx.simulate_event(FileDropEvent::Submit { position: over });
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.session_id, "b1");
+    assert_eq!(upload.name, "drop.txt");
+    answer(&mut h, &upload, "/work/drop.txt");
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some("/work/drop.txt "),
+        "the dropped file's host path is in the composer"
+    );
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        !has_input(&sent),
+        "nothing is pasted to the terminal: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_paste_with_text_and_an_image_pastes_the_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.cx.write_to_clipboard(ClipboardItem {
+        entries: vec![
+            ClipboardEntry::String(ClipboardString::new("some text".to_owned())),
+            ClipboardEntry::Image(Image::from_bytes(ImageFormat::Png, vec![1, 2, 3])),
+        ],
+    });
+    h.keys("secondary-v");
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some("some text"),
+        "the clipboard's text wins over its image"
+    );
+}
+
+#[gpui::test]
+fn a_folder_dropped_on_a_chat_is_refused_with_the_attach_wording(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let files = TestDir::new();
+    let folder = files.path().join("sub");
+    std::fs::create_dir(&folder).expect("make the dropped folder");
+    let file = file_in(&files, "file.txt", b"f");
+    h.root_update(|root, _window, cx| root.drop_files_on_chat("b1", &[folder, file], cx));
+    let shown = toasts(&mut h);
+    assert!(
+        shown.contains(&("Folders can't be attached".to_owned(), None)),
+        "{shown:?}"
+    );
+    assert!(
+        !shown
+            .iter()
+            .any(|(title, _)| title == "Folders can't be dropped into a remote session"),
+        "not the pane's wording: {shown:?}"
+    );
+    let upload = the_upload(&mut h);
+    assert_eq!(upload.name, "file.txt");
+}
+
+#[gpui::test]
+fn an_attach_for_a_chat_no_longer_loaded_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.click_on("pane-view-terminal-p2");
+    h.host(&support::saved_remote()).sent();
+    h.sent();
+    let before = toasts(&mut h);
+    let files = TestDir::new();
+    let file = file_in(&files, "late.txt", b"late");
+    // What Attach does once its pick resolves, after the chat unloaded.
+    h.root_update(|root, _window, cx| root.drop_files_on_chat("b1", &[file], cx));
+    let remote = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&remote).is_empty(),
+        "nothing goes to the session's host: {remote:?}"
+    );
+    let local = h.sent();
+    assert!(
+        uploads_in(&local).is_empty(),
+        "nothing goes to This PC: {local:?}"
+    );
+    assert_eq!(toasts(&mut h), before, "no toast either");
+}
+
+#[gpui::test]
+fn paste_without_an_image_still_pastes_text_in_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.set_clipboard("hello there");
+    h.keys("secondary-v");
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert_eq!(
+        composer_of(&mut h, "b1").as_deref(),
+        Some("hello there"),
+        "the clipboard's text is pasted"
     );
 }

@@ -147,6 +147,16 @@ pub struct TerminalPane {
     /// The issue link under the pointer, its rest timer and the Linear
     /// card shown.
     card: IssueCard,
+    /// Whether this is the phone's terminal, whose links open on a tap with
+    /// no modifier and are underlined at all times; a desktop pane's stays
+    /// false.
+    phone_links: bool,
+    /// The viewport cell a press on a link began on, and the link, while the
+    /// phone's tap on it waits for its release.
+    phone_tap: Option<((usize, usize), TerminalLink)>,
+    /// The phone's underlined cells of every link on screen, keyed by the
+    /// content generation and the scroll offset they were read at.
+    visible_links: RefCell<Option<VisibleLinks>>,
     /// Bumped whenever the terminal's content may have changed: output,
     /// history, a resize or a fresh terminal. Keys the hover's link cache.
     content_generation: u64,
@@ -212,6 +222,14 @@ struct ShownCard {
 /// The issue links on screen and the content generation and display offset
 /// they were read at.
 type UnderlinedIssues = ((u64, usize), Vec<TerminalLink>);
+
+/// The cells of every link on the phone's screen, row by row, as they were
+/// read at `key`: the pane's content generation and its scroll offset.
+#[derive(Debug)]
+struct VisibleLinks {
+    key: (u64, usize),
+    cells: Vec<(usize, Range<usize>)>,
+}
 
 /// How many confirmed readings a pane keeps.
 const CONFIRMED_LIMIT: usize = 16;
@@ -718,6 +736,9 @@ impl TerminalPane {
             issues: IssueContext::default(),
             links: LinkHover::default(),
             card: IssueCard::default(),
+            phone_links: false,
+            phone_tap: None,
+            visible_links: RefCell::new(None),
             content_generation: 0,
             palette: TerminalPalette::default(),
             frame: None,
@@ -1934,6 +1955,54 @@ impl TerminalPane {
         self.phone_keyboard_up = up;
     }
 
+    /// Makes this pane the phone's terminal: its links open on a tap with no
+    /// modifier and are underlined at all times.
+    pub(crate) fn set_phone_links(&mut self) {
+        self.phone_links = true;
+    }
+
+    /// A left press on the phone's terminal that lands on a link: it waits
+    /// for its release to open the link, and goes no further, so the
+    /// keyboard is left as it is and no selection starts. Returns whether
+    /// it did.
+    fn phone_link_press(&mut self, event: &MouseDownEvent) -> bool {
+        if !self.phone_links || event.button != MouseButton::Left || event.first_mouse {
+            return false;
+        }
+        let Some(cell) = self.cell_within(event.position) else {
+            return false;
+        };
+        let Some(link) = self.link_at(cell.row, cell.col) else {
+            return false;
+        };
+        self.phone_tap = Some(((cell.row, cell.col), link));
+        true
+    }
+
+    /// The release of a phone press on a link: on the cell it began on, a
+    /// tap, which opens the link; anywhere else nothing. Returns whether a
+    /// press on a link was waiting for it.
+    fn phone_link_release(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) -> bool {
+        if event.button != MouseButton::Left {
+            return false;
+        }
+        let Some((at, link)) = self.phone_tap.take() else {
+            return false;
+        };
+        let tapped = self
+            .cell_within(event.position)
+            .is_some_and(|cell| (cell.row, cell.col) == at);
+        if tapped {
+            cx.emit(PaneEvent::OpenLink {
+                link,
+                base_dirs: self.base_dirs.clone(),
+                session: self.session_id().map(str::to_owned),
+                action: LinkAction::Viewer,
+            });
+        }
+        true
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1947,6 +2016,12 @@ impl TerminalPane {
         // and reaches no program.
         if self.in_gutter(event.position) {
             cx.stop_propagation();
+            return;
+        }
+        // On the phone a tap on a link opens it on its release, whatever
+        // the keyboard is doing.
+        if self.phone_link_press(event) {
+            cx.notify();
             return;
         }
         // On the phone a tap toggles the soft keyboard: while it is up, the
@@ -2629,6 +2704,70 @@ impl TerminalPane {
         read(cache.as_ref().map_or(&[], |(_, links)| links.as_slice()))
     }
 
+    /// The cells drawn underlined that take the pointing hand: on the phone
+    /// every link on screen's (issue links among them), else the hovered
+    /// link's.
+    fn underlined_cells(&self) -> Option<Vec<(usize, Range<usize>)>> {
+        if !self.phone_links {
+            return self.hovered_link_cells();
+        }
+        let cells = self.visible_link_cells();
+        (!cells.is_empty()).then_some(cells)
+    }
+
+    /// The cells underlined at all times besides [`Self::underlined_cells`]:
+    /// a desktop pane's issue links. The phone's are already among every
+    /// link on screen.
+    fn always_underlined_cells(&self) -> Vec<(usize, Range<usize>)> {
+        if self.phone_links {
+            return Vec::new();
+        }
+        self.underlined_issue_cells()
+    }
+
+    /// The cells of every link on screen, read again only once the content
+    /// or the scroll offset changed.
+    fn visible_link_cells(&self) -> Vec<(usize, Range<usize>)> {
+        let offset = self.term.display_offset();
+        let key = (self.content_generation, offset);
+        let mut cache = self.visible_links.borrow_mut();
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
+            return cached.cells.clone();
+        }
+        let cells = self.scan_visible_links(offset);
+        *cache = Some(VisibleLinks {
+            key,
+            cells: cells.clone(),
+        });
+        cells
+    }
+
+    /// Reads the links of every row on screen at scroll `offset`, one link
+    /// window at a time from the top row down, and returns their cells.
+    fn scan_visible_links(&self, offset: usize) -> Vec<(usize, Range<usize>)> {
+        let size = self.term.size();
+        let (top, _) = self.grid_point(0, 0);
+        let (bottom, _) = self.grid_point(size.rows.saturating_sub(1), 0);
+        let mut found: Vec<TerminalLink> = Vec::new();
+        let mut line = top;
+        while line <= bottom {
+            let Some(window) = self.term.link_window(line) else {
+                break;
+            };
+            let last = window.row_texts().last().map_or(line, |(row, _)| *row);
+            for link in window.links(&self.issues) {
+                if !found.contains(&link) {
+                    found.push(link);
+                }
+            }
+            line = last.max(line) + 1;
+        }
+        found
+            .iter()
+            .flat_map(|link| link_cells(link, offset, size))
+            .collect()
+    }
+
     /// Reports motion to `position`, once per cell entered.
     fn report_motion(
         &mut self,
@@ -2647,6 +2786,9 @@ impl TerminalPane {
     /// Ends a reported press, or a selection: a click that selected nothing
     /// clears it, and a real selection is copied when copy-on-select is on.
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.phone_link_release(event, cx) {
+            return;
+        }
         let Some(button) = report_button(event.button) else {
             return;
         };
@@ -3001,14 +3143,8 @@ impl Render for TerminalPane {
                 let (snap, marked, link, issues, relaid) = view.update(cx, |v, _| {
                     let relaid = v.lay_out(bounds, &m);
                     let snap = v.term.snapshot();
-                    let issues = v.underlined_issue_cells();
-                    (
-                        snap,
-                        v.marked.clone(),
-                        v.hovered_link_cells(),
-                        issues,
-                        relaid,
-                    )
+                    let issues = v.always_underlined_cells();
+                    (snap, v.marked.clone(), v.underlined_cells(), issues, relaid)
                 });
                 // The gutter was built before this layout, from the last one:
                 // a resize moves the anchors and a new cell height the rows,
@@ -3019,8 +3155,9 @@ impl Render for TerminalPane {
                     window.defer(cx, move |_, cx| pane.update(cx, |_, cx| cx.notify()));
                 }
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-                // Issue links are underlined always, the hovered link only
-                // under Ctrl; only the latter takes the pointing hand.
+                // On a desktop pane issue links are underlined always, the
+                // hovered link only under Ctrl, and only the latter takes the
+                // pointing hand; on the phone every link on screen is.
                 let pointing = link.is_some();
                 let mut underline = link.unwrap_or_default();
                 underline.extend(issues);

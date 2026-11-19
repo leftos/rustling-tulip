@@ -15,12 +15,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, KeyContext, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextInputConfiguration,
-    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    App, AvailableSpace, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, CursorStyle,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, Image, ImageFormat, KeyBinding, KeyContext, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style,
+    TextAlign, TextInputConfiguration, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -152,6 +152,47 @@ pub enum TextInputEvent {
     Cancel,
 }
 
+/// An image pasted into an input with image paste on
+/// ([`TextInput::with_image_paste`]): its bytes and the file name it goes
+/// up under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePasted {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The image a paste of `item` takes: its first non-empty image entry that
+/// is not a BMP, else its first non-empty BMP; none without an image.
+fn clipboard_image_entry(item: &ClipboardItem) -> Option<&Image> {
+    let images = || {
+        item.entries().iter().filter_map(|entry| match entry {
+            ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(image),
+            _ => None,
+        })
+    };
+    images()
+        .find(|image| image.format != ImageFormat::Bmp)
+        .or_else(|| images().next())
+}
+
+/// `image` as the file it goes up as, named as a terminal pane names a
+/// pasted image (`paste.<extension>`): a BMP goes up as the PNG the app's
+/// bitmap reader finds on the system clipboard, else as the BMP it is. A
+/// failed bitmap read is logged.
+fn image_upload(image: &Image, cx: &App) -> (String, Vec<u8>) {
+    if image.format == ImageFormat::Bmp {
+        match crate::clipboard_image::bitmap_reader(cx)() {
+            Ok(Some(png)) => return ("paste.png".to_owned(), png),
+            Ok(None) => {}
+            Err(err) => tracing::warn!("reading the clipboard's bitmap failed: {err:#}"),
+        }
+    }
+    (
+        format!("paste.{}", crate::paste_upload::extension_of(image.format)),
+        image.bytes.clone(),
+    )
+}
+
 /// Up or Down in a single-line input, for an owner that navigates a list
 /// with them; the key still reaches the input's parents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +235,17 @@ pub struct TextInput {
     /// The completion hook: its triggers, the popup's open flag and the
     /// token last told to the owner.
     completion: CompletionHook,
+    /// What a paste of an image does ([`Self::with_image_paste`]).
+    image_paste: ImagePaste,
+}
+
+/// What a paste of a clipboard holding an image does in an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImagePaste {
+    /// Pastes the clipboard's text, as an input does by default.
+    Text,
+    /// Emits [`ImagePasted`] and inserts nothing.
+    Emit,
 }
 
 /// A multi-line input's completion hook.
@@ -263,6 +315,8 @@ impl EventEmitter<NavKey> for TextInput {}
 
 impl EventEmitter<CompletionEvent> for TextInput {}
 
+impl EventEmitter<ImagePasted> for TextInput {}
+
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -319,7 +373,17 @@ impl TextInput {
             input_config: TextInputConfiguration::default(),
             platform_report: PlatformReport::None,
             completion: CompletionHook::default(),
+            image_paste: ImagePaste::Text,
         }
+    }
+
+    /// Turns on image paste: a paste whose clipboard holds an image emits
+    /// [`ImagePasted`] with its bytes and file name instead of inserting
+    /// text. A clipboard with no image pastes its text as before.
+    #[must_use]
+    pub fn with_image_paste(mut self) -> Self {
+        self.image_paste = ImagePaste::Emit;
+        self
     }
 
     /// Turns on the completion hook of a multi-line input for `triggers`
@@ -511,11 +575,27 @@ impl TextInput {
     /// the [`Paste`] action does: newlines normalized in a multi-line input,
     /// one line in a single-line one. A clipboard with no text changes
     /// nothing, and a read-only input takes none.
+    /// With image paste on ([`Self::with_image_paste`]), a clipboard holding
+    /// an image and no non-empty text emits [`ImagePasted`] instead and
+    /// inserts nothing; text on the clipboard always pastes as text.
     pub fn paste_clipboard(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let item = cx.read_from_clipboard();
+        let text = item
+            .as_ref()
+            .and_then(ClipboardItem::text)
+            .filter(|text| !text.is_empty());
+        if text.is_none()
+            && self.image_paste == ImagePaste::Emit
+            && let Some(image) = item.as_ref().and_then(clipboard_image_entry)
+        {
+            let (name, bytes) = image_upload(image, cx);
+            cx.emit(ImagePasted { name, bytes });
+            return;
+        }
+        if let Some(text) = text {
             let text = if self.mode.is_multi_line() {
                 normalize_newlines(&text)
             } else {
@@ -966,7 +1046,7 @@ impl TextInput {
     /// Args:
     ///     `new_text`: The text that replaces it.
     ///     `cx`: The input's context, for its events.
-    fn replace_from_app(&mut self, new_text: &str, cx: &mut Context<Self>) {
+    pub(crate) fn replace_from_app(&mut self, new_text: &str, cx: &mut Context<Self>) {
         self.replace_from_platform(None, new_text, cx);
         if !self.read_only {
             self.report_to_platform(PlatformReport::Content);
@@ -1880,9 +1960,29 @@ mod tests {
 
     use super::{
         CompletionEvent, PlatformReport, TextChanged, TextInput, TextInputEvent, Token, bind_keys,
-        caret_scroll_x, marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16,
-        previous_boundary, single_line,
+        caret_scroll_x, clipboard_image_entry, marked_after_replace, next_boundary,
+        offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
     };
+
+    #[test]
+    fn clipboard_image_entry_prefers_a_non_bmp_image_and_skips_empty_ones() {
+        use gpui::{ClipboardEntry, Image, ImageFormat};
+
+        let of = |item: &ClipboardItem| {
+            clipboard_image_entry(item).map(|image| (image.format, image.bytes.clone()))
+        };
+        assert_eq!(of(&ClipboardItem::new_string("hi".to_owned())), None);
+        let mixed = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::Image(Image::from_bytes(ImageFormat::Png, Vec::new())),
+                ClipboardEntry::Image(Image::from_bytes(ImageFormat::Bmp, vec![b'B'])),
+                ClipboardEntry::Image(Image::from_bytes(ImageFormat::Png, vec![1])),
+            ],
+        };
+        assert_eq!(of(&mixed), Some((ImageFormat::Png, vec![1])));
+        let bmp = ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Bmp, vec![b'B']));
+        assert_eq!(of(&bmp), Some((ImageFormat::Bmp, vec![b'B'])));
+    }
 
     #[test]
     fn text_narrower_than_the_box_never_scrolls() {
