@@ -167,6 +167,12 @@ pub(crate) struct SessionChat {
     /// The work running beside the chat, for its strip; a `Chat` reply
     /// leaves it as it is.
     work: RunningWork,
+    /// The model the session's main agent answers with, as the daemon's last
+    /// `ChatModel` named it: the id a later switch of the model uses.
+    model: Option<String>,
+    /// That model in the form a person reads, as the agent plugin formatted
+    /// it; none while the daemon sent no label.
+    label: Option<String>,
     /// The screen's last composer state; none until the chat loaded.
     composer_state: Option<ComposerState>,
     /// Esc was sent to interrupt the running turn; held until the next
@@ -338,6 +344,12 @@ impl SessionChat {
         &self.work
     }
 
+    /// The label the chat's model pill shows: the model's label, else its
+    /// id; none while no model is known.
+    fn model_label(&self) -> Option<&str> {
+        self.label.as_deref().or(self.model.as_deref())
+    }
+
     /// The composer's text, empty before the composer is made.
     fn composer_text(&self, cx: &App) -> String {
         self.composer
@@ -459,8 +471,8 @@ impl SessionChat {
 
     /// Applies one chat message: a `Chat` that answers this chat's load or
     /// that the daemon sent unasked (a reset that keeps open cards open), an
-    /// append, a screen change, or the running work. A reply to an older
-    /// load changes nothing. Returns whether it applied.
+    /// append, a screen change, the running work, or the session's model. A
+    /// reply to an older load changes nothing. Returns whether it applied.
     fn apply(&mut self, msg: DaemonMessage, now: Instant) -> bool {
         match msg {
             DaemonMessage::Chat {
@@ -509,6 +521,10 @@ impl SessionChat {
                 wakeup_at,
                 ..
             } => self.work.set(subagents, shells, wakeup_at),
+            DaemonMessage::ChatModel { model, label, .. } => {
+                self.model = model;
+                self.label = label;
+            }
             _ => return false,
         }
         true
@@ -1315,6 +1331,17 @@ impl RootView {
             .get(session_id)
             .map(|chat| chat.log.entries().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The label the `chat-model` pill draws for session `session_id`'s
+    /// chat; none while no pane shows its chat or no model is known.
+    #[must_use]
+    pub fn chat_model_label(&self, session_id: &str) -> Option<String> {
+        self.chat
+            .sessions
+            .get(session_id)?
+            .model_label()
+            .map(str::to_owned)
     }
 
     /// Session `session_id`'s running-work strip as drawn now; none while
@@ -2294,7 +2321,8 @@ impl RootView {
             DaemonMessage::Chat { .. }
             | DaemonMessage::ChatAppend { .. }
             | DaemonMessage::ChatScreenChanged { .. }
-            | DaemonMessage::ChatWork { .. } => self.on_chat_message(msg, cx),
+            | DaemonMessage::ChatWork { .. }
+            | DaemonMessage::ChatModel { .. } => self.on_chat_message(msg, cx),
             msg @ DaemonMessage::ChatDraft { .. } => self.on_chat_draft(msg, cx),
             DaemonMessage::Summary {
                 session_id,
@@ -2383,16 +2411,17 @@ impl RootView {
         cx.notify();
     }
 
-    /// A `Chat`, `ChatAppend`, `ChatScreenChanged` or `ChatWork`: it
-    /// updates the chat of a session a chat pane shows; one for any other
-    /// session, or a reply to an older load, is dropped.
+    /// A `Chat`, `ChatAppend`, `ChatScreenChanged`, `ChatWork` or
+    /// `ChatModel`: it updates the chat of a session a chat pane shows; one
+    /// for any other session, or a reply to an older load, is dropped.
     pub(crate) fn on_chat_message(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
         let now = (self.now)();
         let session_id = match &msg {
             DaemonMessage::Chat { session_id, .. }
             | DaemonMessage::ChatAppend { session_id, .. }
             | DaemonMessage::ChatScreenChanged { session_id, .. }
-            | DaemonMessage::ChatWork { session_id, .. } => session_id.clone(),
+            | DaemonMessage::ChatWork { session_id, .. }
+            | DaemonMessage::ChatModel { session_id, .. } => session_id.clone(),
             _ => return,
         };
         let work = matches!(msg, DaemonMessage::ChatWork { .. });
@@ -4328,12 +4357,13 @@ impl RootView {
     }
 
     /// Session `session_id`'s Quick reply row under the composer field
-    /// (`chat-quick`): the agent reply set's groups in order, a gap between
-    /// groups, every reply a chip (`chat-quick-{group}-{reply}`) sending its
-    /// own text as a chat message and leaving the composer's text alone. A
-    /// chip is live whenever `chat`'s composer could send that reply's text:
-    /// no disabling note, no send in flight and no card up. None when the set
-    /// holds no reply.
+    /// (`chat-quick`): the model pill (`chat-model`) first, then the agent
+    /// reply set's groups in order, a gap between groups, every reply a chip
+    /// (`chat-quick-{group}-{reply}`) sending its own text as a chat message
+    /// and leaving the composer's text alone. A chip is live whenever
+    /// `chat`'s composer could send that reply's text: no disabling note, no
+    /// send in flight and no card up. None when neither a model nor a reply
+    /// is known.
     fn quick_row(
         &self,
         session_id: &str,
@@ -4344,7 +4374,10 @@ impl RootView {
         let shift = crate::fonts::ui_weight_shift(cx);
         let saved = &self.sidebar.ui_state().phone_agent_replies;
         let groups = quick_replies::groups(saved.as_deref(), ReplySet::Agent);
-        if groups.iter().all(|group| group.replies.is_empty()) {
+        let pill = chat
+            .model_label()
+            .map(|label| model_pill(offset, label, &t));
+        if groups.iter().all(|group| group.replies.is_empty()) && pill.is_none() {
             return None;
         }
         let mut row = div()
@@ -4352,7 +4385,8 @@ impl RootView {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(QUICK_GROUP_GAP));
+            .gap(px(QUICK_GROUP_GAP))
+            .children(pill);
         for (group_index, group) in groups
             .iter()
             .enumerate()
@@ -4555,6 +4589,30 @@ const DISABLED_OPACITY: f32 = 0.5;
 /// of one group.
 const QUICK_GROUP_GAP: f32 = 12.0;
 const QUICK_CHIP_GAP: f32 = 4.0;
+
+/// The model pill's least height and label size, in px: a Quick reply
+/// chip's, which is a compact button's.
+const MODEL_PILL_HEIGHT: f32 = 28.0;
+const MODEL_PILL_TEXT_SIZE: f32 = 12.0;
+
+/// The chat's model pill: its label, read-only, muted and chip-sized, at
+/// the start of the composer's Quick replies line.
+fn model_pill(offset: i8, label: &str, t: &UiTheme) -> AnyElement {
+    div()
+        .driver_id(|| "chat-model".to_owned())
+        .flex_none()
+        .flex()
+        .items_center()
+        .h(ui_px_at(offset, MODEL_PILL_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(ButtonSize::Compact.radius()))
+        .border_1()
+        .border_color(gpui::rgb(t.line_strong))
+        .text_size(ui_px_at(offset, MODEL_PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
+        .child(label.to_owned())
+        .into_any_element()
+}
 
 /// Whether the composer's note row `line` disables the composer, and with
 /// it the suggestion chip's Send and Pull.
@@ -5856,5 +5914,37 @@ mod tests {
             !in_handle_area(Some(spots), point(px(110.0), px(350.0))),
             "inside the end's square but below the layer, where it is clipped"
         );
+    }
+
+    /// A `ChatModel` for `s1` naming `model` and `label`.
+    fn model_report(model: Option<&str>, label: Option<&str>) -> DaemonMessage {
+        DaemonMessage::ChatModel {
+            session_id: "s1".to_owned(),
+            model: model.map(str::to_owned),
+            label: label.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_chat_model_message_sets_the_sessions_model() {
+        let mut chat = SessionChat::default();
+        assert!(chat.apply(
+            model_report(Some("claude-opus-5-5"), Some("Opus 5.5")),
+            Instant::now(),
+        ));
+        assert_eq!(chat.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(chat.model_label(), Some("Opus 5.5"));
+    }
+
+    #[test]
+    fn a_cleared_chat_model_clears_it() {
+        let mut chat = SessionChat::default();
+        assert!(chat.apply(
+            model_report(Some("claude-opus-5-5"), Some("Opus 5.5")),
+            Instant::now(),
+        ));
+        assert!(chat.apply(model_report(None, None), Instant::now()));
+        assert_eq!(chat.model, None);
+        assert_eq!(chat.model_label(), None, "the pill draws nothing again");
     }
 }

@@ -91,6 +91,16 @@ fn reply(request_id: Option<&str>, entries: Vec<ChatEntry>) -> DaemonMessage {
     }
 }
 
+/// A `ChatModel` for `session_id`, the daemon's report of the model its
+/// main agent answers with.
+fn chat_model(session_id: &str, model: Option<&str>, label: Option<&str>) -> DaemonMessage {
+    DaemonMessage::ChatModel {
+        session_id: session_id.to_owned(),
+        model: model.map(str::to_owned),
+        label: label.map(str::to_owned),
+    }
+}
+
 fn append(entries: Vec<ChatEntry>, removed: &[&str]) -> DaemonMessage {
     DaemonMessage::ChatAppend {
         session_id: "s1".to_owned(),
@@ -173,6 +183,11 @@ fn drawn_now(h: &mut Harness<'_>, selector: &str) -> bool {
 
 fn shows_chat(h: &mut Harness<'_>) -> bool {
     h.root(|root, _| root.pane_shows_chat("p1"))
+}
+
+/// The text `s1`'s chat-model pill draws; none while it draws nothing.
+fn pill_label(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_model_label("s1"))
 }
 
 #[gpui::test]
@@ -3038,6 +3053,79 @@ fn an_empty_quick_reply_group_draws_no_section(cx: &mut TestAppContext) {
         "the group with a reply draws its section"
     );
     assert!(painted(&mut h, "chat-quick-1-0"), "with its reply");
+}
+
+#[gpui::test]
+fn the_chat_shows_the_sessions_model_as_a_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Opus 5.5"));
+}
+
+#[gpui::test]
+fn a_model_change_updates_the_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+    h.send(chat_model("s1", Some("claude-sonnet-9"), Some("Sonnet 9")));
+
+    assert!(painted(&mut h, "chat-model"), "the pill is still drawn");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Sonnet 9"));
+}
+
+#[gpui::test]
+fn a_cleared_model_removes_the_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+    assert!(painted(&mut h, "chat-model"));
+
+    h.send(chat_model("s1", None, None));
+
+    assert!(!drawn_now(&mut h, "chat-model"), "the pill is gone");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn a_chat_with_no_model_draws_no_pill(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+
+    assert!(!painted(&mut h, "chat-model"), "no model, no pill");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn a_chat_model_for_another_session_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s2", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(!painted(&mut h, "chat-model"), "s1 shows no pill");
+    assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn the_pill_shows_with_no_quick_replies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    support::seed_ui(&dir, &serde_json::json!({ "phone_agent_replies": [] }));
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model("s1", Some("claude-opus-5-5"), Some("Opus 5.5")));
+
+    assert!(painted(&mut h, "chat-model"), "the line holds the pill");
+    assert_eq!(pill_label(&mut h).as_deref(), Some("Opus 5.5"));
+    assert!(
+        !painted(&mut h, "chat-quick-group-0"),
+        "and no quick reply chip"
+    );
 }
 
 #[gpui::test]

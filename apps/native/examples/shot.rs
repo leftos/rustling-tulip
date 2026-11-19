@@ -3613,10 +3613,14 @@ impl FakeDaemon {
                 prompt: None,
             },
         };
-        vec![
+        let mut replies = vec![
             chat_reply(session_id, request_id, screen),
             chat_work(self.now, session_id),
-        ]
+        ];
+        if self.view == View::Chat {
+            replies.push(chat_model(session_id));
+        }
+        replies
     }
 
     /// The replies to `msg`; requests the views do not need go unanswered.
@@ -4730,6 +4734,16 @@ fn chat_work(now: DateTime<Utc>, session_id: &str) -> DaemonMessage {
             from_screen: false,
         }],
         wakeup_at: Some(now + chrono::Duration::minutes(4)),
+    }
+}
+
+/// The `chat` shot's model pill: the model its session's main agent answers
+/// with.
+fn chat_model(session_id: &str) -> DaemonMessage {
+    DaemonMessage::ChatModel {
+        session_id: session_id.to_owned(),
+        model: Some("claude-opus-5-5".to_owned()),
+        label: Some("Opus 5.5".to_owned()),
     }
 }
 
