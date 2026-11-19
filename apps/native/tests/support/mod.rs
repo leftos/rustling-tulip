@@ -2101,6 +2101,9 @@ pub enum Opened {
     },
     /// Shown selected in its folder.
     Reveal(PathBuf),
+    /// A Linear issue opened in the Linear desktop app, at its `linear://`
+    /// address.
+    LinearApp(String),
 }
 
 /// An opener that only records what it was asked to open, as the test
@@ -2112,6 +2115,10 @@ pub struct OpenRecorder {
     mapped_hosts: Mutex<Vec<String>>,
     /// Every VS Code job reports VS Code missing while this is set.
     vscode_missing: Mutex<bool>,
+    /// Whether the Linear app's URL scheme is registered; not by default.
+    linear_registered: Mutex<bool>,
+    /// Every Linear app open fails while this is set.
+    linear_missing: Mutex<bool>,
     /// The paths a spec marked gone; every other path exists.
     missing: Mutex<Vec<PathBuf>>,
 }
@@ -2137,6 +2144,26 @@ impl OpenRecorder {
 impl Opener for OpenRecorder {
     fn url(&self, url: &str) -> Result<(), String> {
         self.record(Opened::Url(url.to_owned()));
+        Ok(())
+    }
+
+    fn scheme_registered(&self, scheme: &str) -> bool {
+        scheme == "linear"
+            && *self
+                .linear_registered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn linear_app(&self, url: &str) -> Result<(), String> {
+        if *self
+            .linear_missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            return Err("the Linear app is not installed".to_owned());
+        }
+        self.record(Opened::LinearApp(url.to_owned()));
         Ok(())
     }
 
@@ -3524,6 +3551,26 @@ impl<'a> Harness<'a> {
         *self
             .opener
             .vscode_missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Reports the Linear app's URL scheme as registered from now on, so an
+    /// issue opens in the app.
+    pub fn register_linear_scheme(&self) {
+        *self
+            .opener
+            .linear_registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Makes every Linear app open fail, so its caller falls back to the
+    /// issue's web address.
+    pub fn fail_linear_app(&self) {
+        *self
+            .opener
+            .linear_missing
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = true;
     }

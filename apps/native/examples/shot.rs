@@ -2314,6 +2314,14 @@ impl Opener for NoOpener {
         Err("the shot opens nothing".to_owned())
     }
 
+    fn scheme_registered(&self, _scheme: &str) -> bool {
+        false
+    }
+
+    fn linear_app(&self, _url: &str) -> Result<(), String> {
+        Err("the shot opens nothing".to_owned())
+    }
+
     fn vscode(&self, _path: &Path, _line: u32, _column: u32) -> Result<(), OpenFailure> {
         Err(OpenFailure::Failed("the shot opens nothing".to_owned()))
     }

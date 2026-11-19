@@ -200,6 +200,43 @@ fn ctrl_click_on_an_identifier_opens_its_linear_page(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn ctrl_click_on_an_identifier_opens_the_linear_app(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    h.register_linear_scheme();
+    h.pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p1", 5, 0);
+    h.click(on, ctrl());
+    assert_eq!(
+        h.opened(),
+        [Opened::LinearApp(
+            "linear://linear.app/acme/issue/RT-12".to_owned()
+        )],
+        "the app opens the issue address, and the web opens nothing"
+    );
+}
+
+#[gpui::test]
+fn a_failed_linear_app_open_opens_the_issue_on_the_web(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    h.register_linear_scheme();
+    h.fail_linear_app();
+    h.pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p1", 5, 0);
+    h.click(on, ctrl());
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(
+            "https://linear.app/acme/issue/RT-12".to_owned()
+        )],
+        "the app could not open it, so the browser does"
+    );
+}
+
+#[gpui::test]
 fn each_hosts_team_keys_apply_only_to_its_own_panes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let s1 = session("s1").build();

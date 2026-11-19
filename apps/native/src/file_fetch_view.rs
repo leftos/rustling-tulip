@@ -1998,7 +1998,8 @@ impl RootView {
             OpenJob::Url(_)
             | OpenJob::Folder(_)
             | OpenJob::VsCodeFolder(_)
-            | OpenJob::VsCodeWorkspace(_) => None,
+            | OpenJob::VsCodeWorkspace(_)
+            | OpenJob::LinearIssue { .. } => None,
         };
         if !path.is_some_and(|path| self.is_fetched_copy(path)) {
             tracing::warn!(

@@ -176,8 +176,8 @@ impl RootView {
         let host = source.host.clone();
         let opens_here = self.opens_here(&host);
         match link.kind {
-            LinkKind::Url => self.open_web_link(link, &host, window, cx),
-            LinkKind::Issue => self.open_issue_link(link, &host, window, cx),
+            LinkKind::Url => self.open_web_link(&link.target, &host, window, cx),
+            LinkKind::Issue => self.open_issue_link(&link.target, &host, window, cx),
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
             // The host's probe skips a spaced reading it does not find, so
@@ -197,22 +197,23 @@ impl RootView {
         }
     }
 
-    /// Opens URL `link` in the browser on This PC, whichever host's pane it
-    /// is in; anything but an http or https address is refused with a toast.
+    /// Opens web address `url` in the browser on This PC, whichever host's
+    /// pane it is in; anything but an http or https address is refused with
+    /// a toast.
     fn open_web_link(
         &mut self,
-        link: &TerminalLink,
+        url: &str,
         host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match open::validate_http_url(&link.target) {
+        match open::validate_http_url(url) {
             Ok(url) => {
                 let job = OpenJob::Url(url.to_owned());
                 self.dispatch_open(host, job, Then::Nothing, window, cx);
             }
             Err(err) => {
-                tracing::warn!("refusing terminal link {}: {err}", link.target);
+                tracing::warn!("refusing terminal link {url}: {err}");
                 self.push_toast(
                     ToastKind::Error,
                     COULD_NOT_OPEN,
@@ -223,17 +224,28 @@ impl RootView {
         }
     }
 
-    /// Opens Linear issue `link` at its web address, the
+    /// Opens the Linear issue at web address `web_url`, the
     /// `https://linear.app/{workspace}/issue/{ID}` it was detected with or
-    /// the issue URL as written, in the browser on This PC.
-    fn open_issue_link(
+    /// the issue URL as written, on This PC whichever host's pane it is in:
+    /// in the Linear desktop app when its URL scheme is registered, else in
+    /// the browser. An address that is no `linear.app` issue address opens in
+    /// the browser as any other URL does.
+    pub(crate) fn open_issue_link(
         &mut self,
-        link: &TerminalLink,
+        web_url: &str,
         host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_web_link(link, host, window, cx);
+        let Some(app_url) = open::linear_app_url(web_url) else {
+            self.open_web_link(web_url, host, window, cx);
+            return;
+        };
+        let job = OpenJob::LinearIssue {
+            app_url,
+            web_url: web_url.to_owned(),
+        };
+        self.dispatch_open(host, job, Then::Nothing, window, cx);
     }
 
     /// Whether a link in a pane of `host` opens on This PC.
@@ -576,10 +588,10 @@ impl RootView {
     }
 
     /// Hands `job`, from an item on `host`, to the opener on a background
-    /// thread and reports how it went. On a remote host only a URL opens;
-    /// any other job would open a host path on this PC, so it is refused
-    /// with a toast. A terminal link's file reaches here only from a host
-    /// whose files are this PC's, so it comes as This PC's.
+    /// thread and reports how it went. On a remote host only a URL or a
+    /// Linear issue opens; any other job would open a host path on this PC,
+    /// so it is refused with a toast. A terminal link's file reaches here
+    /// only from a host whose files are this PC's, so it comes as This PC's.
     pub(crate) fn dispatch_open(
         &mut self,
         host: &HostKey,
@@ -588,7 +600,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(job, OpenJob::Url(_))
+        if !matches!(job, OpenJob::Url(_) | OpenJob::LinearIssue { .. })
             && let Some(reason) = self.capabilities_of(host).local_files_refusal()
         {
             tracing::warn!(?job, "refusing a local open on a remote host");

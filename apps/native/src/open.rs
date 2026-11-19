@@ -85,6 +85,20 @@ pub trait Opener: Send + Sync {
     /// When the URL could not be handed to the browser.
     fn url(&self, url: &str) -> Result<(), String>;
 
+    /// Whether the OS has the URL scheme `scheme`, given without its `://`,
+    /// registered to open an app. Windows asks the per-user class
+    /// `HKCU\Software\Classes\<scheme>` and then the merged `HKCR\<scheme>`,
+    /// either key being enough; every other OS answers `false`. Reads only.
+    fn scheme_registered(&self, scheme: &str) -> bool;
+
+    /// Opens `url` in the Linear desktop app: a `linear://` address on
+    /// `linear.app` that [`validate_linear_url`] passed.
+    ///
+    /// # Errors
+    /// When the address is not one [`validate_linear_url`] accepts, or the
+    /// app would not start.
+    fn linear_app(&self, url: &str) -> Result<(), String>;
+
     /// Opens `path` in VS Code at `line` and `column`, both 1-based.
     ///
     /// # Errors
@@ -169,6 +183,15 @@ impl Opener for SystemOpener {
         shell_open(OsStr::new(url)).map_err(|err| format!("open {url}: {err}"))
     }
 
+    fn scheme_registered(&self, scheme: &str) -> bool {
+        scheme_registered(scheme)
+    }
+
+    fn linear_app(&self, url: &str) -> Result<(), String> {
+        let url = validate_linear_url(url)?;
+        shell_open(OsStr::new(url)).map_err(|err| format!("open {url}: {err}"))
+    }
+
     fn vscode(&self, path: &Path, line: u32, column: u32) -> Result<(), OpenFailure> {
         spawn_vscode(path, line, column)
     }
@@ -226,6 +249,15 @@ pub struct LoggingOpener(SystemOpener);
 impl Opener for LoggingOpener {
     fn url(&self, url: &str) -> Result<(), String> {
         tracing::info!("a cloaked window would open url: {url}");
+        Ok(())
+    }
+
+    fn scheme_registered(&self, scheme: &str) -> bool {
+        self.0.scheme_registered(scheme)
+    }
+
+    fn linear_app(&self, url: &str) -> Result<(), String> {
+        tracing::info!("a cloaked window would open the Linear app: {url}");
         Ok(())
     }
 
@@ -418,6 +450,13 @@ pub enum OpenJob {
         suffix: String,
     },
     Reveal(PathBuf),
+    /// A Linear issue: in the Linear desktop app at `app_url` when its URL
+    /// scheme is registered, else in the browser at `web_url`; an app open
+    /// that fails opens `web_url` too.
+    LinearIssue {
+        app_url: String,
+        web_url: String,
+    },
 }
 
 /// How a job that did not fail ended.
@@ -440,7 +479,8 @@ impl OpenJob {
             | Self::VsCode { .. }
             | Self::DefaultApp { .. }
             | Self::Page { .. }
-            | Self::Reveal(_) => &[],
+            | Self::Reveal(_)
+            | Self::LinearIssue { .. } => &[],
         }
     }
 
@@ -481,9 +521,28 @@ impl OpenJob {
             }
             Self::Page { path, suffix } => opener.page(path, suffix).map_err(OpenFailure::Failed),
             Self::Reveal(path) => opener.reveal(path).map_err(OpenFailure::Failed),
+            Self::LinearIssue { app_url, web_url } => {
+                open_linear_issue(opener, app_url, web_url).map_err(OpenFailure::Failed)
+            }
         }
         .map(|()| JobOutcome::Opened)
     }
+}
+
+/// Opens the Linear issue at `app_url` in the Linear app when `opener` has
+/// the app's scheme registered, else at its web address `web_url`; an app
+/// open that fails falls back to the web address too, since the shell can
+/// find a registered scheme whose app is gone.
+fn open_linear_issue(opener: &dyn Opener, app_url: &str, web_url: &str) -> Result<(), String> {
+    if opener.scheme_registered(LINEAR_SCHEME) {
+        match opener.linear_app(app_url) {
+            Ok(()) => return Ok(()),
+            Err(err) => tracing::warn!(
+                "could not open {app_url} in the Linear app, so the issue opens on the web: {err}"
+            ),
+        }
+    }
+    opener.url(web_url)
 }
 
 /// What a path link came to once its readings were checked.
@@ -531,6 +590,47 @@ pub fn validate_http_url(url: &str) -> Result<&str, String> {
         return Err("only http:// and https:// URLs can be opened".to_owned());
     }
     Ok(url)
+}
+
+/// The URL scheme the Linear desktop app registers for its issue links.
+pub const LINEAR_SCHEME: &str = "linear";
+
+/// Accepts only `linear://` addresses on `linear.app` with no whitespace or
+/// control characters in them: the form the Linear desktop app opens.
+///
+/// # Errors
+/// Names what is wrong with `url`.
+pub fn validate_linear_url(url: &str) -> Result<&str, String> {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("URL contains whitespace or control characters".to_owned());
+    }
+    if !url.to_ascii_lowercase().starts_with("linear://linear.app/") {
+        return Err(
+            "only linear:// addresses on linear.app can be opened in the Linear app".to_owned(),
+        );
+    }
+    Ok(url)
+}
+
+/// The Linear app's address for the issue at web address `web_url`: its
+/// `http` or `https` scheme swapped for `linear://`, the workspace, the
+/// identifier, the slug and the `?query` and `#fragment` kept as written.
+/// `None` when `web_url` is no address on `linear.app`, or the app address
+/// built from it is not one [`validate_linear_url`] accepts.
+#[must_use]
+pub fn linear_app_url(web_url: &str) -> Option<String> {
+    let lower = web_url.to_ascii_lowercase();
+    let scheme_len = ["https://", "http://"]
+        .into_iter()
+        .find_map(|scheme| lower.strip_prefix(scheme).map(|_| scheme.len()))?;
+    if !lower
+        .get(scheme_len..)
+        .is_some_and(|rest| rest.starts_with("linear.app/"))
+    {
+        return None;
+    }
+    let app = format!("linear://{}", web_url.get(scheme_len..)?);
+    validate_linear_url(&app).ok().map(str::to_owned)
 }
 
 /// Whether `path`'s default action runs code: its extension is in
@@ -1200,6 +1300,77 @@ fn dangerous_file_type(_: &str) -> bool {
     false
 }
 
+/// Which registry view a URL scheme's class key is looked up in.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassRoot {
+    /// `HKEY_CURRENT_USER`, the user's own classes.
+    User,
+    /// `HKEY_CLASSES_ROOT`, the merged view of the user's and the machine's
+    /// classes.
+    Machine,
+}
+
+/// Whether URL scheme `scheme` is registered: the per-user class
+/// `HKCU\Software\Classes\<scheme>` is asked first through `lookup`, then
+/// `HKCR\<scheme>`, and either key's presence is enough. `lookup` answers
+/// whether a class key exists, so a test needs no registry.
+#[cfg(any(windows, test))]
+fn scheme_registered_by(scheme: &str, mut lookup: impl FnMut(ClassRoot, &str) -> bool) -> bool {
+    lookup(ClassRoot::User, &format!("Software\\Classes\\{scheme}"))
+        || lookup(ClassRoot::Machine, scheme)
+}
+
+/// Whether Windows has `scheme` registered, read-only.
+#[cfg(windows)]
+fn scheme_registered(scheme: &str) -> bool {
+    scheme_registered_by(scheme, class_key_exists)
+}
+
+/// No other OS registers a scheme in the Windows registry, so none answers
+/// for one.
+#[cfg(not(windows))]
+fn scheme_registered(_scheme: &str) -> bool {
+    false
+}
+
+/// Whether Windows has the class key `path` under `root`; a key that cannot
+/// be opened, for any reason, counts as absent.
+#[cfg(windows)]
+fn class_key_exists(root: ClassRoot, path: &str) -> bool {
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    use windows::core::PCWSTR;
+
+    let root = match root {
+        ClassRoot::User => HKEY_CURRENT_USER,
+        ClassRoot::Machine => HKEY_CLASSES_ROOT,
+    };
+    let key_name = wide(OsStr::new(path));
+    let mut key = HKEY(std::ptr::null_mut());
+    // SAFETY: the subkey is a NUL-terminated wide string that outlives the
+    // call, which writes the opened handle into `key`.
+    let opened = unsafe {
+        RegOpenKeyExW(
+            root,
+            PCWSTR(key_name.as_ptr()),
+            None,
+            KEY_READ,
+            &raw mut key,
+        )
+    };
+    if opened.is_err() {
+        return false;
+    }
+    // SAFETY: `key` was opened above and is closed exactly once, here.
+    let closed = unsafe { RegCloseKey(key) };
+    if closed.is_err() {
+        tracing::warn!("closing the registry key {path} failed: {closed:?}");
+    }
+    true
+}
+
 /// Opens `target`, a file or a URL, through `ShellExecuteExW` with no verb,
 /// which runs the type's default action and, for a type with none, the
 /// "open with" picker. `SEE_MASK_NOASYNC` makes it finish the launch before
@@ -1307,11 +1478,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
-        browser_command, browser_page_url, copy_path, existing_on_disk, macos_vscode_commands,
-        open_action, opener_for, page_only_for_a_file, page_url, page_url_of, repo_folder,
-        resolve_with, runs_code, simplify_path, unc_host, validate_http_url,
-        workspace_vscode_target,
+        ClassRoot, JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget,
+        base_dirs, browser_command, browser_page_url, copy_path, existing_on_disk, linear_app_url,
+        macos_vscode_commands, open_action, opener_for, page_only_for_a_file, page_url,
+        page_url_of, repo_folder, resolve_with, runs_code, scheme_registered_by, simplify_path,
+        unc_host, validate_http_url, validate_linear_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -1337,6 +1508,14 @@ mod tests {
 
     impl Opener for DangerousTypes {
         fn url(&self, _: &str) -> Result<(), String> {
+            Err("not in these tests".to_owned())
+        }
+
+        fn scheme_registered(&self, _: &str) -> bool {
+            false
+        }
+
+        fn linear_app(&self, _: &str) -> Result<(), String> {
             Err("not in these tests".to_owned())
         }
 
@@ -1554,6 +1733,85 @@ mod tests {
         assert!(validate_http_url(" https://example.com").is_err());
         assert!(validate_http_url("https://example.com/\u{7}").is_err());
         assert!(validate_http_url("https://example.com/\n").is_err());
+    }
+
+    #[test]
+    fn an_issue_web_address_becomes_the_apps_address() {
+        assert_eq!(
+            linear_app_url("https://linear.app/acme/issue/RT-12/some-title?x=1#c"),
+            Some("linear://linear.app/acme/issue/RT-12/some-title?x=1#c".to_owned())
+        );
+        assert_eq!(
+            linear_app_url("http://linear.app/acme/issue/RT-12"),
+            Some("linear://linear.app/acme/issue/RT-12".to_owned())
+        );
+        assert_eq!(
+            linear_app_url("https://example.com/acme/issue/RT-12"),
+            None,
+            "another site has no app address"
+        );
+        assert_eq!(
+            linear_app_url("linear://linear.app/acme/issue/RT-12"),
+            None,
+            "an address already the app's is no web address"
+        );
+    }
+
+    #[test]
+    fn only_the_apps_own_addresses_reach_the_linear_app() {
+        let app = "linear://linear.app/acme/issue/RT-12";
+        assert_eq!(validate_linear_url(app), Ok(app));
+        for refused in [
+            "linear://evil.example/x",
+            "https://linear.app/acme/issue/RT-12",
+            "",
+            "linear://linear.app/acme/issue/RT-1 2",
+        ] {
+            assert!(
+                validate_linear_url(refused).is_err(),
+                "{refused:?} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registered_scheme_is_read_from_the_users_classes_then_the_machines() {
+        let asked = RefCell::new(Vec::new());
+        let ask = |root: ClassRoot, path: &str| {
+            asked.borrow_mut().push((root, path.to_owned()));
+            root == ClassRoot::User
+        };
+        assert!(
+            scheme_registered_by("linear", ask),
+            "the user's own class is enough"
+        );
+        assert_eq!(
+            asked.borrow().clone(),
+            [(ClassRoot::User, "Software\\Classes\\linear".to_owned())],
+            "the machine's view is not asked once the user's class is there"
+        );
+
+        let asked = RefCell::new(Vec::new());
+        let ask = |root: ClassRoot, path: &str| {
+            asked.borrow_mut().push((root, path.to_owned()));
+            root == ClassRoot::Machine
+        };
+        assert!(
+            scheme_registered_by("linear", ask),
+            "a machine-wide install counts too"
+        );
+        assert_eq!(
+            asked.borrow().clone(),
+            [
+                (ClassRoot::User, "Software\\Classes\\linear".to_owned()),
+                (ClassRoot::Machine, "linear".to_owned()),
+            ],
+            "both views are asked, the user's first"
+        );
+        assert!(
+            !scheme_registered_by("linear", |_, _| false),
+            "no class key anywhere leaves the scheme unregistered"
+        );
     }
 
     #[test]
@@ -2129,6 +2387,15 @@ mod tests {
     impl Opener for GonePaths {
         fn url(&self, url: &str) -> Result<(), String> {
             self.ask(format!("url {url}"));
+            Ok(())
+        }
+
+        fn scheme_registered(&self, _: &str) -> bool {
+            false
+        }
+
+        fn linear_app(&self, url: &str) -> Result<(), String> {
+            self.ask(format!("linear_app {url}"));
             Ok(())
         }
 
