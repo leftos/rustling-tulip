@@ -96,6 +96,9 @@ pub(crate) fn isolated_envs(
         // The account service's requests: a closed loopback port, so a driven
         // or isolated run never reaches the real endpoints.
         ("RUSTLING_TULIP_ACCOUNTS_OFFLINE", OsString::from("1")),
+        // Linear: no key is resolved at all, not even the owner's user or
+        // machine variable, so an isolated run never calls Linear.
+        ("RUSTLING_TULIP_LINEAR_OFFLINE", OsString::from("1")),
         // The updates folder: the live tier never cleans or reads the user's
         // real downloaded installers or `last-result.json`.
         (
@@ -356,6 +359,30 @@ mod tests {
         let envs = isolated_envs(&overridden).expect("every registered agent has a fake CLI");
         assert_eq!(
             env_value(&envs, "RUSTLING_TULIP_ACCOUNTS_OFFLINE"),
+            Some(OsString::from("0")),
+            "a spec's own value wins over the isolation's"
+        );
+    }
+
+    #[test]
+    fn isolated_envs_take_linear_offline() {
+        let root = repo_root_tmp().join(format!("linear-offline-env-{}", std::process::id()));
+
+        let envs =
+            isolated_envs(&spec(root.clone())).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_LINEAR_OFFLINE"),
+            Some(OsString::from("1")),
+            "a driven or isolated run resolves no Linear key and never calls Linear"
+        );
+
+        let mut overridden = spec(root);
+        overridden
+            .extra_env
+            .push(("RUSTLING_TULIP_LINEAR_OFFLINE", OsString::from("0")));
+        let envs = isolated_envs(&overridden).expect("every registered agent has a fake CLI");
+        assert_eq!(
+            env_value(&envs, "RUSTLING_TULIP_LINEAR_OFFLINE"),
             Some(OsString::from("0")),
             "a spec's own value wins over the isolation's"
         );

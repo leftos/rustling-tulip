@@ -3281,6 +3281,7 @@ mod tests {
             subagent_tails,
             perf: crate::perf::Perf::new(None),
             host_update: Arc::new(crate::server::HostUpdate::nothing_installed()),
+            linear: crate::server::linear::LinearHub::without_key(),
         };
         (hub, preset_rx, scratch)
     }

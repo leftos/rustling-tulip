@@ -308,6 +308,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_REMOTE_UPDATE,
     protocol::FEATURE_HOST_LAYOUTS,
     protocol::FEATURE_CLIENT_UPDATE,
+    protocol::FEATURE_LINEAR_LINKS,
 ];
 
 /// The features a daemon lists only when it holds the service behind them.
@@ -475,6 +476,9 @@ pub(super) fn push_initial_state(
     // client's Unknown wrapper absorbs it.
     let _ = out_tx.send(super::settings::default_shell_message(&hub.state));
     let _ = out_tx.send(super::settings::subagent_listing_message(&hub.state));
+    // The Linear context (`key_configured: false` with no key) and every
+    // cached issue, under the lock their broadcasts are sent under.
+    hub.linear.send_current(out_tx);
     hub.summarizer.send_status(out_tx);
     // Held across the send: every RemoteStatus broadcast is published under
     // the watch's write lock, so none can reach the state forwarder between

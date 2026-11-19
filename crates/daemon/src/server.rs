@@ -30,6 +30,7 @@ mod folder;
 mod gate;
 mod handshake;
 pub(crate) use self::handshake::TAILNET_HANDSHAKE_TIMEOUT;
+pub(crate) mod linear;
 
 mod git;
 mod tabs;
@@ -267,6 +268,10 @@ pub struct Hub {
     /// the install is, what runs from it, and whether an update is already
     /// running in this daemon.
     pub(crate) host_update: Arc<HostUpdate>,
+    /// The one Linear client and its cache, the identifiers Linear did not
+    /// know, and what the clients were last sent; every connection, the
+    /// title scan, the 5-minute refresh and the Dashboard share it.
+    pub(crate) linear: Arc<linear::LinearHub>,
 }
 
 impl Hub {
@@ -430,6 +435,17 @@ pub enum StateEvent {
     /// `HostUpdateLaunched` or `HostUpdateCanceled`, published under the
     /// host update's phase lock. Only loopback connections forward it.
     HostUpdate(Box<protocol::DaemonMessage>),
+    /// Broadcast by the Linear wiring when the team keys, the workspace or
+    /// whether a key is configured changed. Mirrors
+    /// [`protocol::DaemonMessage::LinearContext`].
+    LinearContext {
+        team_keys: Vec<String>,
+        workspace: Option<String>,
+        key_configured: bool,
+    },
+    /// Broadcast by the Linear wiring after a fetch, for every client, since
+    /// the cache is shared. Mirrors [`protocol::DaemonMessage::LinearIssues`].
+    LinearIssues(Vec<protocol::LinearIssue>),
 }
 
 #[derive(Debug, Clone)]
@@ -692,6 +708,7 @@ pub async fn run(
         subagent_tails,
         perf: crate::perf::Perf::new(crate::perf::os::machine_source()),
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
+        linear: linear::LinearHub::live(),
     };
     start_hub_tasks(&hub, client_count_rx, fallback_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
@@ -1274,15 +1291,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FollowTranscript { .. } | ClientMessage::UnfollowTranscript { .. }) => {
             transcripts::handle(hub, m, ctx);
         }
-        ClientMessage::GetLinearIssues { request_id, .. } => {
-            // No daemon serves Linear issues yet, and nothing offers
-            // `linear_links`, so no client sends this.
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: "this daemon does not serve Linear issues yet".to_owned(),
-                request_id,
-                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
-            });
-        }
+        m @ ClientMessage::GetLinearIssues { .. } => linear::handle(hub, m, ctx),
     }
     Ok(())
 }
@@ -1439,6 +1448,11 @@ fn start_hub_tasks(
             client_count_rx.clone(),
         );
     }
+    // The Linear title scan follows the session registry from here on,
+    // fetching the issues titles and labels name; the 5-minute refresh of
+    // the issues live sessions name parks while no client is connected.
+    linear::spawn_title_scan(hub);
+    linear::spawn_refresh(hub, client_count_rx.clone());
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a
     // resident daemon doesn't pin a stale executable across app updates.
@@ -1507,7 +1521,8 @@ mod tests {
 
     use super::bind_loopback;
     use super::test_support::{
-        dispatch_one, repo_entry, seed_dashboard_tab, seed_two_pane_layout, test_hub,
+        dispatch_on, dispatch_one, next_message, repo_entry, seed_dashboard_tab,
+        seed_two_pane_layout, test_hub,
     };
 
     /// A socket that sets `SO_REUSEADDR` still cannot take the daemon's
@@ -1560,27 +1575,25 @@ mod tests {
         );
     }
 
-    /// A `GetLinearIssues` request is refused as unsupported until a daemon
-    /// serves Linear issues, echoing the requester's id.
+    /// With no Linear key, a `GetLinearIssues` request fetches nothing and is
+    /// answered to the requester alone with no issues, so a hover never waits.
     #[tokio::test]
-    async fn get_linear_issues_is_refused_as_unsupported_until_served() {
-        let (hub, _scratch) = test_hub("get-linear-issues-unsupported");
-        let reply = dispatch_one(
+    async fn get_linear_issues_without_a_key_answers_the_requester_with_no_issues() {
+        let (hub, _scratch) = test_hub("get-linear-issues-no-key");
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        dispatch_on(
             &hub,
             ClientMessage::GetLinearIssues {
                 identifiers: vec!["RT-134".to_string()],
                 request_id: Some("l1".to_string()),
             },
+            1,
+            &out_tx,
         )
         .await;
+        let reply = next_message(&mut out_rx).await;
         assert!(
-            matches!(
-                &reply,
-                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
-                    if message == "this daemon does not serve Linear issues yet"
-                        && id == "l1"
-                        && code == protocol::error_codes::UNSUPPORTED_MESSAGE
-            ),
+            matches!(&reply, DaemonMessage::LinearIssues { issues } if issues.is_empty()),
             "{reply:?}"
         );
     }

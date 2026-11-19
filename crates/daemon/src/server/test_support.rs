@@ -155,6 +155,15 @@ pub(crate) fn scratch_dirs(scratch: &Path, bin_templates: Option<PathBuf>) -> Di
     dirs
 }
 
+/// A keep-awake status that never changes: the default mode, not holding.
+fn idle_keep_awake_status() -> tokio::sync::watch::Receiver<crate::keep_awake::Status> {
+    tokio::sync::watch::channel(crate::keep_awake::Status {
+        mode: protocol::KeepAwakeMode::default(),
+        active: false,
+    })
+    .1
+}
+
 pub(super) fn build_test_hub(
     scratch: ScratchDir,
     bin_templates: Option<PathBuf>,
@@ -174,10 +183,7 @@ pub(super) fn build_test_hub(
     let client_count = Arc::new(tokio::sync::watch::channel(0usize).0);
     let (keep_awake_mode, _) = tokio::sync::watch::channel(protocol::KeepAwakeMode::default());
     let (remote_enabled, _) = tokio::sync::watch::channel(false);
-    let (_, keep_awake_status) = tokio::sync::watch::channel(crate::keep_awake::Status {
-        mode: protocol::KeepAwakeMode::default(),
-        active: false,
-    });
+    let keep_awake_status = idle_keep_awake_status();
     let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
     let push = push_state_in(scratch.path().join("push"));
     let dashboard = crate::dashboard::Dashboard::new(
@@ -262,6 +268,7 @@ pub(super) fn build_test_hub(
         subagent_tails,
         perf: crate::perf::Perf::new(None),
         host_update: Arc::new(super::HostUpdate::nothing_installed()),
+        linear: super::linear::LinearHub::without_key(),
     };
     (hub, scratch, attention_rx)
 }

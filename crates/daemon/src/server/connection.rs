@@ -1035,6 +1035,20 @@ fn spawn_state_forwarder(
                         let _ = out_tx.send(*message);
                     }
                 }
+                Ok(StateEvent::LinearContext {
+                    team_keys,
+                    workspace,
+                    key_configured,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::LinearContext {
+                        team_keys,
+                        workspace,
+                        key_configured,
+                    });
+                }
+                Ok(StateEvent::LinearIssues(issues)) => {
+                    let _ = out_tx.send(DaemonMessage::LinearIssues { issues });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                     // A lost host update notice is not repeated, so a local
@@ -1049,6 +1063,9 @@ fn spawn_state_forwarder(
                     // A lost summarizer status is not repeated until the
                     // next change, so the current one is sent again too.
                     hub.summarizer.send_status(&out_tx);
+                    // A lost Linear context is not repeated until it changes
+                    // again, nor a lost issue until its next fetch.
+                    hub.linear.send_current(&out_tx);
                     // A lost accounts broadcast is not repeated until the
                     // next poll changes them either, so the cached snapshot
                     // goes again (nothing before the first poll; the store

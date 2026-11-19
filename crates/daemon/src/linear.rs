@@ -5,11 +5,6 @@
 //! `now` the caller passes in, so tests drive it with a fake transport and
 //! fixed times. With no `LINEAR_API_KEY` the client makes no request at all.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by the daemon's Linear wiring step")
-)]
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -24,13 +19,12 @@ use tracing::warn;
 use crate::user_env::{self, Secret};
 
 /// Linear's GraphQL endpoint.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "tests post through a fake transport")
-)]
 const ENDPOINT: &str = "https://api.linear.app/graphql";
 /// The variable the API key is read from.
 const KEY_VARIABLE: &str = "LINEAR_API_KEY";
+/// The variable that takes the daemon off Linear: exactly `1` resolves no
+/// key at all, so no request is ever made.
+pub(crate) const OFFLINE_VARIABLE: &str = "RUSTLING_TULIP_LINEAR_OFFLINE";
 /// How long one request to Linear may take, end to end.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most identifiers one issue query asks for.
@@ -58,17 +52,9 @@ pub(crate) enum LinearError {
     /// The request did not complete: no connection, a timeout, or a reply
     /// that is not JSON.
     #[error("the request to Linear failed")]
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "tests post through a fake transport")
-    )]
     Transport(#[source] reqwest::Error),
     /// The API key cannot be sent as a header value.
     #[error("the Linear API key is not a valid header value")]
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "tests post through a fake transport")
-    )]
     BadKey,
     /// The reply carried a GraphQL `errors` array.
     #[error("Linear reported an error: {0}")]
@@ -89,10 +75,6 @@ pub(crate) trait LinearTransport: Send + Sync {
 }
 
 /// The transport that posts to Linear over HTTPS.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "tests post through a fake transport")
-)]
 pub(crate) struct ReqwestTransport {
     http: reqwest::Client,
 }
@@ -104,10 +86,6 @@ impl ReqwestTransport {
     ///
     /// The TLS setup failed, for one when the system's root certificates
     /// cannot be loaded.
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "tests post through a fake transport")
-    )]
     pub(crate) fn new() -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -142,10 +120,6 @@ impl LinearTransport for ReqwestTransport {
 
 /// `key` as the `Authorization` header Linear takes: the key itself, with no
 /// `Bearer`, marked sensitive so it never shows in a debug print.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "tests post through a fake transport")
-)]
 fn header_value(key: &Secret) -> Result<HeaderValue, LinearError> {
     let mut value = HeaderValue::from_str(key.expose()).map_err(|_| LinearError::BadKey)?;
     value.set_sensitive(true);
@@ -223,13 +197,16 @@ impl LinearClient {
     /// # Errors
     ///
     /// The HTTP client's TLS setup failed.
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "tests build the client over a fake transport")
-    )]
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        let key = user_env::resolve(KEY_VARIABLE).map(|(key, _origin)| key);
-        Ok(Self::new(key, Box::new(ReqwestTransport::new()?)))
+        Ok(Self::new(
+            configured_key(),
+            Box::new(ReqwestTransport::new()?),
+        ))
+    }
+
+    /// Replace the key, as when one was set after the daemon started.
+    pub(crate) fn set_key(&mut self, key: Option<Secret>) {
+        self.key = key;
     }
 
     /// A client posting through `transport`; with no `key` it makes no
@@ -282,23 +259,31 @@ impl LinearClient {
     }
 
     /// Fetch `identifiers` in batches of at most 50, stamped `now`, and
-    /// cache them. A batch that fails marks its cached copies stale. Returns
-    /// every issue fetched and every copy marked stale; an identifier Linear
-    /// does not know is in neither. Without a key this does nothing.
+    /// cache them. A batch that fails marks its cached copies stale. The
+    /// outcome holds every issue fetched and every copy marked stale, and
+    /// the identifiers a batch Linear answered came back without; an
+    /// identifier in a failed batch is in none of them. Without a key this
+    /// does nothing.
     pub(crate) async fn fetch_issues(
         &mut self,
         identifiers: &[String],
         now: DateTime<Utc>,
-    ) -> Vec<LinearIssue> {
+    ) -> FetchOutcome {
+        let mut outcome = FetchOutcome::default();
         let Some(key) = &self.key else {
-            return Vec::new();
+            return outcome;
         };
-        let mut fetched = Vec::new();
         for batch in identifiers.chunks(BATCH_SIZE) {
             match fetch_batch(self.transport.as_ref(), key, batch, now).await {
                 Ok(issues) => {
+                    outcome.unknown.extend(
+                        batch
+                            .iter()
+                            .filter(|asked| !issues.iter().any(|issue| &issue.identifier == *asked))
+                            .cloned(),
+                    );
                     self.cache.apply(issues.iter().cloned());
-                    fetched.extend(issues);
+                    outcome.issues.extend(issues);
                 }
                 Err(err) => {
                     warn!(
@@ -306,17 +291,55 @@ impl LinearClient {
                         identifiers = batch.len(),
                         "linear: an issue batch failed; its cached copies are stale"
                     );
-                    fetched.extend(self.cache.mark_stale(batch));
+                    outcome.issues.extend(self.cache.mark_stale(batch));
                 }
             }
         }
-        fetched
+        outcome
     }
 
     /// The issues fetched so far.
     pub(crate) fn cache(&self) -> &LinearCache {
         &self.cache
     }
+}
+
+/// What [`LinearClient::fetch_issues`] found.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct FetchOutcome {
+    /// Every issue fetched and every cached copy a failed batch marked stale.
+    pub(crate) issues: Vec<LinearIssue>,
+    /// The identifiers a batch Linear answered came back without: Linear
+    /// does not know them, or they cannot be read with this key.
+    pub(crate) unknown: Vec<String>,
+}
+
+/// Whether `offline`, the value of `RUSTLING_TULIP_LINEAR_OFFLINE`, takes the
+/// daemon off Linear: exactly `1`.
+pub(crate) fn is_offline(offline: Option<&str>) -> bool {
+    offline == Some("1")
+}
+
+/// The API key: none while `offline` (the value of
+/// `RUSTLING_TULIP_LINEAR_OFFLINE`) is exactly `1`, without calling
+/// `resolve`; else what `resolve` finds.
+pub(crate) fn resolve_key(
+    offline: Option<&str>,
+    resolve: impl FnOnce() -> Option<Secret>,
+) -> Option<Secret> {
+    if is_offline(offline) {
+        return None;
+    }
+    resolve()
+}
+
+/// The key `LINEAR_API_KEY` holds (see [`user_env::resolve`]), unless
+/// `RUSTLING_TULIP_LINEAR_OFFLINE` is exactly `1`, when no environment is
+/// read at all.
+pub(crate) fn configured_key() -> Option<Secret> {
+    resolve_key(std::env::var(OFFLINE_VARIABLE).ok().as_deref(), || {
+        user_env::resolve(KEY_VARIABLE).map(|(key, _origin)| key)
+    })
 }
 
 /// A connection's `nodes`.
@@ -691,39 +714,49 @@ fn is_word(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+/// The fake transport and the canned replies the client's tests and the
+/// daemon's Linear wiring tests share.
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    reason = "tests assert preconditions with expect; panic messages aid debugging"
+    reason = "fakes assert preconditions with expect; panic messages aid debugging"
 )]
-mod tests {
+pub(crate) mod test_support {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use chrono::{TimeDelta, TimeZone};
-    use protocol::{LinearState, LinearStateKind};
-    use serde_json::json;
+    use futures::future::BoxFuture;
+    use serde_json::{Value, json};
 
-    use super::*;
+    use super::{LinearClient, LinearError, LinearTransport};
+    use crate::user_env::Secret;
 
-    const KEY: &str = "lin_api_test";
+    /// The key [`keyed`] gives a client; the fake checks every request
+    /// carries it.
+    pub(crate) const KEY: &str = "lin_api_test";
 
     /// Canned replies, handed out in order, and every request body posted.
+    /// A request with no reply left fails the test.
     #[derive(Clone, Default)]
-    struct Fake {
+    pub(crate) struct Fake {
         replies: Arc<Mutex<VecDeque<Result<Value, LinearError>>>>,
         requests: Arc<Mutex<Vec<Value>>>,
     }
 
     impl Fake {
-        fn with(replies: Vec<Result<Value, LinearError>>) -> Self {
+        pub(crate) fn with(replies: Vec<Result<Value, LinearError>>) -> Self {
             Self {
                 replies: Arc::new(Mutex::new(replies.into())),
                 requests: Arc::default(),
             }
         }
 
-        fn requests(&self) -> Vec<Value> {
+        /// Queue `reply` after the ones already queued.
+        pub(crate) fn push(&self, reply: Result<Value, LinearError>) {
+            self.replies.lock().expect("replies lock").push_back(reply);
+        }
+
+        pub(crate) fn requests(&self) -> Vec<Value> {
             self.requests.lock().expect("requests lock").clone()
         }
     }
@@ -746,21 +779,12 @@ mod tests {
         }
     }
 
-    fn keyed(fake: &Fake) -> LinearClient {
+    /// A client with [`KEY`] posting through `fake`.
+    pub(crate) fn keyed(fake: &Fake) -> LinearClient {
         LinearClient::new(Some(Secret::new(KEY.to_owned())), Box::new(fake.clone()))
     }
 
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 11, 18, 12, 0, 0)
-            .single()
-            .expect("a valid time")
-    }
-
-    fn ids(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| (*name).to_owned()).collect()
-    }
-
-    fn issue_json(identifier: &str) -> Value {
+    pub(crate) fn issue_json(identifier: &str) -> Value {
         json!({
             "identifier": identifier,
             "title": format!("Title of {identifier}"),
@@ -776,13 +800,45 @@ mod tests {
     }
 
     /// A reply holding each identifier under its alias, in order.
-    fn batch_reply(identifiers: &[String]) -> Value {
+    pub(crate) fn batch_reply(identifiers: &[String]) -> Value {
         let data: serde_json::Map<String, Value> = identifiers
             .iter()
             .enumerate()
             .map(|(index, id)| (format!("i{index}"), issue_json(id)))
             .collect();
         json!({ "data": data })
+    }
+
+    /// The context query's reply: `team_keys` and the workspace `url_key`.
+    pub(crate) fn context_reply(team_keys: &[&str], url_key: &str) -> Value {
+        let nodes: Vec<Value> = team_keys.iter().map(|key| json!({ "key": key })).collect();
+        json!({
+            "data": { "teams": { "nodes": nodes }, "organization": { "urlKey": url_key } }
+        })
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; panic messages aid debugging"
+)]
+mod tests {
+    use chrono::{TimeDelta, TimeZone};
+    use protocol::{LinearState, LinearStateKind};
+    use serde_json::json;
+
+    use super::test_support::{Fake, batch_reply, issue_json, keyed};
+    use super::*;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 18, 12, 0, 0)
+            .single()
+            .expect("a valid time")
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
     }
 
     fn variables(request: &Value) -> serde_json::Map<String, Value> {
@@ -818,7 +874,7 @@ mod tests {
             .refresh_context(t0())
             .await
             .expect("no key is not an error");
-        let issues = client.fetch_issues(&ids(&["RT-1"]), t0()).await;
+        let issues = client.fetch_issues(&ids(&["RT-1"]), t0()).await.issues;
         assert_eq!(issues, Vec::<LinearIssue>::new());
         assert!(client.context().is_none());
         assert!(fake.requests().is_empty(), "no request without a key");
@@ -877,7 +933,7 @@ mod tests {
             Ok(batch_reply(&all[100..120])),
         ]);
         let mut client = keyed(&fake);
-        let issues = client.fetch_issues(&all, t0()).await;
+        let issues = client.fetch_issues(&all, t0()).await.issues;
         assert_eq!(issues.len(), 120);
         let requests = fake.requests();
         assert_eq!(requests.len(), 3);
@@ -902,7 +958,10 @@ mod tests {
             json!({ "data": { "i0": issue_json("RT-1"), "i1": odd } }),
         )]);
         let mut client = keyed(&fake);
-        let issues = client.fetch_issues(&ids(&["RT-1", "RT-2"]), t0()).await;
+        let issues = client
+            .fetch_issues(&ids(&["RT-1", "RT-2"]), t0())
+            .await
+            .issues;
         let full = LinearIssue {
             identifier: "RT-1".to_owned(),
             title: "Title of RT-1".to_owned(),
@@ -946,7 +1005,10 @@ mod tests {
             json!({ "data": { "i0": issue_json("RT-1"), "i1": null } }),
         )]);
         let mut client = keyed(&fake);
-        let issues = client.fetch_issues(&ids(&["RT-1", "RT-404"]), t0()).await;
+        let issues = client
+            .fetch_issues(&ids(&["RT-1", "RT-404"]), t0())
+            .await
+            .issues;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].identifier, "RT-1");
         assert_eq!(fake.requests().len(), 1);
@@ -961,7 +1023,10 @@ mod tests {
             Ok(batch_reply(&ids(&["RT-3"]))),
         ]);
         let mut client = keyed(&fake);
-        let issues = client.fetch_issues(&ids(&["RT-3", "RT-404"]), t0()).await;
+        let issues = client
+            .fetch_issues(&ids(&["RT-3", "RT-404"]), t0())
+            .await
+            .issues;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].identifier, "RT-3");
         assert!(!issues[0].stale);
@@ -986,7 +1051,10 @@ mod tests {
         let mut client = keyed(&fake);
         client.fetch_issues(&ids(&["RT-1"]), t0()).await;
         let later = t0() + TimeDelta::minutes(2);
-        let issues = client.fetch_issues(&ids(&["RT-1", "RT-9"]), later).await;
+        let issues = client
+            .fetch_issues(&ids(&["RT-1", "RT-9"]), later)
+            .await
+            .issues;
         assert_eq!(issues.len(), 1, "only the cached copy comes back");
         assert!(issues[0].stale);
         assert_eq!(issues[0].fetched_at, t0(), "the copy keeps its fetch time");
@@ -1008,7 +1076,8 @@ mod tests {
         client.fetch_issues(&ids(&["RT-1"]), t0()).await;
         let issues = client
             .fetch_issues(&ids(&["RT-1"]), t0() + TimeDelta::minutes(2))
-            .await;
+            .await
+            .issues;
         assert_eq!(issues.len(), 1);
         assert!(issues[0].stale);
         assert!(client.cache().get("RT-1").expect("cached").stale);
@@ -1036,7 +1105,7 @@ mod tests {
         ]);
         let mut client = keyed(&fake);
         let asked = ids(&["RT-1", "RT-404", "RT-405", "RT-2"]);
-        let issues = client.fetch_issues(&asked, t0()).await;
+        let issues = client.fetch_issues(&asked, t0()).await.issues;
         let fetched: Vec<&str> = issues
             .iter()
             .map(|issue| issue.identifier.as_str())
@@ -1073,7 +1142,10 @@ mod tests {
         let mut client = keyed(&fake);
         client.fetch_issues(&ids(&["RT-1"]), t0()).await;
         let later = t0() + TimeDelta::minutes(2);
-        let issues = client.fetch_issues(&ids(&["RT-1", "RT-404"]), later).await;
+        let issues = client
+            .fetch_issues(&ids(&["RT-1", "RT-404"]), later)
+            .await
+            .issues;
         assert_eq!(issues.len(), 1, "only the cached copy comes back");
         assert!(issues[0].stale, "no progress fails the batch");
         assert_eq!(fake.requests().len(), 3);
@@ -1083,7 +1155,7 @@ mod tests {
     async fn a_moved_issue_is_cached_under_the_identifier_asked_for() {
         let fake = Fake::with(vec![Ok(json!({ "data": { "i0": issue_json("RT-9") } }))]);
         let mut client = keyed(&fake);
-        let issues = client.fetch_issues(&ids(&["ABC-5"]), t0()).await;
+        let issues = client.fetch_issues(&ids(&["ABC-5"]), t0()).await.issues;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].identifier, "ABC-5");
         assert_eq!(issues[0].url, "https://linear.app/acme/issue/RT-9/title");
