@@ -8,7 +8,7 @@ A file manager in the native client that browses each machine's own file system 
 - **Surfaces:** both a tab (a file-manager tab per host and folder, with a location bar, placed and split like any tab and kept across restarts) and a sidebar panel (a file tree docked in the sidebar).
 - **First cut is read-only:** browse; type or paste a path; open a file in its default app, the viewer or VS Code; copy a file or a folder to this machine and open it; reveal the copy; copy the path. Nothing on the host changes.
 - **Later, in Backlog:** rename, delete and new folder on the host; upload from this machine to a host folder.
-- **Placement:** release vNext+1, apart from the host info and listing (RT-1361), which is in vNext for the phone's files ([phone-files.md](./phone-files.md)).
+- **Placement:** release vNext+1, apart from the host info and listing (RT-1361), which is in vNext for the phone's files ([native-client.md](../native-client.md) "Phone shape").
 
 ## Orchestrator decisions (open to the owner)
 
@@ -28,5 +28,5 @@ A file manager in the native client that browses each machine's own file system 
 
 ## Related
 
-- RT-106 (phone files, [phone-files.md](./phone-files.md)) browses a host folder through the same listing.
+- RT-106 (phone files, [native-client.md](../native-client.md) "Phone shape") browses a host folder through the same listing.
 - RT-889, RT-891, RT-893, RT-895: fetch hardening that the host-path fetch shares.

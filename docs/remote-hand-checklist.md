@@ -203,3 +203,16 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Open a Claude session's Terminal page and tap the terminal so the keyboard rises. **Expect:** the terminal keeps its width and row count (Claude does not redraw), the cursor's row shows above the key bar, and a drag down over the terminal shows the rows the keyboard hides. Ask Claude a question that uses AskUserQuestion, then open its chat with the keyboard still up. **Expect:** the chat shows the question's card, never "Can't read the prompt box right now."
 - [ ] Ask Claude for an AskUserQuestion with three questions and answer all three from the phone. **Expect:** the chat then shows the review card with `Submit answers` and `Cancel`; tap `Submit answers` and Claude goes on.
 - [ ] Fetch a folder from the browser: press and hold a folder row and tap `Fetch folder`. **Expect:** a result line reads `Fetching <name>…`, then `Fetched <name> · <size>`, and the folder shows in the Files app under On My iPhone › Rustling Tulip.
+
+### Files from the host
+
+These need a session on the host whose terminal and chat show file and folder paths, and a TestFlight build with the phone files viewer, browser and Share.
+
+- [ ] On a session's Terminal page, tap a path to a source file. **Expect:** the viewer opens with the file's name, the host and the path in its header, and the code highlighted. Tap Back. **Expect:** the session page returns. Tap a Markdown file's path. **Expect:** it shows rendered. Tap an image's path. **Expect:** the image fits the page. Tap the path of a binary or other file. **Expect:** a card with its name and size and a `Share` button.
+- [ ] Tap a folder's path in the terminal. **Expect:** the browser opens at that folder with the host and the path in its header, folders before files. Tap `..` and then a folder row. **Expect:** each walks up or into that folder. Turn `Show hidden` on. **Expect:** hidden entries appear; leave the browser and open it again. **Expect:** the toggle is off. Tap a file row. **Expect:** it opens in the viewer.
+- [ ] Tap a path in the terminal that the host does not have. **Expect:** the session page shows `Not on <host>: <path>` and nothing is fetched.
+- [ ] In a session's Chat, tap a file link in an answer. **Expect:** it opens in the viewer as a terminal path does. Tap a folder link. **Expect:** the browser opens there.
+- [ ] In the viewer, tap `Share`. **Expect:** the iOS share sheet opens for the file, with `Save to Files` and AirDrop among its targets; save it to Files. **Expect:** the copy lands in the folder you picked.
+- [ ] Open the Files app. **Expect:** On My iPhone › Rustling Tulip holds the fetched files and folders under a folder named for the host, and `fetched.json` is not shown there.
+- [ ] Change a file on the host that you opened before, then tap its path again. **Expect:** the viewer shows the new content (it was fetched again). Turn Tailscale off on the phone and reopen it from the browser or a tap. **Expect:** the old copy opens under `This copy may be out of date: the host did not answer.` Turn Tailscale back on.
+- [ ] Tap `Settings`, then `Storage`. **Expect:** `Fetched files` shows the size the copies use. Tap `Clear`. **Expect:** the size drops to empty and the Files app's Rustling Tulip folder holds none of the copies.
