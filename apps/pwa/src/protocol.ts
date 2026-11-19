@@ -2659,6 +2659,19 @@ export interface PushNotice {
    * `status_since`.
    */
   waited_since?: string | null;
+  /**
+   * For `needs_you` and `cleared`, the ids of the host's sessions still
+   * in Needs you when the notice was built, so the phone can remove the
+   * Needs you notification of every other wait of the host that ended by
+   * `as_of`; absent for `finished`, from an older daemon,
+   * and when the list is too long for one push.
+   */
+  waiting?: string[] | null;
+  /**
+   * When `waiting` was read: a wait that began later is not covered by
+   * it. Absent whenever `waiting` is.
+   */
+  as_of?: string | null;
 }
 
 /**

@@ -22,6 +22,7 @@ workspace = true
 
 [dependencies]
 base64 = "0.22"
+chrono = { workspace = true }
 protocol = { workspace = true }
 push-crypto = { workspace = true }
 serde_json = { workspace = true }
@@ -31,16 +32,22 @@ block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSArray",
     "NSDictionary",
     "NSObject",
     "NSString",
     "NSValue",
 ] }
+# A Needs you alert first removes the delivered Needs you notifications its
+# notice ends (`clearing::ends`), read and removed through the notification
+# center.
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
+    "UNNotification",
     "UNNotificationContent",
     "UNNotificationRequest",
     "UNNotificationServiceExtension",
+    "UNUserNotificationCenter",
 ] }
 security-framework = { version = "3.7", default-features = false }

@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A Needs you notification on the phone now goes away once its wait is answered on another client, even when iOS drops that wait's own update.
 - The accounts popover keeps its title and Auto-switch controls on screen in a short window, and its account list scrolls.
 - A failed account login's message now reads after the login's own output, not above it.
 - A fetched folder that holds one file now says "1 file", not "1 files", while it fetches and once it is done.

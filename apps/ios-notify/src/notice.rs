@@ -70,6 +70,9 @@ pub struct Alert {
     /// The notice's `waited_since` as the daemon sent it, RFC 3339, when it
     /// sent one.
     pub waited_since: Option<String>,
+    /// The notice as it decrypted, which the extension hands the clearing
+    /// rule ([`crate::clearing::ends`]) for the delivered notifications.
+    pub notice: PushNotice,
 }
 
 /// A push notice that decrypted under the install's keys and that this
@@ -108,6 +111,7 @@ pub fn alert(e: Option<&str>, keys: Option<&[u8]>) -> Result<Alert, Fallback> {
     if read.notice.kind == PushNoticeKind::Cleared {
         return Err(Fallback::Cleared);
     }
+    let notice = read.notice.clone();
     Ok(Alert {
         shown: Shown {
             title: read.notice.title,
@@ -118,6 +122,7 @@ pub fn alert(e: Option<&str>, keys: Option<&[u8]>) -> Result<Alert, Fallback> {
             kind: read.kind,
         },
         waited_since: read.waited_since,
+        notice,
     })
 }
 
@@ -216,6 +221,8 @@ mod tests {
             host: Some("desk.tail1234.ts.net".to_owned()),
             badge: 3,
             waited_since: None,
+            waiting: None,
+            as_of: None,
         }
     }
 

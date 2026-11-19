@@ -325,6 +325,47 @@ pub(crate) fn needs_you_count<'a>(snapshots: impl IntoIterator<Item = &'a Sessio
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+/// The most session ids a notice names in its `waiting` list: a longer list
+/// is left out, with its `as_of`, so the notice stays well inside one push
+/// record and the phone keeps the per-session rule.
+const WAITING_MOST: usize = 24;
+
+/// The host's sessions in Needs you as one read of the registry saw them:
+/// what a Needs you or clear notice names as still waiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Waiting {
+    /// The ids of the sessions in Needs you, sorted.
+    pub ids: Vec<String>,
+    /// When the registry was read, taken just before the read: a wait that
+    /// began later is not covered by `ids`.
+    pub as_of: DateTime<Utc>,
+}
+
+impl Waiting {
+    /// The sessions in Needs you among `snapshots`, read at `as_of`.
+    fn of<'a>(
+        snapshots: impl IntoIterator<Item = &'a SessionSnapshot>,
+        as_of: DateTime<Utc>,
+    ) -> Self {
+        let mut ids: Vec<String> = snapshots
+            .into_iter()
+            .filter(|s| needs_you(s))
+            .map(|s| s.id.clone())
+            .collect();
+        ids.sort();
+        Self { ids, as_of }
+    }
+
+    /// The notice's `waiting` and `as_of`: both absent when the list is
+    /// longer than [`WAITING_MOST`].
+    fn fields(&self) -> (Option<Vec<String>>, Option<DateTime<Utc>>) {
+        if self.ids.len() > WAITING_MOST {
+            return (None, None);
+        }
+        (Some(self.ids.clone()), Some(self.as_of))
+    }
+}
+
 /// `snapshots` with `snapshot` in place of its session's entry; a session
 /// the registry no longer holds is not added back.
 fn with_snapshot(
@@ -416,16 +457,22 @@ fn host_name(state: &RemoteState) -> Option<&str> {
 /// The relay push's plaintext for the same alert [`payload`] carries: the
 /// title, the session's label ([`label`]), its id, the tailnet `host` and
 /// the Needs you count as the badge; a Needs you notice also carries the
-/// session's `status_since`, when its wait began.
+/// session's `status_since`, when its wait began, and the sessions
+/// `waiting` names as still in Needs you.
 pub(crate) fn notice(
     kind: PushKind,
     session: &SessionSnapshot,
     host: Option<&str>,
     count: u32,
+    waiting: Option<&Waiting>,
 ) -> PushNotice {
     let (notice_kind, waited_since) = match kind {
         PushKind::NeedsYou => (PushNoticeKind::NeedsYou, session.status_since),
         PushKind::Finished => (PushNoticeKind::Finished, None),
+    };
+    let (waiting, as_of) = match kind {
+        PushKind::NeedsYou => waiting.map_or((None, None), Waiting::fields),
+        PushKind::Finished => (None, None),
     };
     PushNotice {
         v: PUSH_NOTICE_VERSION,
@@ -436,14 +483,17 @@ pub(crate) fn notice(
         host: host.map(str::to_owned),
         badge: count,
         waited_since,
+        waiting,
+        as_of,
     }
 }
 
 /// The relay push's plaintext for `clear`: [`PushNoticeKind::Cleared`] with
 /// an empty title and body, the session's id, the tailnet `host`, the Needs
-/// you count once the wait ended as the badge, and the ended wait's
-/// `status_since`.
+/// you count once the wait ended as the badge, the ended wait's
+/// `status_since`, and the sessions still in Needs you.
 fn cleared_notice(clear: &Clear, host: Option<&str>) -> PushNotice {
+    let (waiting, as_of) = clear.waiting.fields();
     PushNotice {
         v: PUSH_NOTICE_VERSION,
         kind: PushNoticeKind::Cleared,
@@ -453,6 +503,8 @@ fn cleared_notice(clear: &Clear, host: Option<&str>) -> PushNotice {
         host: host.map(str::to_owned),
         badge: clear.count,
         waited_since: clear.waited_since,
+        waiting,
+        as_of,
     }
 }
 
@@ -502,7 +554,13 @@ impl Plaintexts {
             .to_string()
             .into_bytes()
         });
-        let notice = notice_bytes(&notice(alert.kind, session, host_name(remote), alert.count));
+        let notice = notice_bytes(&notice(
+            alert.kind,
+            session,
+            host_name(remote),
+            alert.count,
+            alert.waiting,
+        ));
         Self { web_push, notice }
     }
 
@@ -569,6 +627,9 @@ pub(crate) struct Alert<'a> {
     pub session: &'a SessionSnapshot,
     /// The Needs you count the badge shows.
     pub count: u32,
+    /// The sessions in Needs you, read with `count`, that a Needs you notice
+    /// names; `None` for a Finished push.
+    pub waiting: Option<&'a Waiting>,
     /// Whether the owner was at the desk when the alert was raised, read once
     /// per alert before any `.await`.
     pub at_desk: bool,
@@ -590,6 +651,8 @@ pub(crate) struct Clear {
     pub held_at_desk: bool,
     /// The ended wait's `status_since`, when the session started waiting.
     pub waited_since: Option<DateTime<Utc>>,
+    /// The sessions still in Needs you, read with `count`.
+    pub waiting: Waiting,
 }
 
 /// What one session event raises.
@@ -601,6 +664,8 @@ pub(crate) enum Step {
         session: Box<SessionSnapshot>,
         /// The Needs you count the badge shows.
         count: u32,
+        /// The sessions in Needs you, read with `count`.
+        waiting: Waiting,
     },
     /// A session's wait ended: a clear to deliver.
     Clear(Clear),
@@ -1404,12 +1469,14 @@ impl Trigger {
         self.finishing.fold(&snapshot);
         let raised = self.tracker.observe(&snapshot);
         if let Some(wait) = wait.filter(|_| !waits) {
-            let count = needs_you_count(with_snapshot(sessions.snapshots(), &snapshot).iter());
+            let as_of = Utc::now();
+            let snapshots = with_snapshot(sessions.snapshots(), &snapshot);
             return Step::Clear(Clear {
                 session_id: snapshot.id,
-                count,
+                count: needs_you_count(snapshots.iter()),
                 held_at_desk,
                 waited_since: wait.since,
+                waiting: Waiting::of(&snapshots, as_of),
             });
         }
         match raised {
@@ -1420,14 +1487,16 @@ impl Trigger {
                 Step::Nothing
             }
             Some(PushKind::NeedsYou) => {
+                let as_of = Utc::now();
                 let snapshots = sessions.snapshots();
                 if !snapshots.iter().any(|seen| seen.id == snapshot.id) {
                     return Step::Nothing;
                 }
-                let count = needs_you_count(with_snapshot(snapshots, &snapshot).iter());
+                let snapshots = with_snapshot(snapshots, &snapshot);
                 Step::Alert {
                     session: snapshot,
-                    count,
+                    count: needs_you_count(snapshots.iter()),
+                    waiting: Waiting::of(&snapshots, as_of),
                 }
             }
         }
@@ -1444,13 +1513,17 @@ impl Trigger {
         let Some(wait) = wait else {
             return Step::Nothing;
         };
+        let as_of = Utc::now();
         let snapshots = sessions.snapshots();
-        let count = needs_you_count(snapshots.iter().filter(|seen| seen.id != id));
+        let others = || snapshots.iter().filter(|seen| seen.id != id);
+        let count = needs_you_count(others());
+        let waiting = Waiting::of(others(), as_of);
         Step::Clear(Clear {
             session_id: id,
             count,
             held_at_desk,
             waited_since: wait.since,
+            waiting,
         })
     }
 }
@@ -1532,11 +1605,12 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
                     let _ = request.reply.send(outcome);
                 }
                 event = events.recv() => match trigger.step(event, &sessions) {
-                    Step::Alert { session, count } => {
+                    Step::Alert { session, count, waiting } => {
                         let alert = Alert {
                             kind: PushKind::NeedsYou,
                             session: &session,
                             count,
+                            waiting: Some(&waiting),
                             at_desk: presence.at_desk(),
                             only_held: false,
                         };
@@ -1609,6 +1683,7 @@ async fn deliver_finished(
             kind: PushKind::Finished,
             session,
             count: needs_you_count(&snapshots),
+            waiting: None,
             at_desk: presence.at_desk(),
             only_held: false,
         };
@@ -1630,15 +1705,19 @@ async fn deliver_held(
 ) {
     let sessions_due = trigger.held_now(sessions);
     for session in &sessions_due {
+        let as_of = Utc::now();
         let snapshots = sessions.snapshots();
         if !snapshots.iter().any(|seen| seen.id == session.id) {
             continue;
         }
         trigger.held.remove(&session.id);
+        let snapshots = with_snapshot(snapshots, session);
+        let waiting = Waiting::of(&snapshots, as_of);
         let alert = Alert {
             kind: PushKind::NeedsYou,
             session,
-            count: needs_you_count(with_snapshot(snapshots, session).iter()),
+            count: needs_you_count(snapshots.iter()),
+            waiting: Some(&waiting),
             at_desk: false,
             only_held: true,
         };
@@ -1671,8 +1750,8 @@ mod tests {
     use super::{
         Alert, BACKOFF_FIRST, BACKOFF_MOST, Backoff, Clear, Delivery, FALLBACK_TOPIC,
         FINISHED_GRACE, FallbackOutcome, FinishedHolds, PushKind, Sources, Step, Stores, Tracker,
-        Trigger, deliver_finished, deliver_held, label, lock_push, needs_you_count, notice, origin,
-        payload, run, spawn,
+        Trigger, WAITING_MOST, Waiting, cleared_notice, deliver_finished, deliver_held, label,
+        lock_push, needs_you_count, notice, origin, payload, run, spawn,
     };
     use crate::devices::DeviceStore;
     use crate::paths::Dirs;
@@ -2229,6 +2308,7 @@ mod tests {
                     kind,
                     session: &session,
                     count: 1,
+                    waiting: None,
                     at_desk: false,
                     only_held: false,
                 },
@@ -2272,6 +2352,7 @@ mod tests {
                     kind: PushKind::NeedsYou,
                     session: &session,
                     count: 1,
+                    waiting: None,
                     at_desk,
                     only_held: false,
                 },
@@ -2842,6 +2923,8 @@ mod tests {
                 host: Some("host.tail1234.ts.net".to_owned()),
                 badge: 1,
                 waited_since: None,
+                waiting: None,
+                as_of: None,
             }
         );
     }
@@ -3019,6 +3102,50 @@ mod tests {
             count,
             held_at_desk: false,
             waited_since: None,
+            waiting: waits(&[]),
+        }
+    }
+
+    /// `ids` as waiting, read at the epoch.
+    fn waits(ids: &[&str]) -> Waiting {
+        Waiting {
+            ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            as_of: chrono::DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
+
+    /// The clear `step` raised, if it raised one.
+    fn cleared_step(step: Step) -> Option<Clear> {
+        match step {
+            Step::Clear(clear) => Some(clear),
+            _ => None,
+        }
+    }
+
+    /// `step` with its `as_of` moved to the epoch, so it compares with a
+    /// step built by hand with [`waits`].
+    fn settled(step: Step) -> Step {
+        match step {
+            Step::Alert {
+                session,
+                count,
+                waiting,
+            } => Step::Alert {
+                session,
+                count,
+                waiting: Waiting {
+                    as_of: chrono::DateTime::<Utc>::UNIX_EPOCH,
+                    ..waiting
+                },
+            },
+            Step::Clear(clear) => Step::Clear(Clear {
+                waiting: Waiting {
+                    as_of: chrono::DateTime::<Utc>::UNIX_EPOCH,
+                    ..clear.waiting
+                },
+                ..clear
+            }),
+            other => other,
         }
     }
 
@@ -3093,6 +3220,8 @@ mod tests {
                 host: Some("host.tail1234.ts.net".to_owned()),
                 badge: 2,
                 waited_since: Some(since),
+                waiting: Some(Vec::new()),
+                as_of: Some(ended.waiting.as_of),
             }
         );
     }
@@ -3119,7 +3248,7 @@ mod tests {
             ..clear(0)
         };
         assert_eq!(
-            trigger.step(answered, &sessions),
+            settled(trigger.step(answered, &sessions)),
             Step::Clear(held.clone()),
             "the wait's push was still held"
         );
@@ -3370,7 +3499,7 @@ mod tests {
             "status_since": "2026-11-14T12:00:00Z",
         }));
 
-        let built = notice(PushKind::Finished, &session, None, 3);
+        let built = notice(PushKind::Finished, &session, None, 3, None);
 
         let finished = PushNotice {
             v: PUSH_NOTICE_VERSION,
@@ -3381,10 +3510,12 @@ mod tests {
             host: None,
             badge: 3,
             waited_since: None,
+            waiting: None,
+            as_of: None,
         };
         assert_eq!(built, finished, "a Finished notice carries no wait");
         assert_eq!(
-            notice(PushKind::NeedsYou, &session, None, 3),
+            notice(PushKind::NeedsYou, &session, None, 3, None),
             PushNotice {
                 kind: PushNoticeKind::NeedsYou,
                 title: "Needs you".to_owned(),
@@ -3588,10 +3719,11 @@ mod tests {
         let (asking, event) = update("awaiting_input");
 
         assert_eq!(
-            trigger.step(event, &sessions),
+            settled(trigger.step(event, &sessions)),
             Step::Alert {
                 session: Box::new(asking),
                 count: 1,
+                waiting: waits(&["s1"]),
             }
         );
     }
@@ -3723,10 +3855,11 @@ mod tests {
         let (asking, event) = update("awaiting_input");
 
         assert_eq!(
-            trigger.step(event, &sessions),
+            settled(trigger.step(event, &sessions)),
             Step::Alert {
                 session: Box::new(asking),
                 count: 1,
+                waiting: waits(&["s1"]),
             }
         );
     }
@@ -3822,9 +3955,10 @@ mod tests {
         let waited_since = since_of(&sessions);
 
         assert_eq!(
-            trigger.step(event, &sessions),
+            settled(trigger.step(event, &sessions)),
             Step::Clear(Clear {
                 waited_since,
+                waiting: waits(&["s2"]),
                 ..clear(1)
             })
         );
@@ -3838,9 +3972,10 @@ mod tests {
         sessions.remove("s1");
 
         assert_eq!(
-            trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions),
+            settled(trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions)),
             Step::Clear(Clear {
                 waited_since,
+                waiting: waits(&["s2"]),
                 ..clear(1)
             })
         );
@@ -3856,11 +3991,108 @@ mod tests {
         let waited_since = since_of(&sessions);
 
         assert_eq!(
-            trigger.step(event, &sessions),
+            settled(trigger.step(event, &sessions)),
             Step::Clear(Clear {
                 waited_since,
+                waiting: waits(&["s2"]),
                 ..clear(1)
             })
+        );
+    }
+
+    #[test]
+    fn a_clear_names_the_sessions_still_waiting() {
+        let setup = setup("clear-names-waiting");
+        let (sessions, mut trigger) = two_waiting(&setup);
+        sessions.insert(idle_record("s3"));
+
+        let before = Utc::now();
+        let (_, answered) = update("working");
+        let step = trigger.step(answered, &sessions);
+        let after = Utc::now();
+
+        let answered = cleared_step(step).expect("an answered wait raises a clear");
+        assert_eq!(
+            answered.waiting.ids,
+            vec!["s2".to_owned()],
+            "s1 ended, s3 never waited"
+        );
+        assert_eq!(answered.count, 1, "the count is read with the list");
+        let as_of = answered.waiting.as_of;
+        assert!(
+            before <= as_of && as_of <= after,
+            "as_of is the read's time"
+        );
+        let built = cleared_notice(&answered, Some("host.tail1234.ts.net"));
+        assert_eq!(built.waiting, Some(vec!["s2".to_owned()]));
+        assert_eq!(built.as_of, Some(as_of));
+
+        sessions.remove("s2");
+        trigger.tracker.seed(&sessions.snapshots());
+        let step = settled(trigger.step(Ok(SessionEvent::Removed("s1".to_owned())), &sessions));
+        let removed = cleared_step(step).expect("a removed waiting session raises a clear");
+        assert_eq!(removed.waiting, waits(&[]), "nothing else waits");
+        assert_eq!(
+            cleared_notice(&removed, None).waiting,
+            Some(Vec::new()),
+            "an empty list is sent: every other wait ended"
+        );
+
+        let many: Vec<String> = (0..=WAITING_MOST).map(|n| format!("w{n}")).collect();
+        let crowded = Clear {
+            waiting: Waiting { ids: many, as_of },
+            ..clear(0)
+        };
+        let built = cleared_notice(&crowded, None);
+        assert_eq!(
+            (built.waiting, built.as_of),
+            (None, None),
+            "a list too long for one push is left out"
+        );
+    }
+
+    #[test]
+    fn a_needs_you_notice_names_the_sessions_still_waiting() {
+        let setup = setup("needs-you-names-waiting");
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        sessions.insert(idle_record("s2"));
+        sessions.insert(idle_record("s3"));
+        sessions.update("s1", |record| record.status = SessionStatus::Working);
+        sessions.update("s2", |record| record.status = SessionStatus::AwaitingInput);
+        let mut trigger = trigger();
+        trigger.tracker.seed(&sessions.snapshots());
+
+        let before = Utc::now();
+        let (asking, event) = update("awaiting_input");
+        let step = trigger.step(event, &sessions);
+        let after = Utc::now();
+
+        let (session, count, waiting) = match step {
+            Step::Alert {
+                session,
+                count,
+                waiting,
+            } => Some((session, count, waiting)),
+            _ => None,
+        }
+        .expect("entering Needs you raises an alert");
+        assert_eq!(*session, asking);
+        assert_eq!(count, 2);
+        assert_eq!(
+            waiting.ids,
+            vec!["s1".to_owned(), "s2".to_owned()],
+            "its own wait included"
+        );
+        assert!(before <= waiting.as_of && waiting.as_of <= after);
+        let built = notice(PushKind::NeedsYou, &session, None, count, Some(&waiting));
+        assert_eq!(built.waiting, Some(vec!["s1".to_owned(), "s2".to_owned()]));
+        assert_eq!(built.as_of, Some(waiting.as_of));
+        let finished = notice(PushKind::Finished, &session, None, count, Some(&waiting));
+        assert_eq!(
+            (finished.waiting, finished.as_of),
+            (None, None),
+            "a Finished notice names no waits"
         );
     }
 

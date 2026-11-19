@@ -3475,6 +3475,17 @@ pub struct PushNotice {
     /// `status_since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waited_since: Option<DateTime<Utc>>,
+    /// For `needs_you` and `cleared`, the ids of the host's sessions still
+    /// in Needs you when the notice was built, so the phone can remove the
+    /// Needs you notification of every other wait of the host that ended by
+    /// `as_of`; absent for `finished`, from an older daemon,
+    /// and when the list is too long for one push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Vec<String>>,
+    /// When `waiting` was read: a wait that began later is not covered by
+    /// it. Absent whenever `waiting` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<DateTime<Utc>>,
 }
 
 /// What a relay push tells the phone. Serialized as a `snake_case` string
@@ -8910,6 +8921,8 @@ mod tests {
             host: Some("host.tailnet.ts.net".to_owned()),
             badge: 3,
             waited_since: None,
+            waiting: None,
+            as_of: None,
         };
         let json = serde_json::to_string(&notice).expect("serializes");
         assert!(json.contains(r#""kind":"needs_you""#), "{json}");
@@ -8938,6 +8951,8 @@ mod tests {
             host: Some("host.tailnet.ts.net".to_owned()),
             badge: 2,
             waited_since: None,
+            waiting: None,
+            as_of: None,
         };
         let json = serde_json::to_string(&notice).expect("serializes");
         assert!(json.contains(r#""kind":"cleared""#), "{json}");
@@ -8958,6 +8973,8 @@ mod tests {
                 host: None,
                 badge: 1,
                 waited_since: None,
+                waiting: None,
+                as_of: None,
             };
             let value = serde_json::to_value(&without).expect("serializes");
             assert!(value.get("waited_since").is_none(), "{value}");
@@ -8973,6 +8990,54 @@ mod tests {
             let back: PushNotice = serde_json::from_value(value).expect("decodes");
             assert_eq!(back, with);
         }
+    }
+
+    #[test]
+    fn push_notice_waiting_and_as_of_round_trip_with_and_without() {
+        let as_of: DateTime<Utc> = "2026-11-14T12:07:00.123456789Z"
+            .parse()
+            .expect("a timestamp");
+        let without = PushNotice {
+            v: PUSH_NOTICE_VERSION,
+            kind: PushNoticeKind::Cleared,
+            title: String::new(),
+            body: String::new(),
+            session_id: "s1".to_owned(),
+            host: Some("host.tailnet.ts.net".to_owned()),
+            badge: 1,
+            waited_since: None,
+            waiting: None,
+            as_of: None,
+        };
+        let value = serde_json::to_value(&without).expect("serializes");
+        assert!(value.get("waiting").is_none(), "{value}");
+        assert!(value.get("as_of").is_none(), "{value}");
+        let back: PushNotice = serde_json::from_value(value).expect("decodes");
+        assert_eq!(back, without);
+
+        let with = PushNotice {
+            waiting: Some(vec!["s2".to_owned(), "s3".to_owned()]),
+            as_of: Some(as_of),
+            ..without
+        };
+        let value = serde_json::to_value(&with).expect("serializes");
+        assert_eq!(value["waiting"], serde_json::json!(["s2", "s3"]));
+        assert_eq!(value["as_of"], "2026-11-14T12:07:00.123456789Z");
+        let back: PushNotice = serde_json::from_value(value).expect("decodes");
+        assert_eq!(back, with, "as_of keeps its nanoseconds");
+
+        let empty = PushNotice {
+            waiting: Some(Vec::new()),
+            ..with
+        };
+        let value = serde_json::to_value(&empty).expect("serializes");
+        assert_eq!(
+            value["waiting"],
+            serde_json::json!([]),
+            "an empty list is sent"
+        );
+        let back: PushNotice = serde_json::from_value(value).expect("decodes");
+        assert_eq!(back, empty);
     }
 
     #[test]

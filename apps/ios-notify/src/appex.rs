@@ -2,7 +2,10 @@
 //! `UNNotificationServiceExtension` that reads the push's `e` ciphertext and
 //! the install's push keys from the Keychain, and hands the content handler
 //! the decrypted title, body and badge, or the content as it came on any
-//! failure. The handler is called exactly once. Nothing is logged.
+//! failure. A Needs you alert that names the host's sessions still waiting
+//! first removes the delivered Needs you notifications whose wait ended
+//! ([`clearing::ends`]), so a later alert repairs what a lost background
+//! clear left. The handler is called exactly once. Nothing is logged.
 
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -10,15 +13,18 @@ use std::sync::Mutex;
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{ClassType, DefinedClass, define_class, msg_send};
+use objc2::{ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_foundation::{
-    NSMutableCopying, NSMutableDictionary, NSNumber, NSObject, NSString, ns_string,
+    NSArray, NSDictionary, NSMutableCopying, NSMutableDictionary, NSNumber, NSObject, NSString,
+    ns_string,
 };
 use objc2_user_notifications::{
-    UNMutableNotificationContent, UNNotificationContent, UNNotificationRequest,
-    UNNotificationServiceExtension,
+    UNMutableNotificationContent, UNNotification, UNNotificationContent, UNNotificationRequest,
+    UNNotificationServiceExtension, UNUserNotificationCenter,
 };
+use protocol::{PushNotice, PushNoticeKind};
 use push_crypto::{KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
+use rustling_tulip_ios_notify::clearing::{self, Drawn};
 use rustling_tulip_ios_notify::notice::{self, Alert};
 use security_framework::passwords::{PasswordOptions, generic_password};
 
@@ -81,9 +87,44 @@ impl RTNotificationService {
         let e = ciphertext(&original);
         let keys = install_keys();
         match notice::alert(e.as_deref(), keys.as_deref()) {
-            Ok(alert) => self.deliver(&rewritten(&original, &alert)),
+            Ok(alert) => self.prune_then_deliver(rewritten(&original, &alert), alert.notice),
             Err(_) => self.deliver_original(),
         }
+    }
+
+    /// For a Needs you `notice` that names the host's sessions still
+    /// waiting, removes the delivered Needs you notifications it ends, then
+    /// hands the handler `content` from the same completion; any other
+    /// notice hands it over at once. Should the completion never run,
+    /// `serviceExtensionTimeWillExpire` delivers the content as it came.
+    fn prune_then_deliver(
+        &self,
+        content: Retained<UNMutableNotificationContent>,
+        notice: PushNotice,
+    ) {
+        if notice.kind != PushNoticeKind::NeedsYou || notice.waiting.is_none() {
+            self.deliver(&content);
+            return;
+        }
+        let this = self.retain();
+        let block = RcBlock::new(move |shown: NonNull<NSArray<UNNotification>>| {
+            // SAFETY: the system hands the completion a live array for the call.
+            let shown = unsafe { shown.as_ref() };
+            let ended: Vec<Retained<NSString>> = shown
+                .to_vec()
+                .iter()
+                .filter_map(|delivered| ended_id(delivered, &notice))
+                .collect();
+            if !ended.is_empty() {
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(
+                        &ended,
+                    ));
+            }
+            this.deliver(&content);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&block);
     }
 
     /// Hands the handler the request's content as it came, if it has not run.
@@ -119,6 +160,31 @@ impl RTNotificationService {
 /// The push's `e` ciphertext, when its user info holds one as a string.
 fn ciphertext(content: &UNNotificationContent) -> Option<String> {
     let value = content.userInfo().objectForKey(ns_string!("e"))?;
+    let text = value.downcast::<NSString>().ok()?;
+    Some(text.to_string())
+}
+
+/// The identifier of `delivered` when `notice` ends its wait, read from the
+/// ids this extension put in its user info.
+fn ended_id(delivered: &UNNotification, notice: &PushNotice) -> Option<Retained<NSString>> {
+    let request = delivered.request();
+    let info = request.content().userInfo();
+    let kind = info_string(&info, "kind");
+    let host = info_string(&info, "host");
+    let session_id = info_string(&info, "session_id");
+    let waited_since = info_string(&info, "waited_since");
+    let shown = Drawn {
+        kind: kind.as_deref(),
+        host: host.as_deref(),
+        session_id: session_id.as_deref(),
+        waited_since: waited_since.as_deref(),
+    };
+    clearing::ends(notice, shown).then(|| request.identifier())
+}
+
+/// The string `info` holds under `key`, when it holds one.
+fn info_string(info: &NSDictionary<AnyObject, AnyObject>, key: &str) -> Option<String> {
+    let value = info.objectForKey(&NSString::from_str(key))?;
     let text = value.downcast::<NSString>().ok()?;
     Some(text.to_string())
 }

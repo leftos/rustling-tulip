@@ -53,6 +53,11 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# The phone's background clear decrypts a push notice with the extension's
+# own tested step (`notice::decrypted`), and it and the sweep's clear share
+# the extension's clearing rule (`clearing::ends`). The library's iOS-only
+# dependencies are target-gated in its own manifest.
+rustling-tulip-ios-notify = { path = "../ios-notify" }
 
 gpui = { git = "https://github.com/leftos/zed", rev = "e49cba9261f49e6367b5b1b15129aa189bbf2883" }
 # gpui 0.2.2 turned these on by default; without `font-kit` macOS draws no text.
@@ -167,9 +172,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
 ] }
 security-framework = { version = "3.7", default-features = false }
-# The background clear decrypts a push notice with the extension's own
-# tested step (`notice::decrypted`).
-rustling-tulip-ios-notify = { path = "../ios-notify" }
 # The background clear sets the badge and calls its completion on the main
 # queue, where iOS 15's badge setter must run.
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }

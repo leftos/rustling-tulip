@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Utc};
 use protocol::{PushNotice, PushNoticeKind};
+use rustling_tulip_ios_notify::clearing::{self, Drawn};
 
 use super::push::{Delivered, NEEDS_YOU_KIND};
 use crate::needs_you::{NeedsYouRow, Reason};
@@ -68,10 +68,13 @@ pub(crate) fn sweep(delivered: &[Delivered], hosts: &[HostNow]) -> Sweep {
 }
 
 /// What a background push `notice` does to `delivered`, `None` unless it is
-/// a clear: it removes each Needs you notification of the same host and
-/// session whose wait began no later than the cleared one (either side
-/// with no wait start removes by session alone), and sets the badge to the
-/// notice's count. A notification of a newer wait of that session stays.
+/// a clear: it removes each Needs you notification the extension's clearing
+/// rule ([`clearing::ends`]) says the clear ends, and sets the badge to the
+/// notice's count. That is the clear's own wait (the same host and session,
+/// a wait that began no later than the cleared one; either side with no
+/// wait start removes by session alone), and, when the clear names the
+/// host's sessions still waiting, every other wait of that host that ended
+/// by its `as_of`. A notification of a newer wait stays.
 #[cfg_attr(
     all(not(target_os = "ios"), not(test)),
     expect(dead_code, reason = "only the iOS background wake calls it")
@@ -97,24 +100,15 @@ pub(crate) fn clear(notice: &PushNotice, delivered: &[Delivered]) -> Option<Swee
     expect(dead_code, reason = "only the iOS background wake calls it")
 )]
 fn cleared_by(shown: &Delivered, notice: &PushNotice) -> bool {
-    shown.kind.as_deref() == Some(NEEDS_YOU_KIND)
-        && shown.session_id.as_deref() == Some(notice.session_id.as_str())
-        && shown.host == notice.host
-        && not_newer(shown.waited_since.as_deref(), notice.waited_since)
-}
-
-/// Whether a wait that began at `shown` (RFC 3339) is not newer than the
-/// cleared one that began at `cleared`; true when either is unknown, a
-/// start that does not parse included.
-#[cfg_attr(
-    all(not(target_os = "ios"), not(test)),
-    expect(dead_code, reason = "only the iOS background wake calls it")
-)]
-fn not_newer(shown: Option<&str>, cleared: Option<DateTime<Utc>>) -> bool {
-    let (Some(shown), Some(cleared)) = (shown, cleared) else {
-        return true;
-    };
-    DateTime::parse_from_rfc3339(shown).map_or(true, |shown| shown.with_timezone(&Utc) <= cleared)
+    clearing::ends(
+        notice,
+        Drawn {
+            kind: shown.kind.as_deref(),
+            host: shown.host.as_deref(),
+            session_id: shown.session_id.as_deref(),
+            waited_since: shown.waited_since.as_deref(),
+        },
+    )
 }
 
 /// Whether `shown` is a Needs you notification whose wait has ended: its
@@ -344,6 +338,8 @@ mod tests {
                     .expect("a valid instant")
                     .with_timezone(&Utc)
             }),
+            waiting: None,
+            as_of: None,
         }
     }
 
@@ -413,6 +409,27 @@ mod tests {
             cleared(&unknown, &[waited("n1", "s1", BOX, "2026-11-14T10:05:00Z")]),
             Some(vec!["n1".to_owned()]),
             "a clear with no wait start removes by session"
+        );
+    }
+
+    #[test]
+    fn a_clear_removes_every_ended_wait_of_its_host() {
+        // iOS keeps only the newest held background push, so s1's clear can be
+        // discarded; s2's clear says what still waits on BOX and clears s1 too.
+        let notice: PushNotice = serde_json::from_str(&format!(
+            r#"{{"v":{PUSH_NOTICE_VERSION},"kind":"cleared","title":"","body":"","session_id":"s2","host":"{BOX}","badge":1,"waited_since":"2026-11-14T10:05:00Z","waiting":["s3"],"as_of":"2026-11-14T10:07:00Z"}}"#
+        ))
+        .expect("a clear parses");
+        let delivered = [
+            waited("n1", "s1", BOX, "2026-11-14T10:00:00Z"), // ended; its own clear was lost
+            waited("n2", "s2", BOX, "2026-11-14T10:05:00Z"), // this clear's wait
+            waited("n3", "s3", BOX, "2026-11-14T10:06:00Z"), // still waiting
+            waited("n4", "s4", BOX, "2026-11-14T10:08:00Z"), // began after the clear was built
+            waited("n5", "s1", LAB, "2026-11-14T10:00:00Z"), // another host
+        ];
+        assert_eq!(
+            cleared(&notice, &delivered),
+            Some(vec!["n1".to_owned(), "n2".to_owned()])
         );
     }
 
