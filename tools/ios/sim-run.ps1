@@ -5,19 +5,24 @@
 # On this PC (no switch) it runs itself with -OnMac as one heavy gate run pinned
 # to the Mac (log .tmp/ios-sim-run.log); the gate brings .tmp/ios/*.png back on
 # a pass and .tmp/ios/* on a failure. On the Mac (-OnMac) it builds the
-# simulator bundle (tools/ios/build.ps1), boots the iPhone 17 on iOS 27.0 unless
-# it is already booted, installs and launches the app, waits for its
+# simulator bundle (tools/ios/build.ps1), boots the simulator -Device names on
+# iOS 27.0 unless it is already booted, installs and launches the app, waits for its
 # "phone app started" log line with the background-wake method's line before it,
 # takes .tmp/ios/sim-first.png, then stops the app and shuts the simulator down
 # again if this run booted it.
 #
-#   pwsh -NoProfile -File tools/ios/sim-run.ps1
+#   pwsh -NoProfile -File tools/ios/sim-run.ps1 [-Device <name>]
+#
+# -Device is the simulator's name, matched with -like against the available
+# devices on the iOS 27.0 runtime, the first match winning (default
+# 'iPhone 17'; 'iPad*' picks the first iPad).
 #
 # Prints the screenshot path on success.
 #-------------------------------------------------------------------------------
 [CmdletBinding()]
 param(
-    [switch] $OnMac
+    [switch] $OnMac,
+    [string] $Device = 'iPhone 17'
 )
 
 Set-StrictMode -Version Latest
@@ -26,7 +31,6 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $MacBuilder = 'builder@mac-mini'
 $BundleId = 'dev.leftos.rustling-tulip.phone'
-$DeviceName = 'iPhone 17'
 $RuntimeMark = 'iOS-27-0'
 $ReadyLine = 'phone app started'
 # The two lines together prove the pre-launch call added the background-push
@@ -51,7 +55,7 @@ function Invoke-FromPc {
     $gate = Join-Path $RepoRoot 'tools/gate.ps1'
     $log = Join-Path $RepoRoot '.tmp/ios-sim-run.log'
     & pwsh -NoProfile -File $gate run --builder $MacBuilder --cd $RepoRoot --log $log --timeout 3600 --slot heavy -- `
-        pwsh -NoProfile -File tools/ios/sim-run.ps1 -OnMac
+        pwsh -NoProfile -File tools/ios/sim-run.ps1 -OnMac -Device $Device
     $code = $LASTEXITCODE
     if ($code -ne 0) { exit $code }
     if (-not (Test-Path $Shot)) { throw "the gate passed but brought back no screenshot at $Shot" }
@@ -64,12 +68,13 @@ function Find-Device {
     $runtimes = ($json -join "`n" | ConvertFrom-Json).devices
     $seen = @()
     foreach ($runtime in $runtimes.PSObject.Properties) {
-        foreach ($device in $runtime.Value) {
-            $seen += "$($device.name) ($($runtime.Name))"
-            if ($device.name -eq $DeviceName -and $runtime.Name -like "*$RuntimeMark") { return $device }
+        # Not `$device`: PowerShell names ignore case, so it would be $Device.
+        foreach ($candidate in $runtime.Value) {
+            $seen += "$($candidate.name) ($($runtime.Name))"
+            if ($candidate.name -like $Device -and $runtime.Name -like "*$RuntimeMark") { return $candidate }
         }
     }
-    throw "no available '$DeviceName' on an iOS 27.0 runtime; found: $($seen -join ', ')"
+    throw "no available device like '$Device' on an iOS 27.0 runtime; found: $($seen -join ', ')"
 }
 
 function Start-Simulator([string] $Udid) {
@@ -139,12 +144,12 @@ function Invoke-OnMac {
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build.ps1') -Target sim
     Assert-LastExit 'tools/ios/build.ps1 -Target sim'
     $app = Join-Path $RepoRoot 'target/ios/aarch64-apple-ios-sim/RustlingTulip.app'
-    $device = Find-Device
-    $udid = $device.udid
+    $sim = Find-Device
+    $udid = $sim.udid
     $booted = $false
     $launch = $null
     try {
-        if ($device.state -ne 'Booted') {
+        if ($sim.state -ne 'Booted') {
             Start-Simulator $udid
             # Set before the wait, so a failed wait still shuts it down.
             $booted = $true

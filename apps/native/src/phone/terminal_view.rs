@@ -62,6 +62,7 @@ impl PhoneRoot {
             self.terminal_hidden = 0.0;
             self.terminal_pan = Pan::default();
             self.terminal_watch = None;
+            self.terminal_viewport = None;
             // Only the terminal this sync opened is closed here.
             if self.terminal_open.take().is_some() {
                 self.root.update(cx, RootView::close_phone_terminal);
@@ -82,6 +83,8 @@ impl PhoneRoot {
             );
             self.terminal_open = Some(wanted);
             self.terminal_pan = Pan::default();
+            // The open claims its first size; only a later change re-claims.
+            self.terminal_viewport = None;
             *self.key_bar.borrow_mut() = KeyBar::new();
             self.terminal_quick = false;
             if let Some(pane) = self.terminal_pane(cx) {
@@ -91,6 +94,7 @@ impl PhoneRoot {
                 self.terminal_watch = Some(cx.observe(&pane, |this, _, cx| this.follow_cursor(cx)));
             }
         }
+        self.claim_on_resize(window, cx);
         self.terminal_hidden = hidden;
         self.terminal_pan = if keyboard_up {
             self.terminal_pan.clamped(hidden)
@@ -98,6 +102,20 @@ impl PhoneRoot {
             Pan::default()
         };
         self.terminal_need = self.cursor_need(cx);
+    }
+
+    /// A rotation or a pane change resized the window's viewport under the
+    /// open terminal: the pane is marked resized, so the size it measures
+    /// next claims the PTY, as its open did. A keyboard leaves the viewport
+    /// as it is, so it never claims.
+    fn claim_on_resize(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let previous = self.terminal_viewport.replace(viewport);
+        if previous.is_some_and(|previous| previous != viewport)
+            && let Some(pane) = self.terminal_pane(cx)
+        {
+            pane.update(cx, |pane, _| pane.mark_resized());
+        }
     }
 
     /// After the terminal redraws: the page redraws too when the cursor's

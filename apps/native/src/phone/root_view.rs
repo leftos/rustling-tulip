@@ -101,6 +101,8 @@ pub struct PhoneRoot {
     pub(super) terminal_need: f32,
     /// The open terminal's redraws, watched for its cursor's row.
     pub(super) terminal_watch: Option<gpui::Subscription>,
+    /// The viewport size the open terminal was last laid out at.
+    pub(super) terminal_viewport: Option<gpui::Size<gpui::Pixels>>,
     /// The Terminal page's key bar, shared with the terminal's typed text
     /// so a sticky Ctrl reaches the soft keyboard's next character.
     pub(super) key_bar: Rc<RefCell<KeyBar>>,
@@ -236,6 +238,7 @@ impl PhoneRoot {
             terminal_pan: super::terminal_fit::Pan::default(),
             terminal_need: 0.0,
             terminal_watch: None,
+            terminal_viewport: None,
             key_bar: Rc::new(RefCell::new(KeyBar::new())),
             terminal_quick: false,
             tray: super::tray::Tray::default(),
