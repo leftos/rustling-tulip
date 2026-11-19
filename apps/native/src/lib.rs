@@ -1647,6 +1647,8 @@ pub struct RootView {
     phone_fetched: Vec<PhoneFetched>,
     /// The stats the phone sent about its kept copies, and their answers.
     pub(crate) phone_stats: PhoneStats,
+    /// The phone browser's host answers and each connection's host info.
+    pub(crate) phone_browse: phone::browser::Inbox,
     /// The updater, the update ready to install and the last check.
     update: update_view::UpdateUi,
 }
@@ -2136,6 +2138,7 @@ impl RootView {
                 .map_err(|err| format!("{err:#}")),
             phone_fetched: Vec::new(),
             phone_stats: PhoneStats::default(),
+            phone_browse: phone::browser::Inbox::default(),
             update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);
@@ -5549,6 +5552,9 @@ impl RootView {
             cx.notify();
         }
         if matches!(msg, DaemonMessage::Welcome { .. }) && self.phone_stats.host_reset(host) {
+            cx.notify();
+        }
+        if matches!(msg, DaemonMessage::Welcome { .. }) && self.phone_browse.host_reset(host) {
             cx.notify();
         }
         if self.on_panel_message(host, &msg, window, cx) {

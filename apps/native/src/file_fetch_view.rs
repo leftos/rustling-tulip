@@ -24,6 +24,7 @@ use crate::links::TerminalLink;
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::open::{LinkAction, OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, LinkFolders, LinkSource, Opening, Origin, Route, Then};
+use crate::phone::browser::{Answer, HostFacts};
 use crate::spawn_form::human_size;
 use crate::target::HostKey;
 
@@ -609,6 +610,29 @@ impl RootView {
     pub(crate) fn host_serves_paths(&self, host: &HostKey) -> bool {
         self.conn_of(host)
             .is_some_and(|conn| conn.supports(protocol::FEATURE_HOST_PATHS))
+    }
+
+    /// Whether `host`'s daemon lists its folders and says what it runs.
+    pub(crate) fn host_serves_browse(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_HOST_BROWSE))
+    }
+
+    /// Hands `host`'s answer to the phone browser's request `id` to the
+    /// phone, from a host that offers browsing; returns whether the phone
+    /// took it.
+    fn on_browse_answer(
+        &mut self,
+        host: &HostKey,
+        id: &str,
+        answer: Answer,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.host_serves_browse(host) || !self.phone_browse.answer(host, id, answer) {
+            return false;
+        }
+        cx.notify();
+        true
     }
 
     /// `host` as fetch toasts name it ([`file_fetch::host_label`]); "The
@@ -1380,6 +1404,27 @@ impl RootView {
             }
             DaemonMessage::SessionFolders { id, folders, error } => {
                 return self.on_session_folders(id, folders, error.as_deref(), cx);
+            }
+            DaemonMessage::HostInfo { id, os, roots, .. } => {
+                let facts = HostFacts {
+                    os: *os,
+                    roots: roots.clone(),
+                };
+                return self.on_browse_answer(host, id, Answer::Info(facts), cx);
+            }
+            DaemonMessage::DirListing {
+                id,
+                entries,
+                next_cursor,
+                error,
+                ..
+            } => {
+                let answer = Answer::Listing {
+                    entries: entries.clone(),
+                    next_cursor: next_cursor.clone(),
+                    error: error.clone(),
+                };
+                return self.on_browse_answer(host, id, answer, cx);
             }
             _ => return false,
         }

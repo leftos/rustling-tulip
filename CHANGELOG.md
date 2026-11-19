@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The phone's file page has Share, which opens the iOS share sheet to save the file to Files, AirDrop it or open it in another app.
 - The desktop chat shows the model the session's agent answers with, such as Opus 5.5, at the start of the Quick replies row.
+- The phone can browse a host's folders: walk up and down them, show hidden entries, and tap a file to open it.
 - The desktop chat composer has a row of Quick replies, such as "continue" or "yes", that send in one click.
 - Typing @ in the chat composer, on the desktop or the phone, lists the session's matching files, and picking one inserts its mention.
 - Typing / in the chat composer, on the desktop or the phone, lists the session's commands and skills, marking those that open in the terminal.

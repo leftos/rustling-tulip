@@ -312,18 +312,18 @@ pub(crate) fn link_leaves_roots(
 /// An absolute host path as text: what it starts from (`C:`, `//` for a
 /// network path, `/` on Unix) and its segments, `.` and `..` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HostPath {
-    anchor: String,
+pub(crate) struct HostPath {
+    pub(crate) anchor: String,
     /// A Windows path, whose names compare without case.
-    windows: bool,
-    segments: Vec<String>,
+    pub(crate) windows: bool,
+    pub(crate) segments: Vec<String>,
 }
 
 impl HostPath {
     /// `text` as an absolute host path, Windows' verbatim prefix stripped
     /// and `\` read as `/`; `None` when it is relative or climbs above its
     /// anchor.
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         let unified = unify(text);
         let (anchor, rest) = split_anchor(&unified)?;
         let path = Self {
@@ -376,7 +376,7 @@ impl HostPath {
 
     /// This path as its host writes it: `C:\a\b` for a drive, `\\srv\share\a`
     /// for a network path, `/a/b` on Unix.
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self.anchor.as_str() {
             "/" => format!("/{}", self.segments.join("/")),
             "//" => format!(r"\\{}", self.segments.join(r"\")),

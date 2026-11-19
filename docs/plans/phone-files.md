@@ -34,5 +34,6 @@ The phone reuses the desktop's host-path fetch (RT-1823) and the file manager's 
 - [x] The viewer page's images and the other-type card; `native-shot` views `phone-viewer` and `phone-viewer-md` (RT-1946; pinch to zoom stays RT-1931, Share RT-1901).
 - [x] The share sheet seam and Share in the viewer header, proved in the simulator by `tools/ios/sim-share.ps1`'s log (RT-1901; sharing a folder copy waits for RT-1956).
 - [ ] Tapped paths: links in the phone's chat and terminal, resolved and stat-ed, opening the viewer or the browser, and the inline not-on-host line.
-- [ ] The browser page over RT-1361's listing, with paging, Show hidden and Fetch folder; `native-shot` view `phone-browser`.
+- [x] The browser page over RT-1361's listing, with paging and Show hidden; `native-shot` view `phone-browser` (RT-1955).
+- [ ] Fetch folder from a long press on a folder row (RT-1956).
 - [ ] Hand check on the phone through TestFlight: a tapped file opens, a changed file refetches, an offline open says so, a copy shows in Files, Share saves to Files.

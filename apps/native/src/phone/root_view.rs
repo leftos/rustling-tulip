@@ -163,6 +163,9 @@ pub struct PhoneRoot {
     pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
     /// The platform's share sheet, which the viewer's Share hands its copy.
     share: Arc<dyn ShareSheet>,
+    /// The host browser, drawn over the page shown while open, under the
+    /// viewer.
+    pub(super) browser: Option<super::browser_view::BrowserPage>,
     /// The stats out about kept copies, at most one per host and host path.
     kept_stats: Vec<KeptStat>,
     /// The modified time a changed copy's host answered with, by the copy's
@@ -196,6 +199,7 @@ impl PhoneRoot {
             this.push_changed(cx);
             this.sweep_delivered(cx);
             this.take_kept_answers(cx);
+            this.take_browse_answers(cx);
             this.take_fetched(cx);
             cx.notify();
         });
@@ -267,6 +271,7 @@ impl PhoneRoot {
             storage_error: None,
             viewer: None,
             share: Arc::new(LoggingShare),
+            browser: None,
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
             _root_changed: root_changed,
@@ -634,6 +639,7 @@ impl PhoneRoot {
                 // The viewer, a session page or Settings hides the line, so
                 // the note returns Home.
                 self.close_viewer(cx);
+                self.close_browser(cx);
                 if self.shown.is_some() {
                     self.close_session(cx);
                 }
@@ -725,11 +731,12 @@ impl PhoneRoot {
     /// Shows `host`'s session `session_id` in place of Home, on its chat
     /// when the chat is mirrored, else on its terminal, and loads its chat
     /// while it can show. It opens no tab and lays out no pane, and closes
-    /// the viewer and Settings.
+    /// the viewer, the browser and Settings.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
         self.close_viewer(cx);
+        self.close_browser(cx);
         self.settings = None;
         self.keep_reply_editor();
         self.keep_key_editor();
@@ -1525,7 +1532,10 @@ impl Render for PhoneRoot {
             f32::from(insets.ime.bottom),
         );
         self.sync_terminal(keyboard_up, hidden, window, cx);
+        self.browser_next_page(cx);
         let body = if let Some(page) = self.viewer_page(cx) {
+            page
+        } else if let Some(page) = self.browser_page(cx) {
             page
         } else if let Some(page) = self.session_page(keyboard_up, cx) {
             page
@@ -1539,9 +1549,10 @@ impl Render for PhoneRoot {
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
-        // The sheet is Home's: no viewer, session page, Settings or hosts
-        // screen under it.
+        // The sheet is Home's: no viewer, browser, session page, Settings or
+        // hosts screen under it.
         let over_home = self.viewer.is_none()
+            && self.browser.is_none()
             && self.shown.is_none()
             && self.settings.is_none()
             && hosts_view::any_host_open(self.root.read(cx));
@@ -1550,9 +1561,10 @@ impl Render for PhoneRoot {
             .flatten();
         self.sync_prompt_sheet(cx);
         let screen_height = window.viewport_size().height;
-        let prompt_sheet = (self.viewer.is_none() && self.shown.is_some())
-            .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
-            .flatten();
+        let prompt_sheet =
+            (self.viewer.is_none() && self.browser.is_none() && self.shown.is_some())
+                .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
+                .flatten();
         let padded = || {
             div()
                 .pt(padding.top)
@@ -1560,15 +1572,18 @@ impl Render for PhoneRoot {
                 .pb(padding.bottom)
                 .pl(padding.left)
         };
-        // The whole window takes the viewer's, a session page's or
-        // Settings' back gesture, so a swipe that starts in the safe area's
-        // bands goes back too.
-        let goes_back = self.viewer.is_some() || self.shown.is_some() || self.settings.is_some();
+        // The whole window takes the viewer's, the browser's, a session
+        // page's or Settings' back gesture, so a swipe that starts in the
+        // safe area's bands goes back too.
+        let goes_back = self.viewer.is_some()
+            || self.browser.is_some()
+            || self.shown.is_some()
+            || self.settings.is_some();
         div()
             .relative()
             .size_full()
             .when(goes_back, |root| {
-                root.on_back_gesture(cx.listener(Self::screen_back_gesture))
+                root.on_back_gesture(cx.listener(Self::browser_back_gesture))
             })
             .bg(gpui::rgb(t.ground))
             .text_color(gpui::rgb(t.text))
