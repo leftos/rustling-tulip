@@ -236,6 +236,10 @@ struct AnswerDoc {
 pub(crate) struct Composer {
     input: Entity<TextInput>,
     completion: CompletionState,
+    /// Whether the completion is the phone's tap-only strip: the input never
+    /// enters the popup's key context, so Return stays a line break and Up,
+    /// Down, Tab and Esc keep their own behaviour.
+    tap_only: bool,
     /// The search of the session's files for the `@` token.
     files: FileSearch,
     /// The debounce timer of the next file search.
@@ -246,9 +250,10 @@ pub(crate) struct Composer {
 }
 
 impl Composer {
-    /// Tells the input whether the popup is open, so its keys go to it.
+    /// Tells the input whether the popup is open, so its keys go to it; the
+    /// phone's tap-only strip never takes its keys.
     fn sync_completion(&self, cx: &mut App) {
-        let open = self.completion.is_open();
+        let open = self.completion.is_open() && !self.tap_only;
         self.input
             .update(cx, |input, cx| input.set_completion_open(open, cx));
     }
@@ -2577,7 +2582,8 @@ impl RootView {
         let input = cx.new(|cx| {
             let mut input = if phone {
                 let mut input = TextInput::multi_line("", PHONE_COMPOSER_PLACEHOLDER, cx)
-                    .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS);
+                    .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS)
+                    .with_completion_triggers(COMPLETION_TRIGGERS);
                 input.set_text_input_configuration(phone_composer_configuration(), cx);
                 input
             } else {
@@ -2614,6 +2620,7 @@ impl RootView {
             chat.composer = Some(Composer {
                 input,
                 completion: CompletionState::default(),
+                tap_only: phone,
                 files: FileSearch::default(),
                 file_timer: None,
                 commands: CommandCatalog::default(),
@@ -2750,6 +2757,27 @@ impl RootView {
         composer.completion.select(index);
         let input = composer.input.clone();
         input.read(cx).focus_handle(cx).focus(window, cx);
+        self.on_completion_event(session_id, &CompletionEvent::Accept, cx);
+    }
+
+    /// A tap on row `index` of session `session_id`'s completion strip: it
+    /// accepts that row and leaves the keyboard as it is, so the phone's
+    /// field keeps its focus and the keyboard neither rises nor lowers.
+    pub(crate) fn tap_completion(
+        &mut self,
+        session_id: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(composer) = self
+            .chat
+            .sessions
+            .get_mut(session_id)
+            .and_then(|chat| chat.composer.as_mut())
+        else {
+            return;
+        };
+        composer.completion.select(index);
         self.on_completion_event(session_id, &CompletionEvent::Accept, cx);
     }
 
@@ -2899,6 +2927,17 @@ impl RootView {
             let labels = state.items().iter().map(|item| item.label.clone());
             (labels.collect(), state.selected())
         })
+    }
+
+    /// Session `session_id`'s completion while it shows, as the phone's strip
+    /// lists it: each item's short chip text, in the popup's order.
+    #[must_use]
+    pub fn chat_completion_chips(&self, session_id: &str) -> Option<Vec<String>> {
+        let composer = self.chat.sessions.get(session_id)?.composer.as_ref()?;
+        let state = &composer.completion;
+        state
+            .is_open()
+            .then(|| state.items().iter().map(CompletionItem::chip).collect())
     }
 
     /// Session `session_id`'s completion popup above the composer field

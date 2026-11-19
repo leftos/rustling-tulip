@@ -15,17 +15,19 @@ use gpui::{
 };
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
-    ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_TAIL,
-    ScriptFacts, SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
+    CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ChatEntry, ChatOption,
+    ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
+    FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH,
+    FEATURE_FILE_TAIL, FileMatch, ScriptFacts, SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
 };
-use rustling_tulip_native::chat::RowShape;
+use rustling_tulip_native::chat::{self, RowShape};
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::quick_replies::{ReplyGroup, ReplySet};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
+use std::time::Duration;
 use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
 
 /// The least height of a row or a target.
@@ -1812,6 +1814,282 @@ fn the_composer_buttons_are_44_px_tall(cx: &mut TestAppContext) {
             bounds.size.height
         );
     }
+}
+
+// ── The completion strip: the session's commands and files ─────────────────
+
+/// Session `a`'s page with its chat loaded on a host that offers the command
+/// catalog.
+fn cataloging_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    chat_loaded_on(cx, dir, &[FEATURE_CHAT_CATALOG])
+}
+
+/// Session `a`'s page with its chat loaded on a host that offers file search.
+fn file_searching_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    chat_loaded_on(cx, dir, &[FEATURE_FILE_SEARCH])
+}
+
+/// The chips session `a`'s completion strip offers, while it shows.
+fn chips(h: &mut Harness<'_>) -> Option<Vec<String>> {
+    h.root(|root, _| root.chat_completion_chips("a"))
+}
+
+/// A command named `name`, with its description and overlay flag.
+fn command(name: &str, description: Option<&str>, opens_terminal: bool) -> CatalogEntry {
+    CatalogEntry {
+        name: name.to_owned(),
+        kind: CatalogEntryKind::Command,
+        description: description.map(str::to_owned),
+        source: CatalogEntrySource::BuiltIn,
+        opens_terminal,
+    }
+}
+
+/// The host's commands: `compact`, `config` (an overlay) and `code-review`,
+/// in that order.
+fn host_commands() -> Vec<CatalogEntry> {
+    vec![
+        command("compact", Some("Compress the conversation"), false),
+        command("config", None, true),
+        command("code-review", Some("Review the branch"), false),
+    ]
+}
+
+/// The request ids of the `ListCatalog`s for session `a` sent since the last
+/// drain.
+fn catalog_requests(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListCatalog {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one `ListCatalog` for session `a` sent since the last drain: its
+/// request id.
+fn one_catalog_request(h: &mut Harness<'_>) -> Option<String> {
+    let sent = catalog_requests(h);
+    assert_eq!(sent.len(), 1, "one catalog request: {sent:?}");
+    assert!(sent[0].is_some(), "it carries a request id");
+    sent[0].clone()
+}
+
+/// The daemon answers the catalog request `request_id` for session `a` with
+/// `entries`.
+fn cataloged(h: &mut Harness<'_>, request_id: Option<String>, entries: Vec<CatalogEntry>) {
+    h.host(&saved_remote()).send(DaemonMessage::Catalog {
+        session_id: "a".to_owned(),
+        entries,
+        request_id,
+    });
+}
+
+/// Session `a`'s page holding `/co` with the host's commands answered, so
+/// its strip shows their chips, everything sent so far drained.
+fn on_the_command_strip<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = cataloging_phone(cx, dir);
+    h.host(&saved_remote()).sent();
+    type_into_composer(&mut h, "/co");
+    let id = one_catalog_request(&mut h);
+    cataloged(&mut h, id, host_commands());
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// Moves the test clock past the file search's debounce.
+fn past_debounce(h: &mut Harness<'_>) {
+    let ms = u64::try_from(chat::FILE_SEARCH_DEBOUNCE.as_millis()).unwrap_or(u64::MAX);
+    h.cx.executor()
+        .advance_clock(Duration::from_millis(ms + 10));
+    h.cx.run_until_parked();
+}
+
+/// The query, limit and request id of each `SearchFiles` for session `a`
+/// sent since the last drain.
+fn file_searches(h: &mut Harness<'_>) -> Vec<(String, Option<u32>, Option<String>)> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SearchFiles {
+                session_id,
+                query,
+                limit,
+                request_id,
+            } if session_id == "a" => Some((query, limit, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one file search for session `a` sent since the last drain: its
+/// request id, its query `ma` and the desktop's limit.
+fn one_file_search(h: &mut Harness<'_>) -> Option<String> {
+    let sent = file_searches(h);
+    assert_eq!(sent.len(), 1, "one search: {sent:?}");
+    let (query, limit, request_id) = sent[0].clone();
+    assert_eq!(query, "ma");
+    assert_eq!(limit, Some(50), "the desktop's limit");
+    request_id
+}
+
+/// The daemon answers the search `request_id` for session `a` with `files`,
+/// each a path and its reference.
+fn files_matched(h: &mut Harness<'_>, request_id: Option<String>, files: &[(&str, &str)]) {
+    h.host(&saved_remote()).send(DaemonMessage::FileMatches {
+        session_id: "a".to_owned(),
+        matches: files
+            .iter()
+            .map(|(path, reference)| FileMatch {
+                path: (*path).to_owned(),
+                reference: (*reference).to_owned(),
+            })
+            .collect(),
+        truncated: false,
+        request_id,
+    });
+}
+
+#[gpui::test]
+fn typing_a_slash_asks_for_the_catalog_and_the_strip_lists_its_chips(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cataloging_phone(cx, &dir);
+    assert!(
+        !drawn(&mut h, "phone-completion-strip"),
+        "no token, no strip"
+    );
+    h.host(&saved_remote()).sent();
+
+    type_into_composer(&mut h, "/co");
+
+    let id = one_catalog_request(&mut h);
+    assert_eq!(chips(&mut h), None, "nothing before the answer");
+    cataloged(&mut h, id, host_commands());
+    assert_eq!(
+        chips(&mut h),
+        Some(vec![
+            "/compact".to_owned(),
+            "/config \u{b7} terminal".to_owned(),
+            "/code-review".to_owned(),
+        ]),
+        "the strip lists the catalog's chips, the overlay flagged"
+    );
+    assert!(drawn(&mut h, "phone-completion-strip"));
+}
+
+#[gpui::test]
+fn a_chip_tap_inserts_the_pick_and_leaves_the_keyboard_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_the_command_strip(cx, &dir);
+    clear_keyboard_calls();
+
+    h.tap_on("phone-completion-1");
+
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/config "),
+        "the pick and one space"
+    );
+    assert_eq!(chat_sends(&mut h), Vec::new(), "a pick only inserts");
+    assert_eq!(
+        keyboard_calls(),
+        [],
+        "the tap neither raises nor lowers the keyboard"
+    );
+    assert_eq!(chips(&mut h), None, "the pick ends the token");
+    assert!(!drawn(&mut h, "phone-completion-strip"));
+}
+
+#[gpui::test]
+fn typing_an_at_lists_the_matching_files_chips(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = file_searching_phone(cx, &dir);
+    h.host(&saved_remote()).sent();
+
+    type_into_composer(&mut h, "@ma");
+    assert_eq!(
+        file_searches(&mut h),
+        Vec::new(),
+        "nothing inside the debounce"
+    );
+    past_debounce(&mut h);
+    let id = one_file_search(&mut h);
+    files_matched(
+        &mut h,
+        id,
+        &[
+            ("src/a/b.rs", "@./src/a/b.rs"),
+            ("src/map.rs", "@./src/map.rs"),
+        ],
+    );
+
+    assert_eq!(
+        chips(&mut h),
+        Some(vec!["b.rs".to_owned(), "map.rs".to_owned()]),
+        "each chip is the file's last path part"
+    );
+    assert!(drawn(&mut h, "phone-completion-strip"));
+    h.host(&saved_remote()).sent();
+
+    h.tap_on("phone-completion-0");
+
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("@./src/a/b.rs "),
+        "the pick inserts the daemon's reference"
+    );
+    assert_eq!(chat_sends(&mut h), Vec::new());
+}
+
+#[gpui::test]
+fn return_with_the_strip_showing_inserts_a_line_break(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_the_command_strip(cx, &dir);
+    assert!(drawn(&mut h, "phone-completion-strip"));
+
+    h.keys("enter");
+
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/co\n"),
+        "Return breaks the line"
+    );
+    assert_eq!(chat_sends(&mut h), Vec::new(), "and sends nothing");
+}
+
+#[gpui::test]
+fn the_strips_chips_are_44_px_tall(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_the_command_strip(cx, &dir);
+
+    for index in 0..3 {
+        let selector = format!("phone-completion-{index}");
+        let bounds = h.bounds(&selector);
+        assert!(
+            bounds.size.height >= touch_target(),
+            "{selector} is {} tall",
+            bounds.size.height
+        );
+    }
+}
+
+#[gpui::test]
+fn a_space_ends_the_token_and_the_strip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_the_command_strip(cx, &dir);
+    assert!(drawn(&mut h, "phone-completion-strip"));
+
+    h.keys("space");
+
+    assert_eq!(composer_text(&mut h).as_deref(), Some("/co "));
+    assert_eq!(chips(&mut h), None, "a space ends the token");
+    assert!(!drawn(&mut h, "phone-completion-strip"));
 }
 
 // ── The prompt box's draft and the suggested next prompt ───────────────────
