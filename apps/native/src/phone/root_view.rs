@@ -14,6 +14,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, PathKind};
 
+use super::browser::FolderEnd;
 use super::fetched::{self, Entry, Freshness, HostStat, Index};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
@@ -200,6 +201,7 @@ impl PhoneRoot {
             this.sweep_delivered(cx);
             this.take_kept_answers(cx);
             this.take_browse_answers(cx);
+            this.take_folder_fetches(cx);
             this.take_fetched(cx);
             cx.notify();
         });
@@ -304,10 +306,92 @@ impl PhoneRoot {
                 modified,
                 fetched_at: now,
                 last_opened: now,
+                folder: false,
             });
         }
         self.write_fetched();
         self.open_viewer(last, cx);
+    }
+
+    /// Takes the phone's folder fetches that ended: a saved folder is kept
+    /// in the index as one folder, opened now, and the index written once;
+    /// the open browser's result line says how each ended. A folder opens
+    /// nothing.
+    fn take_folder_fetches(&mut self, cx: &mut Context<Self>) {
+        let ended = self
+            .root
+            .update(cx, |root, _| root.phone_browse.take_folders());
+        if ended.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let mut kept = false;
+        for end in ended {
+            match end {
+                FolderEnd::Saved { host, asked, saved } => {
+                    tracing::debug!(path = %saved.local_path, "phone: keeping a fetched folder");
+                    let size = saved.size;
+                    self.fetched.upsert(Entry {
+                        host: saved.host,
+                        host_path: saved.host_path,
+                        local_path: saved.local_path,
+                        size,
+                        modified: None,
+                        fetched_at: now,
+                        last_opened: now,
+                        folder: true,
+                    });
+                    kept = true;
+                    self.browser_fetch_ended(&host, &asked, Ok(size));
+                }
+                FolderEnd::Failed {
+                    host,
+                    asked,
+                    reason,
+                } => self.browser_fetch_ended(&host, &asked, Err(reason)),
+            }
+        }
+        if kept {
+            self.write_fetched();
+        }
+        cx.notify();
+    }
+
+    /// The open browser on `host` hears how the fetch of `asked` ended: its
+    /// size once saved, else why it failed.
+    fn browser_fetch_ended(&mut self, host: &HostKey, asked: &str, outcome: Result<u64, String>) {
+        let Some(page) = self
+            .browser
+            .as_mut()
+            .filter(|page| page.state.host() == host)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(size) => page.state.fetch_done(asked, size),
+            Err(reason) => page.state.fetch_failed(asked, reason),
+        }
+    }
+
+    /// Fetches `host`'s folder `host_path` whole by its host path into the
+    /// copies folder, where a file from that path would land.
+    ///
+    /// # Errors
+    /// Why the fetch is refused, as one line.
+    pub(super) fn fetch_host_folder(
+        &mut self,
+        host: HostKey,
+        host_path: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let request = FetchRequest {
+            open_when_done: false,
+            ..kept_request(host, host_path)
+        };
+        let started = self
+            .root
+            .update(cx, |root, cx| root.phone_fetch_folder(request, cx));
+        started.map(|id| tracing::debug!(%id, "phone: fetching a host folder"))
     }
 
     /// Deletes the copies unopened for the retention time and writes the
@@ -379,10 +463,11 @@ impl PhoneRoot {
             .read(cx)
             .conn_of(host)
             .and_then(|conn| file_fetch::host_folder(conn.target()))?;
+        // A fetched folder opens nothing, so it is never a file's copy.
         self.fetched
             .entries
             .iter()
-            .filter(|entry| entry.host == folder && entry.host_path == host_path)
+            .filter(|entry| !entry.folder && entry.host == folder && entry.host_path == host_path)
             .max_by_key(|entry| entry.fetched_at)
             .cloned()
     }
@@ -1482,7 +1567,7 @@ impl PhoneRoot {
     }
 
     /// A full-width sheet row of `kind`, at least a touch target tall.
-    fn sheet_button(id: &str, kind: ButtonKind, cx: &Context<Self>) -> Stateful<Div> {
+    pub(super) fn sheet_button(id: &str, kind: ButtonKind, cx: &Context<Self>) -> Stateful<Div> {
         phone_button(id, kind, cx).w_full().min_h(px(TOUCH_TARGET))
     }
 }
@@ -1559,6 +1644,12 @@ impl Render for PhoneRoot {
         let sheet = over_home
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten();
+        // The browser's folder sheet, while the browser is the page on top.
+        let browser_sheet = self
+            .viewer
+            .is_none()
+            .then(|| self.browser_sheet_layer(padding.bottom, cx))
+            .flatten();
         self.sync_prompt_sheet(cx);
         let screen_height = window.viewport_size().height;
         let prompt_sheet =
@@ -1593,6 +1684,7 @@ impl Render for PhoneRoot {
             .child(padded().size_full().child(body))
             .children(self.copied_chip_layer(padding.top, cx))
             .children(sheet)
+            .children(browser_sheet)
             .children(prompt_sheet)
             .children(pairing.map(|layer| {
                 padded()

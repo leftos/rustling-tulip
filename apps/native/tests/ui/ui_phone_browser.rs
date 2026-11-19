@@ -3,12 +3,16 @@
 //! left out until Show hidden; a folder row enters it, the parent row goes
 //! up, a file row fetches the file and opens it in the viewer, and the next
 //! page is asked for as the list nears its end. Back returns to the page
-//! under it.
+//! under it. A long press on a folder row offers Fetch folder, which fetches
+//! the folder whole into the copies folder, keeps it as one folder entry
+//! and says how it went on the line under the header.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::support;
 
+use base64::Engine as _;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{TestAppContext, px};
 use protocol::{
@@ -498,6 +502,335 @@ fn a_browser_opened_while_connecting_waits_then_lists(cx: &mut TestAppContext) {
         "the waiting line is gone"
     );
     assert!(drawn(&mut h, "phone-browser-row-docs"), "the rows show");
+}
+
+/// The longest a spec waits on the unpacker thread before it calls the run
+/// hung; a passing run never waits it out.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// The files the specs' fetched `docs` folder holds, relative to it.
+const DOCS_FILES: &[(&str, &[u8])] = &[("guide.md", b"# guide\n\n"), ("sub/notes.txt", b"hello")];
+
+/// The paths of the host folder fetches among `sent`.
+fn folder_fetches(sent: &[ClientMessage]) -> Vec<(String, String)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchHostFolder { id, path } => Some((id.clone(), path.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The line under the browser's header, while it shows one.
+fn result_line(h: &mut Harness<'_>) -> Option<String> {
+    phone_update(h, |phone, _| phone.browser_result())
+}
+
+/// A phone browsing [`SRC`], its `docs` folder and `notes.txt` file listed,
+/// its copies under the returned folder. The unpacker is a real thread that
+/// wakes the app, which gpui's test scheduler refuses unless the spec allows
+/// parking.
+fn browsing<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, std::path::PathBuf) {
+    let copies = dir.path().join("copies");
+    let mut h = open_phone_listing(cx, dir, &copies, &[FEATURE_HOST_PATHS, FEATURE_HOST_BROWSE]);
+    h.cx.executor().allow_parking();
+    browse(&mut h, SRC, docs_and_notes(), None);
+    (h, copies)
+}
+
+/// Long-presses the `docs` row and taps Fetch folder; returns the fetch's
+/// id, checked to ask for `docs`' host path.
+fn fetch_docs(h: &mut Harness<'_>) -> String {
+    h.long_press_on("phone-browser-row-docs");
+    h.click_on("phone-browser-sheet-fetch");
+    let sent = sent(h);
+    let fetches = folder_fetches(&sent);
+    assert_eq!(fetches.len(), 1, "one folder fetch: {sent:?}");
+    let (id, path) = fetches[0].clone();
+    assert_eq!(path, "/home/me/src/docs");
+    id
+}
+
+/// `files` packed as the daemon packs a folder: regular-file entries named
+/// relative to the folder, in a tar inside a zstd frame.
+fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).expect("a zstd encoder");
+    let mut builder = tar::Builder::new(encoder);
+    for (name, data) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(u64::try_from(data.len()).expect("a small file"));
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, *data)
+            .expect("pack a file");
+    }
+    builder
+        .into_inner()
+        .expect("end the archive")
+        .finish()
+        .expect("end the zstd frame")
+}
+
+/// The bytes `files` hold in all.
+fn total(files: &[(&str, &[u8])]) -> u64 {
+    files
+        .iter()
+        .map(|(_, data)| u64::try_from(data.len()).expect("a small file"))
+        .sum()
+}
+
+/// Streams `files` as the folder `resolved` for the fetch `id`, as the
+/// host would: started, the archive in one chunk, then done.
+fn stream_folder(h: &mut Harness<'_>, id: &str, resolved: &str, files: &[(&str, &[u8])]) {
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FolderFetchStarted {
+        id: id.to_owned(),
+        resolved_path: resolved.to_owned(),
+        files: u64::try_from(files.len()).expect("a few files"),
+        bytes: total(files),
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: id.to_owned(),
+        seq: 0,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(archive(files)),
+    });
+    host.send(DaemonMessage::FileFetchDone { id: id.to_owned() });
+}
+
+/// Lets the phone settle until `done` holds, the unpacker's thread
+/// reporting back meanwhile; fails as hung past [`HANG_GUARD`].
+fn settle_until(h: &mut Harness<'_>, what: &str, mut done: impl FnMut(&mut Harness<'_>) -> bool) {
+    let deadline = Instant::now() + HANG_GUARD;
+    loop {
+        h.cx.run_until_parked();
+        if done(h) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "hung: waited {HANG_GUARD:?} for {what}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[gpui::test]
+fn a_long_press_on_a_folder_row_offers_fetch_folder_and_cancel(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+
+    h.long_press_on("phone-browser-row-docs");
+
+    assert!(drawn(&mut h, "phone-browser-sheet"), "the sheet opens");
+    assert!(
+        drawn(&mut h, "phone-browser-sheet-fetch"),
+        "with Fetch folder"
+    );
+    assert!(drawn(&mut h, "phone-browser-sheet-cancel"), "and Cancel");
+    assert_eq!(
+        phone_update(&mut h, |phone, _| phone.browser_path().map(str::to_owned)).as_deref(),
+        Some(SRC),
+        "the press does not enter the folder"
+    );
+    assert_eq!(listings(&sent(&mut h)), [], "and lists nothing");
+}
+
+#[gpui::test]
+fn cancel_closes_the_folder_sheet_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+    h.long_press_on("phone-browser-row-docs");
+
+    h.click_on("phone-browser-sheet-cancel");
+
+    assert!(!drawn(&mut h, "phone-browser-sheet"), "the sheet closes");
+    let sent = sent(&mut h);
+    assert_eq!(folder_fetches(&sent), [], "nothing is fetched: {sent:?}");
+    assert_eq!(listings(&sent), [], "nothing is listed");
+    assert_eq!(result_line(&mut h), None, "and no line shows");
+}
+
+#[gpui::test]
+fn fetch_folder_fetches_the_folder_by_its_host_path_and_says_fetching(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+
+    fetch_docs(&mut h);
+
+    assert!(!drawn(&mut h, "phone-browser-sheet"), "the sheet closes");
+    assert_eq!(result_line(&mut h).as_deref(), Some("Fetching docs…"));
+    assert!(drawn(&mut h, "phone-browser-result"), "under the header");
+    let header = h.bounds("phone-browser-path");
+    let line = h.bounds("phone-browser-result");
+    let row = h.bounds("phone-browser-row-docs");
+    assert!(
+        header.bottom() <= line.top() && line.bottom() <= row.top(),
+        "between the header and the rows"
+    );
+}
+
+#[gpui::test]
+fn a_fetched_folder_lands_under_its_host_path_as_one_folder_entry(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, copies) = browsing(cx, &dir);
+    let id = fetch_docs(&mut h);
+
+    stream_folder(&mut h, &id, "/home/me/src/docs", DOCS_FILES);
+    settle_until(&mut h, "the folder's result line", |h| {
+        result_line(h).is_some_and(|line| line.starts_with("Fetched"))
+    });
+
+    let folder = copies.join(REMOTE).join("root/home/me/src/docs");
+    assert_eq!(
+        std::fs::read(folder.join("guide.md")).expect("the folder's file"),
+        DOCS_FILES[0].1
+    );
+    assert_eq!(
+        std::fs::read(folder.join("sub/notes.txt")).expect("its subfolder's file"),
+        DOCS_FILES[1].1
+    );
+    let index: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("fetched.json")).expect("the index is written"),
+    )
+    .expect("the index parses");
+    let entries = index["entries"].as_array().expect("the index's entries");
+    assert_eq!(entries.len(), 1, "one entry for the folder: {index}");
+    assert_eq!(entries[0]["folder"], json!(true));
+    assert_eq!(entries[0]["host_path"], json!("/home/me/src/docs"));
+    assert_eq!(
+        entries[0]["local_path"],
+        json!(format!("{REMOTE}/root/home/me/src/docs"))
+    );
+    assert_eq!(entries[0]["size"], json!(total(DOCS_FILES)));
+    assert_eq!(result_line(&mut h).as_deref(), Some("Fetched docs · 14 B"));
+    assert!(!drawn(&mut h, "phone-viewer"), "a folder opens nothing");
+    assert!(drawn(&mut h, "phone-browser"), "the browser stays");
+}
+
+#[gpui::test]
+fn tapping_a_file_then_fetching_its_folder_leaves_one_entry(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, copies) = browsing(cx, &dir);
+    h.click_on("phone-browser-row-docs");
+    let (id, path, _) = one_listing(&mut h);
+    answer_listing(
+        &mut h,
+        &id,
+        &path,
+        vec![entry("guide.md", PathKind::File, 9)],
+        None,
+    );
+    h.click_on("phone-browser-row-guide.md");
+    // The host sends the file whole, and the phone saves and opens it.
+    let sent = sent(&mut h);
+    let file_id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::FetchHostFile { id, path } if path == "/home/me/src/docs/guide.md" => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .expect("the file is fetched");
+    let data = DOCS_FILES[0].1;
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FileFetchStarted {
+        id: file_id.clone(),
+        resolved_path: "/home/me/src/docs/guide.md".to_owned(),
+        size: u64::try_from(data.len()).expect("a small file"),
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: file_id.clone(),
+        seq: 0,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(data),
+    });
+    host.send(DaemonMessage::FileFetchDone { id: file_id });
+    settle_until(&mut h, "the file's viewer", |h| drawn(h, "phone-viewer"));
+    let file = copies.join(REMOTE).join("root/home/me/src/docs/guide.md");
+    assert!(file.exists(), "the file's copy is saved");
+    let before: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("fetched.json")).expect("the index is written"),
+    )
+    .expect("the index parses");
+    assert_eq!(
+        before["entries"].as_array().map(Vec::len),
+        Some(1),
+        "the file is kept first: {before}"
+    );
+    h.click_on("phone-viewer-back");
+    h.click_on("phone-browser-parent");
+    let (id, path, _) = one_listing(&mut h);
+    answer_listing(&mut h, &id, &path, docs_and_notes(), None);
+
+    let id = fetch_docs(&mut h);
+    stream_folder(&mut h, &id, "/home/me/src/docs", DOCS_FILES);
+    settle_until(&mut h, "the folder's result line", |h| {
+        result_line(h).is_some_and(|line| line.starts_with("Fetched"))
+    });
+
+    let index: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("fetched.json")).expect("the index is written"),
+    )
+    .expect("the index parses");
+    let entries = index["entries"].as_array().expect("the index's entries");
+    assert_eq!(entries.len(), 1, "the folder replaced the file: {index}");
+    assert_eq!(entries[0]["folder"], json!(true));
+    assert_eq!(
+        entries[0]["local_path"],
+        json!(format!("{REMOTE}/root/home/me/src/docs"))
+    );
+}
+
+#[gpui::test]
+fn a_refused_folder_fetch_says_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+    fetch_docs(&mut h);
+
+    // The same folder again, while its first fetch still runs.
+    h.long_press_on("phone-browser-row-docs");
+    h.click_on("phone-browser-sheet-fetch");
+
+    let sent = sent(&mut h);
+    assert_eq!(
+        folder_fetches(&sent),
+        [],
+        "nothing more is fetched: {sent:?}"
+    );
+    assert_eq!(
+        result_line(&mut h).as_deref(),
+        Some("Couldn't fetch docs: Already fetching docs")
+    );
+    assert!(drawn(&mut h, "phone-browser-result"));
+}
+
+#[gpui::test]
+fn the_result_line_clears_on_entering_another_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+    fetch_docs(&mut h);
+    assert!(result_line(&mut h).is_some());
+
+    h.click_on("phone-browser-row-docs");
+    let (id, path, _) = one_listing(&mut h);
+    answer_listing(&mut h, &id, &path, Vec::new(), None);
+
+    assert_eq!(result_line(&mut h), None, "the line clears");
+    assert!(!drawn(&mut h, "phone-browser-result"));
+}
+
+#[gpui::test]
+fn a_long_press_on_a_file_row_offers_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+
+    h.long_press_on("phone-browser-row-notes.txt");
+
+    assert!(!drawn(&mut h, "phone-browser-sheet"), "no sheet opens");
+    let sent = sent(&mut h);
+    assert_eq!(folder_fetches(&sent), [], "no folder is fetched: {sent:?}");
+    assert_eq!(result_line(&mut h), None);
 }
 
 #[gpui::test]

@@ -52,15 +52,47 @@ pub(crate) enum Event {
     Reset(HostKey),
 }
 
+/// How a folder fetch on the phone ended, as the root view hands it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FolderEnd {
+    /// The folder asked for as `asked` on `host` is saved as `saved`, whose
+    /// size is the folder's bytes in all.
+    Saved {
+        host: HostKey,
+        asked: String,
+        saved: crate::PhoneFetched,
+    },
+    /// The folder asked for as `asked` on `host` could not be fetched, for
+    /// `reason`.
+    Failed {
+        host: HostKey,
+        asked: String,
+        reason: String,
+    },
+}
+
 /// The root view's hand-off for the browser.
 #[derive(Debug, Default)]
 pub(crate) struct Inbox {
     watched: Option<HostKey>,
     facts: Vec<(HostKey, HostFacts)>,
     came: Vec<Event>,
+    /// The phone's folder fetches that ended since the last take, whether
+    /// or not a browser is open: a saved folder is kept either way.
+    folders: Vec<FolderEnd>,
 }
 
 impl Inbox {
+    /// Keeps how a folder fetch on the phone ended, for the phone.
+    pub(crate) fn folder_ended(&mut self, end: FolderEnd) {
+        self.folders.push(end);
+    }
+
+    /// The folder fetches that ended since the last take.
+    pub(crate) fn take_folders(&mut self) -> Vec<FolderEnd> {
+        std::mem::take(&mut self.folders)
+    }
+
     /// Keeps the answers of `host` from now on, none while `None`.
     pub(crate) fn watch(&mut self, host: Option<HostKey>) {
         if host.is_none() {
@@ -140,6 +172,25 @@ pub(crate) struct Browser {
     paged: Option<String>,
     show_hidden: bool,
     error: Option<String>,
+    fetch: Option<FolderFetch>,
+}
+
+/// Where a folder fetch the browser started has got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FetchState {
+    Running,
+    Done(u64),
+    Failed(String),
+}
+
+/// The folder fetch the browser's result line is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FolderFetch {
+    /// The host path the fetch asked for.
+    host_path: String,
+    /// The folder's name, as the line says it.
+    name: String,
+    state: FetchState,
 }
 
 impl Browser {
@@ -156,7 +207,60 @@ impl Browser {
             paged: None,
             show_hidden: false,
             error: None,
+            fetch: None,
         }
+    }
+
+    /// The fetch of the folder `name` at `host_path` started: the result
+    /// line says so, in place of any line before it.
+    pub(crate) fn fetch_started(&mut self, host_path: String, name: String) {
+        self.fetch = Some(FolderFetch {
+            host_path,
+            name,
+            state: FetchState::Running,
+        });
+    }
+
+    /// The fetch of `host_path` is saved, `size` bytes in all; nothing
+    /// changes unless the line is about that fetch.
+    pub(crate) fn fetch_done(&mut self, host_path: &str, size: u64) {
+        self.fetch_ended(host_path, FetchState::Done(size));
+    }
+
+    /// The fetch of `host_path` failed or was refused, for `reason`;
+    /// nothing changes unless the line is about that fetch.
+    pub(crate) fn fetch_failed(&mut self, host_path: &str, reason: String) {
+        self.fetch_ended(host_path, FetchState::Failed(reason));
+    }
+
+    fn fetch_ended(&mut self, host_path: &str, state: FetchState) {
+        if let Some(fetch) = self
+            .fetch
+            .as_mut()
+            .filter(|fetch| fetch.host_path == host_path)
+        {
+            fetch.state = state;
+        }
+    }
+
+    /// The result line under the header, while the browser shows one.
+    pub(crate) fn fetch_line(&self) -> Option<String> {
+        let fetch = self.fetch.as_ref()?;
+        let name = &fetch.name;
+        Some(match &fetch.state {
+            FetchState::Running => format!("Fetching {name}…"),
+            FetchState::Done(size) => {
+                format!("Fetched {name} · {}", crate::spawn_form::human_size(*size))
+            }
+            FetchState::Failed(reason) => format!("Couldn't fetch {name}: {reason}"),
+        })
+    }
+
+    /// Whether the result line tells of a failure.
+    pub(crate) fn fetch_failed_line(&self) -> bool {
+        self.fetch
+            .as_ref()
+            .is_some_and(|fetch| matches!(fetch.state, FetchState::Failed(_)))
     }
 
     pub(crate) fn host(&self) -> &HostKey {
@@ -189,8 +293,12 @@ impl Browser {
     }
 
     /// Lists `path` from its first page under `id`, in place of the folder
-    /// shown.
+    /// shown; another folder than the one shown drops the result line.
     pub(crate) fn list(&mut self, path: String, id: String) -> ClientMessage {
+        if path != self.path {
+            // The result line belongs to the folder it was started in.
+            self.fetch = None;
+        }
         self.path = path;
         self.entries.clear();
         self.next_cursor = None;
@@ -686,6 +794,70 @@ mod tests {
         browser.take("l1", page(vec![entry("a", PathKind::File)], Some("c2")));
         browser.fail("this host does not list folders".to_owned());
         assert!(browser.next_page(0, "l2".to_owned()).is_none());
+    }
+
+    #[test]
+    fn the_result_line_says_fetching_then_fetched_with_the_size() {
+        let mut browser = listing();
+        assert_eq!(browser.fetch_line(), None, "no line before a fetch");
+
+        browser.fetch_started("/home/a/docs".to_owned(), "docs".to_owned());
+        assert_eq!(browser.fetch_line().as_deref(), Some("Fetching docs…"));
+
+        browser.fetch_done("/home/a/docs", 2048);
+        assert_eq!(
+            browser.fetch_line(),
+            Some(format!(
+                "Fetched docs · {}",
+                crate::spawn_form::human_size(2048)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_result_line_says_why_a_fetch_failed() {
+        let mut browser = listing();
+        browser.fetch_started("/home/a/docs".to_owned(), "docs".to_owned());
+
+        browser.fetch_failed("/home/a/docs", "permission denied".to_owned());
+
+        assert_eq!(
+            browser.fetch_line().as_deref(),
+            Some("Couldn't fetch docs: permission denied")
+        );
+    }
+
+    #[test]
+    fn the_result_line_ignores_another_fetchs_end() {
+        let mut browser = listing();
+        browser.fetch_started("/home/a/docs".to_owned(), "docs".to_owned());
+
+        browser.fetch_done("/home/a/other", 10);
+        browser.fetch_failed("/home/a/other", "gone".to_owned());
+
+        assert_eq!(browser.fetch_line().as_deref(), Some("Fetching docs…"));
+    }
+
+    #[test]
+    fn the_result_line_clears_when_the_browser_moves_to_another_folder() {
+        let mut browser = listing();
+        browser.fetch_started("/home/a/docs".to_owned(), "docs".to_owned());
+        browser.list("/home/a".to_owned(), "l2".to_owned());
+        assert_eq!(
+            browser.fetch_line().as_deref(),
+            Some("Fetching docs…"),
+            "listing the same folder again keeps it"
+        );
+
+        browser.list("/home/a/docs".to_owned(), "l3".to_owned());
+
+        assert_eq!(browser.fetch_line(), None, "another folder clears it");
+        browser.fetch_done("/home/a/docs", 2048);
+        assert_eq!(
+            browser.fetch_line(),
+            None,
+            "the cleared fetch's end does not bring it back"
+        );
     }
 
     #[test]

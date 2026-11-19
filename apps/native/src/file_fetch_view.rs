@@ -24,7 +24,7 @@ use crate::links::TerminalLink;
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::open::{LinkAction, OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, LinkFolders, LinkSource, Opening, Origin, Route, Then};
-use crate::phone::browser::{Answer, HostFacts};
+use crate::phone::browser::{Answer, FolderEnd, HostFacts};
 use crate::spawn_form::human_size;
 use crate::target::HostKey;
 
@@ -53,6 +53,10 @@ pub(crate) const FETCH_REVEAL: ToastAction = ToastAction {
     label: "Reveal",
     danger: false,
 };
+
+/// Why the phone's browser says a saved folder failed when it landed
+/// outside the copies folder, so the phone cannot keep it.
+const PHONE_FOLDER_NOT_KEPT: &str = "it was saved outside the copies folder";
 
 /// The detail of the toast refusing a link's fetch, outside every repo or
 /// worktree of its session.
@@ -1778,6 +1782,12 @@ impl RootView {
         let Some(entry) = self.fetches.remove(id) else {
             return;
         };
+        if self.shape == crate::RootShape::Phone {
+            // The phone draws no toast: its browser's line says how it went.
+            self.dismiss_toast_key(id, cx);
+            self.phone_folder_saved(&entry, &path, cx);
+            return;
+        }
         let reveal = entry.reveal_on_done().map(Path::to_path_buf);
         self.push_folder_fetched(id, &entry, path.clone(), cx);
         if let Some(file) = reveal {
@@ -1816,6 +1826,61 @@ impl RootView {
         if request.open_when_done {
             self.open_fetched(path, request, window, cx);
         }
+    }
+
+    /// The phone's folder fetch `entry` is saved at `path`: the phone keeps
+    /// it as one folder, its size the bytes the host announced, and its
+    /// browser says so. A folder not under the copies folder is not kept,
+    /// and the browser says it failed.
+    fn phone_folder_saved(&mut self, entry: &FetchEntry, path: &Path, cx: &mut Context<Self>) {
+        let host = entry.host_key().clone();
+        let asked = entry.request().rel_path.clone();
+        let end = match self.phone_fetched_of(entry, path) {
+            Some(mut saved) => {
+                saved.size = entry
+                    .announced()
+                    .map_or_else(|| entry.bytes_received(), |announced| announced.bytes);
+                FolderEnd::Saved { host, asked, saved }
+            }
+            None => FolderEnd::Failed {
+                host,
+                asked,
+                reason: PHONE_FOLDER_NOT_KEPT.to_owned(),
+            },
+        };
+        self.phone_browse.folder_ended(end);
+        cx.notify();
+    }
+
+    /// The phone's folder fetch `entry` ended without its folder, for
+    /// `reason`: the phone's browser says why. A file fetch, or any fetch
+    /// on the desktop, tells nothing.
+    fn phone_folder_failed(&mut self, entry: &FetchEntry, reason: &str, cx: &mut Context<Self>) {
+        if self.shape != crate::RootShape::Phone || !entry.is_folder() {
+            return;
+        }
+        self.phone_browse.folder_ended(FolderEnd::Failed {
+            host: entry.host_key().clone(),
+            asked: entry.request().rel_path.clone(),
+            reason: reason.to_owned(),
+        });
+        cx.notify();
+    }
+
+    /// Asks the host for the folder `request` names, for the phone's
+    /// browser, which says why when the fetch is refused; returns the
+    /// fetch's id.
+    ///
+    /// # Errors
+    /// Why the fetch is refused, as one line: the same folder already
+    /// fetching, a refused path or copies folder.
+    pub(crate) fn phone_fetch_folder(
+        &mut self,
+        request: FetchRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.try_start_folder_fetch(request, cx)
+            .map_err(|refusal| refusal.message().to_owned())
     }
 
     /// The phone's record of `entry`, saved at `path`: its host is the
@@ -1953,6 +2018,7 @@ impl RootView {
         };
         tracing::warn!(id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
         abort_writer(id, &entry);
+        self.phone_folder_failed(&entry, reason, cx);
         if cancel {
             self.send_to(
                 entry.host_key(),
@@ -1999,6 +2065,7 @@ impl RootView {
             let reason = format!("The connection to {} closed.", entry.host_label());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);
+            self.phone_folder_failed(&entry, &reason, cx);
             if entry.parent().is_some() {
                 continue;
             }

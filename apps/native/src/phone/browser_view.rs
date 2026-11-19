@@ -4,11 +4,13 @@
 //! goes up (none at a root), a folder row enters the folder, and a file row
 //! fetches the file and opens it in the viewer, as a kept copy opens. The
 //! next page is asked for once the list is drawn near its last entry; Back
-//! or a committed back gesture closes the page.
+//! or a committed back gesture closes the page. A long press on a folder row
+//! opens a sheet whose Fetch folder fetches the folder whole into the
+//! copies folder; the line under the header says how that fetch went.
 
 use chrono::{DateTime, Local};
 use gpui::{
-    BackGestureEvent, ClickEvent, Context, Div, FontWeight, ScrollEvent, ScrollHandle,
+    BackGestureEvent, ClickEvent, Context, Div, FontWeight, Pixels, ScrollEvent, ScrollHandle,
     SharedString, Stateful, Window, div, prelude::*, px,
 };
 use protocol::DirEntry;
@@ -17,7 +19,9 @@ use super::PhoneRoot;
 use super::browser::{self, Answer, Browser, Event, Taken};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::{host_open, phone_button};
+use super::long_press::long_press_area;
 use super::settings_view::{BACK_LABEL, CHEVRON, header_frame};
+use super::sheet::CANCEL_LABEL;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_weight};
@@ -34,12 +38,18 @@ const PARENT_LABEL: &str = "..";
 /// Why a host without the host-browse feature lists nothing.
 const NO_BROWSE_ERROR: &str = "this host does not list folders";
 
+/// The folder sheet's row that fetches the folder whole.
+const FETCH_FOLDER_LABEL: &str = "Fetch folder";
+
 /// The browser page: its state and its list's scroll.
 pub(super) struct BrowserPage {
     pub(super) state: Browser,
     /// The list's scroll, fresh for every folder, so a folder opens at its
     /// top.
     scroll: ScrollHandle,
+    /// The folder a long press opened the sheet on, by its name in the
+    /// folder shown, while the sheet is open.
+    sheet: Option<String>,
 }
 
 impl PhoneRoot {
@@ -55,6 +65,7 @@ impl PhoneRoot {
         self.browser = Some(BrowserPage {
             state: Browser::new(host, path),
             scroll: ScrollHandle::new(),
+            sheet: None,
         });
         self.browser_start(cx);
         cx.notify();
@@ -158,6 +169,7 @@ impl PhoneRoot {
         let host = page.state.host().clone();
         let msg = page.state.list(path, crate::new_request_id());
         page.scroll = ScrollHandle::new();
+        page.sheet = None;
         // A host that cannot be asked now is asked once its Welcome resets
         // the browser.
         if self.root.read(cx).host_serves_browse(&host) {
@@ -187,6 +199,44 @@ impl PhoneRoot {
             let host = page.state.host().clone();
             self.open_kept(host, path, cx);
         }
+    }
+
+    /// A long press on the folder row `name`: its sheet opens.
+    fn browser_open_sheet(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Some(page) = self.browser.as_mut() {
+            tracing::debug!(%name, "phone: opening a browsed folder's sheet");
+            page.sheet = Some(name);
+            cx.notify();
+        }
+    }
+
+    /// The folder sheet's Cancel or scrim: the sheet closes, asking nothing.
+    fn browser_close_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.browser.as_mut() {
+            page.sheet = None;
+            cx.notify();
+        }
+    }
+
+    /// Fetch folder: the sheet closes and its folder is fetched whole; the
+    /// result line says it is fetching, or why the fetch was refused.
+    fn browser_fetch_sheet_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.browser.as_mut() else {
+            return;
+        };
+        let Some(name) = page.sheet.take() else {
+            return;
+        };
+        let host = page.state.host().clone();
+        let path = page.state.child(&name);
+        page.state.fetch_started(path.clone(), name);
+        if let Err(reason) = self.fetch_host_folder(host, path.clone(), cx) {
+            tracing::info!(%path, %reason, "phone: a folder fetch was refused");
+            if let Some(page) = self.browser.as_mut() {
+                page.state.fetch_failed(&path, reason);
+            }
+        }
+        cx.notify();
     }
 
     /// Show hidden: shows or hides the hidden entries.
@@ -272,6 +322,84 @@ impl PhoneRoot {
         self.browser.as_ref()?.state.error_line()
     }
 
+    /// The result line under the browser's header, while it shows one.
+    #[must_use]
+    pub fn browser_result(&self) -> Option<String> {
+        self.browser.as_ref()?.state.fetch_line()
+    }
+
+    /// The folder sheet over the browser, while a long press opened one:
+    /// the folder's name, Fetch folder and Cancel over a scrim, its bottom
+    /// clear of `bottom`'s home indicator.
+    pub(super) fn browser_sheet_layer(
+        &self,
+        bottom: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let name = self.browser.as_ref()?.sheet.clone()?;
+        let t = theme(cx);
+        let scrim = div()
+            .id("phone-browser-sheet-scrim")
+            .driver_id(|| "phone-browser-sheet-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.browser_close_sheet(cx)));
+        let fetch = Self::sheet_button("phone-browser-sheet-fetch", ButtonKind::Outlined, cx)
+            .child(FETCH_FOLDER_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.browser_fetch_sheet_folder(cx);
+            }));
+        let cancel = Self::sheet_button("phone-browser-sheet-cancel", ButtonKind::Outlined, cx)
+            .child(CANCEL_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.browser_close_sheet(cx);
+            }));
+        let title = div()
+            .driver_id(|| "phone-browser-sheet-title".to_owned())
+            .flex()
+            .items_center()
+            .min_h(px(TOUCH_TARGET))
+            .px(px(4.0))
+            .truncate()
+            .font_weight(ui_weight(cx, FontWeight::SEMIBOLD))
+            .child(name);
+        let panel = div()
+            .id("phone-browser-sheet")
+            .driver_id(|| "phone-browser-sheet".to_owned())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pt(px(16.0))
+            .pb(bottom + px(16.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .child(title)
+            .child(fetch)
+            .child(cancel);
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(panel),
+        )
+    }
+
     /// While the browser is open: its header over its list.
     pub(super) fn browser_page(&self, cx: &mut Context<Self>) -> Option<Div> {
         let page = self.browser.as_ref()?;
@@ -291,6 +419,7 @@ impl PhoneRoot {
                 .flex()
                 .flex_col()
                 .child(Self::browser_header_row(page, &host_label, &t, cx))
+                .children(result_line(&page.state, &t))
                 .child(Self::browser_list(page, waiting, &t, cx)),
         )
     }
@@ -423,7 +552,19 @@ impl PhoneRoot {
             .children(modified)
             .children(folder.then_some(CHEVRON));
         let tapped = name.clone();
+        // A long press on a folder offers its sheet; a file's offers nothing.
+        let long_press = folder.then(|| {
+            let phone = cx.weak_entity();
+            let pressed = name.clone();
+            long_press_area(move |_, _, cx| {
+                // Fails only when the phone's root is gone.
+                phone
+                    .update(cx, |this, cx| this.browser_open_sheet(pressed.clone(), cx))
+                    .ok();
+            })
+        });
         row_frame(&format!("phone-browser-row-{name}"), t)
+            .relative()
             .child(
                 div()
                     .flex_1()
@@ -433,10 +574,33 @@ impl PhoneRoot {
                     .child(name),
             )
             .child(meta)
+            .children(long_press)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.browser_open_row(&tapped, folder, cx);
             }))
     }
+}
+
+/// The result line under the header, while `state` shows one: muted, or in
+/// the danger colour when it says why a fetch failed.
+fn result_line(state: &Browser, t: &UiTheme) -> Option<Div> {
+    let line = state.fetch_line()?;
+    let color = if state.fetch_failed_line() {
+        t.danger_text
+    } else {
+        t.muted
+    };
+    Some(
+        div()
+            .driver_id(|| "phone-browser-result".to_owned())
+            .flex_none()
+            .px(px(SIDE_PADDING))
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
+            .text_color(gpui::rgb(color))
+            .child(line),
+    )
 }
 
 /// A muted line tagged `selector` drawn in the rows' place.
