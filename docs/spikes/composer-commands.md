@@ -9,6 +9,7 @@ The chat composer sends text into the agent's prompt as one bracketed paste foll
 - Driven with the session-driving verbs: `spawn --agent claude --cwd <empty scratch folder>`, `send <id> <text>` (the composer path: paste, then Enter), `send <id> --keys <spec>` (typed keys), `read`, `wait --status idle` and `kill`.
 - The scratch folder sat inside a checkout with a project `.mcp.json`, so Claude Code first showed its "New MCP server found in this project" prompt; it was answered with its default row, "Continue without using this MCP server".
 - One short message ("Reply with the single word ok.") gave `/compact` a conversation to compact.
+- A real `claude` session shares the user's `~/.claude/settings.json`, which isolating the daemon's own folders does not cover: a typed `/model <name>`, `/effort <level>` (all but `max` and `status`), Enter in the `/model` or `/effort` picker and `/config` all write it. A spike that sends them changes the user's defaults for every new session.
 
 Gotcha for anyone driving the verbs from Git Bash: MSYS path conversion rewrites an argument such as `/compact` into a Windows path (`C:/Program Files/Git/compact`) before `rustling-tulipd` sees it, and that text reaches the model as a message. Set `MSYS_NO_PATHCONV=1` (and `MSYS2_ARG_CONV_EXCL=*`), or run the verbs from PowerShell.
 
@@ -62,3 +63,73 @@ For the catalog: the overlay rows above are the ones to flag "opens in the termi
 - Whether a pasted slash name opens the command menu before Enter, and so whether a pasted alias or prefix resolves to the highlighted row as typed keys do.
 - The commands the brief ruled out (`/login`, `/logout`, `/init`, `/clear`, `/exit`, `/theme`, `/vim` and the like), other agents, and Claude Code versions other than the one above.
 - macOS and remote (tailnet or SSH) hosts.
+
+## Model and effort commands
+
+Measured on Claude Code 2.1.328 with the Setup above: an isolated daemon, the real `claude`, a session that started on the account's default model with the owner's saved effort, driven with `send <id> <text>` (paste then Enter) and `send <id> --keys <spec>`. At start the banner read `Opus 5.5 with high effort · Claude Ultra`, and a right-aligned indicator above the prompt read `● high · /effort`. The status line named the model (`Opus 5.5`).
+
+### Headlines
+
+- **A. `/model <name>` switches at once.** It opens no picker and starts no model turn, and the text never reaches the model. `send <id> /model opus` echoed `❯ /model opus` and `⎿  Set model to Opus 5.5 and saved as your default for new sessions`. The full id `/model claude-opus-5-5` printed the same row. `/model default` printed `⎿  Set model to Opus 5.5 (default) and saved as your default for new sessions`.
+- **B. Every typed `/model <name>` writes the user's `~/.claude/settings.json`.** `/model opus` appended `"model": "opus"` to it, the full id replaced that with `"model": "claude-opus-5-5"`, and `/model default` removed the key. Claude Code's docs say the same: typed `/model <name>` behaves like Enter in the picker, which saves the default; only `s` in the picker switches for this session alone (https://code.claude.com/docs/en/model-config, "Setting your model").
+
+  So a composer that sends `/model sonnet` changes the user's default model for every new session, not just this one. For that reason `/model sonnet` and `/model haiku` were not sent; Sonnet was reached through the picker's `s` instead (C). Haiku was not switched to at all.
+- **C. A session-only switch goes through the picker.** `send <id> /model`, then `--keys "<Down><Down>"` to `❯ 4.  Sonnet 5.5`, then `--keys "s"` printed `⎿  Set model to Sonnet 5.5 for this session only`. The status line changed to `Sonnet 5.5`, the effort indicator to `◐ medium · /effort`, and settings.json was not touched.
+- **D. A switch in a conversation with a turn asks first.** Switching back to Opus with `s` after one turn opened a dialog, during which the daemon read the session as `awaiting_input`:
+
+  `Switch model?` / `Your next response will be slower and use more tokens` / `This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.` / `❯ 1. Yes, switch to Opus 5.5` / `2. No, go back` / `Enter to confirm · Esc to cancel`.
+
+  A `send <id> /effort high` made while it was open was held back by the composer and never typed; `--keys "<Enter>"` took Yes and printed `⎿  Set model to Opus 5.5 for this session only`. Whether a typed `/model <name>` opens the same dialog was not measured (it would have saved a default).
+- **E. The transcript names the new model on the next turn.** After the Sonnet switch and one message ("Reply with the single word ok."), the session's jsonl (`~/.claude/projects/<cwd slug>/<claude session id>.jsonl`) had an `assistant` record with `message.model: "claude-sonnet-5-5"` and `requestedModel: "claude-sonnet-5-5"`. The `api-request` record had `params.model: "claude-sonnet-5-5"`.
+- **F. `/effort <level>` sets effort; `/model` takes no effort argument.** The command menu's hints are `/model  [model]` and `/effort  [low|medium|high|xhigh|max|auto|ultracode [on|off]]`. `/model opus high` was not sent: the hint names one argument, and a typed `/model` saves what it is given.
+- **G. Main-thread records carry effort.** The main-thread (`isSidechain: false`) `assistant` record had top-level `effort: "medium"` and `perTurnEffort: "medium"`, and the `api-request` record had `params.output_config.effort: "medium"`. No `user` or `system` record carries an effort field.
+
+### The `/model` picker
+
+Bare `/model` (paste then Enter) opens this overlay, the current model ticked and highlighted:
+
+```
+  Select model
+  Your pick is the default for new sessions. For other models, use --model.
+    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+  ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+    3.  Fable 5.2              For your toughest challenges
+    4.  Sonnet 5.5             Most efficient for simpler tasks
+    5.  Haiku 5.5              Fastest for quick answers
+    ▸   More models
+  ● High effort ←/→ to adjust
+  s to use this session only · Enter to save · Esc to cancel
+```
+
+Up and Down move between models. Effort is the row under the list, changed with Left and Right: `○ Low effort`, `◐ Medium effort (default)`, `● High effort`, `◉ xHigh effort`, `◈ Max effort`, stopping at both ends. Enter saves the highlighted model (and effort) as the default, `s` applies it to this session only, and Esc closes it with `⎿  Kept model as Opus 5.5` and saves nothing, even after the effort row was moved.
+
+### Effort commands
+
+| Sent (paste then Enter) | Screen | Saved to settings.json |
+|---|---|---|
+| `/effort status` on Sonnet 5.5 at its default | `⎿  Effort level: auto (currently medium)` | No |
+| `/effort max` | `⎿  Set effort level to max (this session only): Maximum capability with deepest reasoning. …`; indicator `◈ max · /effort` | No |
+| `/effort` (bare) | Overlay titled `Effort`: a slider `low  medium  high  xhigh  max` between `Faster` and `Smarter`, `Ultracode  off` / `Tab to toggle`, a cost line (`~3.5x the estimated cost of medium (the default)` on xhigh), and a footer `←/→ to adjust · s to use this session only · Enter to save · Esc to cancel` (on max: `←/→ to adjust · Enter to use this session only · Esc to cancel`) | Esc printed `⎿  Cancelled`; nothing saved |
+| `/effort status` on Opus 5.5 after the `max` above and a switch to Opus | `⎿  Current effort level: max (Maximum capability with deepest reasoning. …)` | No |
+| `/effort high` on Opus 5.5 | `⎿  Set effort level to high (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation`; indicator `● high · /effort` | Yes: the file was rewritten. Its Opus level was already `high`, so only key order changed |
+
+A session-only effort (`max`) stays across a session-only model switch: set on Sonnet, it still read `max` on Opus. A switch from Opus at its saved `high` to Sonnet, which had no saved level, showed Sonnet at `auto (currently medium)`. The docs say a typed `/effort low|medium|high|xhigh` saves the level for the active model under `modelSettings`, and `max` is session-only (https://code.claude.com/docs/en/settings-reference, `effortLevel`).
+
+### The transcript's record of a command
+
+Each command run from the prompt leaves `user` records in the jsonl: `<command-name>/model</command-name>` with `<command-args>opus</command-args>`, then ``<local-command-stdout>Set model to `Opus 5.5` and saved as your default for new sessions</local-command-stdout>``. The `/effort` commands are recorded the same way.
+
+The first bare `/model` closed with Esc was recorded as `system` records (subtype `local_command`) instead, with ``<local-command-stdout>Kept model as `Opus 5.5`</local-command-stdout>``.
+
+### For the catalog and the composer
+
+- Sending `/model <name>` or `/effort low|medium|high|xhigh` through the composer runs it, and also saves it as the user's default for new sessions. A chat control meant to switch one session should either say so, or drive the picker (`/model`, arrows, `s`) as typed keys, which needs the `Switch model?` dialog handled once the conversation has a turn.
+- `/effort max` and `/effort status` are safe for one session from the composer. Bare `/model` and bare `/effort` are overlays ("opens in the terminal").
+- The chat can read the active model from the next `assistant` record's `message.model`, and the effort from its top-level `effort`.
+
+### Not measured
+
+- Typed `/model sonnet`, `/model haiku`, and `/model opus high`, because each would write the owner's default model. Whether a typed `/model <name>` in a conversation with a turn opens the `Switch model?` dialog, and whether it saves before or after that dialog.
+- Haiku 5.5, Fable 5.2 and the `More models` rows.
+- `/effort low|medium|xhigh|auto` and `/effort ultracode`, and the picker's Enter path, all of which save.
+- Whether the daemon's own chat mirror shows the switched model: `sessions --json` carries no model field.
