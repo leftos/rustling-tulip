@@ -1277,6 +1277,8 @@ pub struct RootView {
     linear_issues: linear_card::LinearCache,
     /// The Linear card a pane shows: at most one at a time.
     linear_card: Option<linear_card::CardAnchor>,
+    /// The panes the last frame drew; one that leaves it forgets its hover.
+    drawn_panes: HashSet<String>,
     /// When the pending layout save is due, if one is.
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
@@ -1934,6 +1936,7 @@ impl RootView {
             linear_contexts: HashMap::new(),
             linear_issues: linear_card::LinearCache::default(),
             linear_card: None,
+            drawn_panes: HashSet::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
             auto_grid_timer: None,
@@ -3470,8 +3473,14 @@ impl RootView {
 
     /// Link mode goes on or off in every pane: each terminal's, and each
     /// transcript's underline at the pointer, with no pointer move needed.
+    /// A press reaches only the panes drawn now, so a hidden one never
+    /// takes the card; a release reaches every pane.
     fn set_link_mode(&mut self, on: bool, window: &Window, cx: &mut Context<Self>) {
-        for slot in self.panes.values() {
+        let drawn = self.drawn_pane_ids();
+        for (pane_id, slot) in &self.panes {
+            if on && !drawn.contains(pane_id) {
+                continue;
+            }
             slot.view()
                 .update(cx, |pane, cx| pane.set_link_mode(on, cx));
         }
@@ -7124,8 +7133,9 @@ impl Render for RootView {
         if !cx.has_active_drag() {
             self.clear_drag_state();
         }
-        // Before any pane header is built: they read which tip shows.
-        self.settle_header_tips(cx);
+        // Before any pane header is built: they read which tip shows. No
+        // pane hidden since the last frame keeps a hover or the card.
+        self.settle_panes_for_frame(cx);
         let footer = self.conn().footer(self.sidebar.local_sessions().len());
         let flyout = self.flyout_layers(window, cx);
         let overlay = self

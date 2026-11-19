@@ -814,6 +814,54 @@ impl RootView {
         }
     }
 
+    /// The panes drawn now: the main window's active tab's, each tab's open
+    /// in a pop-out, and each pane or session terminal popped out on its
+    /// own.
+    pub(crate) fn drawn_pane_ids(&self) -> HashSet<String> {
+        let active = self.tabs.active_id();
+        let popped = self.popouts.popped_panes();
+        self.panes
+            .iter()
+            .filter(|(pane_id, slot)| {
+                active == Some(slot.tab_id.as_str())
+                    || self.is_tab_popped(&slot.tab_id)
+                    || popped.contains(&pane_id.as_str())
+                    || popouts::slot_session(pane_id).is_some()
+            })
+            .map(|(pane_id, _)| pane_id.clone())
+            .collect()
+    }
+
+    /// Before a frame is built: settles which pane header tip shows, and
+    /// lets the panes no longer drawn forget their hover.
+    pub(crate) fn settle_panes_for_frame(&mut self, cx: &mut Context<Self>) {
+        self.settle_header_tips(cx);
+        self.forget_undrawn_hovers(cx);
+    }
+
+    /// Each pane the last frame drew that is not drawn now forgets its
+    /// hover and hides its card, and a card whose pane is gone goes, so the
+    /// one card always belongs to a drawn pane.
+    fn forget_undrawn_hovers(&mut self, cx: &mut Context<Self>) {
+        let drawn = self.drawn_pane_ids();
+        if drawn == self.drawn_panes {
+            return;
+        }
+        for pane_id in self.drawn_panes.difference(&drawn) {
+            if let Some(slot) = self.panes.get(pane_id) {
+                slot.view.update(cx, TerminalPane::forget_hover);
+            }
+        }
+        if self
+            .linear_card
+            .as_ref()
+            .is_some_and(|anchor| !drawn.contains(&anchor.pane_id))
+        {
+            self.linear_card = None;
+        }
+        self.drawn_panes = drawn;
+    }
+
     /// Gives every pane `keep` takes the font and colours it resolves to.
     fn apply_fonts_where(
         &mut self,

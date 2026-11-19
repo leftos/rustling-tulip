@@ -12,10 +12,14 @@
 
 use crate::support;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, point, px};
+use gpui::{
+    AppContext as _, Modifiers, MouseButton, Pixels, Point, ScrollDelta, ScrollEvent,
+    TestAppContext, TouchPhase, point, px,
+};
 use protocol::{
     ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS,
     FEATURE_FILE_TAIL, FollowSource, SessionSnapshot, SplitDirection,
@@ -522,6 +526,209 @@ fn no_key_offers_open_in_linear_which_opens_the_issue(cx: &mut TestAppContext) {
     h.hover(open.center(), Modifiers::none());
     h.click(open.center(), Modifiers::none());
     assert_eq!(h.opened(), [Opened::Url(url.to_owned())]);
+}
+
+/// Turns the wheel over `at` by `by` px; a positive `by` scrolls back into
+/// the history.
+fn wheel(h: &mut Harness<'_>, at: Point<Pixels>, by: f32) {
+    h.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(by))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    h.cx.run_until_parked();
+}
+
+/// `count` numbered lines of output.
+fn lines(count: usize) -> String {
+    let mut text = String::new();
+    for line in 0..count {
+        write!(text, "line {line}\r\n").expect("a string write");
+    }
+    text
+}
+
+/// [`support::remote_in_pane_with_features`] with `linear_links`, `RT-12`
+/// atop the remote session's history and pane `p2` scrolled all the way
+/// back, so `RT-12` is on its first row; nothing sent is left unread.
+fn scrolled_back_identifier<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let s1 = session("s1").build();
+    let features = [protocol::FEATURE_LINEAR_LINKS];
+    let mut h = support::remote_in_pane_with_features(cx, dir, &json!({}), &["r1"], s1, &features);
+    h.host(&saved_remote()).send(linear(&["RT"], true));
+    let output = format!("see RT-12 now\r\n{}", lines(200));
+    h.host(&saved_remote()).pty("s1", output.as_bytes());
+    let top = h.cell_center("p2", 0, 0);
+    wheel(&mut h, top, 100_000.0);
+    assert_eq!(
+        h.underlined_links("p2"),
+        ["RT-12"],
+        "the pane is scrolled back to RT-12"
+    );
+    h.sent();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// One more line of output in the remote session `s1`, then `by` passes.
+fn output_then(h: &mut Harness<'_>, by: Duration) {
+    h.host(&saved_remote()).pty("s1", b"more\r\n");
+    h.advance(by);
+}
+
+#[gpui::test]
+fn a_card_shows_on_scrollback_while_output_arrives(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = scrolled_back_identifier(cx, &dir);
+    let on = h.cell_center("p2", 5, 0);
+    h.hover(on, Modifiers::none());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        [vec!["RT-12".to_owned()]],
+        "the entry asks once"
+    );
+    // The reply ends the request, so a second entry would ask again.
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Hover card",
+        )]));
+    for _ in 0..5 {
+        output_then(&mut h, Duration::from_millis(100));
+    }
+    assert_eq!(
+        h.underlined_links("p2"),
+        ["RT-12"],
+        "RT-12 stays where it was on screen"
+    );
+    assert!(
+        card_says(&mut h, "p2", "Hover card"),
+        "the rest shows the card: {:?}",
+        h.linear_card("p2")
+    );
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        Vec::<Vec<String>>::new(),
+        "output that leaves RT-12 in place is no new entry"
+    );
+}
+
+#[gpui::test]
+fn a_shown_card_stays_on_scrollback_while_output_arrives(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = scrolled_back_identifier(cx, &dir);
+    let on = h.cell_center("p2", 5, 0);
+    h.hover(on, Modifiers::none());
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Hover card",
+        )]));
+    h.advance(Duration::from_millis(500));
+    assert!(card_says(&mut h, "p2", "Hover card"), "the rest shows it");
+    h.host(&saved_remote()).sent();
+    for _ in 0..5 {
+        output_then(&mut h, Duration::from_millis(100));
+        assert!(
+            card_says(&mut h, "p2", "Hover card"),
+            "the card stays while RT-12 stays on screen: {:?}",
+            h.linear_card("p2")
+        );
+    }
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        Vec::<Vec<String>>::new(),
+        "and nothing is asked again"
+    );
+}
+
+#[gpui::test]
+fn output_that_moves_the_identifier_still_hides_the_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifier_on_screen(cx, &dir);
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(500));
+    assert!(h.linear_card("p1").is_some(), "the rest shows the card");
+    let output = format!("\r\n{}", lines(200));
+    h.pty("s1", output.as_bytes());
+    assert_eq!(
+        h.underlined_links("p1"),
+        Vec::<String>::new(),
+        "the output scrolled RT-12 off the screen"
+    );
+    assert_eq!(h.linear_card("p1"), None, "its card goes with it");
+    h.advance(Duration::from_millis(500));
+    assert_eq!(h.linear_card("p1"), None, "and no rest brings it back");
+}
+
+/// `s1` in pane `p1` of tab `t1` and `s2` in pane `p2` of tab `t2`, This
+/// PC's daemon with a key and the team `RT`, `RT-12` on `s1`'s screen and
+/// `RT-34` on `s2`'s; `t1` shows.
+fn identifiers_in_two_tabs<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.send(linear(&["RT"], true));
+    h.pty("s1", b"see RT-12 now");
+    h.pty("s2", b"see RT-34 now");
+    h
+}
+
+#[gpui::test]
+fn a_hidden_tab_does_not_take_the_card_on_ctrl(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifiers_in_two_tabs(cx, &dir);
+    let a = h.cell_center("p1", 5, 0);
+    h.hover(a, Modifiers::none());
+    h.keys("ctrl-tab");
+    let b = h.cell_center("p2", 5, 0);
+    h.hover(b, Modifiers::none());
+
+    h.set_modifiers(ctrl());
+    assert!(h.linear_card("p2").is_some(), "Ctrl shows RT-34's card");
+    assert_eq!(h.linear_card("p1"), None, "the hidden pane shows none");
+    h.set_modifiers(Modifiers::none());
+    assert_eq!(h.linear_card("p2"), None, "releasing Ctrl hides it");
+
+    h.advance(Duration::from_millis(500));
+    assert!(h.linear_card("p2").is_some(), "the rest shows RT-34's card");
+    h.set_modifiers(ctrl());
+    assert!(
+        h.linear_card("p2").is_some(),
+        "Ctrl keeps the rested card: the hidden pane takes nothing"
+    );
+    assert_eq!(h.linear_card("p1"), None);
+}
+
+#[gpui::test]
+fn switching_tabs_forgets_the_hover(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = identifiers_in_two_tabs(cx, &dir);
+    let a = h.cell_center("p1", 5, 0);
+    h.hover(a, Modifiers::none());
+    h.keys("ctrl-tab");
+    h.cell_center("p2", 0, 0);
+    h.keys("ctrl-tab");
+    h.cell_center("p1", 0, 0);
+
+    h.set_modifiers(ctrl());
+    assert_eq!(h.linear_card("p1"), None, "the hover was forgotten");
+    h.advance(Duration::from_millis(500));
+    assert_eq!(h.linear_card("p1"), None, "and so was its rest");
+    h.hover(a, ctrl());
+    assert!(
+        h.linear_card("p1").is_some(),
+        "a move onto RT-12 shows its card"
+    );
 }
 
 #[gpui::test]

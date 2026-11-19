@@ -185,6 +185,10 @@ const CARD_REST: Duration = Duration::from_millis(500);
 #[derive(Default)]
 struct IssueCard {
     under: Option<TerminalLink>,
+    /// The display offset the grid rows of `under` and of the shown card's
+    /// link are stated at; [`TerminalPane::rebase_card`] restates them at
+    /// the offset now.
+    offset: usize,
     /// When the rest on `under` shows its card, on the injected clock.
     deadline: Option<Instant>,
     timer: Option<Task<()>>,
@@ -2131,6 +2135,7 @@ impl TerminalPane {
     /// The pointer or Ctrl changed: the card follows the issue link under
     /// the pointer.
     fn follow_card(&mut self, cx: &mut Context<Self>) {
+        self.rebase_card();
         let under = self.issue_under_mouse();
         if under != self.card.under {
             self.enter_issue(under, cx);
@@ -2165,6 +2170,7 @@ impl TerminalPane {
     /// Ctrl held over an issue link shows its card at once; releasing it
     /// hides a card only Ctrl showed.
     fn card_on_ctrl(&mut self, cx: &mut Context<Self>) {
+        self.rebase_card();
         if !self.links.active {
             if self.card.shown.as_ref().is_some_and(|shown| shown.by_ctrl) {
                 self.hide_card(cx);
@@ -2209,6 +2215,7 @@ impl TerminalPane {
             return;
         }
         self.card.deadline = None;
+        self.rebase_card();
         let Some(link) = self.card.under.clone() else {
             return;
         };
@@ -2307,9 +2314,44 @@ impl TerminalPane {
         Some(at)
     }
 
-    /// Hides the card whose link a scroll moved, or new output moved or
-    /// overwrote.
+    /// Restates the grid rows of the hovered issue link and of the shown
+    /// card's link at the display offset now, so each names the viewport
+    /// cells it named: output arriving while the pane is scrolled back
+    /// raises the offset and lowers every history line alike, and leaves
+    /// the text on screen where it was.
+    fn rebase_card(&mut self) {
+        let now = self.term.display_offset();
+        let from = std::mem::replace(&mut self.card.offset, now);
+        if from == now {
+            return;
+        }
+        if let Some(under) = &mut self.card.under {
+            rebase_link(under, from, now);
+        }
+        if let Some(shown) = &mut self.card.shown {
+            rebase_link(&mut shown.link, from, now);
+        }
+    }
+
+    /// The pane stopped being drawn: it forgets the cell under the pointer
+    /// and the issue link there, disarms the rest timer and hides its card,
+    /// so a later Ctrl press or rest shows nothing until the pointer moves
+    /// over it again.
+    pub(crate) fn forget_hover(&mut self, cx: &mut Context<Self>) {
+        self.links.cell = None;
+        self.card.under = None;
+        self.card.deadline = None;
+        self.card.timer = None;
+        self.card.on_card = false;
+        self.hide_card(cx);
+    }
+
+    /// Hides the card whose link no longer takes the viewport cells it was
+    /// shown at: a scroll or new output moved it, or new output overwrote
+    /// it. Output that scrolls a scrolled-back pane's history moves no
+    /// text on screen, so it keeps the card.
     fn check_card(&mut self, cx: &mut Context<Self>) {
+        self.rebase_card();
         let key = self.card_key();
         let Some(shown) = &self.card.shown else {
             return;
@@ -2317,7 +2359,7 @@ impl TerminalPane {
         if shown.read_at == key {
             return;
         }
-        let kept = shown.read_at.1 == key.1 && self.link_still_shown(&shown.link);
+        let kept = self.link_still_shown(&shown.link);
         match self.card.shown.as_mut() {
             Some(shown) if kept => shown.read_at = key,
             _ => self.hide_card(cx),
@@ -3513,6 +3555,18 @@ fn paint_span(
     }
 }
 
+/// Restates `link`, whose grid rows were read at display offset `from`, at
+/// offset `to`, so it names the same viewport cells: a viewport row is its
+/// grid line plus the display offset.
+fn rebase_link(link: &mut TerminalLink, from: usize, to: usize) {
+    let from = i64::try_from(from).unwrap_or(i64::MAX);
+    let to = i64::try_from(to).unwrap_or(i64::MAX);
+    let shift = from
+        .saturating_sub(to)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    link.shift_rows(i32::try_from(shift).unwrap_or_default());
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -3524,7 +3578,7 @@ mod tests {
 
     use super::{
         Attachment, CLAIM_WINDOW, CachedLinks, ReplyVerdict, ShellStatus, SizeGate, decorations,
-        dot_color, paste_log_line, terminal_font, to_rgba,
+        dot_color, paste_log_line, rebase_link, terminal_font, to_rgba,
     };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
@@ -3540,6 +3594,30 @@ mod tests {
             let verdict = load.on_reply(None, false, false, || Ok::<_, Infallible>(Vec::new()));
             matches!(verdict, Ok(ReplyVerdict::Accepted(_)))
         })
+    }
+
+    #[test]
+    fn rebase_link_keeps_the_viewport_cells_a_link_names() {
+        let links = crate::links::detect_links("see https://example.com now");
+        assert_eq!(links.len(), 1, "the text holds one link");
+        let mut link = links[0].clone();
+        link.shift_rows(-3);
+        let read = link.clone();
+        // Read at offset 2, grid line -3 is viewport row -1; at offset 7 that
+        // row is grid line -8.
+        rebase_link(&mut link, 2, 7);
+        assert_eq!(link.start_row, -8, "five more lines in the history");
+        assert_eq!(link.end_row, -8);
+        assert!(link.segments.iter().all(|segment| segment.row == -8));
+        assert_eq!(
+            link.start_row + 7,
+            read.start_row + 2,
+            "the same viewport row"
+        );
+        rebase_link(&mut link, 7, 2);
+        assert_eq!(link, read, "rebasing back restores it");
+        rebase_link(&mut link, 4, 4);
+        assert_eq!(link, read, "an unchanged offset moves nothing");
     }
 
     #[test]
