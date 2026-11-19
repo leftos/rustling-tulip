@@ -24,6 +24,7 @@ use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::quick_replies::{ReplyGroup, ReplySet};
 use super::session::SessionPage;
+use super::share::{LoggingShare, ShareSheet};
 use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
 };
@@ -160,6 +161,8 @@ pub struct PhoneRoot {
     pub(super) storage_error: Option<String>,
     /// The viewer page, drawn over the page shown while open.
     pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
+    /// The platform's share sheet, which the viewer's Share hands its copy.
+    share: Arc<dyn ShareSheet>,
     /// The stats out about kept copies, at most one per host and host path.
     kept_stats: Vec<KeptStat>,
     /// The modified time a changed copy's host answered with, by the copy's
@@ -263,6 +266,7 @@ impl PhoneRoot {
             fetched_path,
             storage_error: None,
             viewer: None,
+            share: Arc::new(LoggingShare),
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
             _root_changed: root_changed,
@@ -535,6 +539,27 @@ impl PhoneRoot {
     pub fn set_insets_override(&mut self, insets: Option<WindowInsets>, cx: &mut Context<Self>) {
         self.insets_override = insets;
         cx.notify();
+    }
+
+    /// The same root sharing through `share`; it shares through a sheet that
+    /// only logs until then.
+    #[must_use]
+    pub fn with_share(mut self, share: Arc<dyn ShareSheet>) -> Self {
+        self.share = share;
+        self
+    }
+
+    /// Shares through `share` from now on.
+    pub fn set_share(&mut self, share: Arc<dyn ShareSheet>) {
+        self.share = share;
+    }
+
+    /// Share on the viewer page: hands the open copy, as it is, to the share
+    /// sheet; nothing while the page is closed.
+    pub(super) fn share_viewer(&self) {
+        if let Some(viewer) = &self.viewer {
+            self.share.present(&viewer.path);
+        }
     }
 
     /// The root view the phone reads and drives.

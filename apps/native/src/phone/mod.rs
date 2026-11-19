@@ -26,6 +26,9 @@ mod session;
 mod session_view;
 mod settings;
 mod settings_view;
+pub mod share;
+#[cfg(target_os = "ios")]
+mod share_ios;
 pub(crate) mod sheet;
 mod sweep;
 mod terminal_fit;
@@ -46,6 +49,7 @@ use crate::{
 pub use layout::PhoneLayout;
 use push::PushPlatform;
 pub use root_view::PhoneRoot;
+use share::ShareSheet;
 
 /// Starts the phone app: logging to stderr, then `register_delegates` (which
 /// registers the platform's app delegate classes before the app starts, so the
@@ -69,9 +73,11 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
             crate::bind_keys(cx);
             crate::fonts::register_bundled(cx);
             let platform = push_platform(cx);
+            let share = share_sheet();
+            let root_share = Arc::clone(&share);
             let opened = cx.open_window(WindowOptions::default(), |window, cx| {
                 let root = cx.new(|cx| RootView::with_transport(phone_deps(), window, cx));
-                cx.new(|cx| PhoneRoot::new(root, platform, window, cx))
+                cx.new(|cx| PhoneRoot::new(root, platform, window, cx).with_share(root_share))
             });
             if let Err(err) = opened {
                 tracing::error!(error = %err, "phone window failed to open");
@@ -79,7 +85,30 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
                 return;
             }
             cx.activate(true);
+            #[cfg(target_os = "ios")]
+            share_selftest(share, cx);
         });
+}
+
+/// The phone's share sheet on iOS: `UIActivityViewController`.
+#[cfg(target_os = "ios")]
+fn share_sheet() -> Arc<dyn ShareSheet> {
+    Arc::new(share_ios::IosShareSheet)
+}
+
+/// No share sheet off iOS: a Share only logs.
+#[cfg(not(target_os = "ios"))]
+fn share_sheet() -> Arc<dyn ShareSheet> {
+    Arc::new(share::LoggingShare)
+}
+
+/// Launched with [`share_ios::SHARE_SELFTEST_ARG`], presents the share sheet
+/// for a small file it writes into the copies folder.
+#[cfg(target_os = "ios")]
+fn share_selftest(share: Arc<dyn ShareSheet>, cx: &mut App) {
+    if std::env::args().any(|arg| arg == share_ios::SHARE_SELFTEST_ARG) {
+        share_ios::start_selftest(share, cx);
+    }
 }
 
 /// The phone's push on iOS; launched with

@@ -50,7 +50,7 @@ tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs and a driven run's `remote_host`
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
-  ios/          - `build.ps1` (the phone app's `.app`, on a Mac) `sim-run.ps1` (the gated simulator run from this PC) and `sim-notify.ps1` (the same for the notification extension)
+  ios/          - `build.ps1` (the phone app's `.app`, on a Mac) `sim-run.ps1` (the gated simulator run from this PC) `sim-notify.ps1` (the same for the notification extension) and `sim-share.ps1` (the same for the viewer's share sheet)
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
   protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped

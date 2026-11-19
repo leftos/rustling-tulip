@@ -15,6 +15,7 @@ use protocol::{ClientMessage, DaemonMessage, FEATURE_HOST_PATHS, FEATURE_RELAY_P
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
+use rustling_tulip_native::phone::share::FakeShareSheet;
 use rustling_tulip_native::target::HostKey;
 use rustling_tulip_native::{Connection, LinkAction, NetEvent, PhoneFetched, ViewerTab};
 use serde_json::json;
@@ -162,6 +163,62 @@ fn a_saved_text_file_opens_in_the_phone_viewer(cx: &mut TestAppContext) {
         !drawn(&mut h, "phone-viewer-stale"),
         "a fresh copy shows no stale line"
     );
+}
+
+/// Gives the phone a [`FakeShareSheet`] and hands back the spec's handle on
+/// it.
+fn fake_share(h: &mut Harness<'_>) -> Arc<FakeShareSheet> {
+    let share = Arc::new(FakeShareSheet::default());
+    let given = share.clone();
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_share(given));
+    });
+    share
+}
+
+/// The copy of `name` [`save`] writes under `copies`.
+fn copy_of(copies: &std::path::Path, name: &str) -> std::path::PathBuf {
+    copies.join(format!("{REMOTE}/root/abs/{name}"))
+}
+
+#[gpui::test]
+fn the_viewer_header_draws_share(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save(&mut h, &copies, "notes.txt", "text\n");
+
+    assert!(drawn(&mut h, "phone-viewer-share"), "Share shows");
+    let title = h.bounds("phone-viewer-title");
+    let share = h.bounds("phone-viewer-share");
+    assert!(
+        share.origin.x >= title.origin.x + title.size.width,
+        "right of the names: {share:?} after {title:?}"
+    );
+}
+
+#[gpui::test]
+fn share_hands_the_open_copy_to_the_share_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    let share = fake_share(&mut h);
+    save(&mut h, &copies, "notes.txt", "text\n");
+    assert_eq!(
+        share.shared(),
+        Vec::<std::path::PathBuf>::new(),
+        "nothing is shared before the tap"
+    );
+
+    h.click_on("phone-viewer-share");
+
+    assert_eq!(share.shared(), [copy_of(&copies, "notes.txt")]);
+    assert!(drawn(&mut h, "phone-viewer"), "the viewer stays open");
 }
 
 #[gpui::test]
@@ -449,6 +506,28 @@ fn reopening_with_the_host_offline_opens_the_copy_as_out_of_date(cx: &mut TestAp
         fetched_paths(&sent),
         Vec::<String>::new(),
         "nothing is fetched"
+    );
+}
+
+#[gpui::test]
+fn share_hands_a_stale_copy_over_as_it_is(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone_serving_paths(cx, &dir, &copies);
+    let share = fake_share(&mut h);
+    keep_notes(&mut h, &copies);
+    h.host(&saved_remote())
+        .event(NetEvent::State(Connection::for_target(saved_remote())));
+    open_kept(&mut h, NOTES);
+    assert!(drawn(&mut h, "phone-viewer-stale"), "the copy is stale");
+
+    h.click_on("phone-viewer-share");
+
+    assert_eq!(share.shared(), [copy_of(&copies, "notes.txt")]);
+    assert_eq!(
+        fetched_paths(&sent(&mut h)),
+        Vec::<String>::new(),
+        "nothing is fetched first"
     );
 }
 

@@ -15,6 +15,7 @@ use super::PhoneRoot;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::settings_view::{BACK_LABEL, header_frame};
+use super::share::SHARE_LABEL;
 use crate::PhoneFetched;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
@@ -218,7 +219,7 @@ impl PhoneRoot {
     }
 
     /// The viewer page's header: Back, then the file's name over its host
-    /// and its path on that host.
+    /// and its path on that host, then Share.
     fn viewer_header_row(viewer: &PhoneViewer, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let back = phone_button("phone-viewer-back", ButtonKind::Outlined, cx)
             .min_h(px(TOUCH_TARGET))
@@ -255,7 +256,12 @@ impl PhoneRoot {
                     .text_color(muted)
                     .child(viewer.host_path.clone()),
             );
-        header_frame(t).child(back).child(names)
+        let share = phone_button("phone-viewer-share", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_none()
+            .child(SHARE_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, _| this.share_viewer()));
+        header_frame(t).child(back).child(names).child(share)
     }
 }
 

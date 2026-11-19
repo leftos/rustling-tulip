@@ -133,14 +133,28 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSData",
     "NSDictionary",
+    "NSEnumerator",
     "NSError",
     "NSObject",
     "NSString",
+    "NSURL",
 ] }
+# The share sheet (src/phone/share_ios.rs): `UIActivityViewController` for a
+# file URL, presented from the key window's view controller, its iPad popover
+# anchored by a source view and rect.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
+    "objc2-core-foundation",
+    "UIActivity",
+    "UIActivityViewController",
     "UIApplication",
+    "UIPopoverPresentationController",
+    "UIPresentationController",
     "UIResponder",
+    "UIView",
+    "UIViewController",
+    "UIWindow",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
