@@ -216,3 +216,16 @@ These need a session on the host whose terminal and chat show file and folder pa
 - [ ] Open the Files app. **Expect:** On My iPhone › Rustling Tulip holds the fetched files and folders under a folder named for the host, and `fetched.json` is not shown there.
 - [ ] Change a file on the host that you opened before, then tap its path again. **Expect:** the viewer shows the new content (it was fetched again). Turn Tailscale off on the phone and reopen it from the browser or a tap. **Expect:** the old copy opens under `This copy may be out of date: the host did not answer.` Turn Tailscale back on.
 - [ ] Tap `Settings`, then `Storage`. **Expect:** `Fetched files` shows the size the copies use. Tap `Clear`. **Expect:** the size drops to empty and the Files app's Rustling Tulip folder holds none of the copies.
+
+### iPad and landscape
+
+These need TestFlight builds, an iPad and an iPhone, and a host with a working Claude session.
+
+- [ ] Install the build on an iPad. **Expect:** the app installs and fills the iPad's screen, not a phone-sized window.
+- [ ] On the iPad in portrait and then in landscape, open Home. **Expect:** in both orientations Home's list is on the left and the selected session is on the right, with "Pick a session" in the right pane before you tap a row.
+- [ ] Tap a session's row. **Expect:** its page opens in the right pane with Home still in view, and the selected row is marked.
+- [ ] Tap `Settings`. **Expect:** Settings covers the whole window. Go back, then open a session's prompt sheet. **Expect:** the sheet covers only the session pane, and the list and its tray stay usable.
+- [ ] On the iPad, tap the session page's Terminal toggle. **Expect:** the session pane switches between Chat and Terminal, and the list stays.
+- [ ] Turn an iPhone on its side on Home. **Expect:** the list and the selected session sit side by side, with "Pick a session" before a tap.
+- [ ] Open a session on Chat on the iPhone, then turn it on its side. **Expect:** the screen fills with the session's terminal and no header, and the key bar starts with `Back` and the session's status. Tap `Back`. **Expect:** the list and the session on Chat sit side by side. Turn the iPhone upright. **Expect:** the session shows Chat.
+- [ ] With Claude's terminal open, turn the device (the iPad, and the iPhone upright and on its side) and look at the terminal after each turn. **Expect:** the terminal redraws at the new width and Claude's TUI fits it.

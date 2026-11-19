@@ -61,7 +61,7 @@ These are the native app's settled design decisions; the phases below build them
 - **Push needs a tailnet host.** A phone registers for push over a tailnet connection, whose device record the daemon keys the subscription to; an SSH bridge connection is the owner's `Local` login with no device record, and stays so. A PC the phone reaches only over SSH sends it no push; the phone has the Tailscale app in any case, so adding that PC as a tailnet host too brings its pushes.
 
   Reason: the device-token check stays in one place, and an SSH device identity would be a second pairing scheme.
-- **Portrait iPhone first.** The app declares iPhone and portrait, as the spike did. The iPad and landscape are designed in [tablet-layout.md](./tablet-layout.md).
+- **Portrait iPhone first.** The app declares iPhone and portrait, as the spike did. The iPad and landscape are laid out in [native-client.md](../native-client.md) "Phone shape".
 - **The GPUI pin.** The client takes GPUI from Zed's git at one revision, since the crate has had no crates.io release since 0.2.2. It moves by decision, about once a quarter, never per commit, with the desktop pass of MA.5 each time. If Zed drops or breaks `gpui_ios`, a pinned revision still builds.
 - **The first-mouse fix rides on a fork.** At the pin the vendored text-measure fix is upstream (each measure truncates its own copy of the runs), but the first-mouse fix is not: `gpui_windows` answers `WM_MOUSEACTIVATE` without marking the press, and `gpui_macos` marks only a left press. It is carried as one commit on the owner's fork of Zed at the pin, `leftos/zed`, and every GPUI crate comes from that fork's revision; `vendor/gpui` goes.
 
