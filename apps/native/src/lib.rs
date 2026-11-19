@@ -584,7 +584,38 @@ impl PhoneStats {
     }
 }
 
+/// What a path tapped on the phone opens once its host said what it names,
+/// queued for the phone's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PhoneOpen {
+    /// A folder: the browser opens at `path` on `host`, while the page of
+    /// `session`, where it was tapped, shows.
+    Folder {
+        host: HostKey,
+        session: Option<String>,
+        path: String,
+    },
+    /// Nothing on the host: the page of `session` on `host`, where it was
+    /// tapped, says `note` while it shows.
+    Missing {
+        host: HostKey,
+        session: Option<String>,
+        note: String,
+    },
+}
+
 impl RootView {
+    /// Queues `open`, what a tapped path names, for the phone's root.
+    pub(crate) fn phone_open(&mut self, open: PhoneOpen, cx: &mut Context<Self>) {
+        self.phone_opens.push(open);
+        cx.notify();
+    }
+
+    /// What tapped paths opened since the last take.
+    pub(crate) fn take_phone_opens(&mut self) -> Vec<PhoneOpen> {
+        std::mem::take(&mut self.phone_opens)
+    }
+
     /// Queues the phone's saved file fetch `saved` for the phone's root,
     /// which records it as it observes this view.
     pub fn phone_file_saved(&mut self, saved: PhoneFetched, cx: &mut Context<Self>) {
@@ -1645,6 +1676,9 @@ pub struct RootView {
     remote_files_root: Result<PathBuf, String>,
     /// The phone's saved file fetches, until the phone's root takes them.
     phone_fetched: Vec<PhoneFetched>,
+    /// What paths tapped on the phone opened, until the phone's root takes
+    /// them.
+    phone_opens: Vec<PhoneOpen>,
     /// The stats the phone sent about its kept copies, and their answers.
     pub(crate) phone_stats: PhoneStats,
     /// The phone browser's host answers and each connection's host info.
@@ -2137,6 +2171,7 @@ impl RootView {
                 .map(file_fetch_view::absolute_root)
                 .map_err(|err| format!("{err:#}")),
             phone_fetched: Vec::new(),
+            phone_opens: Vec::new(),
             phone_stats: PhoneStats::default(),
             phone_browse: phone::browser::Inbox::default(),
             update: update_view::UpdateUi::new(updater),

@@ -412,6 +412,14 @@ impl PhoneRoot {
                 .flex()
                 .flex_col()
                 .child(Self::session_header_row(&header, page, &t, cx))
+                .children(self.path_note().map(str::to_owned).map(|note| {
+                    div()
+                        .driver_id(|| "phone-path-note".to_owned())
+                        .px(px(16.0))
+                        .py(px(6.0))
+                        .text_color(gpui::rgb(t.muted))
+                        .child(note)
+                }))
                 .child(body)
                 .children(show_prompt),
         )

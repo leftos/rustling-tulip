@@ -17,7 +17,7 @@ The phone reuses the desktop's host-path fetch (RT-1823) and the file manager's 
 
 ## Orchestrator decisions (open to the owner)
 
-- **Paths are links on the phone without a modifier.** The phone's chat and terminal find paths with the desktop's `links::detect_links` and draw them underlined at all times, since the phone has no Ctrl. A single tap on a path opens it; a tap anywhere else does what it does today (focus the terminal and raise the keyboard, expand a tool card). A URL tap is unchanged by this plan.
+- **Paths are links on the phone without a modifier.** The phone's chat and terminal find paths with the desktop's `links::detect_links` and draw them underlined at all times, since the phone has no Ctrl. A single tap on a path opens it; a tap anywhere else does what it does today (focus the terminal and raise the keyboard, expand a tool card). A URL tap in the chat is unchanged; in the terminal, which took no tap on a URL before, a tap on a URL opens it.
 - **Resolution as the desktop's Ctrl+click.** A relative path resolves against the session's folders as `RootView::open_link_click` resolves it on a remote pane; an absolute path goes straight to the host-path messages. `stat_host_path` decides file or folder before anything is fetched; a missing path shows "Not on <host>: <path>" inline, never a fetch.
 - **Copies live in the app's Documents folder.** `daemon_client::remote_files_dir()` on iOS resolves to `Documents/`, keyed by host and path as the desktop's remote-files folder is, and `Info.plist` gains `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`, which make that folder the app's Files location. A fetched folder lands as a folder there.
 - **The fetch index is not in Documents.** Each copy's host, host path, size, modified time and last-opened time live in `fetched.json` in the client's config dir, beside `native-ui.json`, written atomically, so the Files app never shows it. A copy the user deleted in Files drops out of the index at the next read; the index never brings it back.
@@ -33,7 +33,7 @@ The phone reuses the desktop's host-path fetch (RT-1823) and the file manager's 
 - [x] The viewer page's highlighted text and rendered Markdown, the header and its stale line (RT-1900).
 - [x] The viewer page's images and the other-type card; `native-shot` views `phone-viewer` and `phone-viewer-md` (RT-1946; pinch to zoom stays RT-1931, Share RT-1901).
 - [x] The share sheet seam and Share in the viewer header, proved in the simulator by `tools/ios/sim-share.ps1`'s log (RT-1901; sharing a folder copy waits for RT-1956).
-- [ ] Tapped paths: links in the phone's chat and terminal, resolved and stat-ed, opening the viewer or the browser, and the inline not-on-host line.
+- [x] Tapped paths: links in the phone's chat and terminal, resolved and stat-ed, opening the viewer or the browser, and the inline not-on-host line (RT-1902).
 - [x] The browser page over RT-1361's listing, with paging and Show hidden; `native-shot` view `phone-browser` (RT-1955).
 - [x] Fetch folder from a long press on a folder row (RT-1956; Share of a folder copy is still open).
 - [ ] Hand check on the phone through TestFlight: a tapped file opens, a changed file refetches, an offline open says so, a copy shows in Files, Share saves to Files.

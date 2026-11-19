@@ -3856,6 +3856,25 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Opens a file link tapped in session `session_id`'s phone chat as a
+    /// tapped path: resolved as the desktop chat resolves it, then the host
+    /// says whether it names a file, which the viewer opens, or a folder,
+    /// which the browser opens. A `#fragment` is not passed.
+    pub fn phone_chat_file_link(
+        &mut self,
+        session_id: &str,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link = crate::link_menu_view::ChatFileLink {
+            path,
+            anchor: None,
+            menu: false,
+        };
+        self.chat_file_link(session_id, link, window, cx);
+    }
+
     fn answer_doc(&self, session_id: &str, answer_id: &str) -> Option<&MdDoc> {
         let chat = self.chat.sessions.get(session_id)?;
         chat.docs.get(answer_id).map(|answer| answer.doc.as_ref())
@@ -4006,7 +4025,7 @@ impl RootView {
             finals: BTreeSet::new(),
             min_run: PHONE_MIN_RUN,
             select: select.as_ref(),
-            link_route: LinkRoute::WebOnly,
+            link_route: LinkRoute::Phone,
             ..self.row_look(PHONE_PANE, session_id, cx)
         };
         let (main, strip) = match &self.chat.phone_refused {

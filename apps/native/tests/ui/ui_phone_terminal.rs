@@ -1503,3 +1503,370 @@ fn the_key_bar_fits_a_375_point_phone_with_the_keyboard_up(cx: &mut TestAppConte
         );
     }
 }
+
+// ── Tapped paths ───────────────────────────────────────────────────────────
+
+/// A file path on the host.
+const NOTES: &str = "/home/me/src/notes.txt";
+
+/// A phone on session `id`'s page over a host that serves host paths,
+/// browsing and folder fetches, everything sent so far drained.
+fn on_paths_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let copies = dir.path().join("copies");
+    h.root_update(move |root, _, _| root.set_remote_files_root(copies));
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(&[
+        protocol::FEATURE_HOST_PATHS,
+        protocol::FEATURE_HOST_BROWSE,
+        protocol::FEATURE_FOLDER_FETCH,
+    ]);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", REPO_ROOT)],
+    });
+    // `n` works in its repo's root, which its relative paths read against.
+    let mut sessions = listed();
+    sessions[1] = session("n")
+        .label("November")
+        .in_repo("r1")
+        .status("working")
+        .no_agent()
+        .cwd(REPO_ROOT)
+        .build();
+    host.send(DaemonMessage::Sessions { sessions });
+    h.click_on(&row(id));
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The phone on session `n`'s terminal, whose output is `lines`, one per
+/// row from the top.
+fn terminal_showing<'a>(cx: &'a mut TestAppContext, dir: &TestDir, lines: &[&str]) -> Harness<'a> {
+    let mut h = on_paths_page(cx, dir, "n");
+    let output = lines.iter().fold(String::new(), |mut output, line| {
+        output.push_str(line);
+        output.push_str("\r\n");
+        output
+    });
+    h.host(&saved_remote()).pty("n", output.as_bytes());
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    // A frame lays the grid out, so its cells have places.
+    h.bounds("phone-session-terminal");
+    h
+}
+
+/// The window point of the terminal's cell at `col`, `row`.
+fn terminal_cell(h: &mut Harness<'_>, col: usize, row: usize) -> Point<Pixels> {
+    h.root(|root, cx| {
+        root.phone_terminal_view()
+            .and_then(|view| view.read(cx).cell_center(col, row))
+    })
+    .expect("the terminal's grid is laid out")
+}
+
+/// A finger down and straight up on the terminal's cell at `col`, `row`.
+fn tap_cell(h: &mut Harness<'_>, col: usize, row: usize) {
+    let at = terminal_cell(h, col, row);
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+}
+
+/// The stats among `sent`: id and path.
+fn stats(sent: &[ClientMessage]) -> Vec<(String, String)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StatHostPath { id, path } => Some((id.clone(), path.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The paths of the file and folder fetches among `sent`.
+fn fetches(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchHostFile { path, .. }
+            | ClientMessage::FetchHostFolder { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The host answers the stat `id` with `kind`.
+fn answer_stat(h: &mut Harness<'_>, id: &str, kind: protocol::PathKind) {
+    h.host(&saved_remote()).send(DaemonMessage::PathStat {
+        id: id.to_owned(),
+        kind,
+        size: 5,
+        modified: Some(1_700_000_000_000),
+    });
+    h.cx.run_until_parked();
+}
+
+/// The one stat the phone sent since the last call, about `path`, answered
+/// `kind`; then everything sent after it.
+fn stat_answered(h: &mut Harness<'_>, path: &str, kind: protocol::PathKind) -> Vec<ClientMessage> {
+    let sent = h.host(&saved_remote()).sent();
+    let asked = stats(&sent);
+    assert_eq!(asked.len(), 1, "one stat: {sent:?}");
+    assert_eq!(asked[0].1, path, "the tapped path is asked about");
+    answer_stat(h, &asked[0].0, kind);
+    h.host(&saved_remote()).sent()
+}
+
+/// The fetch flow saved [`NOTES`]'s copy, as it hands it to the phone.
+fn notes_saved(h: &mut Harness<'_>, dir: &TestDir) {
+    let saved = rustling_tulip_native::PhoneFetched {
+        host: REMOTE.to_owned(),
+        host_path: NOTES.to_owned(),
+        local_path: format!("{REMOTE}/root/home/me/src/notes.txt"),
+        size: 5,
+        host_label: REMOTE.to_owned(),
+    };
+    let path = dir.path().join("copies").join(&saved.local_path);
+    std::fs::create_dir_all(path.parent().expect("a copy has a folder")).expect("make its folder");
+    std::fs::write(&path, "text\n").expect("write the copy");
+    h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
+}
+
+/// The phone's not-on-host line, while it shows.
+fn path_note(h: &mut Harness<'_>) -> Option<String> {
+    let mut note = None;
+    phone_update(h, |phone, _| note = phone.path_note().map(str::to_owned));
+    note
+}
+
+#[gpui::test]
+fn a_tap_on_a_file_path_in_the_terminal_opens_it_in_the_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = terminal_showing(cx, &dir, &[NOTES]);
+    clear_keyboard_calls();
+
+    tap_cell(&mut h, 3, 0);
+
+    assert_eq!(keyboard_calls(), [], "a tap on a link leaves the keyboard");
+    let after = stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    assert_eq!(fetches(&after), [NOTES], "the file is fetched: {after:?}");
+    notes_saved(&mut h, &dir);
+    assert!(drawn(&mut h, "phone-viewer"), "the viewer opens on it");
+}
+
+#[gpui::test]
+fn a_tap_on_a_folder_path_in_the_terminal_opens_the_browser_there(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = terminal_showing(cx, &dir, &["/home/me/src"]);
+
+    tap_cell(&mut h, 3, 0);
+
+    let after = stat_answered(&mut h, "/home/me/src", protocol::PathKind::Dir);
+    assert_eq!(
+        fetches(&after),
+        Vec::<String>::new(),
+        "nothing is fetched: {after:?}"
+    );
+    assert!(drawn(&mut h, "phone-browser"), "the browser opens");
+    let mut path = None;
+    phone_update(&mut h, |phone, _| {
+        path = phone.browser_path().map(str::to_owned);
+    });
+    assert_eq!(
+        path.as_deref(),
+        Some("/home/me/src"),
+        "at the tapped folder"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_path_not_on_the_host_says_so_on_the_session_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = "/home/me/src/gone.txt";
+    let mut h = terminal_showing(cx, &dir, &[gone, "", NOTES]);
+
+    tap_cell(&mut h, 3, 0);
+    let mut sent = h.host(&saved_remote()).sent();
+    let mut all = Vec::new();
+    while let Some((id, _)) = stats(&sent).first().cloned() {
+        answer_stat(&mut h, &id, protocol::PathKind::Missing);
+        all.extend(sent);
+        sent = h.host(&saved_remote()).sent();
+    }
+    all.extend(sent);
+
+    assert_eq!(
+        fetches(&all),
+        Vec::<String>::new(),
+        "nothing is fetched: {all:?}"
+    );
+    let note = format!("Not on {REMOTE}: {gone}");
+    assert_eq!(path_note(&mut h).as_deref(), Some(note.as_str()));
+    assert!(drawn(&mut h, "phone-path-note"), "the line shows");
+
+    clear_keyboard_calls();
+    tap_cell(&mut h, 3, 1);
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Raise),
+        "a tap off every link raises the keyboard as before"
+    );
+
+    tap_cell(&mut h, 3, 2);
+    stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    notes_saved(&mut h, &dir);
+    assert_eq!(path_note(&mut h), None, "a tap that opens clears the line");
+}
+
+#[gpui::test]
+fn the_not_on_host_line_clears_when_the_session_page_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = "/home/me/src/gone.txt";
+    let mut h = terminal_showing(cx, &dir, &[gone]);
+    tap_cell(&mut h, 3, 0);
+    stat_answered(&mut h, gone, protocol::PathKind::Missing);
+    assert!(path_note(&mut h).is_some(), "the line shows");
+
+    h.click_on("phone-session-back");
+
+    assert_eq!(path_note(&mut h), None, "closing the page clears the line");
+}
+
+#[gpui::test]
+fn a_tapped_file_link_in_the_phone_chat_asks_the_host_about_its_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_paths_page(cx, &dir, "a");
+
+    h.root_update(|root, window, cx| {
+        root.phone_chat_file_link("a", std::path::Path::new(NOTES), window, cx);
+    });
+
+    let sent = h.host(&saved_remote()).sent();
+    let asked: Vec<String> = stats(&sent).into_iter().map(|(_, path)| path).collect();
+    assert_eq!(asked, [NOTES], "the link's path is asked about: {sent:?}");
+}
+
+/// Where the specs' repo `r1` lives on the host.
+const REPO_ROOT: &str = "/home/me/r1";
+
+/// Answers every stat the phone sends, starting with those in `sent`, as
+/// missing, until it sends none; returns everything it sent meanwhile.
+fn all_missing(h: &mut Harness<'_>, mut sent: Vec<ClientMessage>) -> Vec<ClientMessage> {
+    let mut all = Vec::new();
+    while let Some((id, _)) = stats(&sent).first().cloned() {
+        answer_stat(h, &id, protocol::PathKind::Missing);
+        all.extend(sent);
+        sent = h.host(&saved_remote()).sent();
+    }
+    all.extend(sent);
+    all
+}
+
+/// Opens session `id`'s page as a notification's tap does.
+fn open_session_on(h: &mut Harness<'_>, id: &str) {
+    let mut opened = false;
+    phone_update(h, |phone, cx| opened = phone.open_session_on(id, cx));
+    assert!(opened, "Home lists {id}");
+}
+
+#[gpui::test]
+fn a_missing_path_still_resolving_names_itself_not_a_later_tap(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = "docs/gone.md";
+    let mut h = terminal_showing(cx, &dir, &[gone, "", NOTES]);
+
+    tap_cell(&mut h, 2, 0);
+    let first = h.host(&saved_remote()).sent();
+    assert!(
+        !stats(&first).is_empty(),
+        "the first tap is asked about: {first:?}"
+    );
+    tap_cell(&mut h, 3, 2);
+    stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    all_missing(&mut h, first);
+
+    let note = path_note(&mut h);
+    assert_eq!(note, Some(format!("Not on {REMOTE}: {gone}")));
+    assert!(
+        !note.is_some_and(|note| note.contains(NOTES)),
+        "the line never names the later tap"
+    );
+}
+
+#[gpui::test]
+fn a_not_on_host_line_stays_on_its_own_session_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = "/home/me/src/gone.txt";
+    let mut h = terminal_showing(cx, &dir, &[gone]);
+    tap_cell(&mut h, 3, 0);
+    stat_answered(&mut h, gone, protocol::PathKind::Missing);
+    assert!(path_note(&mut h).is_some(), "the line shows on n's page");
+
+    open_session_on(&mut h, "a");
+
+    assert_eq!(
+        path_note(&mut h),
+        None,
+        "another session's page has no line"
+    );
+    assert!(!drawn(&mut h, "phone-path-note"));
+}
+
+#[gpui::test]
+fn a_missing_answer_after_leaving_the_page_shows_no_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = "/home/me/src/gone.txt";
+    let mut h = terminal_showing(cx, &dir, &[gone]);
+    tap_cell(&mut h, 3, 0);
+    let pending = h.host(&saved_remote()).sent();
+    h.click_on("phone-session-back");
+    open_session_on(&mut h, "a");
+
+    all_missing(&mut h, pending);
+
+    assert_eq!(
+        path_note(&mut h),
+        None,
+        "the next session's page has no line"
+    );
+    assert!(!drawn(&mut h, "phone-path-note"));
+}
+
+#[gpui::test]
+fn a_tapped_folder_in_the_sessions_repo_opens_the_browser_and_fetches_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = terminal_showing(cx, &dir, &["src/"]);
+
+    tap_cell(&mut h, 1, 0);
+    let sent = h.host(&saved_remote()).sent();
+    let asked = stats(&sent);
+    assert!(!asked.is_empty(), "the folder is asked about: {sent:?}");
+    answer_stat(&mut h, &asked[0].0, protocol::PathKind::Dir);
+    let after = h.host(&saved_remote()).sent();
+
+    assert_eq!(
+        fetches(&after),
+        Vec::<String>::new(),
+        "nothing is fetched: {after:?}"
+    );
+    assert!(
+        !after
+            .iter()
+            .any(|msg| wire_types(std::slice::from_ref(msg))[0].starts_with("fetch")),
+        "no fetch of any kind: {after:?}"
+    );
+    let mut path = None;
+    phone_update(&mut h, |phone, _| {
+        path = phone.browser_path().map(str::to_owned);
+    });
+    assert_eq!(
+        path,
+        Some(format!("{REPO_ROOT}/src")),
+        "the browser opens at the folder"
+    );
+}

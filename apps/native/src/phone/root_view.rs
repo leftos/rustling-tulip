@@ -153,6 +153,10 @@ pub struct PhoneRoot {
     /// Why the last tap could not open its session, until the next
     /// navigation or tap.
     pub(super) open_note: Option<String>,
+    /// Why the last tapped path did not open (`Not on {host}: {path}`), with
+    /// the session (host and id) whose page it was tapped on, until a tap
+    /// opens something or another page shows.
+    path_note: Option<((HostKey, String), String)>,
     /// The copies the phone keeps of fetched files.
     pub(super) fetched: Index,
     /// Where the index is saved; `None` keeps it in memory only.
@@ -189,22 +193,7 @@ impl PhoneRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let root_changed = cx.observe(&root, |this, root, cx| {
-            this.hosts.root_changed(root.read(cx));
-            this.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
-            this.try_open_pending(cx);
-            this.forget_gone_session(cx);
-            this.keep_draft_clear_confirm(cx);
-            this.take_replies(cx);
-            this.sync_sheet(cx);
-            this.push_changed(cx);
-            this.sweep_delivered(cx);
-            this.take_kept_answers(cx);
-            this.take_browse_answers(cx);
-            this.take_folder_fetches(cx);
-            this.take_fetched(cx);
-            cx.notify();
-        });
+        let root_changed = cx.observe(&root, |this, root, cx| this.on_root_changed(&root, cx));
         if platform.supported() {
             Self::learn_token(&platform, cx);
         }
@@ -268,6 +257,7 @@ impl PhoneRoot {
             sweeps: 0,
             pending_open: None,
             open_note: None,
+            path_note: None,
             fetched,
             fetched_path,
             storage_error: None,
@@ -283,6 +273,26 @@ impl PhoneRoot {
         this
     }
 
+    /// The root view changed: the phone takes what it queued and keeps its
+    /// pages in step with it, then redraws.
+    fn on_root_changed(&mut self, root: &Entity<RootView>, cx: &mut Context<Self>) {
+        self.hosts.root_changed(root.read(cx));
+        self.keep_the_add_form(hosts_view::any_host_open(root.read(cx)), cx);
+        self.try_open_pending(cx);
+        self.forget_gone_session(cx);
+        self.keep_draft_clear_confirm(cx);
+        self.take_replies(cx);
+        self.sync_sheet(cx);
+        self.push_changed(cx);
+        self.sweep_delivered(cx);
+        self.take_kept_answers(cx);
+        self.take_browse_answers(cx);
+        self.take_folder_fetches(cx);
+        self.take_fetched(cx);
+        self.take_phone_opens(cx);
+        cx.notify();
+    }
+
     /// Records the root's queued saved fetches in the index, opened now, and
     /// writes it once; the last one opens in the viewer page.
     fn take_fetched(&mut self, cx: &mut Context<Self>) {
@@ -290,6 +300,8 @@ impl PhoneRoot {
         let Some(last) = saved.last().cloned() else {
             return;
         };
+        // A copy opening is a tap that opened something.
+        self.path_note = None;
         let now = now_ms();
         for saved in saved {
             // A copy fetched again because it changed keeps the modified
@@ -677,6 +689,48 @@ impl PhoneRoot {
         self.open_note.as_deref()
     }
 
+    /// Why the last path tapped in the session's chat or terminal did not
+    /// open, while the session page says so.
+    #[must_use]
+    pub fn path_note(&self) -> Option<&str> {
+        self.path_note
+            .as_ref()
+            .filter(|(session, _)| self.shown.as_ref() == Some(session))
+            .map(|(_, note)| note.as_str())
+    }
+
+    /// What the root's tapped paths opened, each acted on only while the
+    /// page of the session it was tapped in shows: a folder opens the
+    /// browser at it, and a path not on its host leaves that page's line.
+    fn take_phone_opens(&mut self, cx: &mut Context<Self>) {
+        let opens = self.root.update(cx, |root, _| root.take_phone_opens());
+        for open in opens {
+            let (crate::PhoneOpen::Folder { host, session, .. }
+            | crate::PhoneOpen::Missing { host, session, .. }) = &open;
+            let Some(shown) = self
+                .shown
+                .clone()
+                .filter(|(shown_host, id)| shown_host == host && session.as_ref() == Some(id))
+            else {
+                tracing::debug!(
+                    ?session,
+                    "phone: a tapped path's session is not shown; dropped"
+                );
+                continue;
+            };
+            match open {
+                crate::PhoneOpen::Folder { host, path, .. } => {
+                    self.path_note = None;
+                    self.open_browser(host, path, cx);
+                }
+                crate::PhoneOpen::Missing { note, .. } => {
+                    self.path_note = Some((shown, note));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     /// A tap on a notification for its user info's session: remembered until
     /// that host lists it, replacing any tap before it.
     fn tap(&mut self, tap: push::Tap, cx: &mut Context<Self>) {
@@ -820,6 +874,7 @@ impl PhoneRoot {
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
+        self.path_note = None;
         self.close_viewer(cx);
         self.close_browser(cx);
         self.settings = None;
@@ -1082,6 +1137,7 @@ impl PhoneRoot {
     /// Back from the shown session to Home; its chat unloads.
     pub(super) fn close_session(&mut self, cx: &mut Context<Self>) {
         self.forget_pending_open();
+        self.path_note = None;
         self.shown = None;
         self.page = None;
         self.draft_clear_asking = None;
@@ -1107,6 +1163,7 @@ impl PhoneRoot {
         if gone {
             tracing::debug!("phone: the shown session is gone; back to Home");
             self.shown = None;
+            self.path_note = None;
             self.page = None;
             self.composer_dock = super::composer::Dock::None;
             self.prompt_sheet = SheetState::default();

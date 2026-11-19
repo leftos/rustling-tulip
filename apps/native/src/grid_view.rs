@@ -1348,7 +1348,10 @@ impl RootView {
         self.phone_terminal = Some(session.clone());
         self.open_session_slot(&session, window, cx);
         if let Some(view) = self.phone_terminal_view() {
-            view.update(cx, |pane, _| pane.claim_next_size());
+            view.update(cx, |pane, _| {
+                pane.claim_next_size();
+                pane.set_phone_links();
+            });
         }
         self.update_pane_roles(cx);
     }

@@ -268,9 +268,15 @@ impl RootView {
         source: &LinkSource<'_>,
         cx: &mut Context<Self>,
     ) {
+        // On the phone the tap travels with its own fetch, so its outcome
+        // names its own path and session page.
+        let tap = (self.shape == crate::RootShape::Phone).then(|| file_fetch::PhoneTap {
+            session: source.session.map(str::to_owned),
+            path: link.target.clone(),
+        });
         match source.folders {
-            LinkFolders::Session => self.fetch_session_link(link, source, cx),
-            LinkFolders::Run(dirs) => self.fetch_run_link(link, source, dirs, cx),
+            LinkFolders::Session => self.fetch_session_link(link, source, tap, cx),
+            LinkFolders::Run(dirs) => self.fetch_run_link(link, source, dirs, tap, cx),
         }
     }
 
@@ -283,6 +289,7 @@ impl RootView {
         link: &TerminalLink,
         source: &LinkSource<'_>,
         dirs: &[String],
+        tap: Option<file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) {
         let mut readings = self.run_link_readings(source.host, &link.candidates, dirs);
@@ -303,7 +310,7 @@ impl RootView {
         for reading in &mut readings {
             reading.action = source.action;
         }
-        self.start_link_readings(readings, source.host, cx);
+        self.start_link_readings(readings, source.host, tap, cx);
     }
 
     /// The readings of a link's `candidates` on `host` under a dispatch
@@ -371,6 +378,7 @@ impl RootView {
         &mut self,
         link: &TerminalLink,
         source: &LinkSource<'_>,
+        tap: Option<file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) {
         let (host, session, action) = (source.host, source.session, source.action);
@@ -404,6 +412,7 @@ impl RootView {
                     cwd,
                     own_roots,
                     action,
+                    tap,
                 },
                 session,
                 cx,
@@ -411,7 +420,9 @@ impl RootView {
             return;
         }
         if readings.is_empty() {
-            if self.start_host_readings(host, &link.candidates, cwd.as_deref(), action, cx) {
+            let outside = self.host_link_readings(host, &link.candidates, cwd.as_deref(), action);
+            if !outside.is_empty() {
+                self.start_link_readings(outside, host, tap, cx);
                 return;
             }
             tracing::warn!(
@@ -430,7 +441,7 @@ impl RootView {
         for reading in &mut readings {
             reading.action = action;
         }
-        self.start_link_readings(readings, host, cx);
+        self.start_link_readings(readings, host, tap, cx);
     }
 
     /// Records a link's ask `ask` under a new id, asks `host` for its
@@ -468,12 +479,14 @@ impl RootView {
         &mut self,
         readings: Vec<FetchRequest>,
         host: &HostKey,
+        tap: Option<file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) {
         if self.host_sends_folders(host) {
             let Some((id, first)) = self.fetches.begin_stat(host.clone(), readings) else {
                 return;
             };
+            self.fetches.tap_stat(&id, tap);
             // The toast shows at once, keyed by the stat: the file fetch
             // updates it in place, and a folder's toast or a warning
             // replaces it.
@@ -535,7 +548,9 @@ impl RootView {
         );
         if readings.is_empty() {
             let (host, cwd) = (ask.host.clone(), ask.cwd.as_deref());
-            if self.start_host_readings(&host, &ask.candidates, cwd, ask.action, cx) {
+            let outside = self.host_link_readings(&host, &ask.candidates, cwd, ask.action);
+            if !outside.is_empty() {
+                self.start_link_readings(outside, &host, ask.tap, cx);
                 return true;
             }
             let label = self.host_label_of(&ask.host);
@@ -561,7 +576,7 @@ impl RootView {
         for reading in &mut readings {
             reading.action = ask.action;
         }
-        self.start_link_readings(readings, &ask.host, cx);
+        self.start_link_readings(readings, &ask.host, ask.tap, cx);
         true
     }
 
@@ -584,30 +599,27 @@ impl RootView {
     }
 
     /// A link outside every session folder on `host`: when the host serves
-    /// absolute paths, fetches the link's host-path readings as `action`
-    /// asks. `false` when the host does not serve them or the link has no
+    /// absolute paths, the link's host-path readings, opening as `action`
+    /// asks. Empty when the host does not serve them or the link has no
     /// such reading, which leaves the refusal to the caller.
-    fn start_host_readings(
-        &mut self,
+    fn host_link_readings(
+        &self,
         host: &HostKey,
         candidates: &[crate::links::TerminalLinkCandidate],
         cwd: Option<&str>,
         action: LinkAction,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Vec<FetchRequest> {
         if !self.host_serves_paths(host) {
-            return false;
+            return Vec::new();
         }
         let mut readings = fetch_link::host_readings(host, candidates, cwd);
-        if readings.is_empty() {
-            return false;
-        }
         for reading in &mut readings {
             reading.action = action;
         }
-        tracing::info!(host = ?host, "fetching a link outside every session folder by its host path");
-        self.start_link_readings(readings, host, cx);
-        true
+        if !readings.is_empty() {
+            tracing::info!(host = ?host, "fetching a link outside every session folder by its host path");
+        }
+        readings
     }
 
     /// Whether `host`'s daemon fetches any absolute path.
@@ -703,38 +715,18 @@ impl RootView {
     }
 
     /// The host said what the stat `id`'s reading names: a folder is
-    /// fetched as one, a missing path moves on to the next reading, and
-    /// anything else is fetched as a file. Returns whether `id` was a stat.
+    /// fetched as one (on the phone, a host path opens the browser at it), a
+    /// missing path moves on to the next reading (on the phone, the last one
+    /// says the path is not on the host), and anything else is fetched as a
+    /// file. Returns whether `id` was a stat.
     fn on_path_stat(&mut self, id: &str, kind: PathKind, cx: &mut Context<Self>) -> bool {
         let Some(stat) = self.fetches.get_stat(id) else {
             return false;
         };
         let host = stat.host().clone();
         match kind {
-            PathKind::Dir => {
-                let Some(stat) = self.fetches.take_stat(id) else {
-                    return true;
-                };
-                // The folder's own toast, or its refusal, takes over.
-                self.dismiss_toast_key(id, cx);
-                if let Err(refusal) = self.try_start_folder_fetch(stat.reading().clone(), cx) {
-                    self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
-                }
-            }
-            PathKind::Missing => {
-                if let Some(next) = self.fetches.next_stat(id) {
-                    self.send_stat(&host, id.to_owned(), &next);
-                    return true;
-                }
-                let Some(stat) = self.fetches.take_stat(id) else {
-                    return true;
-                };
-                tracing::info!(
-                    id,
-                    "no reading of the link is on the host; fetching as files"
-                );
-                self.start_files_or_warn(stat.readings().to_vec(), id, cx);
-            }
+            PathKind::Dir => self.on_stat_dir(id, &host, cx),
+            PathKind::Missing => self.on_stat_missing(id, &host, cx),
             PathKind::File | PathKind::Other | PathKind::Unknown => {
                 let Some(stat) = self.fetches.take_stat(id) else {
                     return true;
@@ -745,6 +737,133 @@ impl RootView {
             }
         }
         true
+    }
+
+    /// The host said the stat `id`'s reading on `host` is a folder: the
+    /// phone opens its browser there ([`Self::phone_folder_stat`]); the
+    /// desktop fetches it as one.
+    fn on_stat_dir(&mut self, id: &str, host: &HostKey, cx: &mut Context<Self>) {
+        let Some(stat) = self.fetches.take_stat(id) else {
+            return;
+        };
+        // The folder's own toast, or its refusal, takes over.
+        self.dismiss_toast_key(id, cx);
+        if self.phone_folder_stat(host, &stat, cx) {
+            return;
+        }
+        if let Err(refusal) = self.try_start_folder_fetch(stat.reading().clone(), cx) {
+            self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+        }
+    }
+
+    /// The host said the stat `id`'s reading on `host` is missing: the next
+    /// reading is asked about; with none left, the phone says the path is
+    /// not on the host, and the desktop fetches the readings as files.
+    fn on_stat_missing(&mut self, id: &str, host: &HostKey, cx: &mut Context<Self>) {
+        if let Some(next) = self.fetches.next_stat(id) {
+            self.send_stat(host, id.to_owned(), &next);
+            return;
+        }
+        let Some(stat) = self.fetches.take_stat(id) else {
+            return;
+        };
+        if self.shape == crate::RootShape::Phone {
+            self.dismiss_toast_key(id, cx);
+            self.phone_not_on_host(host, &stat, cx);
+            return;
+        }
+        tracing::info!(
+            id,
+            "no reading of the link is on the host; fetching as files"
+        );
+        self.start_files_or_warn(stat.readings().to_vec(), id, cx);
+    }
+
+    /// On the phone, the host says the reading `stat` asked about is a
+    /// folder: the browser opens at its absolute path on the host (a
+    /// session folder's reading joined to its root), and when none can be
+    /// built the session page says the path is not on the host. A tap never
+    /// fetches a folder whole. Returns whether the phone took the answer;
+    /// `false` on the desktop.
+    fn phone_folder_stat(
+        &mut self,
+        host: &HostKey,
+        stat: &file_fetch::PendingStat,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.shape != crate::RootShape::Phone {
+            return false;
+        }
+        let Some(path) = self.reading_host_path(host, stat.reading()) else {
+            self.phone_not_on_host(host, stat, cx);
+            return true;
+        };
+        tracing::debug!(%path, "phone: a tapped path is a folder; browsing it");
+        let open = crate::PhoneOpen::Folder {
+            host: host.clone(),
+            session: stat.tap().and_then(|tap| tap.session.clone()),
+            path,
+        };
+        self.phone_open(open, cx);
+        true
+    }
+
+    /// The absolute path on `host` that `reading` names: a host path as it
+    /// is, else its rel path joined to its worktree, or to its registered
+    /// repo's root. `None` when its repo is not one `host` lists.
+    fn reading_host_path(&self, host: &HostKey, reading: &FetchRequest) -> Option<String> {
+        if reading.host_path {
+            return Some(reading.rel_path.clone());
+        }
+        let root = match reading
+            .worktree_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+        {
+            Some(worktree) => worktree.clone(),
+            None => self
+                .sidebar
+                .repos_of(host)
+                .iter()
+                .find(|repo| repo.id == reading.repo_id)?
+                .path
+                .clone(),
+        };
+        let path = reading
+            .rel_path
+            .split(['/', '\\'])
+            .filter(|segment| !segment.is_empty())
+            .fold(root, |path, segment| {
+                crate::phone::browser::child_of(None, &path, segment)
+            });
+        Some(path)
+    }
+
+    /// On the phone, no reading of the tapped path `stat` asked about is on
+    /// `host`: nothing is fetched, and the page of the session it was tapped
+    /// in says so, naming the path as tapped (else the first reading).
+    fn phone_not_on_host(
+        &mut self,
+        host: &HostKey,
+        stat: &file_fetch::PendingStat,
+        cx: &mut Context<Self>,
+    ) {
+        let tap = stat.tap();
+        let path = tap
+            .map(|tap| tap.path.clone())
+            .or_else(|| {
+                stat.readings()
+                    .first()
+                    .map(|reading| reading.rel_path.clone())
+            })
+            .unwrap_or_default();
+        tracing::info!(%path, "phone: no reading of a tapped path is on the host");
+        let open = crate::PhoneOpen::Missing {
+            host: host.clone(),
+            session: tap.and_then(|tap| tap.session.clone()),
+            note: format!("Not on {}: {path}", self.host_label_of(host)),
+        };
+        self.phone_open(open, cx);
     }
 
     /// [`Self::start_file_flow`] over `readings`; when none names a file, a
