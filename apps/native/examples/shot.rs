@@ -1653,6 +1653,9 @@ fn start_phone_home_shot(
     // The phone opens no This PC connection: "box" takes the first pair.
     let remote = start_box_daemon(shot.view, now, &failure)?;
     let deps = deps(shot.view, remote, None, &shot.ui_dir);
+    // The phone's root sweeps its copies folder as it opens: point it at the
+    // shot's own folder first, never the real one.
+    let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
     let window_size = shot.view.window_size();
     let (width, height) = window_size;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
@@ -1667,6 +1670,7 @@ fn start_phone_home_shot(
             move |window, cx| {
                 show_cloaked(window, window_size);
                 let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
+                root.update(cx, |root, _| root.set_remote_files_root(copies));
                 cx.new(|cx| {
                     PhoneRoot::new(root, Arc::new(UnsupportedPlatform), window, cx)
                         .with_insets_override(Some(phone_insets()))
