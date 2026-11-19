@@ -145,6 +145,78 @@ fn ctrl_click_on_a_scheme_less_web_address_opens_it_as_a_url(cx: &mut TestAppCon
     assert_eq!(asked, 0, "a web address fetches or stats no path");
 }
 
+/// The Linear context of a host whose workspace `acme` has the teams `keys`.
+fn linear(keys: &[&str], key_configured: bool) -> DaemonMessage {
+    DaemonMessage::LinearContext {
+        team_keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        workspace: Some("acme".to_owned()),
+        key_configured,
+    }
+}
+
+#[gpui::test]
+fn an_identifier_of_a_listed_team_is_underlined_without_ctrl(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    h.pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p1", 5, 0);
+    h.hover(on, Modifiers::none());
+    assert_eq!(h.underlined_links("p1"), ["RT-12"]);
+    assert_eq!(h.hovered_link("p1"), None, "no Ctrl hover without Ctrl");
+}
+
+#[gpui::test]
+fn an_identifier_is_not_underlined_without_a_configured_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], false));
+    h.pty("s1", b"see RT-12 now");
+    assert_eq!(h.underlined_links("p1"), Vec::<String>::new());
+    let on = h.cell_center("p1", 5, 0);
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [], "no link to open");
+}
+
+#[gpui::test]
+fn ctrl_click_on_an_identifier_opens_its_linear_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    h.pty("s1", b"see RT-12 now");
+    let on = h.cell_center("p1", 5, 0);
+    h.click(on, Modifiers::none());
+    assert_eq!(h.opened(), [], "a plain click opens nothing");
+    h.hover(on, ctrl());
+    assert!(drawn(&mut h, OPEN_ONLY), "the tip names the open only");
+    h.click(on, ctrl());
+    assert!(!h.in_model("link-menu"), "an issue opens no menu");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(
+            "https://linear.app/acme/issue/RT-12".to_owned()
+        )]
+    );
+}
+
+#[gpui::test]
+fn each_hosts_team_keys_apply_only_to_its_own_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1").build();
+    let mut h = support::remote_in_pane_with_features(cx, &dir, &json!({}), &["r1"], s1, &[]);
+    h.sent();
+    h.send(linear(&["RT"], true));
+    h.host(&saved_remote()).send(linear(&["OPS"], true));
+    h.pty("a1", b"RT-1 OPS-2");
+    h.host(&saved_remote()).pty("s1", b"RT-1 OPS-2");
+    assert_eq!(h.underlined_links("p1"), ["RT-1"], "This PC's teams");
+    assert_eq!(
+        h.underlined_links("p2"),
+        ["OPS-2"],
+        "the remote host's teams"
+    );
+}
+
 #[gpui::test]
 fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppContext) {
     let dir = TestDir::new();

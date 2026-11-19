@@ -587,9 +587,11 @@ impl RootView {
             return;
         };
         let request_id = self.retries.start(target);
+        let issues = self.issue_context_of(&target.host);
         let mut attached = false;
         for slot in self.panes.values_mut().filter(|slot| slot.shows(target)) {
             slot.view.update(cx, |pane, cx| {
+                pane.set_issue_context(issues.clone(), cx);
                 pane.attach(&session, self.sidebar.agents(&target.host), cx);
             });
             slot.attached = true;

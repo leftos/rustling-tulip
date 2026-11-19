@@ -30,7 +30,7 @@ use crate::clipboard_image;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
-use crate::links::{LinkKind, LinkSegment, TerminalLink};
+use crate::links::{IssueContext, LinkKind, LinkSegment, TerminalLink};
 use crate::mouse::{self, CellSize, ClickThrough, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open::{self, LinkAction};
@@ -137,6 +137,8 @@ pub struct TerminalPane {
     family: Option<SharedString>,
     /// The folders the session's relative link paths resolve against.
     base_dirs: Vec<String>,
+    /// The pane's host's Linear context, which issue links are read against.
+    issues: IssueContext,
     /// Link mode and the link under the mouse.
     links: LinkHover,
     /// Bumped whenever the terminal's content may have changed: output,
@@ -160,11 +162,18 @@ struct LinkHover {
     active: bool,
     cell: Option<(usize, usize)>,
     cache: RefCell<Option<CachedLinks>>,
+    /// The issue links on screen, always underlined, keyed by the content
+    /// generation and the display offset they were read at.
+    underlined: RefCell<Option<UnderlinedIssues>>,
     /// The spaced readings found to exist, newest last, kept across cache
     /// rebuilds so that new output elsewhere, or a hover on another row of
     /// the same path, keeps the widened link.
     confirmed: Vec<Confirmed>,
 }
+
+/// The issue links on screen and the content generation and display offset
+/// they were read at.
+type UnderlinedIssues = ((u64, usize), Vec<TerminalLink>);
 
 /// How many confirmed readings a pane keeps.
 const CONFIRMED_LIMIT: usize = 16;
@@ -659,6 +668,7 @@ impl TerminalPane {
             font: font.normalized(),
             family: None,
             base_dirs: Vec::new(),
+            issues: IssueContext::default(),
             links: LinkHover::default(),
             content_generation: 0,
             palette: TerminalPalette::default(),
@@ -1121,6 +1131,16 @@ impl TerminalPane {
     /// The terminal's content may read differently now.
     fn content_changed(&mut self) {
         self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
+    /// Takes in the Linear context of the pane's host; a changed one reads
+    /// every link again, since its issue links may differ.
+    pub(crate) fn set_issue_context(&mut self, context: IssueContext, cx: &mut Context<Self>) {
+        if self.issues != context {
+            self.issues = context;
+            self.content_changed();
+            cx.notify();
+        }
     }
 
     /// A `LoadScrollback` for the attached session went out under
@@ -2159,7 +2179,7 @@ impl TerminalPane {
             let (links, rows) = self
                 .term
                 .link_window(line)
-                .map(|window| (window.links(), window.row_texts()))
+                .map(|window| (window.links(&self.issues), window.row_texts()))
                 .unwrap_or_default();
             *cache = Some(CachedLinks::rebuilt(
                 key,
@@ -2201,6 +2221,36 @@ impl TerminalPane {
             self.term.display_offset(),
             self.term.size(),
         ))
+    }
+
+    /// The issue links on screen, which are always underlined, Ctrl held or
+    /// not. They are read again only once the terminal's content, the host's
+    /// Linear context or the scroll changed.
+    pub fn underlined_issue_links(&self) -> Vec<TerminalLink> {
+        self.with_underlined(<[TerminalLink]>::to_vec)
+    }
+
+    /// The viewport cells of every issue link on screen, row by row.
+    fn underlined_issue_cells(&self) -> Vec<(usize, Range<usize>)> {
+        let (offset, size) = (self.term.display_offset(), self.term.size());
+        self.with_underlined(|links| {
+            links
+                .iter()
+                .flat_map(|link| link_cells(link, offset, size))
+                .collect()
+        })
+    }
+
+    /// `read` over the issue links on screen, read again first when the
+    /// content, the context or the scroll changed since they were last read.
+    fn with_underlined<R>(&self, read: impl FnOnce(&[TerminalLink]) -> R) -> R {
+        let key = (self.content_generation, self.term.display_offset());
+        let mut cache = self.links.underlined.borrow_mut();
+        if cache.as_ref().is_none_or(|(at, _)| *at != key) {
+            let links = self.term.visible_link_window().issue_links(&self.issues);
+            *cache = Some((key, links));
+        }
+        read(cache.as_ref().map_or(&[], |(_, links)| links.as_slice()))
     }
 
     /// Reports motion to `position`, once per cell entered.
@@ -2572,10 +2622,17 @@ impl Render for TerminalPane {
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
-                let (snap, marked, link, relaid) = view.update(cx, |v, _| {
+                let (snap, marked, link, issues, relaid) = view.update(cx, |v, _| {
                     let relaid = v.lay_out(bounds, &m);
                     let snap = v.term.snapshot();
-                    (snap, v.marked.clone(), v.hovered_link_cells(), relaid)
+                    let issues = v.underlined_issue_cells();
+                    (
+                        snap,
+                        v.marked.clone(),
+                        v.hovered_link_cells(),
+                        issues,
+                        relaid,
+                    )
                 });
                 // The gutter was built before this layout, from the last one:
                 // a resize moves the anchors and a new cell height the rows,
@@ -2586,11 +2643,16 @@ impl Render for TerminalPane {
                     window.defer(cx, move |_, cx| pane.update(cx, |_, cx| cx.notify()));
                 }
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-                (m, snap, marked, link, hitbox)
+                // Issue links are underlined always, the hovered link only
+                // under Ctrl; only the latter takes the pointing hand.
+                let pointing = link.is_some();
+                let mut underline = link.unwrap_or_default();
+                underline.extend(issues);
+                (m, snap, marked, pointing, underline, hitbox)
             },
-            move |bounds, (m, snap, marked, link, hitbox), window, cx| {
+            move |bounds, (m, snap, marked, pointing, underline, hitbox), window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
-                if link.is_some() {
+                if pointing {
                     window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
                 }
                 // Window-wide, so a drag keeps going once the pointer leaves
@@ -2612,14 +2674,7 @@ impl Render for TerminalPane {
                     }
                 });
                 window.paint_quad(fill(bounds, to_rgba(grid_fill)));
-                paint_grid(
-                    bounds,
-                    &snap,
-                    link.as_deref().unwrap_or_default(),
-                    &m,
-                    window,
-                    cx,
-                );
+                paint_grid(bounds, &snap, &underline, &m, window, cx);
                 if let Some(text) = marked {
                     paint_preedit(bounds.origin, &snap, &text, &m, window, cx);
                 }
@@ -2896,7 +2951,8 @@ fn link_cells(
         .collect()
 }
 
-/// `link` is the hovered link's cells, underlined after the text.
+/// `link` is the cells underlined after the text: the hovered link's and
+/// every issue link's on screen.
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,

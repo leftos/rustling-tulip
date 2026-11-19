@@ -22,6 +22,9 @@ use regex::Regex;
 pub enum LinkKind {
     Url,
     Path,
+    /// A Linear issue: a bare identifier of one of the host's teams, or an
+    /// `http(s)://linear.app/{workspace}/issue/{ID}` URL.
+    Issue,
 }
 
 /// One grid row as the detector sees it.
@@ -284,7 +287,7 @@ fn slice_columns(row: &TerminalRow, start: usize, end: usize, cols: usize) -> Ve
 pub fn tip_text(kind: LinkKind) -> &'static str {
     match kind {
         LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click for options",
-        LinkKind::Url => "Ctrl+click to open",
+        LinkKind::Url | LinkKind::Issue => "Ctrl+click to open",
     }
 }
 
@@ -377,6 +380,236 @@ fn shares_a_cell(a: &TerminalLink, b: &TerminalLink) -> bool {
                 && second.start_column < first.end_column
         })
     })
+}
+
+/// The Linear context issue links are read against: the team keys a bare
+/// identifier must carry and the workspace its web address is built from.
+/// A bare identifier counts only when the host has a key configured and
+/// knows its workspace; a `linear.app` issue URL counts whatever the context.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueContext {
+    team_keys: Vec<String>,
+    workspace: Option<String>,
+}
+
+impl IssueContext {
+    /// The context a host's `LinearContext` describes.
+    #[must_use]
+    pub fn new(team_keys: &[String], workspace: Option<&str>, key_configured: bool) -> Self {
+        let workspace = workspace
+            .filter(|workspace| !workspace.is_empty())
+            .map(str::to_owned);
+        let team_keys = if key_configured && workspace.is_some() {
+            team_keys.to_vec()
+        } else {
+            Vec::new()
+        };
+        Self {
+            team_keys,
+            workspace,
+        }
+    }
+
+    /// The web address bare `identifier` opens, when its team is one of the
+    /// context's.
+    fn bare_address(&self, identifier: &str) -> Option<String> {
+        let key = team_key(identifier)?;
+        let workspace = self.workspace.as_deref()?;
+        self.team_keys
+            .iter()
+            .any(|team| team == key)
+            .then(|| issue_web_address(workspace, identifier))
+    }
+}
+
+/// The web address of issue `identifier` in Linear workspace `workspace`.
+#[must_use]
+pub fn issue_web_address(workspace: &str, identifier: &str) -> String {
+    format!("https://linear.app/{workspace}/issue/{identifier}")
+}
+
+/// Every Linear issue link in `rows`, grouped into logical lines as
+/// [`detect_window_links`] groups them, `edges` as it takes them: each
+/// `http(s)://linear.app/{workspace}/issue/{ID}` URL, which opens as
+/// written, and each bare identifier of one of `context`'s teams, which opens
+/// its web address. The caller merges them with the other links through
+/// [`merge_issue_links`].
+#[must_use]
+pub fn issue_links(
+    rows: &[TerminalRow],
+    cols: usize,
+    edges: &[Option<usize>],
+    context: &IssueContext,
+) -> Vec<TerminalLink> {
+    let (groups, _) = group_rows_with(
+        rows,
+        cols,
+        &mut |at| edges.get(at).copied().flatten(),
+        false,
+    );
+    groups
+        .iter()
+        .flat_map(|group| issue_segment_links(group, context))
+        .collect()
+}
+
+/// `detected` with `issues` merged in: a `linear.app` issue URL takes the
+/// place of the URL link the detector read it as, and a bare identifier
+/// sharing a cell with a detected link, as in `docs/RT-12/notes.md`, is left
+/// out, so the longer link keeps its cells.
+#[must_use]
+pub fn merge_issue_links(
+    mut detected: Vec<TerminalLink>,
+    issues: Vec<TerminalLink>,
+) -> Vec<TerminalLink> {
+    let (urls, bare): (Vec<TerminalLink>, Vec<TerminalLink>) = issues
+        .into_iter()
+        .partition(|issue| issue.text.contains("://"));
+    detected.retain(|link| !urls.iter().any(|url| shares_a_cell(url, link)));
+    let kept: Vec<TerminalLink> = bare
+        .into_iter()
+        .filter(|issue| !detected.iter().any(|link| shares_a_cell(link, issue)))
+        .collect();
+    detected.extend(urls);
+    detected.extend(kept);
+    detected
+}
+
+/// The issue links of one logical line: its `linear.app` issue URLs, then
+/// the bare identifiers outside them.
+fn issue_segment_links(segments: &[Segment], context: &IssueContext) -> Vec<TerminalLink> {
+    let text: String = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect();
+    let indices = CharIndices::of(&text);
+    let mut links: Vec<TerminalLink> = Vec::new();
+    for found in URL_PATTERN.find_iter(&text) {
+        let trimmed = trim_link_candidate(found.as_str());
+        if is_issue_url(&trimmed) {
+            let start_index = indices.at(found.start());
+            links.push(build_link(LinkKind::Issue, start_index, &trimmed, segments));
+        }
+    }
+    for (start, identifier) in bare_identifiers(&text) {
+        let start_index = indices.at(start);
+        let end_index = start_index + chars_len(identifier);
+        let Some(address) = context.bare_address(identifier) else {
+            continue;
+        };
+        if overlaps_existing_link(start_index, end_index, &links) {
+            continue;
+        }
+        let mut link = build_link(LinkKind::Issue, start_index, identifier, segments);
+        link.target.clone_from(&address);
+        link.candidates = vec![TerminalLinkCandidate {
+            path: address,
+            line: None,
+            column: None,
+            suffix: None,
+        }];
+        links.push(link);
+    }
+    links.sort_by_key(|link| link.start_index);
+    links
+}
+
+/// The text before the workspace in a Linear issue URL.
+const ISSUE_URL_HOST: &str = "linear.app/";
+/// The text between the workspace and the identifier in a Linear issue URL.
+const ISSUE_URL_PATH: &str = "/issue/";
+
+/// Whether `url` is an `http(s)://linear.app/{workspace}/issue/{ID}` address,
+/// with anything after the identifier past a `/`, `?` or `#`.
+fn is_issue_url(url: &str) -> bool {
+    let rest = ["https://", "http://"]
+        .iter()
+        .filter(|scheme| starts_with_ignore_case(url, scheme))
+        .find_map(|scheme| url.get(scheme.len()..));
+    let Some(rest) = rest.and_then(|rest| rest.strip_prefix(ISSUE_URL_HOST)) else {
+        return false;
+    };
+    let workspace = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
+        .count();
+    let Some(path) = rest.get(workspace..).filter(|_| workspace > 0) else {
+        return false;
+    };
+    let Some(identifier) = path.strip_prefix(ISSUE_URL_PATH) else {
+        return false;
+    };
+    identifier_at(identifier, 0).is_some_and(|end| {
+        identifier
+            .get(end..)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(['/', '?', '#']))
+    })
+}
+
+// The identifier matcher below mirrors `identifiers_in` in
+// `crates/daemon/src/linear.rs`, so the client links exactly the identifiers
+// the daemon would fetch; the two test lists pin the same look-alikes.
+
+/// The team key of `identifier`, the text before its `-`.
+fn team_key(identifier: &str) -> Option<&str> {
+    identifier.split_once('-').map(|(key, _)| key)
+}
+
+/// Every `KEY-123` in `text` with no word character on either side, with
+/// the byte where it starts.
+fn bare_identifiers(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut next = 0;
+    std::iter::from_fn(move || {
+        while next < text.len() {
+            let start = next;
+            if !word_before(text, start)
+                && let Some(end) = identifier_at(text, start)
+            {
+                next = end;
+                return Some((start, &text[start..end]));
+            }
+            next += text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        None
+    })
+}
+
+/// Where a `KEY-123` that starts at byte `start` ends: an uppercase letter,
+/// then uppercase letters and digits, a `-`, at least one digit, and no word
+/// character after it.
+fn identifier_at(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !bytes.get(start)?.is_ascii_uppercase() {
+        return None;
+    }
+    let key_end = start
+        + bytes[start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            .count();
+    if bytes.get(key_end) != Some(&b'-') {
+        return None;
+    }
+    let digits = bytes[key_end + 1..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let end = key_end + 1 + digits;
+    (digits > 0 && !word_at(text, end)).then_some(end)
+}
+
+/// Whether the character just before byte `at` is a word character.
+fn word_before(text: &str, at: usize) -> bool {
+    text[..at].chars().next_back().is_some_and(is_word)
+}
+
+/// Whether the character at byte `at` is a word character.
+fn word_at(text: &str, at: usize) -> bool {
+    text[at..].chars().next().is_some_and(is_word)
+}
+
+fn is_word(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 /// Every OSC 8 hyperlink in `rows`: one link per maximal run of consecutive
@@ -500,7 +733,7 @@ fn build_hyperlink_link(
     cols: usize,
 ) -> TerminalLink {
     let target = match kind {
-        LinkKind::Url => uri.to_owned(),
+        LinkKind::Url | LinkKind::Issue => uri.to_owned(),
         LinkKind::Path => file_uri_path(uri),
     };
     // The run's last cell ends where the next character starts; at the row's
@@ -1140,15 +1373,15 @@ fn build_link(
     let end = locate(segments, end_index.saturating_sub(1));
     // A browser cannot verify a URL the way the filesystem verifies a path, so
     // there is nothing to fall back to: one candidate, always.
-    let candidates = if kind == LinkKind::Url {
+    let candidates = if kind == LinkKind::Path {
+        build_candidates(text, start_index, end_index, segments)
+    } else {
         vec![TerminalLinkCandidate {
             path: text.to_owned(),
             line: None,
             column: None,
             suffix: None,
         }]
-    } else {
-        build_candidates(text, start_index, end_index, segments)
     };
     let primary = candidates
         .first()
@@ -1488,9 +1721,9 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch,
-        detect_links, detect_row_links, group_rows, hyperlink_links, spaced_candidates,
-        trim_link_candidate, web_address,
+        IssueContext, LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow,
+        can_stitch, detect_links, detect_row_links, group_rows, hyperlink_links, issue_links,
+        issue_web_address, merge_issue_links, spaced_candidates, trim_link_candidate, web_address,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -2802,5 +3035,172 @@ mod tests {
         ] {
             assert_eq!(split(whole), (whole, None, None), "{whole}");
         }
+    }
+
+    /// A context of the teams `keys` in workspace `acme`, a key configured.
+    fn teams(keys: &[&str]) -> IssueContext {
+        let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+        IssueContext::new(&keys, Some("acme"), true)
+    }
+
+    /// Every link in the rows `rows`, the issue links merged in as the
+    /// terminal merges them.
+    fn merged(rows: &[TerminalRow], cols: usize, context: &IssueContext) -> Vec<TerminalLink> {
+        merge_issue_links(
+            detect_row_links(rows, cols),
+            issue_links(rows, cols, &[], context),
+        )
+    }
+
+    /// The issue links in one row of `text`, as their text and the address
+    /// they open.
+    fn issues_in(text: &str, context: &IssueContext) -> Vec<(String, String)> {
+        let cols = text.chars().count() + 4;
+        merged(&[row(text, cols, false)], cols, context)
+            .into_iter()
+            .filter(|link| link.kind == LinkKind::Issue)
+            .map(|link| (link.text, link.target))
+            .collect()
+    }
+
+    fn opens(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(text, target)| ((*text).to_owned(), (*target).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn issue_links_match_an_identifier_of_a_listed_team() {
+        let context = teams(&["RT", "OPS"]);
+        assert_eq!(
+            issues_in("see RT-12 now", &context),
+            opens(&[("RT-12", "https://linear.app/acme/issue/RT-12")])
+        );
+        assert_eq!(
+            issues_in("RT-1", &context),
+            opens(&[("RT-1", "https://linear.app/acme/issue/RT-1")])
+        );
+        assert_eq!(
+            issues_in("see RT-1, OPS-22.", &context),
+            opens(&[
+                ("RT-1", "https://linear.app/acme/issue/RT-1"),
+                ("OPS-22", "https://linear.app/acme/issue/OPS-22"),
+            ])
+        );
+        let cols = 16;
+        let cells: Vec<Vec<LinkSegment>> =
+            merged(&[row("see RT-12 now", cols, false)], cols, &context)
+                .into_iter()
+                .filter(|link| link.kind == LinkKind::Issue)
+                .map(|link| link.segments)
+                .collect();
+        assert_eq!(
+            cells,
+            [vec![LinkSegment {
+                row: 0,
+                start_column: 4,
+                end_column: 9
+            }]]
+        );
+    }
+
+    #[test]
+    fn issue_links_skip_an_identifier_of_an_unlisted_team() {
+        assert_eq!(issues_in("see XY-12 now", &teams(&["RT"])), []);
+    }
+
+    #[test]
+    fn issue_links_skip_the_daemons_look_alikes() {
+        let context = teams(&["RT", "OPS"]);
+        for text in [
+            "UTF-8", "SHA-256", "ISO-8601", "ABC-1", "XRT-1", "RT-1X", "rt-1", "RT-", "_RT-1",
+            "RT-12a", "xRT-12",
+        ] {
+            assert_eq!(issues_in(text, &context), [], "{text} must not match");
+        }
+        assert_eq!(issues_in("RT-1", &teams(&[])), [], "no team keys");
+    }
+
+    #[test]
+    fn issue_links_take_a_linear_issue_url_whatever_the_context() {
+        let none = IssueContext::default();
+        for url in [
+            "https://linear.app/acme/issue/RT-12/some-title",
+            "https://linear.app/acme/issue/RT-12",
+        ] {
+            assert_eq!(
+                issues_in(&format!("see {url} now"), &none),
+                opens(&[(url, url)])
+            );
+            let cols = url.len() + 8;
+            let links = merged(&[row(&format!("see {url} now"), cols, false)], cols, &none);
+            assert_eq!(links.len(), 1, "the URL is an issue link, not a URL too");
+        }
+        assert_eq!(
+            issues_in("(https://linear.app/acme/issue/ABC-12)", &teams(&["RT"])),
+            opens(&[(
+                "https://linear.app/acme/issue/ABC-12",
+                "https://linear.app/acme/issue/ABC-12"
+            )]),
+            "a URL counts whatever its key"
+        );
+        for plain in [
+            "https://linear.app/acme/project/ABC-1",
+            "linear.app/acme/issue/RT-12",
+            "https://notlinear.app/acme/issue/RT-12",
+        ] {
+            assert_eq!(issues_in(plain, &none), [], "{plain} is no issue link");
+        }
+    }
+
+    #[test]
+    fn issue_links_need_a_workspace_and_a_key_for_a_bare_identifier() {
+        let keys = vec!["RT".to_owned()];
+        let no_workspace = IssueContext::new(&keys, None, true);
+        assert_eq!(issues_in("see RT-12 now", &no_workspace), []);
+        let no_key = IssueContext::new(&keys, Some("acme"), false);
+        assert_eq!(issues_in("see RT-12 now", &no_key), []);
+    }
+
+    #[test]
+    fn issue_links_open_the_identifiers_web_address() {
+        assert_eq!(
+            issue_web_address("acme", "RT-12"),
+            "https://linear.app/acme/issue/RT-12"
+        );
+    }
+
+    #[test]
+    fn issue_links_leave_a_path_holding_an_identifier_a_path() {
+        let context = teams(&["RT"]);
+        let cols = 24;
+        let links = merged(&[row("see docs/RT-12/x.md", cols, false)], cols, &context);
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].kind, LinkKind::Path);
+    }
+
+    #[test]
+    fn issue_links_join_an_identifier_wrapped_across_rows() {
+        let context = teams(&["RT"]);
+        let rows = [row("see RT-", 7, false), row("12 ok", 7, true)];
+        let links = merged(&rows, 7, &context);
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].text, "RT-12");
+        assert_eq!(
+            links[0].segments,
+            [
+                LinkSegment {
+                    row: 0,
+                    start_column: 4,
+                    end_column: 7
+                },
+                LinkSegment {
+                    row: 1,
+                    start_column: 0,
+                    end_column: 2
+                },
+            ]
+        );
     }
 }

@@ -19,7 +19,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor,
 
 use crate::Clock;
 use crate::copy_text::{self, CopyRow};
-use crate::links::{self, TerminalLink, TerminalRow};
+use crate::links::{self, IssueContext, LinkKind, TerminalLink, TerminalRow};
 use crate::mouse::{MouseExt, MouseModeScan};
 use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
 use crate::theme::{self, TerminalPalette};
@@ -1101,19 +1101,24 @@ struct BoxEdges {
 }
 
 impl LinkWindow {
-    /// Every link in the window, its rows in grid lines. A link touching a
-    /// window edge the walk only stopped at because it ran out of window is
-    /// dropped rather than offered cut short.
+    /// Every link in the window, its rows in grid lines, the Linear issue
+    /// links `issues` makes out among them. A link touching a window edge
+    /// the walk only stopped at because it ran out of window is dropped
+    /// rather than offered cut short.
     #[must_use]
-    pub fn links(&self) -> Vec<TerminalLink> {
+    pub fn links(&self, issues: &IssueContext) -> Vec<TerminalLink> {
         let edge = i32::try_from(self.rows.len())
             .unwrap_or(i32::MAX)
             .saturating_sub(1);
         let mut links = links::hyperlink_links(&self.rows, self.cols);
         let hyperlinks = links.len();
+        let detected = links::merge_issue_links(
+            links::detect_window_links(&self.rows, self.cols, &self.edges),
+            links::issue_links(&self.rows, self.cols, &self.edges, issues),
+        );
         // A hyperlink's own target wins over the text it runs under, so a
         // detected link sharing a cell with one is dropped.
-        for link in links::detect_window_links(&self.rows, self.cols, &self.edges) {
+        for link in detected {
             let shadowed = links[..hyperlinks]
                 .iter()
                 .any(|hyperlink| shares_a_cell(hyperlink, &link));
@@ -1130,6 +1135,18 @@ impl LinkWindow {
             link.shift_rows(self.first);
         }
         links
+    }
+
+    /// The Linear issue links of the window, as [`Self::links`] offers them.
+    /// The other links are read only when the window holds an issue link.
+    #[must_use]
+    pub fn issue_links(&self, issues: &IssueContext) -> Vec<TerminalLink> {
+        if links::issue_links(&self.rows, self.cols, &self.edges, issues).is_empty() {
+            return Vec::new();
+        }
+        let mut found = self.links(issues);
+        found.retain(|link| link.kind == LinkKind::Issue);
+        found
     }
 
     /// Each row of the window as its grid line and its text.
@@ -1182,9 +1199,30 @@ impl Terminal {
         let Some(window) = self.window_near(line, cap) else {
             return Vec::new();
         };
-        let mut links = window.links();
+        let mut links = window.links(&IssueContext::default());
         links.retain(|link| link.start_row <= line && link.end_row >= line);
         links
+    }
+
+    /// The rows on screen at the current scroll, as one window: the
+    /// always-on underline of issue links reads them. No row beyond the view
+    /// and no box edge is read, so a link running off the view is cut where
+    /// the view cuts it.
+    #[must_use]
+    pub fn visible_link_window(&self) -> LinkWindow {
+        let first = i32::try_from(self.display_offset()).map_or(i32::MIN, |offset| -offset);
+        let count = i32::try_from(self.size.rows).unwrap_or(i32::MAX);
+        let rows: Vec<TerminalRow> = (first..first.saturating_add(count))
+            .map(|line| self.read_row(line))
+            .collect();
+        LinkWindow {
+            first,
+            edges: vec![None; rows.len()],
+            rows,
+            cols: self.size.cols,
+            cut_above: false,
+            cut_below: false,
+        }
     }
 
     /// The rows the links spanning grid line `line` are read from.

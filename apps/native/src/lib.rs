@@ -1266,6 +1266,9 @@ pub struct RootView {
     /// status the sidebar kept from before a reconnect says nothing about
     /// an exit.
     seen_sessions: HashMap<HostKey, HashSet<String>>,
+    /// Each host's last Linear context, which its panes read issue links
+    /// against; written only by [`Self::on_linear_message`].
+    linear_contexts: HashMap<HostKey, links::IssueContext>,
     /// When the pending layout save is due, if one is.
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
@@ -1920,6 +1923,7 @@ impl RootView {
             pane_ui: pane_menu::PaneUi::new(cx.focus_handle(), cx.focus_handle()),
             pending_appearance: appearance::InFlightAppearance::default(),
             seen_sessions: HashMap::new(),
+            linear_contexts: HashMap::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
             auto_grid_timer: None,
@@ -3419,6 +3423,21 @@ impl RootView {
     pub fn pane_hovered_link(&self, pane_id: &str, cx: &App) -> Option<String> {
         let slot = self.panes.get(pane_id)?;
         slot.view().read(cx).hovered_link().map(|link| link.text)
+    }
+
+    /// The texts of the links pane `pane_id` always underlines: its Linear
+    /// issue links on screen.
+    #[must_use]
+    pub fn pane_underlined_links(&self, pane_id: &str, cx: &App) -> Vec<String> {
+        let Some(slot) = self.panes.get(pane_id) else {
+            return Vec::new();
+        };
+        slot.view()
+            .read(cx)
+            .underlined_issue_links()
+            .into_iter()
+            .map(|link| link.text)
+            .collect()
     }
 
     /// Ctrl went down or up. Modifier changes reach only the focused
@@ -5407,6 +5426,30 @@ impl RootView {
         }
     }
 
+    /// `host`'s Linear context: kept for the panes that attach one of its
+    /// sessions later, and handed to each of its panes now.
+    fn on_linear_message(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::LinearContext {
+            team_keys,
+            workspace,
+            key_configured,
+        } = msg
+        else {
+            return;
+        };
+        let context = links::IssueContext::new(team_keys, workspace.as_deref(), *key_configured);
+        self.linear_contexts.insert(host.clone(), context.clone());
+        for view in self.pane_views_on(host) {
+            view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
+        }
+    }
+
+    /// The Linear context `host`'s panes read issue links against: its last
+    /// one, or none, which links only issue URLs.
+    pub(crate) fn issue_context_of(&self, host: &HostKey) -> links::IssueContext {
+        self.linear_contexts.get(host).cloned().unwrap_or_default()
+    }
+
     /// A daemon refusal from `host` carrying `request_id`: when it answers
     /// the request `host`'s Notifications switch has out, the switch shows
     /// it. Returns whether it did.
@@ -5475,6 +5518,7 @@ impl RootView {
         self.on_transcript_message(host, &msg, cx);
         self.on_host_rebind_message(host, &msg, cx);
         self.on_push_message(host, &msg, cx);
+        self.on_linear_message(host, &msg, cx);
         if self.phone_replies.on_message(host, &msg) {
             cx.notify();
         }
@@ -6096,6 +6140,7 @@ impl RootView {
         self.reset_host(host, window, cx);
         self.sidebar.clear_host(host);
         self.seen_sessions.remove(host);
+        self.linear_contexts.remove(host);
         self.remote_lists_in.remove(host);
         self.lists_since_welcome.remove(host);
         self.reset_dashboard_for_target(host);

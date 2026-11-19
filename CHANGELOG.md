@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- Linear issue identifiers such as RT-12, and linear.app issue links, are underlined in the terminal; Ctrl+click opens the issue in your browser.
 - The desktop chat composer has a row of Quick replies, such as "continue" or "yes", that send in one click.
 - Typing @ in the desktop chat composer lists the session's matching files, and picking one inserts its mention.
 - A terminal draft's Pull and Send now come with Clear, which empties the prompt box, pasted text and images included, once you confirm.

@@ -4467,6 +4467,12 @@ impl<'a> Harness<'a> {
         self.root(|root, cx| root.pane_hovered_link(pane, cx))
     }
 
+    /// The texts of the links `pane` always underlines, Ctrl held or not:
+    /// its Linear issue links on screen.
+    pub fn underlined_links(&mut self, pane: &str) -> Vec<String> {
+        self.root(|root, cx| root.pane_underlined_links(pane, cx))
+    }
+
     pub fn keys(&mut self, keystrokes: &str) {
         self.cx.simulate_keystrokes(keystrokes);
     }

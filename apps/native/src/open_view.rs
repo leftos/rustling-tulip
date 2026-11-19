@@ -176,21 +176,8 @@ impl RootView {
         let host = source.host.clone();
         let opens_here = self.opens_here(&host);
         match link.kind {
-            LinkKind::Url => match open::validate_http_url(&link.target) {
-                Ok(url) => {
-                    let job = OpenJob::Url(url.to_owned());
-                    self.dispatch_open(&host, job, Then::Nothing, window, cx);
-                }
-                Err(err) => {
-                    tracing::warn!("refusing terminal link {}: {err}", link.target);
-                    self.push_toast(
-                        ToastKind::Error,
-                        COULD_NOT_OPEN,
-                        Some("Only http and https links open from the terminal.".to_owned()),
-                        cx,
-                    );
-                }
-            },
+            LinkKind::Url => self.open_web_link(link, &host, window, cx),
+            LinkKind::Issue => self.open_issue_link(link, &host, window, cx),
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
             // The host's probe skips a spaced reading it does not find, so
@@ -208,6 +195,45 @@ impl RootView {
                 self.resolve_path(candidates, base_dirs, opening, window, cx);
             }
         }
+    }
+
+    /// Opens URL `link` in the browser on This PC, whichever host's pane it
+    /// is in; anything but an http or https address is refused with a toast.
+    fn open_web_link(
+        &mut self,
+        link: &TerminalLink,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match open::validate_http_url(&link.target) {
+            Ok(url) => {
+                let job = OpenJob::Url(url.to_owned());
+                self.dispatch_open(host, job, Then::Nothing, window, cx);
+            }
+            Err(err) => {
+                tracing::warn!("refusing terminal link {}: {err}", link.target);
+                self.push_toast(
+                    ToastKind::Error,
+                    COULD_NOT_OPEN,
+                    Some("Only http and https links open from the terminal.".to_owned()),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Opens Linear issue `link` at its web address, the
+    /// `https://linear.app/{workspace}/issue/{ID}` it was detected with or
+    /// the issue URL as written, in the browser on This PC.
+    fn open_issue_link(
+        &mut self,
+        link: &TerminalLink,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_web_link(link, host, window, cx);
     }
 
     /// Whether a link in a pane of `host` opens on This PC.
