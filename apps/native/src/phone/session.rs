@@ -114,6 +114,11 @@ impl SessionPage {
         }
     }
 
+    /// Puts the session on `page`, as a turn of the window does.
+    pub(crate) fn set(&mut self, page: Page) {
+        self.page = page;
+    }
+
     /// The toggle's tap: the other page.
     pub(crate) fn toggle(&mut self) {
         self.page = match self.page {

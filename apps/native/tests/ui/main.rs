@@ -64,6 +64,7 @@ mod ui_perf;
 mod ui_phone_browser;
 mod ui_phone_home;
 mod ui_phone_keys;
+mod ui_phone_landscape;
 mod ui_phone_push;
 mod ui_phone_quick_replies;
 mod ui_phone_root;

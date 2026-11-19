@@ -8,7 +8,6 @@ use gpui::{
     Point, Stateful, Window, div, prelude::*, px,
 };
 
-use super::PhoneRoot;
 use super::composer::Dock;
 use super::home::{self, Tone};
 use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
@@ -17,6 +16,7 @@ use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
+use super::{PhoneLayout, PhoneRoot};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
 use crate::chat_view::{HandleAreas, HandleEnd, chat_available, composer_line_disables};
@@ -188,6 +188,12 @@ impl PhoneRoot {
             .then(|| self.shown_page(header.chat_mirrored).toggle_label())
     }
 
+    /// A tap on the Terminal toggle: the shown session's other page; on an
+    /// iPhone on its side the Terminal page fills the screen.
+    pub fn tap_session_toggle(&mut self, cx: &mut Context<Self>) {
+        self.toggle_page(cx);
+    }
+
     /// One back step on the session page: the prompt sheet goes down while
     /// it is up, else the composer's open dock closes, else the page steps
     /// back, from the Terminal page to the Chat page while the toggle shows,
@@ -218,7 +224,11 @@ impl PhoneRoot {
                 self.composer_dock = Dock::None;
                 cx.notify();
             }
-            BackStep::ToChat => cx.notify(),
+            BackStep::ToChat => {
+                // The user's own page wins over a turn upright's return.
+                self.landscape_return = None;
+                cx.notify();
+            }
             BackStep::Close => self.close_session(cx),
         }
     }
@@ -242,6 +252,8 @@ impl PhoneRoot {
         if let Some(page) = self.page.as_mut() {
             page.toggle();
             self.composer_dock = Dock::None;
+            // The user's own page wins over a turn upright's return.
+            self.landscape_return = None;
             // Leaving the Chat page, or coming back to it, ends its selection.
             if let Some((_, id)) = self.shown.clone() {
                 self.root
@@ -364,7 +376,8 @@ impl PhoneRoot {
 
     /// While a session is shown: its page, the header over the body of the
     /// page it is on, with whether the on-screen keyboard is up for the
-    /// composer's buttons and the chat's tap.
+    /// composer's buttons and the chat's tap. A terminal filling the screen
+    /// draws no header: its key bar carries Back and the status.
     /// Off the Chat page, and with no session shown, the chat's texts from
     /// its last frame are forgotten.
     pub(super) fn session_page(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Option<Div> {
@@ -406,19 +419,16 @@ impl PhoneRoot {
                 self.terminal_page(&id, keyboard_up, cx)
             }
         };
+        let full = self.layout == PhoneLayout::TerminalFull && page == Page::Terminal;
+        let header_row = (!full)
+            .then(|| Self::session_header_row(&header, page, !self.layout.two_pane(), &t, cx));
         Some(
             div()
                 .driver_id(|| "phone-session".to_owned())
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(Self::session_header_row(
-                    &header,
-                    page,
-                    !self.layout.two_pane(),
-                    &t,
-                    cx,
-                ))
+                .children(header_row)
                 .children(self.path_note().map(str::to_owned).map(|note| {
                     div()
                         .driver_id(|| "phone-path-note".to_owned())
@@ -1120,7 +1130,7 @@ impl QuickTarget {
 }
 
 /// The status word in its tone's colour, as Home's row draws it.
-fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App) -> Div {
+pub(super) fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App) -> Div {
     div()
         .driver_id(|| "phone-session-status".to_owned())
         .text_size(ui_px(cx, STATUS_TEXT_SIZE))

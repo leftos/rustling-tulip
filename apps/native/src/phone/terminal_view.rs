@@ -11,14 +11,15 @@ use gpui::{
     ScrollEvent, Window, canvas, div, prelude::*, px,
 };
 
-use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::key_bar::KeyBar;
 use super::key_grid::{self, KeyAction};
 use super::session::Page;
-use super::session_view::{KeySurface, QuickTarget};
+use super::session_view::{KeySurface, QuickTarget, status_line};
+use super::settings_view::BACK_LABEL;
 use super::terminal_fit::{self, Pan};
+use super::{PhoneLayout, PhoneRoot};
 use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
@@ -88,7 +89,10 @@ impl PhoneRoot {
             *self.key_bar.borrow_mut() = KeyBar::new();
             self.terminal_quick = false;
             if let Some(pane) = self.terminal_pane(cx) {
-                pane.read(cx).focus_handle().focus(window, cx);
+                // A page over the session's keeps its own focused field.
+                if !self.page_covered() {
+                    pane.read(cx).focus_handle().focus(window, cx);
+                }
                 let filter = self.typed_ctrl(cx);
                 pane.update(cx, |pane, _| pane.set_typed_filter(Some(filter)));
                 self.terminal_watch = Some(cx.observe(&pane, |this, _, cx| this.follow_cursor(cx)));
@@ -274,7 +278,8 @@ impl PhoneRoot {
 
     /// The key bar: one sideways-scrolling row of the grid's keys in order,
     /// Ctrl lit while it is armed, then Hide pinned at its end while the
-    /// on-screen keyboard is up.
+    /// on-screen keyboard is up; Back and the status pinned at its start
+    /// while the terminal fills the screen.
     fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.key_bar.borrow().armed();
         let mut scroll = div()
@@ -328,8 +333,39 @@ impl PhoneRoot {
             .gap(px(BAR_GAP))
             .px(px(SIDE_PADDING))
             .py(px(BAR_GAP))
+            .children(self.bar_lead(cx))
             .child(scroll)
             .children(hide)
+    }
+
+    /// While the terminal fills the screen, pinned at the bar's start
+    /// outside its sideways scroll: Back, a back step that returns to the
+    /// two panes on the session's Chat page, and the session's status, as
+    /// the header it replaces draws them.
+    fn bar_lead(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.layout != PhoneLayout::TerminalFull {
+            return None;
+        }
+        let header = self.session_header(cx)?;
+        let t = theme(cx);
+        let back = phone_button("phone-bar-back", ButtonKind::Outlined, cx)
+            .flex_none()
+            .min_h(px(TOUCH_TARGET))
+            .px(px(BAR_KEY_PAD))
+            .child(BACK_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx)));
+        let status = header
+            .status
+            .map(|(word, tone)| status_line(word, tone, &t, cx));
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(BAR_GAP))
+                .child(back)
+                .children(status),
+        )
     }
 
     /// The session the open terminal shows, as this page opened it.

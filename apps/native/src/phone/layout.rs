@@ -19,11 +19,13 @@ pub enum PhoneLayout {
     /// fills the window over it.
     Single,
     /// Home's list docks on the left with the selected session's page on the
-    /// right; a session with no terminal stays on its Chat page in that
-    /// pane, and the Terminal toggle opens the full-screen terminal.
+    /// right, the Terminal toggle switching that pane's page: the iPad.
     TwoPane,
-    /// Home and a session's page lay out as two panes, and an open terminal
-    /// fills the screen: the iPhone on its side.
+    /// Home and a session's page lay out as two panes, and a session's
+    /// Terminal page fills the screen: the iPhone on its side. Turning it
+    /// on its side moves a session with a terminal from its Chat page to
+    /// it, the Terminal toggle in the two panes opens it, and a session with
+    /// no terminal stays on its Chat page in the session pane.
     TerminalFull,
 }
 

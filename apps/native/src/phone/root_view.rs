@@ -24,7 +24,7 @@ use super::open_tap::{self, PendingOpen};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::quick_replies::{ReplyGroup, ReplySet};
-use super::session::SessionPage;
+use super::session::{Page, SessionPage};
 use super::share::{LoggingShare, ShareSheet};
 use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
@@ -139,6 +139,10 @@ pub struct PhoneRoot {
     /// The layout the last frame picked from the window's usable size, which
     /// the views draw their panes by.
     pub(super) layout: PhoneLayout,
+    /// The page the shown session returns to when the iPhone turns upright:
+    /// recorded when turning it on its side moved the session off it, and
+    /// forgotten once the user picks a page or another session shows.
+    pub(super) landscape_return: Option<Page>,
     /// Whether the first render has logged the app's ready line.
     logged_ready: bool,
     /// Whether the window is in front, so delivered notifications are swept.
@@ -254,6 +258,7 @@ impl PhoneRoot {
             resumes: Vec::new(),
             insets_override: None,
             layout: PhoneLayout::Single,
+            landscape_return: None,
             logged_ready: false,
             in_front: window.visibility() == WindowVisibility::Visible,
             swept: None,
@@ -781,7 +786,7 @@ impl PhoneRoot {
                 // On one pane the viewer, a session page or Settings hides
                 // the line, so the note returns Home; in two panes the list
                 // shows it beside them, and only Settings covers it.
-                if !self.layout.two_pane() {
+                if self.one_pane(cx) {
                     self.close_viewer(cx);
                     self.close_browser(cx);
                     if self.shown.is_some() {
@@ -899,6 +904,7 @@ impl PhoneRoot {
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         self.draft_clear_asking = None;
+        self.landscape_return = None;
         self.page = Some(SessionPage::opened(
             self.chat_mirrored(&host, session_id, cx),
         ));
@@ -916,7 +922,7 @@ impl PhoneRoot {
     /// while Settings shows, or a session page in Home's place. It sends
     /// nothing.
     pub(super) fn open_sheet(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
-        if (self.shown.is_some() && !self.layout.two_pane()) || self.settings.is_some() {
+        if (self.shown.is_some() && self.one_pane(cx)) || self.settings.is_some() {
             return;
         }
         let Some(offer) = self.offer_of(&host, session_id, cx) else {
@@ -1157,6 +1163,7 @@ impl PhoneRoot {
         self.path_note = None;
         self.shown = None;
         self.page = None;
+        self.landscape_return = None;
         self.draft_clear_asking = None;
         self.composer_dock = super::composer::Dock::None;
         self.prompt_sheet = SheetState::default();
@@ -1182,6 +1189,7 @@ impl PhoneRoot {
             self.shown = None;
             self.path_note = None;
             self.page = None;
+            self.landscape_return = None;
             self.composer_dock = super::composer::Dock::None;
             self.prompt_sheet = SheetState::default();
             self.root
@@ -1691,9 +1699,68 @@ enum Pane {
 
 impl PhoneRoot {
     /// Whether the window draws Home's list beside the session pane: a
-    /// two-pane layout with Settings closed and [`Self::panes_shown`].
-    fn split(&self, host_open: bool) -> bool {
-        self.layout.two_pane() && self.settings.is_none() && self.panes_shown(host_open)
+    /// two-pane layout with no full-screen terminal, Settings closed and
+    /// [`Self::panes_shown`].
+    fn split(&self, host_open: bool, cx: &App) -> bool {
+        !self.one_pane(cx) && self.settings.is_none() && self.panes_shown(host_open)
+    }
+
+    /// Whether the shown session's terminal fills the screen: the iPhone on
+    /// its side, with the session on its Terminal page.
+    pub(super) fn terminal_full(&self, cx: &App) -> bool {
+        self.layout == PhoneLayout::TerminalFull
+            && self
+                .session_header(cx)
+                .is_some_and(|header| self.shown_page(header.chat_mirrored) == Page::Terminal)
+    }
+
+    /// Whether a page covers the shown session's: Settings, the viewer or
+    /// the browser is open.
+    pub(super) fn page_covered(&self) -> bool {
+        self.settings.is_some() || self.viewer.is_some() || self.browser.is_some()
+    }
+
+    /// Whether the window shows one page at a time: a one-pane layout, or
+    /// a terminal filling the screen.
+    fn one_pane(&self, cx: &App) -> bool {
+        !self.layout.two_pane() || self.terminal_full(cx)
+    }
+
+    /// The window turned from layout `previous` to the one this frame
+    /// picked: on its side, [`Self::turn_on_side`]; upright again,
+    /// [`Self::turn_upright`].
+    fn turn_terminal(&mut self, previous: PhoneLayout, cx: &App) {
+        let full = PhoneLayout::TerminalFull;
+        if previous != full && self.layout == full {
+            self.turn_on_side(cx);
+        } else if previous == full && self.layout != full {
+            self.turn_upright();
+        }
+    }
+
+    /// The iPhone turned on its side: a shown session on its Chat page that
+    /// has a terminal goes to its Terminal page, which fills the screen, and
+    /// the Chat page is recorded for the turn back.
+    fn turn_on_side(&mut self, cx: &App) {
+        let Some(header) = self.session_header(cx) else {
+            return;
+        };
+        if let Some(page) = self.page.as_mut()
+            && header.toggle
+            && page.shown(header.chat_mirrored) == Page::Chat
+        {
+            page.set(Page::Terminal);
+            self.landscape_return = Some(Page::Chat);
+        }
+    }
+
+    /// The iPhone turned upright: the shown session returns to the page its
+    /// turn on its side recorded, if any.
+    fn turn_upright(&mut self) {
+        let recorded = self.landscape_return.take();
+        if let (Some(page), Some(recorded)) = (self.page.as_mut(), recorded) {
+            page.set(recorded);
+        }
     }
 
     /// Whether two panes draw rather than the hosts screen: a saved host is
@@ -1711,7 +1778,9 @@ impl PhoneRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        if !self.layout.two_pane() {
+        // A terminal filling the screen draws as one pane does, under
+        // Settings, the viewer and the browser.
+        if self.one_pane(cx) {
             return self.single_body(host_open, keyboard_up, window, cx);
         }
         // Settings and the hosts screen cover the whole window in two panes.
@@ -1805,11 +1874,11 @@ impl PhoneRoot {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<Div> {
-        let split = self.split(host_open);
+        let split = self.split(host_open, cx);
         let boxed =
             |pane: Pane| move |layer: Div| Self::boxed(layer, split.then_some(pane), &padding);
         let sheet = self
-            .home_sheet_over(host_open)
+            .home_sheet_over(host_open, cx)
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten()
             .map(boxed(Pane::List));
@@ -1834,10 +1903,11 @@ impl PhoneRoot {
 
     /// Whether Home's long-press sheet may draw: in two panes over the
     /// list while it shows; on one pane only over Home itself, with no
-    /// viewer, browser, session page, Settings or hosts screen under it.
-    fn home_sheet_over(&self, host_open: bool) -> bool {
-        if self.layout.two_pane() {
-            return self.split(host_open);
+    /// viewer, browser, session page, Settings or hosts screen under it. A
+    /// terminal filling the screen counts as one pane.
+    fn home_sheet_over(&self, host_open: bool, cx: &App) -> bool {
+        if !self.one_pane(cx) {
+            return self.split(host_open, cx);
         }
         let page_over_home = self.viewer.is_some()
             || self.browser.is_some()
@@ -1888,7 +1958,9 @@ impl Render for PhoneRoot {
             .insets_override
             .clone()
             .unwrap_or_else(|| window.insets());
+        let previous = self.layout;
         self.layout = PhoneLayout::of(window.viewport_size(), &insets);
+        self.turn_terminal(previous, cx);
         let padding = content_padding(&insets);
         let keyboard_up = crate::keyboard::is_up(&insets);
         let hidden = super::terminal_fit::hidden_height(

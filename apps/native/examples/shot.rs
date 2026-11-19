@@ -107,6 +107,9 @@
 //! window inside its 24 pt top and 20 pt bottom insets.
 //! `phone-landscape-home` shows the same in an iPhone's 874x402 window on
 //! its side, inside its 21 pt bottom inset and 62 pt side insets.
+//! `phone-landscape-terminal` shows that session's Terminal page there after
+//! its Terminal toggle: the terminal filling the screen with no header, the
+//! key bar carrying Back and `Working`.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -413,10 +416,11 @@ enum View {
     PhoneIpad,
     PhoneIpadPortrait,
     PhoneLandscapeHome,
+    PhoneLandscapeTerminal,
 }
 
 impl View {
-    const ALL: [Self; 67] = [
+    const ALL: [Self; 68] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -484,6 +488,7 @@ impl View {
         Self::PhoneIpad,
         Self::PhoneIpadPortrait,
         Self::PhoneLandscapeHome,
+        Self::PhoneLandscapeTerminal,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -507,6 +512,7 @@ impl View {
                 | Self::PhoneIpad
                 | Self::PhoneIpadPortrait
                 | Self::PhoneLandscapeHome
+                | Self::PhoneLandscapeTerminal
         )
     }
 
@@ -521,7 +527,19 @@ impl View {
 
     /// Whether the view opens the fixture's working session over its chat.
     fn opens_session(self) -> bool {
-        matches!(self, Self::PhoneSession | Self::PhoneSessionSheet) || self.is_two_pane()
+        matches!(
+            self,
+            Self::PhoneSession | Self::PhoneSessionSheet | Self::PhoneLandscapeTerminal
+        ) || self.is_two_pane()
+    }
+
+    /// Whether the view draws an iPhone on its side, whose layout is
+    /// [`PhoneLayout::TerminalFull`].
+    fn is_landscape(self) -> bool {
+        matches!(
+            self,
+            Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal
+        )
     }
 
     /// The insets the phone's root draws inside, as the device reports them.
@@ -529,7 +547,7 @@ impl View {
         let (top, right, bottom, left) = match self {
             Self::PhoneIpad => (0.0, 0.0, 0.0, 0.0),
             Self::PhoneIpadPortrait => (IPAD_INSET_TOP, 0.0, IPAD_INSET_BOTTOM, 0.0),
-            Self::PhoneLandscapeHome => (
+            Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal => (
                 0.0,
                 PHONE_LANDSCAPE_INSET_SIDE,
                 PHONE_LANDSCAPE_INSET_BOTTOM,
@@ -617,6 +635,7 @@ impl View {
             Self::PhoneIpad => "phone-ipad",
             Self::PhoneIpadPortrait => "phone-ipad-portrait",
             Self::PhoneLandscapeHome => "phone-landscape-home",
+            Self::PhoneLandscapeTerminal => "phone-landscape-terminal",
         }
     }
 
@@ -678,7 +697,7 @@ impl View {
             | Self::PhoneBrowser => PHONE_WINDOW_SIZE,
             Self::PhoneIpad => IPAD_WINDOW_SIZE,
             Self::PhoneIpadPortrait => IPAD_PORTRAIT_WINDOW_SIZE,
-            Self::PhoneLandscapeHome => PHONE_LANDSCAPE_WINDOW_SIZE,
+            Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal => PHONE_LANDSCAPE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -734,7 +753,8 @@ impl View {
             | Self::PhoneBrowser
             | Self::PhoneIpad
             | Self::PhoneIpadPortrait
-            | Self::PhoneLandscapeHome => true,
+            | Self::PhoneLandscapeHome
+            | Self::PhoneLandscapeTerminal => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -1014,6 +1034,7 @@ impl Shot {
             | View::PhoneIpad
             | View::PhoneIpadPortrait
             | View::PhoneLandscapeHome
+            | View::PhoneLandscapeTerminal
             | View::Toast => None,
         }
     }
@@ -1850,12 +1871,18 @@ async fn capture_phone_home(
     capture(shot.out.clone(), address, failure).await
 }
 
-/// Fails when a two-pane `view` lays out as one pane: its window's size or
-/// insets leave too little room.
+/// Fails when a two-pane `view` lays out as one pane, or a landscape one
+/// not as an iPhone on its side: its window's size or insets are wrong.
 fn check_phone_layout(view: View, layout: PhoneLayout) -> Result<()> {
     if view.is_two_pane() && !layout.two_pane() {
         bail!(
             "the {} view lays out as {layout:?}, not two panes",
+            view.name()
+        );
+    }
+    if view.is_landscape() && layout != PhoneLayout::TerminalFull {
+        bail!(
+            "the {} view lays out as {layout:?}, not TerminalFull",
             view.name()
         );
     }
@@ -2017,6 +2044,7 @@ async fn open_phone_screen(
 ) -> Result<()> {
     match view {
         View::PhoneTerminal => open_phone_terminal(handle, cx).await,
+        View::PhoneLandscapeTerminal => open_landscape_terminal(handle, cx).await,
         View::PhoneSettings => {
             handle.update(cx, |phone, _, cx| phone.open_settings(cx))?;
             cx.background_executor().timer(DRIVE_WAIT).await;
@@ -2084,6 +2112,28 @@ async fn open_phone_terminal(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp)
     };
     if !screen.iter().any(|row| row.contains("git log")) {
         bail!("the phone-terminal view's terminal does not draw the shell: {screen:?}");
+    }
+    Ok(())
+}
+
+/// Taps the `phone-landscape-terminal` view's Terminal toggle, and checks
+/// the session shows on its Terminal page with its terminal drawn.
+async fn open_landscape_terminal(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    handle.update(cx, |phone, _, cx| phone.tap_session_toggle(cx))?;
+    cx.background_executor().timer(LOAD_WAIT).await;
+    let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
+    if toggle != Some("Chat") {
+        bail!("the phone-landscape-terminal view's toggle reads {toggle:?}, not Chat");
+    }
+    let screen = handle.update(cx, |phone, _, cx| {
+        phone
+            .root()
+            .read(cx)
+            .phone_terminal_view()
+            .map(|pane| pane.read(cx).grid_text())
+    })?;
+    if !screen.is_some_and(|rows| rows.iter().any(|row| !row.trim().is_empty())) {
+        bail!("the phone-landscape-terminal view's terminal draws nothing");
     }
     Ok(())
 }
@@ -2222,7 +2272,8 @@ fn drive(
         | View::PhoneBrowser
         | View::PhoneIpad
         | View::PhoneIpadPortrait
-        | View::PhoneLandscapeHome => Ok(()),
+        | View::PhoneLandscapeHome
+        | View::PhoneLandscapeTerminal => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -3864,7 +3915,7 @@ impl FakeDaemon {
         session_id: &str,
         request_id: Option<String>,
     ) -> Vec<DaemonMessage> {
-        if self.view == View::PhoneSession || self.view.is_two_pane() {
+        if self.view.opens_session() && self.view != View::PhoneSessionSheet {
             return vec![phone_chat_reply(session_id, request_id)];
         }
         if self.view == View::PhoneSessionSheet {
