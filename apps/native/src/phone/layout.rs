@@ -44,6 +44,13 @@ impl PhoneLayout {
             Self::Single
         }
     }
+
+    /// Whether Home's list and the selected session lay out side by side:
+    /// the iPad's two panes, and the iPhone on its side.
+    #[must_use]
+    pub fn two_pane(self) -> bool {
+        matches!(self, Self::TwoPane | Self::TerminalFull)
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +79,16 @@ mod tests {
 
     fn layout(width: f32, height: f32, insets: &WindowInsets) -> PhoneLayout {
         PhoneLayout::of(viewport(width, height), insets)
+    }
+
+    #[test]
+    fn two_panes_are_the_ipads_and_the_iphone_on_its_side() {
+        assert!(PhoneLayout::TwoPane.two_pane(), "the iPad's layout");
+        assert!(
+            PhoneLayout::TerminalFull.two_pane(),
+            "the iPhone on its side lays Home out as two panes"
+        );
+        assert!(!PhoneLayout::Single.two_pane(), "the phone in portrait");
     }
 
     #[test]

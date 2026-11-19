@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, FontWeight, IntoElement, Pixels, Render, Stateful,
-    Subscription, Task, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
+    App, ClickEvent, Context, Div, Edges, Entity, FontWeight, IntoElement, Pixels, Render,
+    Stateful, Subscription, Task, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
 };
 use protocol::{ClientMessage, PathKind};
 
@@ -138,7 +138,7 @@ pub struct PhoneRoot {
     insets_override: Option<WindowInsets>,
     /// The layout the last frame picked from the window's usable size, which
     /// the views draw their panes by.
-    layout: PhoneLayout,
+    pub(super) layout: PhoneLayout,
     /// Whether the first render has logged the app's ready line.
     logged_ready: bool,
     /// Whether the window is in front, so delivered notifications are swept.
@@ -778,12 +778,15 @@ impl PhoneRoot {
                     "phone: a tap's session could not be opened"
                 );
                 self.pending_open = None;
-                // The viewer, a session page or Settings hides the line, so
-                // the note returns Home.
-                self.close_viewer(cx);
-                self.close_browser(cx);
-                if self.shown.is_some() {
-                    self.close_session(cx);
+                // On one pane the viewer, a session page or Settings hides
+                // the line, so the note returns Home; in two panes the list
+                // shows it beside them, and only Settings covers it.
+                if !self.layout.two_pane() {
+                    self.close_viewer(cx);
+                    self.close_browser(cx);
+                    if self.shown.is_some() {
+                        self.close_session(cx);
+                    }
                 }
                 self.settings = None;
                 self.keep_reply_editor();
@@ -802,12 +805,22 @@ impl PhoneRoot {
         self.open_note = None;
     }
 
-    /// The session shown in place of Home, as its host and id.
+    /// The session shown in place of Home, or beside it in two panes, as its
+    /// host and id.
     #[must_use]
     pub fn shown_session(&self) -> Option<(&HostKey, &str)> {
         self.shown.as_ref().map(|(host, id)| (host, id.as_str()))
     }
 
+    /// Whether `host`'s session `session_id` is the one selected beside
+    /// Home's list in two panes.
+    pub(super) fn is_selected(&self, host: &HostKey, session_id: &str) -> bool {
+        self.layout.two_pane()
+            && self
+                .shown
+                .as_ref()
+                .is_some_and(|(shown_host, id)| shown_host == host && id == session_id)
+    }
     /// A tap on the composer's Quick button: the Quick dock opens over it,
     /// or the open one closes.
     pub fn tap_composer_quick(&mut self, cx: &mut Context<Self>) {
@@ -900,9 +913,10 @@ impl PhoneRoot {
     }
 
     /// Opens the sheet of `host`'s session `session_id` over Home; nothing
-    /// while a session page or Settings shows. It sends nothing.
+    /// while Settings shows, or a session page in Home's place. It sends
+    /// nothing.
     pub(super) fn open_sheet(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
-        if self.shown.is_some() || self.settings.is_some() {
+        if (self.shown.is_some() && !self.layout.two_pane()) || self.settings.is_some() {
             return;
         }
         let Some(offer) = self.offer_of(&host, session_id, cx) else {
@@ -1657,6 +1671,211 @@ impl PhoneRoot {
     }
 }
 
+/// The list pane's width, in points, in two panes.
+pub(super) const LIST_PANE_WIDTH: f32 = 320.0;
+
+/// The width, in points, of the line between the two panes.
+const PANE_LINE_WIDTH: f32 = 1.0;
+
+/// What the session pane says while no session is selected.
+const PICK_SESSION_TEXT: &str = "Pick a session";
+
+/// A pane of the two, which a sheet over it covers alone.
+#[derive(Clone, Copy)]
+enum Pane {
+    /// Home's list, on the left.
+    List,
+    /// The selected session's page, on the right.
+    Session,
+}
+
+impl PhoneRoot {
+    /// Whether the window draws Home's list beside the session pane: a
+    /// two-pane layout with Settings closed and [`Self::panes_shown`].
+    fn split(&self, host_open: bool) -> bool {
+        self.layout.two_pane() && self.settings.is_none() && self.panes_shown(host_open)
+    }
+
+    /// Whether two panes draw rather than the hosts screen: a saved host is
+    /// open, or a session, the viewer or the browser is up (they stay while
+    /// their host is disconnected, as one pane keeps its page).
+    fn panes_shown(&self, host_open: bool) -> bool {
+        host_open || self.shown.is_some() || self.viewer.is_some() || self.browser.is_some()
+    }
+
+    /// The page the window draws inside its safe area.
+    fn page_body(
+        &mut self,
+        host_open: bool,
+        keyboard_up: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if !self.layout.two_pane() {
+            return self.single_body(host_open, keyboard_up, window, cx);
+        }
+        // Settings and the hosts screen cover the whole window in two panes.
+        if let Some(page) = self.settings_page(window, cx) {
+            page
+        } else if self.panes_shown(host_open) {
+            self.two_pane_body(keyboard_up, cx)
+        } else {
+            self.hosts_body(cx)
+        }
+    }
+
+    /// One pane at a time: Settings, the viewer, the browser, a session's
+    /// page, Home, else the hosts screen. Settings is on top, over whatever
+    /// two panes left open in the session pane.
+    fn single_body(
+        &mut self,
+        host_open: bool,
+        keyboard_up: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if let Some(page) = self.settings_page(window, cx) {
+            page
+        } else if let Some(page) = self.viewer_page(cx) {
+            page
+        } else if let Some(page) = self.browser_page(cx) {
+            page
+        } else if let Some(page) = self.session_page(keyboard_up, cx) {
+            page
+        } else if host_open {
+            self.list_body(cx)
+        } else {
+            self.hosts_body(cx)
+        }
+    }
+
+    /// Home's list in its pane, a line, then the session pane.
+    fn two_pane_body(&mut self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let list = div()
+            .driver_id(|| "phone-list-pane".to_owned())
+            .flex_none()
+            .w(px(LIST_PANE_WIDTH))
+            .h_full()
+            .child(self.list_body(cx));
+        let line = div()
+            .flex_none()
+            .w(px(PANE_LINE_WIDTH))
+            .h_full()
+            .bg(gpui::rgb(t.line));
+        let pane = self.session_pane(keyboard_up, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(list)
+            .child(line)
+            .child(div().flex_1().min_w_0().h_full().child(pane))
+    }
+
+    /// The session pane: the viewer, the browser, the selected session's
+    /// page, else "Pick a session".
+    fn session_pane(&mut self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
+        if let Some(page) = self.viewer_page(cx) {
+            page
+        } else if let Some(page) = self.browser_page(cx) {
+            page
+        } else if let Some(page) = self.session_page(keyboard_up, cx) {
+            page
+        } else {
+            let t = theme(cx);
+            div()
+                .driver_id(|| "phone-pane-empty".to_owned())
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(gpui::rgb(t.muted))
+                .child(PICK_SESSION_TEXT)
+        }
+    }
+
+    /// The sheets over the page, in order: Home's long-press sheet, the
+    /// browser's folder sheet, then the prompt sheet; in two panes each
+    /// covers its own pane only.
+    fn sheet_layers(
+        &mut self,
+        host_open: bool,
+        padding: Edges<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Div> {
+        let split = self.split(host_open);
+        let boxed =
+            |pane: Pane| move |layer: Div| Self::boxed(layer, split.then_some(pane), &padding);
+        let sheet = self
+            .home_sheet_over(host_open)
+            .then(|| self.sheet_layer(padding.bottom, cx))
+            .flatten()
+            .map(boxed(Pane::List));
+        let browser_sheet = self
+            .browser_sheet_shown()
+            .then(|| self.browser_sheet_layer(padding.bottom, cx))
+            .flatten()
+            .map(boxed(Pane::Session));
+        self.sync_prompt_sheet(cx);
+        let screen_height = window.viewport_size().height;
+        let prompt_sheet = self
+            .prompt_sheet_shown()
+            .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
+            .flatten()
+            .map(boxed(Pane::Session));
+        sheet
+            .into_iter()
+            .chain(browser_sheet)
+            .chain(prompt_sheet)
+            .collect()
+    }
+
+    /// Whether Home's long-press sheet may draw: in two panes over the
+    /// list while it shows; on one pane only over Home itself, with no
+    /// viewer, browser, session page, Settings or hosts screen under it.
+    fn home_sheet_over(&self, host_open: bool) -> bool {
+        if self.layout.two_pane() {
+            return self.split(host_open);
+        }
+        let page_over_home = self.viewer.is_some()
+            || self.browser.is_some()
+            || self.shown.is_some()
+            || self.settings.is_some();
+        host_open && !page_over_home
+    }
+
+    /// Whether the browser's folder sheet may draw: the browser is the page
+    /// on top, under no viewer and no Settings.
+    fn browser_sheet_shown(&self) -> bool {
+        self.viewer.is_none() && self.settings.is_none()
+    }
+
+    /// Whether the prompt sheet may draw: a session's page is shown with no
+    /// viewer, browser or Settings over it.
+    fn prompt_sheet_shown(&self) -> bool {
+        let page_over = self.viewer.is_some() || self.browser.is_some() || self.settings.is_some();
+        self.shown.is_some() && !page_over
+    }
+
+    /// `layer` over the whole window, or over `pane` alone while one is
+    /// given, inside `padding`'s side insets.
+    fn boxed(layer: Div, pane: Option<Pane>, padding: &Edges<Pixels>) -> Div {
+        let Some(pane) = pane else {
+            return layer;
+        };
+        let frame = div().absolute().top_0().bottom_0();
+        let frame = match pane {
+            Pane::List => frame.left(padding.left).w(px(LIST_PANE_WIDTH)),
+            Pane::Session => frame
+                .left(padding.left + px(LIST_PANE_WIDTH + PANE_LINE_WIDTH))
+                .right(padding.right),
+        };
+        frame.child(layer)
+    }
+}
+
 impl Render for PhoneRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The ready line follows the first frame, not the window's opening.
@@ -1678,44 +1897,12 @@ impl Render for PhoneRoot {
         );
         self.sync_terminal(keyboard_up, hidden, window, cx);
         self.browser_next_page(cx);
-        let body = if let Some(page) = self.viewer_page(cx) {
-            page
-        } else if let Some(page) = self.browser_page(cx) {
-            page
-        } else if let Some(page) = self.session_page(keyboard_up, cx) {
-            page
-        } else if let Some(page) = self.settings_page(window, cx) {
-            page
-        } else if hosts_view::any_host_open(self.root.read(cx)) {
-            self.list_body(cx)
-        } else {
-            self.hosts_body(cx)
-        };
+        let host_open = hosts_view::any_host_open(self.root.read(cx));
+        let body = self.page_body(host_open, keyboard_up, window, cx);
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
-        // The sheet is Home's: no viewer, browser, session page, Settings or
-        // hosts screen under it.
-        let over_home = self.viewer.is_none()
-            && self.browser.is_none()
-            && self.shown.is_none()
-            && self.settings.is_none()
-            && hosts_view::any_host_open(self.root.read(cx));
-        let sheet = over_home
-            .then(|| self.sheet_layer(padding.bottom, cx))
-            .flatten();
-        // The browser's folder sheet, while the browser is the page on top.
-        let browser_sheet = self
-            .viewer
-            .is_none()
-            .then(|| self.browser_sheet_layer(padding.bottom, cx))
-            .flatten();
-        self.sync_prompt_sheet(cx);
-        let screen_height = window.viewport_size().height;
-        let prompt_sheet =
-            (self.viewer.is_none() && self.browser.is_none() && self.shown.is_some())
-                .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
-                .flatten();
+        let layers = self.sheet_layers(host_open, padding, window, cx);
         let padded = || {
             div()
                 .pt(padding.top)
@@ -1743,9 +1930,7 @@ impl Render for PhoneRoot {
             .child(Self::pan_guard(cx))
             .child(padded().size_full().child(body))
             .children(self.copied_chip_layer(padding.top, cx))
-            .children(sheet)
-            .children(browser_sheet)
-            .children(prompt_sheet)
+            .children(layers)
             .children(pairing.map(|layer| {
                 padded()
                     .absolute()

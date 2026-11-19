@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- On the iPad, and on an iPhone on its side, the phone app shows the session list beside the selected session.
 - The phone app runs on the iPad and turns to landscape on the iPhone, and an open terminal redraws at the new width when the screen turns.
 - On the phone, tapping a path in a session's chat or terminal opens it: a file in the viewer, a folder in the browser, or a note when the host has no such path.
 - A Settings › Accounts row whose sign-in was refused has a Log in again button, which signs that account in again.

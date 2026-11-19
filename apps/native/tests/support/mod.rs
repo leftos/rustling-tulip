@@ -50,6 +50,16 @@ pub mod update_feed;
 
 pub const PROTOCOL: u32 = 1;
 
+/// The width, in points, of the window [`Harness::phone`] opens: under the
+/// 700 points two panes need, so it draws one pane at a time, and wide
+/// enough that the terminal's key bar shows every key unscrolled (an
+/// iPhone's 402 scrolls it sideways).
+pub const PHONE_WIDTH: f32 = 600.0;
+
+/// The height, in points, of the window [`Harness::phone`] opens: an
+/// iPhone's in portrait.
+pub const PHONE_HEIGHT: f32 = 874.0;
+
 /// The platform's secondary modifier alone (Cmd on macOS, Ctrl elsewhere),
 /// as `Modifiers::secondary_key` reads it off the test platform, for code
 /// with no `App` at hand.
@@ -3463,7 +3473,8 @@ impl<'a> Harness<'a> {
         harness
     }
 
-    /// Opens a phone-shape window over `dir`, drawn by a [`PhoneRoot`] as the
+    /// Opens a phone-shaped window ([`PHONE_WIDTH`] by [`PHONE_HEIGHT`],
+    /// one pane at a time) over `dir`, drawn by a [`PhoneRoot`] as the
     /// phone app draws it: no connection to This PC, each
     /// saved host's opened as a host [`Self::host`] reaches, the desktop's
     /// notification, sound, toast and badge seams silent, and nothing
@@ -3522,6 +3533,10 @@ impl<'a> Harness<'a> {
             let root = cx.new(|cx| RootView::with_transport(deps, window, cx));
             PhoneRoot::new(root, platform, window, cx)
         });
+        // A phone-shaped window, so a phone spec draws one pane at a time;
+        // a two-pane spec resizes it.
+        cx.simulate_resize(gpui::size(px(PHONE_WIDTH), px(PHONE_HEIGHT)));
+        cx.run_until_parked();
         let root = cx.update(|_, cx| phone.read(cx).root().clone());
         let mut harness = Self {
             cx,

@@ -191,7 +191,8 @@ impl PhoneRoot {
     /// One back step on the session page: the prompt sheet goes down while
     /// it is up, else the composer's open dock closes, else the page steps
     /// back, from the Terminal page to the Chat page while the toggle shows,
-    /// else back to Home.
+    /// else back to Home: in two panes, the selection clears to the empty
+    /// session pane.
     pub(super) fn session_back(&mut self, cx: &mut Context<Self>) {
         let (mirrored, toggle) = self.session_header(cx).map_or((false, false), |header| {
             (header.chat_mirrored, header.toggle)
@@ -411,7 +412,13 @@ impl PhoneRoot {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(Self::session_header_row(&header, page, &t, cx))
+                .child(Self::session_header_row(
+                    &header,
+                    page,
+                    !self.layout.two_pane(),
+                    &t,
+                    cx,
+                ))
                 .children(self.path_note().map(str::to_owned).map(|note| {
                     div()
                         .driver_id(|| "phone-path-note".to_owned())
@@ -1019,14 +1026,23 @@ impl PhoneRoot {
             })
     }
 
-    /// The header: Back, the label over the status word, and the toggle
-    /// while it shows.
-    fn session_header_row(header: &Header, page: Page, t: &UiTheme, cx: &mut Context<Self>) -> Div {
-        let back = phone_button("phone-session-back", ButtonKind::Outlined, cx)
-            .min_h(px(TOUCH_TARGET))
-            .flex_none()
-            .child(BACK_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx)));
+    /// The header: Back while `back` (one pane at a time; Home's list stays
+    /// beside the page in two panes), the label over the status word, and
+    /// the toggle while it shows.
+    fn session_header_row(
+        header: &Header,
+        page: Page,
+        back: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let back = back.then(|| {
+            phone_button("phone-session-back", ButtonKind::Outlined, cx)
+                .min_h(px(TOUCH_TARGET))
+                .flex_none()
+                .child(BACK_LABEL)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx)))
+        });
         let toggle = header.toggle.then(|| {
             phone_button("phone-session-toggle", ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))
@@ -1043,7 +1059,7 @@ impl PhoneRoot {
             .py(px(6.0))
             .border_b_1()
             .border_color(gpui::rgb(t.line))
-            .child(back)
+            .children(back)
             .child(
                 div()
                     .flex_1()

@@ -170,12 +170,14 @@ impl PhoneRoot {
         if !session::back_on(event.phase) {
             return;
         }
-        if self.viewer.is_some() {
+        // Settings is the page on top in either layout, over whatever two
+        // panes left open beside or under it.
+        if self.settings.is_some() {
+            self.settings_back(cx);
+        } else if self.viewer.is_some() {
             self.viewer_back(cx);
         } else if self.shown.is_some() {
             self.session_back(cx);
-        } else if self.settings.is_some() {
-            self.settings_back(cx);
         }
     }
 

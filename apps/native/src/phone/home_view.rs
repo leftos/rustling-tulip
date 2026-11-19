@@ -16,6 +16,7 @@ use super::PhoneRoot;
 use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
 use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
+use super::root_view::LIST_PANE_WIDTH;
 use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
 use crate::chat_cards;
@@ -39,6 +40,9 @@ const DOT: f32 = 8.0;
 pub(super) const SIDE_PADDING: f32 = 16.0;
 /// A not-paired host's header button.
 const PAIR_LABEL: &str = "Pair";
+
+/// The width, in points, of the accent edge on the selected row.
+const SELECTED_EDGE_WIDTH: f32 = 3.0;
 /// What Home says with no session to list.
 const EMPTY_TEXT: &str = "No sessions yet";
 /// The Needs you card's height, whatever it holds, so the rows under the
@@ -260,7 +264,8 @@ impl PhoneRoot {
                 children.push(Self::host_header(host, state, &parts, &t, cx));
             }
             for group in &host.groups {
-                children.push(Self::home_group(group, &t, cx));
+                let selected = self.selected_in(group);
+                children.push(Self::home_group(group, selected.as_deref(), &t, cx));
             }
         }
         if home.rows().next().is_none() {
@@ -498,8 +503,13 @@ impl PhoneRoot {
             TouchPhase::Started => self.tray.touch_started(dx, at),
             TouchPhase::Moved => self.tray.touch_moved(dx, at),
             TouchPhase::Ended => {
-                let width = f32::from(window.viewport_size().width) - 2.0 * SIDE_PADDING;
-                self.tray.touch_ended(dx, at, width);
+                // The tray spans the list pane in two panes, else the window.
+                let list = if self.layout.two_pane() {
+                    LIST_PANE_WIDTH
+                } else {
+                    f32::from(window.viewport_size().width)
+                };
+                self.tray.touch_ended(dx, at, list - 2.0 * SIDE_PADDING);
             }
             TouchPhase::Cancelled => self.tray.touch_cancelled(),
         }
@@ -594,13 +604,29 @@ impl PhoneRoot {
             )
     }
 
-    /// `group`'s heading, its banner when Detached, then its rows.
-    fn home_group(group: &HomeGroup, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+    /// The id of the session in `group` selected beside the list, in two
+    /// panes.
+    fn selected_in(&self, group: &HomeGroup) -> Option<String> {
+        group
+            .rows
+            .iter()
+            .find(|row| self.is_selected(&row.host, &row.session_id))
+            .map(|row| row.session_id.clone())
+    }
+
+    /// `group`'s heading, its banner when Detached, then its rows, the one
+    /// whose session is `selected` marked.
+    fn home_group(
+        group: &HomeGroup,
+        selected: Option<&str>,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let banner = group.detached.then(|| detached_banner(t, cx));
         let rows: Vec<Stateful<Div>> = group
             .rows
             .iter()
-            .map(|row| Self::session_row(row, t, cx))
+            .map(|row| Self::session_row(row, selected == Some(row.session_id.as_str()), t, cx))
             .collect();
         div()
             .flex()
@@ -610,10 +636,29 @@ impl PhoneRoot {
             .children(rows)
     }
 
-    /// One session's row: a dot, its label and its status word; a tap
-    /// shows the session, a long press opens its sheet.
-    fn session_row(row: &HomeRow, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = format!("phone-home-row-{}", leaf_key(&row.host, &row.session_id));
+    /// One session's row: a dot, its label and its status word, on the
+    /// raised ground with an accent edge while `selected`; a tap shows the
+    /// session (nothing while it is the one selected), a long press opens
+    /// its sheet.
+    fn session_row(
+        row: &HomeRow,
+        selected: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let leaf = leaf_key(&row.host, &row.session_id);
+        let id = format!("phone-home-row-{leaf}");
+        let mark = selected.then(|| {
+            let mark_id = format!("phone-home-row-selected-{leaf}");
+            div()
+                .driver_id(|| mark_id)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(SELECTED_EDGE_WIDTH))
+                .bg(gpui::rgb(t.accent))
+        });
         let color = tone_color(row.tone, t);
         let host = row.host.clone();
         let session_id = row.session_id.clone();
@@ -640,6 +685,8 @@ impl PhoneRoot {
             .when(row.tone == Tone::NeedsYou, |line| {
                 line.bg(gpui::rgba(t.ask_wash))
             })
+            .when(selected, |line| line.bg(gpui::rgb(t.raised)))
+            .children(mark)
             .child(dot(color))
             .child(
                 div()
@@ -662,7 +709,9 @@ impl PhoneRoot {
             )
             .child(long_press)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.open_session(host.clone(), &session_id, cx);
+                if !this.is_selected(&host, &session_id) {
+                    this.open_session(host.clone(), &session_id, cx);
+                }
             }))
     }
 }

@@ -24,7 +24,7 @@ The options were put as lanes in [canvases/tablet-layout/index.html](./canvases/
 ## Steps
 
 - [x] The layout rule: `PhoneLayout::of` and its tests, read by `PhoneRoot`.
-- [ ] Two panes on the iPad and in phone landscape: the list pane, the session pane and its empty state, where the prompt sheet, Settings and a notification's tap go; `native-shot` views `phone-ipad`, `phone-ipad-portrait` and `phone-landscape-home`.
+- [x] Two panes on the iPad and in phone landscape: the list pane, the session pane and its empty state, where the prompt sheet, Settings and a notification's tap go; `native-shot` views `phone-ipad`, `phone-ipad-portrait` and `phone-landscape-home`.
 - [ ] Terminal first on the iPhone in landscape: the full-screen terminal, the key bar's Back and status, the rotation rules; `native-shot` view `phone-landscape-terminal`.
 - [x] The bundle and the size claim: the `Info.plist` keys, the terminal's re-claim on a resize, and `sim-run.ps1 -Device` proving a launch on an iPad simulator.
 - [ ] Hand check through TestFlight on an iPad in both orientations and an iPhone on its side: rotate in a session, answer a prompt from the tray, open a terminal and type.

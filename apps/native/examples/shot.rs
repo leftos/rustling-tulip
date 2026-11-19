@@ -98,6 +98,15 @@
 //! "box"'s checkout: the header with `Back`, the host, the folder's path and
 //! `Show hidden`, over the parent row, the folders and then the files of the
 //! host's two pages, a hidden folder and file left out.
+//! `phone-ipad` shows the `phone-home` fixture in two panes in an iPad's
+//! 1180x820 landscape window with no insets: Home's list, its tray and its
+//! Settings button in the 320 pt list pane, the working session's row
+//! marked, and beside it that session's page (header with no Back, label,
+//! `Working`, the Terminal toggle) over its loaded chat and composer.
+//! `phone-ipad-portrait` shows the same in an iPad's 820x1180 portrait
+//! window inside its 24 pt top and 20 pt bottom insets.
+//! `phone-landscape-home` shows the same in an iPhone's 874x402 window on
+//! its side, inside its 21 pt bottom inset and 62 pt side insets.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -134,9 +143,9 @@ use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTes
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::perf_pills::PillLevel;
-use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::UnsupportedPlatform;
 use rustling_tulip_native::phone::quick_replies::ReplySet;
+use rustling_tulip_native::phone::{PhoneLayout, PhoneRoot};
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
@@ -178,6 +187,20 @@ const PHONE_WINDOW_SIZE: (u16, u16) = (390, 844);
 /// insets the iPhone simulator reported in the gpui iOS spike.
 const PHONE_INSET_TOP: f32 = 62.0;
 const PHONE_INSET_BOTTOM: f32 = 34.0;
+/// The `phone-ipad` shot's window: an iPad in landscape, in points, with no
+/// insets.
+const IPAD_WINDOW_SIZE: (u16, u16) = (1180, 820);
+/// The `phone-ipad-portrait` shot's window: an iPad held upright.
+const IPAD_PORTRAIT_WINDOW_SIZE: (u16, u16) = (820, 1180);
+/// The safe area the `phone-ipad-portrait` shot draws inside.
+const IPAD_INSET_TOP: f32 = 24.0;
+const IPAD_INSET_BOTTOM: f32 = 20.0;
+/// The `phone-landscape-home` shot's window: an iPhone on its side.
+const PHONE_LANDSCAPE_WINDOW_SIZE: (u16, u16) = (874, 402);
+/// The safe area the `phone-landscape-home` shot draws inside: the home
+/// indicator's band at the bottom and the camera's on each side.
+const PHONE_LANDSCAPE_INSET_BOTTOM: f32 = 21.0;
+const PHONE_LANDSCAPE_INSET_SIDE: f32 = 62.0;
 /// The folder under the shot's temp dir the phone shots' fetched copies
 /// sit in.
 const SHOT_PHONE_COPIES: &str = "copies";
@@ -387,10 +410,13 @@ enum View {
     PhoneViewer,
     PhoneViewerMd,
     PhoneBrowser,
+    PhoneIpad,
+    PhoneIpadPortrait,
+    PhoneLandscapeHome,
 }
 
 impl View {
-    const ALL: [Self; 64] = [
+    const ALL: [Self; 67] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -455,6 +481,9 @@ impl View {
         Self::PhoneViewer,
         Self::PhoneViewerMd,
         Self::PhoneBrowser,
+        Self::PhoneIpad,
+        Self::PhoneIpadPortrait,
+        Self::PhoneLandscapeHome,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -475,7 +504,48 @@ impl View {
                 | Self::PhoneViewer
                 | Self::PhoneViewerMd
                 | Self::PhoneBrowser
+                | Self::PhoneIpad
+                | Self::PhoneIpadPortrait
+                | Self::PhoneLandscapeHome
         )
+    }
+
+    /// Whether the view draws the phone in two panes: Home's list beside a
+    /// selected session.
+    fn is_two_pane(self) -> bool {
+        matches!(
+            self,
+            Self::PhoneIpad | Self::PhoneIpadPortrait | Self::PhoneLandscapeHome
+        )
+    }
+
+    /// Whether the view opens the fixture's working session over its chat.
+    fn opens_session(self) -> bool {
+        matches!(self, Self::PhoneSession | Self::PhoneSessionSheet) || self.is_two_pane()
+    }
+
+    /// The insets the phone's root draws inside, as the device reports them.
+    fn phone_insets(self) -> WindowInsets {
+        let (top, right, bottom, left) = match self {
+            Self::PhoneIpad => (0.0, 0.0, 0.0, 0.0),
+            Self::PhoneIpadPortrait => (IPAD_INSET_TOP, 0.0, IPAD_INSET_BOTTOM, 0.0),
+            Self::PhoneLandscapeHome => (
+                0.0,
+                PHONE_LANDSCAPE_INSET_SIDE,
+                PHONE_LANDSCAPE_INSET_BOTTOM,
+                PHONE_LANDSCAPE_INSET_SIDE,
+            ),
+            _ => (PHONE_INSET_TOP, 0.0, PHONE_INSET_BOTTOM, 0.0),
+        };
+        WindowInsets {
+            safe_area: Edges {
+                top: px(top),
+                right: px(right),
+                bottom: px(bottom),
+                left: px(left),
+            },
+            ..WindowInsets::default()
+        }
     }
 
     fn name(self) -> &'static str {
@@ -544,6 +614,9 @@ impl View {
             Self::PhoneViewer => "phone-viewer",
             Self::PhoneViewerMd => "phone-viewer-md",
             Self::PhoneBrowser => "phone-browser",
+            Self::PhoneIpad => "phone-ipad",
+            Self::PhoneIpadPortrait => "phone-ipad-portrait",
+            Self::PhoneLandscapeHome => "phone-landscape-home",
         }
     }
 
@@ -603,6 +676,9 @@ impl View {
             | Self::PhoneViewer
             | Self::PhoneViewerMd
             | Self::PhoneBrowser => PHONE_WINDOW_SIZE,
+            Self::PhoneIpad => IPAD_WINDOW_SIZE,
+            Self::PhoneIpadPortrait => IPAD_PORTRAIT_WINDOW_SIZE,
+            Self::PhoneLandscapeHome => PHONE_LANDSCAPE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -655,7 +731,10 @@ impl View {
             | Self::PhoneSettingsReplyGroup
             | Self::PhoneViewer
             | Self::PhoneViewerMd
-            | Self::PhoneBrowser => true,
+            | Self::PhoneBrowser
+            | Self::PhoneIpad
+            | Self::PhoneIpadPortrait
+            | Self::PhoneLandscapeHome => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -932,6 +1011,9 @@ impl Shot {
             | View::PhoneViewer
             | View::PhoneViewerMd
             | View::PhoneBrowser
+            | View::PhoneIpad
+            | View::PhoneIpadPortrait
+            | View::PhoneLandscapeHome
             | View::Toast => None,
         }
     }
@@ -1108,18 +1190,6 @@ fn shot_tokens(view: View) -> Arc<MemoryTokens> {
         tracing::warn!("the shot's device token was not stored: {err}");
     }
     Arc::new(tokens)
-}
-
-/// The insets the `phone-home` shot draws inside, as a phone reports them.
-fn phone_insets() -> WindowInsets {
-    WindowInsets {
-        safe_area: Edges {
-            top: px(PHONE_INSET_TOP),
-            bottom: px(PHONE_INSET_BOTTOM),
-            ..Edges::default()
-        },
-        ..WindowInsets::default()
-    }
 }
 
 /// Bytes in the GiB the `perf` shot's samples count in.
@@ -1667,6 +1737,7 @@ fn start_phone_home_shot(
     // The phone's root sweeps its copies folder as it opens: point it at the
     // shot's own folder first, never the real one.
     let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
+    let insets = shot.view.phone_insets();
     let window_size = shot.view.window_size();
     let (width, height) = window_size;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
@@ -1684,7 +1755,7 @@ fn start_phone_home_shot(
                 root.update(cx, |root, _| root.set_remote_files_root(copies));
                 cx.new(|cx| {
                     PhoneRoot::new(root, Arc::new(UnsupportedPlatform), window, cx)
-                        .with_insets_override(Some(phone_insets()))
+                        .with_insets_override(Some(insets))
                 })
             },
         )
@@ -1730,7 +1801,7 @@ async fn capture_phone_home(
             bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
         }
     }
-    if matches!(shot.view, View::PhoneSession | View::PhoneSessionSheet) {
+    if shot.view.opens_session() {
         let opened = handle.update(cx, |phone, _, cx| {
             phone.open_session_on(PHONE_SHEET_SESSION, cx)
         })?;
@@ -1758,6 +1829,8 @@ async fn capture_phone_home(
             cx.background_executor().timer(DRIVE_WAIT).await;
         }
     }
+    let layout = handle.update(cx, |phone, _, _| phone.layout())?;
+    check_phone_layout(shot.view, layout)?;
     open_phone_screen(shot.view, handle, cx).await?;
     if matches!(shot.view, View::PhoneViewer | View::PhoneViewerMd) {
         open_phone_viewer(shot, handle, cx).await?;
@@ -1775,6 +1848,18 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// Fails when a two-pane `view` lays out as one pane: its window's size or
+/// insets leave too little room.
+fn check_phone_layout(view: View, layout: PhoneLayout) -> Result<()> {
+    if view.is_two_pane() && !layout.two_pane() {
+        bail!(
+            "the {} view lays out as {layout:?}, not two panes",
+            view.name()
+        );
+    }
+    Ok(())
 }
 
 /// The copies-folder path of a fetch of `host_path` from the shot's host.
@@ -2134,7 +2219,10 @@ fn drive(
         | View::PhoneSettingsReplyGroup
         | View::PhoneViewer
         | View::PhoneViewerMd
-        | View::PhoneBrowser => Ok(()),
+        | View::PhoneBrowser
+        | View::PhoneIpad
+        | View::PhoneIpadPortrait
+        | View::PhoneLandscapeHome => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),
@@ -3776,7 +3864,7 @@ impl FakeDaemon {
         session_id: &str,
         request_id: Option<String>,
     ) -> Vec<DaemonMessage> {
-        if self.view == View::PhoneSession {
+        if self.view == View::PhoneSession || self.view.is_two_pane() {
             return vec![phone_chat_reply(session_id, request_id)];
         }
         if self.view == View::PhoneSessionSheet {

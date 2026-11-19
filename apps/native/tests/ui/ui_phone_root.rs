@@ -74,8 +74,8 @@ fn no_saved_host_shows_the_first_run_screen(cx: &mut TestAppContext) {
 }
 
 /// The layout the phone draws by follows its window's size: the harness's
-/// desktop-sized window fits two panes, and an iPhone's portrait window
-/// keeps one.
+/// phone-shaped window keeps one pane, an iPad's landscape window fits two,
+/// and an iPhone's portrait window keeps one.
 #[gpui::test]
 fn the_layout_follows_the_windows_size(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -90,8 +90,15 @@ fn the_layout_follows_the_windows_size(cx: &mut TestAppContext) {
     };
     assert_eq!(
         layout(&mut h),
+        Some(PhoneLayout::Single),
+        "the harness opens a phone-shaped window, one pane wide"
+    );
+    h.cx.simulate_resize(gpui::size(px(1180.0), px(820.0)));
+    h.cx.run_until_parked();
+    assert_eq!(
+        layout(&mut h),
         Some(PhoneLayout::TwoPane),
-        "the harness opens a desktop-sized window, wide enough for two panes"
+        "an iPad's landscape window fits two panes"
     );
     h.cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
     h.cx.run_until_parked();
