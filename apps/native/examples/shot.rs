@@ -2449,6 +2449,9 @@ impl Fixture {
             subagent_rows(&mut rows, now);
         }
         rows.extend(stopped_rows(view));
+        if view == View::Main {
+            rows.push(issue_row());
+        }
         let sessions = rows
             .into_iter()
             .map(|row| row.snapshot(now))
@@ -3128,6 +3131,55 @@ fn session_rows() -> Vec<Row> {
     ]
 }
 
+/// The Linear issue the `main` shot's issue session names.
+const SHOT_ISSUE: &str = "RT-139";
+
+/// The `main` shot's session whose label names a Linear issue of This PC's
+/// team, which the sidebar draws as a state chip.
+fn issue_row() -> Row {
+    Row {
+        id: "s-issue",
+        label: "RT-139 hover card",
+        status: "idle",
+        members: json!([member(TULIP, "main", TULIP_PATH)]),
+        minutes: 12,
+        extra: json!({}),
+    }
+}
+
+/// This PC's Linear context, with a key and the team `RT`, and its copy of
+/// [`SHOT_ISSUE`], In Progress, which colour the chip's dot.
+fn shot_linear(now: DateTime<Utc>) -> [DaemonMessage; 2] {
+    let issue = protocol::LinearIssue {
+        identifier: SHOT_ISSUE.to_owned(),
+        title: "Hover card over terminal identifiers".to_owned(),
+        url: format!("https://linear.app/acme/issue/{SHOT_ISSUE}"),
+        state: Some(protocol::LinearState {
+            name: "In Progress".to_owned(),
+            kind: protocol::LinearStateKind::Started,
+            color: "#f2c94c".to_owned(),
+        }),
+        priority: 2,
+        priority_label: "High".to_owned(),
+        project: Some("Linear links".to_owned()),
+        releases: vec!["vNext".to_owned()],
+        assignee: None,
+        updated_at: Some(now),
+        fetched_at: now,
+        stale: false,
+    };
+    [
+        DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        },
+        DaemonMessage::LinearIssues {
+            issues: vec![issue],
+        },
+    ]
+}
+
 /// The session the `exited` and `abandoned` shots put in the tulip tab's
 /// bottom pane in place of its shell: stopped with its child's exit code,
 /// or left behind by a daemon restart with the prompt it was running.
@@ -3336,6 +3388,11 @@ impl FakeDaemon {
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
         })?;
+        if self.view == View::Main {
+            for msg in shot_linear(self.now) {
+                self.send(msg)?;
+            }
+        }
         // A first connect is asked how to lay out its window in place of a
         // tab list, as `push_initial_state` sends it; a tab list would mark
         // the layout loaded under the chooser.

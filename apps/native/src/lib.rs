@@ -358,6 +358,7 @@ pub use crate::history::{
     MoreRow,
 };
 pub use crate::host_update_dialog::{HostUpdateDialogView, HostUpdateSession};
+pub use crate::linear_card::TitleChip;
 pub use crate::link_menu_view::ChatFileLink;
 pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
@@ -5580,6 +5581,41 @@ impl RootView {
     /// one, or none, which links only issue URLs.
     pub(crate) fn issue_context_of(&self, host: &HostKey) -> links::IssueContext {
         self.linear_contexts.get(host).cloned().unwrap_or_default()
+    }
+
+    /// What this render's session title chips read: each host's Linear
+    /// context and the issues its daemon sent.
+    pub(crate) fn title_chips(&self) -> linear_card::TitleChips<'_> {
+        linear_card::TitleChips {
+            contexts: &self.linear_contexts,
+            issues: &self.linear_issues,
+            now: chrono::Utc::now(),
+        }
+    }
+
+    /// What a hover on title chip `chip` does: the pointer coming onto it
+    /// asks the chip's host for its issue, as a terminal hover does.
+    pub(crate) fn ask_on_chip_hover(
+        chip: &linear_card::TitleChip,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        let (host, identifier) = (chip.host.clone(), chip.identifier.clone());
+        cx.listener(move |this, hovered: &bool, _, _| {
+            if *hovered {
+                this.ask_linear_issue(&host, &identifier);
+            }
+        })
+    }
+
+    /// The card title chip `chip`'s tooltip shows now, from its host's
+    /// cache.
+    pub(crate) fn chip_card(&self, chip: &linear_card::TitleChip) -> linear_card::Card {
+        self.linear_issues.card(
+            &chip.host,
+            &chip.identifier,
+            &chip.web_url,
+            chrono::Utc::now(),
+        )
     }
 
     /// A daemon refusal from `host` carrying `request_id`: when it answers

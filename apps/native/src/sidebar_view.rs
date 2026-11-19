@@ -21,6 +21,8 @@ use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::fonts::{ui_px, ui_px_at};
 use crate::grid_view::{ADD_REPO_TIP, HostLabel, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
+use crate::linear_card::{TitleChip, TitleChips};
+use crate::linear_card_view::{card_tooltip, issue_dot};
 use crate::palette::ROW_GAP;
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
@@ -366,6 +368,7 @@ impl RootView {
             drop_mark: self.sidebar_drop_mark(cx),
             subline_room: width - 2.0 * BODY_INSET_X - LEAF_PAD_LEFT - ROW_PADDING - SUBLINE_INDENT,
             chrome,
+            title_chips: self.title_chips(),
         };
         let row_of = |container: &Container, cx: &mut Context<Self>| {
             let add_workspace = container
@@ -2382,6 +2385,8 @@ struct LeafRows<'a> {
     drop_mark: Option<(SidebarRow, Side)>,
     /// The window the rows are drawn for.
     chrome: SidebarChrome,
+    /// What a session label's Linear chip reads.
+    title_chips: TitleChips<'a>,
 }
 
 impl LeafRows<'_> {
@@ -3079,6 +3084,9 @@ fn leaf_row(
         host_chip(crate::fonts::ui_text_size(cx), name, label.clone(), &t)
     });
     let fold = session_fold(leaf, host, cx);
+    let issue = (leaf.kind == LeafKind::Session)
+        .then(|| ctx.title_chips.chip(host, &leaf.label))
+        .flatten();
     match density {
         LeafDensity::Compact => {
             let pill = if leaf.kind == LeafKind::Session {
@@ -3096,13 +3104,7 @@ fn leaf_row(
                 .items_center()
                 .gap(px(8.0))
                 .h(ui_px(cx, COMPACT_LEAF_HEIGHT))
-                .children(label_head(
-                    crate::fonts::ui_text_size(cx),
-                    crate::fonts::ui_weight_shift(cx),
-                    leaf,
-                    &key,
-                    &theme(cx),
-                ))
+                .children(titled_head(leaf, &key, issue.as_ref(), cx))
                 .children(fold)
                 .children(host_tag)
                 .children(inline)
@@ -3113,13 +3115,7 @@ fn leaf_row(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .children(label_head(
-                    crate::fonts::ui_text_size(cx),
-                    crate::fonts::ui_weight_shift(cx),
-                    leaf,
-                    &key,
-                    &theme(cx),
-                ))
+                .children(titled_head(leaf, &key, issue.as_ref(), cx))
                 .children(fold)
                 .children(host_tag)
                 .children(inline);
@@ -3259,6 +3255,69 @@ fn session_fold(leaf: &Leaf, host: &HostKey, cx: &mut Context<RootView>) -> Opti
             }))
             .into_any_element(),
     )
+}
+
+/// The label line's start as [`label_head`] draws it, a session label's
+/// Linear chip `issue` leading the label, which then shows the rest.
+fn titled_head(
+    leaf: &Leaf,
+    key: &str,
+    issue: Option<&TitleChip>,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let t = theme(cx);
+    let Some(issue) = issue else {
+        return label_head(offset, shift, leaf, key, &t);
+    };
+    let rest = Leaf {
+        label: issue.rest.clone(),
+        ..leaf.clone()
+    };
+    let mut parts = label_head(offset, shift, &rest, key, &t);
+    // After the status glyph, before the label.
+    parts.insert(1.min(parts.len()), leaf_issue_chip(offset, key, issue, cx));
+    parts
+}
+
+/// A session label's Linear chip, tagged `leaf-<key>-issue`: the identifier
+/// behind a 6 px dot in its state's colour, in the leaf chips' look.
+/// Hovering it shows the issue's card; a left press opens the issue and
+/// goes no further, so it neither selects nor drags the leaf.
+fn leaf_issue_chip(
+    offset: i8,
+    key: &str,
+    issue: &TitleChip,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let name = format!("leaf-{key}-issue");
+    let (selector, text_tag) = (name.clone(), format!("{name}={}", issue.identifier));
+    let (url, host) = (issue.open_url().to_owned(), issue.host.clone());
+    let root = cx.entity().downgrade();
+    chip(
+        offset,
+        div().id(SharedString::from(name.clone())),
+        ChipSize::Row,
+        &t,
+    )
+    .driver_id(|| selector)
+    .gap(px(5.0))
+    .cursor_pointer()
+    .on_hover(RootView::ask_on_chip_hover(issue, cx))
+    .tooltip(card_tooltip(name, root, issue.clone()))
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            this.on_any_mouse_down(event, window, cx);
+            cx.stop_propagation();
+            this.open_issue_link(&url, &host, window, cx);
+        }),
+    )
+    .child(issue_dot(issue.dot, &t))
+    .child(div().driver_id(|| text_tag).child(issue.identifier.clone()))
+    .into_any_element()
 }
 
 /// Whether the leaf's label draws dimmed: the session is idle with no

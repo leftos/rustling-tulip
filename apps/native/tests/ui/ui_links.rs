@@ -414,6 +414,42 @@ fn each_hover_entry_asks_once_and_only_a_host_with_linear_links(cx: &mut TestApp
     );
 }
 
+#[gpui::test]
+fn hovering_an_uncached_title_chip_asks_for_its_issue_and_its_card_follows_the_reply(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let s1 = session("s1").label("RT-139 hover card").build();
+    let features = [protocol::FEATURE_LINEAR_LINKS];
+    let mut h = support::remote_in_pane_with_features(cx, &dir, &json!({}), &["r1"], s1, &features);
+    h.host(&saved_remote()).send(linear(&["RT"], true));
+    h.host(&saved_remote()).sent();
+    let at = h.center("pane-chip-p2-issue");
+    h.hover(at, Modifiers::none());
+    assert_eq!(
+        asked(h.host(&saved_remote()).sent()),
+        [vec!["RT-139".to_owned()]],
+        "hovering the chip asks for its issue"
+    );
+    h.advance(Duration::from_millis(600));
+    assert!(
+        drawn(
+            &mut h,
+            "linear-card-notice-pane-chip-p2-issue=Fetching from Linear"
+        ),
+        "the card says it is loading"
+    );
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-139",
+            "Hover card",
+        )]));
+    assert!(
+        drawn(&mut h, "linear-card-title-pane-chip-p2-issue=Hover card"),
+        "the open card follows the reply"
+    );
+}
+
 /// [`support::remote_in_pane_with_features`] with `linear_links`, `RT-12`
 /// on screen in the remote pane `p2` and the card shown there by Ctrl.
 fn remote_card<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {

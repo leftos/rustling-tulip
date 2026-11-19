@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use protocol::LinearIssue;
 
 use crate::dashboard_rows::{DASH, format_age};
-use crate::links::{LinkKind, tip_text};
+use crate::links::{IssueContext, LinkKind, tip_text, title_issue};
 use crate::target::HostKey;
 
 /// The no-key notice.
@@ -19,6 +19,9 @@ pub(crate) const NO_KEY: &str = "Set LINEAR_API_KEY to see this issue's details.
 pub(crate) const LOADING: &str = "Fetching from Linear";
 /// What the card's button says, and what it does.
 pub(crate) const OPEN_IN_LINEAR: &str = "Open in Linear";
+/// The foot of a session title chip's card: a plain click on the chip
+/// opens the issue.
+pub(crate) const CHIP_FOOT: &str = "Click to open";
 
 /// Every host's Linear issues, key flag and requests in flight.
 #[derive(Debug, Default)]
@@ -103,6 +106,59 @@ impl LinearCache {
             &lookup,
             now,
         )
+    }
+}
+
+/// A session title's Linear chip: the title's first identifier of one of
+/// its host's teams, the title's rest, the dot's colour and the card a
+/// hover shows, whose address a click opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleChip {
+    pub host: HostKey,
+    pub identifier: String,
+    /// The title with the identifier cut out; empty when it was all of it.
+    pub rest: String,
+    /// Linear's colour for the issue's state, as `0xrrggbb`; `None`, with no
+    /// copy or no colour, draws the theme's muted dot.
+    pub dot: Option<u32>,
+    /// The web address built from the host's Linear context, which the
+    /// card opens until a copy names the issue's own.
+    pub(crate) web_url: String,
+    pub(crate) card: Card,
+}
+
+impl TitleChip {
+    /// The address a click on the chip opens: the copy's own, else the web
+    /// address built from the host's Linear context.
+    pub(crate) fn open_url(&self) -> &str {
+        &self.card.open_url
+    }
+}
+
+/// What the title chips of one render read: each host's Linear context and
+/// the issues its daemon sent, with ages counted to `now`.
+pub(crate) struct TitleChips<'a> {
+    pub contexts: &'a HashMap<HostKey, IssueContext>,
+    pub issues: &'a LinearCache,
+    pub now: DateTime<Utc>,
+}
+
+impl TitleChips<'_> {
+    /// The chip of `host`'s session titled `title`; `None` when the title
+    /// names no identifier of the host's teams, as on a host with no context.
+    pub(crate) fn chip(&self, host: &HostKey, title: &str) -> Option<TitleChip> {
+        let context = self.contexts.get(host)?;
+        let (identifier, rest) = title_issue(title, context)?;
+        let web_url = context.bare_address(&identifier)?;
+        let card = self.issues.card(host, &identifier, &web_url, self.now);
+        Some(TitleChip {
+            host: host.clone(),
+            dot: card.state.as_ref().and_then(|state| state.color),
+            identifier,
+            rest,
+            web_url,
+            card,
+        })
     }
 }
 

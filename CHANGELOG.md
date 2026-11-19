@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- A session title naming a Linear issue shows it as a chip in its state colour; hovering shows the issue, clicking opens it.
 - Linear issue identifiers such as RT-12, and linear.app issue links, are underlined in the terminal; resting on one shows the issue's card, and Ctrl+click opens it in the Linear app, or in your browser without it.
 - The desktop chat composer has a row of Quick replies, such as "continue" or "yes", that send in one click.
 - Typing @ in the desktop chat composer lists the session's matching files, and picking one inserts its mention.

@@ -412,7 +412,8 @@ impl IssueContext {
 
     /// The web address bare `identifier` opens, when its team is one of the
     /// context's.
-    fn bare_address(&self, identifier: &str) -> Option<String> {
+    #[must_use]
+    pub fn bare_address(&self, identifier: &str) -> Option<String> {
         let key = team_key(identifier)?;
         let workspace = self.workspace.as_deref()?;
         self.team_keys
@@ -444,6 +445,85 @@ pub fn issue_identifier(link: &TerminalLink) -> Option<String> {
 #[must_use]
 pub fn issue_web_address(workspace: &str, identifier: &str) -> String {
     format!("https://linear.app/{workspace}/issue/{identifier}")
+}
+
+/// What a session title's chip names: the title's first bare identifier of
+/// one of `context`'s teams outside any URL, and the title with it cut out
+/// (see [`title_rest`]). `None` when the title names no such identifier, as
+/// with a context of no teams; any further identifier stays in the text.
+#[must_use]
+pub fn title_issue(title: &str, context: &IssueContext) -> Option<(String, String)> {
+    let urls: Vec<std::ops::Range<usize>> = URL_PATTERN
+        .find_iter(title)
+        .map(|found| found.range())
+        .collect();
+    let (start, identifier) = bare_identifiers(title).find(|(start, identifier)| {
+        context.bare_address(identifier).is_some() && !urls.iter().any(|url| url.contains(start))
+    })?;
+    let end = start + identifier.len();
+    Some((
+        identifier.to_owned(),
+        title_rest(&title[..start], &title[end..]),
+    ))
+}
+
+/// The separators that stand between two parts of a title.
+const TITLE_SEPARATORS: [char; 6] = [':', '-', '–', '—', '·', '|'];
+
+/// The characters trimmed from either end of a title's rest: the
+/// separators, `,` and `;`.
+const TITLE_TRIMMED: [char; 8] = [':', '-', '–', '—', '·', '|', ',', ';'];
+
+/// The characters that follow the text before them with no space.
+const TIGHT_AFTER: [char; 8] = [':', ',', ';', '.', '?', '!', ')', ']'];
+
+/// The title text left around a cut identifier, `before` it and `after` it,
+/// tidied only at the cut: the `[]` or `()` pair that surrounded the
+/// identifier dropped, one of two separators meeting at the cut kept, the
+/// halves joined by one space or none (before punctuation or a closing
+/// bracket, after an opening one), whitespace runs collapsed to one space,
+/// and whitespace, separators, `,` and `;` trimmed from the rest's start
+/// and end.
+fn title_rest(before: &str, after: &str) -> String {
+    let (before, after) = unwrap_cut(before.trim_end(), after.trim_start());
+    let after = one_separator(before, after);
+    let tight = after.starts_with(TIGHT_AFTER) || before.ends_with(['(', '[']);
+    let joined = if before.is_empty() || after.is_empty() || tight {
+        format!("{before}{after}")
+    } else {
+        format!("{before} {after}")
+    };
+    collapse_spaces(&joined)
+        .trim_matches(|c: char| c.is_whitespace() || TITLE_TRIMMED.contains(&c))
+        .to_owned()
+}
+
+/// `after` without its leading separator when `before` ends in one, so the
+/// two meeting at the cut leave one.
+fn one_separator<'a>(before: &str, after: &'a str) -> &'a str {
+    if !before.ends_with(TITLE_SEPARATORS) {
+        return after;
+    }
+    after
+        .strip_prefix(TITLE_SEPARATORS)
+        .map_or(after, str::trim_start)
+}
+
+/// `before` and `after` a cut without the `[]` or `()` pair that held the
+/// cut identifier and nothing else, when they had one.
+fn unwrap_cut<'a>(before: &'a str, after: &'a str) -> (&'a str, &'a str) {
+    for (open, close) in [('[', ']'), ('(', ')')] {
+        if let (Some(before), Some(after)) = (before.strip_suffix(open), after.strip_prefix(close))
+        {
+            return (before.trim_end(), after.trim_start());
+        }
+    }
+    (before, after)
+}
+
+/// `text` with each whitespace run one space and none at either end.
+fn collapse_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every Linear issue link in `rows`, grouped into logical lines as
@@ -3241,5 +3321,115 @@ mod tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::{IssueContext, title_issue};
+
+    /// The context of a host with a key whose workspace `acme` has team `RT`.
+    fn rt() -> IssueContext {
+        IssueContext::new(&["RT".to_owned()], Some("acme"), true)
+    }
+
+    fn split(title: &str) -> Option<(String, String)> {
+        title_issue(title, &rt())
+    }
+
+    fn chip(identifier: &str, rest: &str) -> (String, String) {
+        (identifier.to_owned(), rest.to_owned())
+    }
+
+    #[test]
+    fn a_leading_identifier_leads_the_rest() {
+        assert_eq!(
+            split("RT-139 hover card"),
+            Some(chip("RT-139", "hover card"))
+        );
+    }
+
+    #[test]
+    fn a_bracketed_identifier_leaves_no_empty_brackets() {
+        assert_eq!(split("[RT-12] Fix login"), Some(chip("RT-12", "Fix login")));
+        assert_eq!(split("Fix login (RT-12)"), Some(chip("RT-12", "Fix login")));
+    }
+
+    #[test]
+    fn a_separator_after_the_identifier_is_trimmed() {
+        assert_eq!(split("RT-12: Fix login"), Some(chip("RT-12", "Fix login")));
+    }
+
+    #[test]
+    fn only_the_first_identifier_is_cut_and_spaces_collapse() {
+        assert_eq!(
+            split("Fix RT-12 and RT-13"),
+            Some(chip("RT-12", "Fix and RT-13"))
+        );
+    }
+
+    #[test]
+    fn text_away_from_the_cut_is_left_as_written() {
+        assert_eq!(
+            split("Fix render() crash RT-140"),
+            Some(chip("RT-140", "Fix render() crash"))
+        );
+        assert_eq!(split("a : b RT-1"), Some(chip("RT-1", "a : b")));
+    }
+
+    #[test]
+    fn a_comma_after_the_cut_joins_the_text_before_it() {
+        assert_eq!(
+            split("Fix RT-12, then ship"),
+            Some(chip("RT-12", "Fix, then ship"))
+        );
+    }
+
+    #[test]
+    fn punctuation_at_the_cut_joins_or_is_trimmed() {
+        for (title, rest) in [
+            ("RT-12, fix login", "fix login"),
+            ("RT-12; fix", "fix"),
+            ("Fix login, RT-12", "Fix login"),
+            ("Work on RT-12.", "Work on."),
+            ("What about RT-12?", "What about?"),
+            ("Fix (see RT-12)", "Fix (see)"),
+        ] {
+            assert_eq!(split(title), Some(chip("RT-12", rest)), "{title}");
+        }
+    }
+
+    #[test]
+    fn separators_meeting_at_the_cut_keep_one() {
+        assert_eq!(
+            split("Fix – RT-12 – later"),
+            Some(chip("RT-12", "Fix – later"))
+        );
+    }
+
+    #[test]
+    fn a_title_of_only_the_identifier_has_no_rest() {
+        assert_eq!(split("RT-12"), Some(chip("RT-12", "")));
+    }
+
+    #[test]
+    fn an_identifier_of_another_team_is_no_chip() {
+        assert_eq!(split("XYZ-12 thing"), None);
+    }
+
+    #[test]
+    fn an_identifier_inside_an_issue_url_is_no_chip() {
+        assert_eq!(split("see https://linear.app/acme/issue/RT-12/x"), None);
+    }
+
+    #[test]
+    fn a_context_of_no_teams_draws_no_chip() {
+        let none = IssueContext::new(&[], Some("acme"), true);
+        let no_key = IssueContext::new(&["RT".to_owned()], Some("acme"), false);
+        for context in [IssueContext::default(), none, no_key] {
+            for title in ["RT-139 hover card", "[RT-12] Fix login", "RT-12"] {
+                assert_eq!(title_issue(title, &context), None, "{title}");
+            }
+        }
     }
 }

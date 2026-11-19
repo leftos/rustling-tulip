@@ -6,18 +6,22 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Div, FontWeight, MouseButton, MouseDownEvent, Pixels, Point, Window, anchored,
-    deferred, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, FontWeight, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, Stateful, WeakEntity, Window, anchored, deferred, div, prelude::*, px,
 };
 
 use crate::driver_id::DriverId as _;
-use crate::fonts::{self, DEFAULT_FAMILY};
-use crate::linear_card::{Card, Notice, OPEN_IN_LINEAR};
+use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
+use crate::linear_card::{CHIP_FOOT, Card, Notice, OPEN_IN_LINEAR, TitleChip};
+use crate::notice_view::drop_shadow;
 use crate::session_menu::popover_frame;
 use crate::ui_theme::{self, UiTheme};
+use crate::{RootView, UI_TEXT_SIZE};
 
 /// The card's width, as the mock's.
 const CARD_WIDTH: f32 = 300.0;
+/// The corner radius of a title chip's card, as a popover's.
+const PASSIVE_RADIUS: f32 = 10.0;
 /// The width of a field's label column.
 const LABEL_WIDTH: f32 = 64.0;
 
@@ -42,14 +46,79 @@ pub(crate) fn card_at(
     actions: CardActions,
     cx: &App,
 ) -> AnyElement {
-    let t = ui_theme::theme(cx);
-    let pane = pane_id.to_owned();
     let hover = actions.hover;
+    let frame = card_frame(pane_id, card, Some(&actions.open), cx)
+        .on_hover(move |over: &bool, window, cx| hover(*over, window, cx));
+    let card = anchored().position(at).snap_to_window().child(frame);
+    deferred(card).with_priority(1).into_any_element()
+}
+
+/// The card of title chip `chip`, tagged `owner`, as the chip's tooltip:
+/// the same card, drawn where gpui draws a tooltip and read from `root`'s
+/// cache at each render, so an open card follows a reply. It takes no
+/// pointer: a press on it reaches the chip under it.
+pub(crate) fn card_tooltip(
+    owner: String,
+    root: WeakEntity<RootView>,
+    chip: TitleChip,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_, cx| {
+        let tip = CardTip {
+            owner: owner.clone(),
+            root: root.clone(),
+            chip: chip.clone(),
+        };
+        cx.new(|cx| {
+            if let Some(root) = tip.root.upgrade() {
+                cx.observe(&root, |_, _, cx| cx.notify()).detach();
+            }
+            tip
+        })
+        .into()
+    }
+}
+
+/// A title chip's card, drawn as its tooltip.
+struct CardTip {
+    owner: String,
+    root: WeakEntity<RootView>,
+    chip: TitleChip,
+}
+
+impl Render for CardTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = self.root.upgrade().map_or_else(
+            || self.chip.card.clone(),
+            |root| root.read(cx).chip_card(&self.chip),
+        );
+        card_frame(&self.owner, &card, None, cx)
+    }
+}
+
+/// The card's box, tagged by `owner` (its pane, or its title chip): the
+/// header, the title, the fields, the notice and the foot. With `open` it
+/// is the terminal's card, which takes the pointer and whose title and
+/// button open the issue; without, a title chip's passive tooltip, whose
+/// foot names the chip's plain click.
+fn card_frame(owner: &str, card: &Card, open: Option<&OpenCard>, cx: &App) -> Stateful<Div> {
+    let t = ui_theme::theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    let pane = owner.to_owned();
+    let foot_text = if open.is_some() {
+        Card::foot()
+    } else {
+        CHIP_FOOT
+    };
     let foot = div()
         .text_color(gpui::rgb(t.faint))
-        .driver_id(move || format!("linear-card-foot-{pane}={}", Card::foot()))
-        .child(Card::foot());
-    let frame = popover_frame(fonts::ui_text_size(cx), "linear-card", &t)
+        .driver_id(move || format!("linear-card-foot-{pane}={foot_text}"))
+        .child(foot_text);
+    let frame = if open.is_some() {
+        popover_frame(offset, "linear-card", &t)
+    } else {
+        passive_frame(offset, &t)
+    };
+    frame
         .w(px(CARD_WIDTH))
         .px(px(12.0))
         .py(px(10.0))
@@ -57,9 +126,8 @@ pub(crate) fn card_at(
         .flex_col()
         .gap(px(4.0))
         .font_family(fonts::ui_family(cx))
-        .on_hover(move |over: &bool, window, cx| hover(*over, window, cx))
-        .child(header(card, &t))
-        .children(title(card, &actions.open))
+        .child(header(owner, card, &t))
+        .children(title(owner, card, open))
         .children(
             card.fields
                 .iter()
@@ -68,15 +136,31 @@ pub(crate) fn card_at(
         .children(
             card.notice
                 .as_ref()
-                .map(|notice| notice_row(card, notice, &actions.open, &t)),
+                .map(|notice| notice_row(owner, card, notice, open, &t)),
         )
-        .child(foot);
-    let card = anchored().position(at).snap_to_window().child(frame);
-    deferred(card).with_priority(1).into_any_element()
+        .child(foot)
 }
 
-/// The identifier, then the priority and state pills at the right.
-fn header(card: &Card, t: &UiTheme) -> Div {
+/// The card's box as a tooltip: the popover's look, without taking the
+/// pointer, so a press on it goes through to what lies under it.
+fn passive_frame(offset: i8, t: &UiTheme) -> Stateful<Div> {
+    div()
+        .id("linear-card")
+        .driver_id(|| "linear-card".to_owned())
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .rounded(px(PASSIVE_RADIUS))
+        .shadow(vec![drop_shadow(t.popover_shadow, 8.0, 24.0)])
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text))
+}
+
+/// The identifier, then the priority and state pills at the right; the
+/// identifier and the state are tagged by `owner`.
+fn header(owner: &str, card: &Card, t: &UiTheme) -> Div {
+    let (id_owner, state_owner) = (owner.to_owned(), owner.to_owned());
+    let identifier = card.identifier.clone();
     div()
         .flex()
         .items_center()
@@ -85,15 +169,26 @@ fn header(card: &Card, t: &UiTheme) -> Div {
             div()
                 .font_family(DEFAULT_FAMILY)
                 .text_color(gpui::rgb(t.subtle))
+                .driver_id(move || format!("linear-card-id-{id_owner}={identifier}"))
                 .child(card.identifier.clone()),
         )
         .child(div().flex_1())
         .children(card.priority.clone().map(|label| pill(t.faint, label, t)))
-        .children(
-            card.state
-                .as_ref()
-                .map(|state| pill(state.color.unwrap_or(t.faint), state.name.clone(), t)),
-        )
+        .children(card.state.as_ref().map(|state| {
+            let name = state.name.clone();
+            pill(state.color.unwrap_or(t.faint), state.name.clone(), t)
+                .driver_id(move || format!("linear-card-state-{state_owner}={name}"))
+        }))
+}
+
+/// A session title chip's 6 px dot: Linear's colour for its issue's state,
+/// else the theme's muted text colour.
+pub(crate) fn issue_dot(color: Option<u32>, t: &UiTheme) -> Div {
+    div()
+        .flex_none()
+        .size(px(6.0))
+        .rounded_full()
+        .bg(gpui::rgb(color.unwrap_or(t.muted)))
 }
 
 /// A pill of `label` behind a dot of colour `dot`.
@@ -111,9 +206,19 @@ fn pill(dot: u32, label: String, t: &UiTheme) -> Div {
         .child(label)
 }
 
-/// The issue's title, which opens the issue when clicked.
-fn title(card: &Card, open: &OpenCard) -> Option<Div> {
+/// The issue's title, which with `open` opens the issue when clicked;
+/// without, plain text tagged by `owner`.
+fn title(owner: &str, card: &Card, open: Option<&OpenCard>) -> Option<Div> {
     let title = card.title.clone()?;
+    let Some(open) = open else {
+        let tag = format!("linear-card-title-{owner}={title}");
+        return Some(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .driver_id(|| tag)
+                .child(title),
+        );
+    };
     let open = Rc::clone(open);
     Some(
         div()
@@ -143,11 +248,20 @@ fn field(label: &str, value: &str, t: &UiTheme) -> Div {
         .child(div().child(value.to_owned()))
 }
 
-/// The notice's line, in the asking colour when it warns, with Open in
-/// Linear under it when it offers one.
-fn notice_row(card: &Card, notice: &Notice, open: &OpenCard, t: &UiTheme) -> Div {
+/// The notice's line, tagged by `owner`, in the asking colour when it
+/// warns, with Open in Linear under it when it offers one and the card has
+/// `open`.
+fn notice_row(
+    owner: &str,
+    card: &Card,
+    notice: &Notice,
+    open: Option<&OpenCard>,
+    t: &UiTheme,
+) -> Div {
     let color = if notice.warns() { t.asking } else { t.subtle };
-    let button = notice.offers_open().then(|| {
+    let text = notice.text(&card.identifier);
+    let tag = format!("linear-card-notice-{owner}={text}");
+    let button = open.filter(|_| notice.offers_open()).map(|open| {
         let open = Rc::clone(open);
         div()
             .mt(px(4.0))
@@ -172,7 +286,8 @@ fn notice_row(card: &Card, notice: &Notice, open: &OpenCard, t: &UiTheme) -> Div
         .child(
             div()
                 .text_color(gpui::rgb(color))
-                .child(notice.text(&card.identifier)),
+                .driver_id(|| tag)
+                .child(text),
         )
         .children(button)
 }

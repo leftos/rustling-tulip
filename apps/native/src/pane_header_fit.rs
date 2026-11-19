@@ -22,6 +22,12 @@ pub(crate) struct HeaderFit {
     pub(crate) width: f32,
     /// The status glyph's width; 0 for an empty pane, which draws none.
     pub(crate) glyph: f32,
+    /// The Linear chip's width, which never shrinks; 0 for a title that
+    /// names no issue, which draws none.
+    pub(crate) issue: f32,
+    /// The title is drawn; a title that was only its Linear identifier
+    /// draws the chip alone.
+    pub(crate) title: bool,
     /// Each chip's natural width, in header order.
     pub(crate) chips: Vec<f32>,
     /// Each button of the cluster that moves (Pop out to the last prompt
@@ -52,14 +58,19 @@ fn row_width(items: &[f32]) -> f32 {
 const SPACER: f32 = 0.0;
 
 /// The width a header needs to show everything inline with the title at
-/// [`TITLE_MIN`]: padding, glyph, title, chips, the spacer, the fixed items,
+/// [`TITLE_MIN`]: padding, glyph, the Linear chip, title, chips, the spacer, the fixed items,
 /// the cluster and Close, a [`GAP`] between each two items.
 pub(crate) fn inline_width(fit: &HeaderFit) -> f32 {
     let mut items = Vec::with_capacity(fit.chips.len() + fit.cluster.len() + fit.fixed.len() + 4);
     if fit.glyph > 0.0 {
         items.push(fit.glyph);
     }
-    items.push(TITLE_MIN);
+    if fit.issue > 0.0 {
+        items.push(fit.issue);
+    }
+    if fit.title {
+        items.push(TITLE_MIN);
+    }
     items.extend(&fit.chips);
     items.push(SPACER);
     items.extend(&fit.fixed);
@@ -77,7 +88,7 @@ pub(crate) fn collapses(fit: &HeaderFit) -> bool {
 
 /// Whether the header's row holds every chip at its floor, `floor` or the
 /// chip's own width when that is less, beside the parts that never shrink:
-/// padding, glyph, the title shrunk to nothing, the spacer, the fixed
+/// padding, glyph, the Linear chip, the title shrunk to nothing, the spacer, the fixed
 /// items, the cluster or, when the header [`collapses`], the ⋯ button
 /// `overflow`, and Close, a [`GAP`] between each two items. When it does
 /// not, the chips shrink past their floor, as far as nothing.
@@ -86,7 +97,13 @@ pub(crate) fn floors_fit(fit: &HeaderFit, floor: f32, overflow: f32) -> bool {
     if fit.glyph > 0.0 {
         items.push(fit.glyph);
     }
-    items.push(0.0);
+    // The Linear chip never shrinks.
+    if fit.issue > 0.0 {
+        items.push(fit.issue);
+    }
+    if fit.title {
+        items.push(0.0);
+    }
     items.extend(fit.chips.iter().map(|chip| chip.min(floor)));
     items.push(SPACER);
     items.extend(&fit.fixed);
@@ -109,6 +126,8 @@ mod tests {
         HeaderFit {
             width,
             glyph: 14.0,
+            issue: 0.0,
+            title: true,
             chips: vec![20.0, 90.0],
             cluster: vec![54.0, 36.0, 190.0, 26.0, 26.0, 26.0, 26.0, 26.0],
             fixed: Vec::new(),
@@ -123,6 +142,8 @@ mod tests {
         let bare = HeaderFit {
             width: 0.0,
             glyph: 0.0,
+            issue: 0.0,
+            title: true,
             chips: Vec::new(),
             cluster: vec![26.0, 26.0],
             fixed: Vec::new(),
@@ -192,6 +213,70 @@ mod tests {
         let need = inline_width(&session(0.0));
         let without_title = need - TITLE_MIN - GAP;
         assert!(collapses(&session(without_title + 30.0)));
+    }
+
+    #[test]
+    fn an_issue_chip_counts_whole_toward_the_collapse() {
+        let need = inline_width(&session(0.0));
+        let issue = HeaderFit {
+            issue: 64.0,
+            ..session(need)
+        };
+        assert!(!collapses(&session(need)));
+        assert!(collapses(&issue), "the chip and its gap no longer fit");
+        assert!((inline_width(&issue) - need - 64.0 - GAP).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_chip_with_no_title_reserves_no_title() {
+        let titled = HeaderFit {
+            issue: 64.0,
+            ..session(0.0)
+        };
+        let alone = HeaderFit {
+            title: false,
+            ..titled.clone()
+        };
+        assert!(
+            (inline_width(&titled) - inline_width(&alone) - TITLE_MIN - GAP).abs() < 0.01,
+            "no title minimum and no gap for it"
+        );
+        // Nothing to move: padding 12 and 8, the glyph, the chip, the
+        // chips at the 40 px floor (20 and 40), the spacer and Close: six
+        // items, five gaps, and no title between them.
+        let width = 12.0 + 14.0 + 64.0 + 20.0 + 40.0 + 26.0 + 8.0 + 5.0 * GAP;
+        let floors = |fit: &HeaderFit| {
+            let fit = HeaderFit {
+                width,
+                cluster: Vec::new(),
+                ..fit.clone()
+            };
+            floors_fit(&fit, 40.0, 26.0)
+        };
+        assert!(floors(&alone), "the chip alone fits at its floors");
+        assert!(!floors(&titled), "a title's gap would not");
+    }
+
+    #[test]
+    fn an_issue_chip_never_shrinks_to_a_floor() {
+        // Nothing to move: padding 12 and 8, the glyph, the title at
+        // nothing, the chips at the 40 px floor (20 and 40), the spacer and
+        // Close: six items, five gaps.
+        let bare = HeaderFit {
+            cluster: Vec::new(),
+            ..session(12.0 + 14.0 + 20.0 + 40.0 + 26.0 + 8.0 + 5.0 * GAP)
+        };
+        assert!(floors_fit(&bare, 40.0, 26.0));
+        let issue = HeaderFit {
+            issue: 64.0,
+            ..bare.clone()
+        };
+        assert!(!floors_fit(&issue, 40.0, 26.0), "the chip takes its width");
+        let wider = HeaderFit {
+            width: bare.width + 64.0 + GAP,
+            ..issue
+        };
+        assert!(floors_fit(&wider, 40.0, 26.0));
     }
 
     #[test]

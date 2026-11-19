@@ -29,6 +29,8 @@ use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, FontSettings};
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
+use crate::linear_card::TitleChip;
+use crate::linear_card_view::{card_tooltip, issue_dot};
 use crate::link_menu::LinkMenu;
 use crate::links::TerminalLink;
 use crate::mouse::ClickThrough;
@@ -2534,6 +2536,13 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
+        // A Linear chip with a rest after it is one more element of the name.
+        let name_len = 2 + usize::from(
+            parts
+                .as_ref()
+                .and_then(|parts| parts.issue.as_ref())
+                .is_some_and(|chip| !chip.rest.is_empty()),
+        );
         let mut title = header_title(
             pane_id,
             pane_title(parts.as_ref(), None, None),
@@ -2551,7 +2560,7 @@ impl RootView {
                 .child(docked)
                 .into_any_element();
             // After the glyph and the name, before the chips.
-            title.insert(title.len().min(2), docked);
+            title.insert(title.len().min(name_len), docked);
         }
         let mut controls = self.header_stop(pane_id, session_id, StopPlace::Popout, cx);
         controls.push(Self::popout_dock_back(pane_id, cx));
@@ -3350,13 +3359,15 @@ impl RootView {
     fn session_header_parts(&self, host: &HostKey, session: &SessionSnapshot) -> PaneHeaderParts {
         let label_agents = self.sidebar.label_agents(host);
         let host_label = self.host_chip_label(host);
-        header_parts(
+        let mut parts = header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
             label_agents,
             self.sidebar.repos_of(host),
             host_label.as_ref(),
-        )
+        );
+        parts.issue = self.title_chips().chip(host, &parts.title);
+        parts
     }
 
     /// The label of `host`'s chip; `None` for This PC. The target comes
@@ -3504,6 +3515,9 @@ pub struct PaneHeaderParts {
     pub title_tip: String,
     /// The chips after the name, in the order they show.
     pub chips: Vec<HeaderChip>,
+    /// The Linear chip leading the name, when the title names an issue of
+    /// its host's teams; the name then shows the title's rest.
+    pub issue: Option<TitleChip>,
 }
 
 /// What a pane header chip says.
@@ -3632,6 +3646,7 @@ fn header_parts(
         title: display_label(session, label_agents),
         title_tip: label_tooltip(session, label_agents),
         chips,
+        issue: None,
     }
 }
 
@@ -3776,15 +3791,10 @@ fn header_title(
             &format!("pane-glyph-{pane_id}"),
             &theme(cx),
         ));
-    let title = title.children(ellipsized(
-        &title_id,
-        SharedString::from(parts.title.clone()),
-        StyledText::new(parts.title.clone()),
-    ));
     let mut out = vec![
         header_tipped(status, &status_id, pane_id, &parts.status_tip, at, cx).into_any_element(),
-        header_tipped(title, &title_id, pane_id, &parts.title_tip, at, cx).into_any_element(),
     ];
+    out.extend(named_title(pane_id, parts, title, at, cx));
     out.extend(
         parts
             .chips
@@ -3792,6 +3802,84 @@ fn header_title(
             .map(|chip| header_chip(pane_id, chip, at, floors, cx)),
     );
     out
+}
+
+/// A session header's name, `title` holding it, tipping `at`: the title, or
+/// with a Linear chip the chip and then the title's rest, the chip alone
+/// when the title was only its identifier.
+fn named_title(
+    pane_id: &str,
+    parts: &PaneHeaderParts,
+    title: Stateful<Div>,
+    at: TipAt,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let title_id = format!("pane-title-{pane_id}");
+    let shown = parts
+        .issue
+        .as_ref()
+        .map_or(parts.title.as_str(), |chip| chip.rest.as_str())
+        .to_owned();
+    let mut out: Vec<AnyElement> = parts
+        .issue
+        .iter()
+        .map(|chip| title_issue_chip(pane_id, chip, cx))
+        .collect();
+    if !shown.is_empty() || parts.issue.is_none() {
+        let title = title.children(ellipsized(
+            &title_id,
+            SharedString::from(shown.clone()),
+            StyledText::new(shown),
+        ));
+        out.push(
+            header_tipped(title, &title_id, pane_id, &parts.title_tip, at, cx).into_any_element(),
+        );
+    }
+    out
+}
+
+/// A session title's Linear chip, leading the name: the identifier behind a
+/// 6 px dot in its state's colour, tagged `pane-chip-<pane>-issue`, in the
+/// header chips' look. Hovering it shows the issue's card; a left press
+/// opens the issue and goes no further, so it neither focuses the pane nor
+/// starts a pane drag.
+fn title_issue_chip(pane_id: &str, chip: &TitleChip, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
+    let name = format!("pane-chip-{pane_id}-issue");
+    let (selector, text_tag) = (name.clone(), format!("{name}={}", chip.identifier));
+    let (url, host) = (chip.open_url().to_owned(), chip.host.clone());
+    let root = cx.entity().downgrade();
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .driver_id(|| selector)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.press_on_header_control(event, window, cx);
+                this.open_issue_link(&url, &host, window, cx);
+            }),
+        )
+        .on_hover(RootView::ask_on_chip_hover(chip, cx))
+        .tooltip(card_tooltip(name, root, chip.clone()))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(ISSUE_DOT_GAP))
+        .h(ui_px(cx, CHIP_HEIGHT))
+        .px(px(CHIP_PAD))
+        .rounded(px(CHIP_RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(t.transparent))
+        .bg(gpui::rgb(t.chip))
+        .font_family(DEFAULT_FAMILY)
+        .font_weight(FontWeight::NORMAL)
+        .text_size(ui_px(cx, CHIP_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text_2))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .child(issue_dot(chip.dot, &t))
+        .child(div().driver_id(|| text_tag).child(chip.identifier.clone()))
+        .into_any_element()
 }
 
 /// A 20 px Geist Mono chip: the runtime a 20 px square holding its icon,
@@ -4691,6 +4779,15 @@ fn header_fit(
         // The card's border takes a pixel on each side.
         width: card.width - 2.0 * CARD_BORDER,
         glyph: target.parts.map_or(0.0, |_| GlyphSize::Leaf.px()),
+        // A title that was only its identifier draws the chip alone.
+        title: target
+            .parts
+            .and_then(|parts| parts.issue.as_ref())
+            .is_none_or(|chip| !chip.rest.is_empty()),
+        issue: target
+            .parts
+            .and_then(|parts| parts.issue.as_ref())
+            .map_or(0.0, |chip| issue_chip_width(chip, cx)),
         chips: match (target.parts, target.run.and_then(|run| run_header(&run))) {
             (Some(parts), _) => parts
                 .chips
@@ -4723,6 +4820,24 @@ fn run_chip_widths(run: &RunHeader, cx: &App) -> [f32; 2] {
     );
     [chip, HeaderText { cx }.ui(run.status)]
 }
+
+/// The width a title's Linear chip takes, as `title_issue_chip` draws it:
+/// its dot, the gap, its identifier, padding and border.
+fn issue_chip_width(chip: &TitleChip, cx: &App) -> f32 {
+    let text = text_width(
+        cx,
+        &chip.identifier,
+        DEFAULT_FAMILY,
+        FontWeight::NORMAL,
+        ui_px(cx, CHIP_TEXT_SIZE),
+    );
+    ISSUE_DOT + ISSUE_DOT_GAP + text + 2.0 * CHIP_PAD + 2.0
+}
+
+/// A title chip's dot, as `issue_dot` draws it.
+const ISSUE_DOT: f32 = 6.0;
+/// The gap between a title chip's dot and its identifier.
+const ISSUE_DOT_GAP: f32 = 5.0;
 
 fn chip_width(chip: &HeaderChip, cx: &App) -> f32 {
     let square = ui_px(cx, CHIP_HEIGHT) / px(1.0);

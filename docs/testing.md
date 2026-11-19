@@ -128,7 +128,7 @@ To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of th
 
 The views:
 
-- `main`, `source-control`, `diff`, `settings`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view.
+- `main`, `source-control`, `diff`, `settings`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view; `main` also shows an idle session "RT-139 hover card" with its Linear title chip in the sidebar leaf.
 - `settings-claude`: Settings on Claude's page scrolled to its end, the end of Launch command and then Hooks.
 - `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080.
 - `main-compact`: the sidebar's Compact leaves.

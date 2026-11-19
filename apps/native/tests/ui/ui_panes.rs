@@ -355,6 +355,98 @@ fn pane_header_shows_the_runtime_chip_and_no_trusted_chip(cx: &mut TestAppContex
     assert!(never_painted(&mut h, "pane-chip-p1-trusted"));
 }
 
+/// `s1` in pane `p1` beside `s2`, titled "RT-139 hover card", in `p2`;
+/// with `linear`, This PC's daemon has a key and the team `RT`, and sent
+/// its copy of RT-139.
+fn titled_rt_139<'a>(cx: &'a mut TestAppContext, dir: &TestDir, linear: bool) -> Harness<'a> {
+    #[cfg(debug_assertions)]
+    rustling_tulip_native::ellipsis::enable_probe();
+    let fixture = side_by_side(
+        session("s1").build(),
+        session("s2").label("RT-139 hover card").build(),
+    );
+    let mut h = Harness::with(cx, dir, &fixture);
+    if linear {
+        h.send(DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        });
+        h.send(support::linear_issues(vec![support::linear_issue(
+            "RT-139",
+            "Hover card",
+        )]));
+    }
+    h
+}
+
+#[gpui::test]
+fn a_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    let chip = "pane-chip-p2-issue";
+    assert!(
+        !never_painted(&mut h, chip),
+        "the title's identifier is a chip"
+    );
+    assert!(
+        !never_painted(&mut h, "pane-chip-p2-issue=RT-139"),
+        "the chip holds the identifier"
+    );
+    assert!(
+        h.bounds(chip).right() <= h.bounds("pane-title-p2").left(),
+        "the chip leads the title"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("pane-title-p2").as_deref(),
+        Some("hover card"),
+        "the title shows the rest"
+    );
+    let focused = h.root(|root, _| root.focused_pane());
+    let at = h.center(chip);
+    h.hover(at, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    for line in [
+        "linear-card-id-pane-chip-p2-issue=RT-139",
+        "linear-card-state-pane-chip-p2-issue=In Progress",
+        "linear-card-foot-pane-chip-p2-issue=Click to open",
+    ] {
+        assert!(!never_painted(&mut h, line), "the hover card shows {line}");
+    }
+    // The card sits a pixel from where the pointer rested; a press a few
+    // pixels on, still on the chip, lands on the card's corner.
+    h.click(
+        gpui::point(at.x + px(4.0), at.y + px(4.0)),
+        Modifiers::none(),
+    );
+    assert_eq!(
+        h.opened(),
+        [support::Opened::Url(
+            "https://linear.app/acme/issue/RT-139".to_owned()
+        )]
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        focused,
+        "a click on the chip focuses no pane"
+    );
+}
+
+#[gpui::test]
+fn a_title_on_a_host_with_no_linear_context_has_no_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, false);
+    assert!(!never_painted(&mut h, "pane-title-p2"));
+    assert!(never_painted(&mut h, "pane-chip-p2-issue"));
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("pane-title-p2").as_deref(),
+        Some("RT-139 hover card"),
+        "the title is whole"
+    );
+}
+
 #[gpui::test]
 fn headless_pane_shows_unsupported_note(cx: &mut TestAppContext) {
     let dir = TestDir::new();

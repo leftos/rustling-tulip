@@ -56,6 +56,103 @@ fn home_of(h: &mut Harness<'_>, id: &str) -> Option<(&'static str, String, bool,
     })
 }
 
+/// `s1` in pane `p1` beside `s2`, titled "RT-139 hover card", in `p2`;
+/// with `linear`, This PC's daemon has a key and the team `RT`, and sent
+/// its copy of RT-139.
+fn titled_rt_139<'a>(cx: &'a mut TestAppContext, dir: &TestDir, linear: bool) -> Harness<'a> {
+    #[cfg(debug_assertions)]
+    rustling_tulip_native::ellipsis::enable_probe();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2").label("RT-139 hover card").build(),
+        ],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    if linear {
+        h.send(DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        });
+        h.send(support::linear_issues(vec![support::linear_issue(
+            "RT-139",
+            "Hover card",
+        )]));
+    }
+    h
+}
+
+#[gpui::test]
+fn a_leaf_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    let chip = "leaf-s2-issue";
+    assert!(painted(&mut h, chip), "the label's identifier is a chip");
+    assert!(
+        painted(&mut h, "leaf-s2-issue=RT-139"),
+        "the chip holds the identifier"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("leaf-s2-label").as_deref(),
+        Some("hover card"),
+        "the label shows the rest"
+    );
+    let focused = h.root(|root, _| root.focused_pane());
+    // The model knows `leaf-` selectors as leaves, so the chip is found by
+    // its bounds alone.
+    let at = h.bounds(chip).center();
+    h.hover(at, Modifiers::none());
+    h.advance(std::time::Duration::from_millis(600));
+    for line in [
+        "linear-card-id-leaf-s2-issue=RT-139",
+        "linear-card-state-leaf-s2-issue=In Progress",
+        "linear-card-foot-leaf-s2-issue=Click to open",
+    ] {
+        assert!(painted(&mut h, line), "the hover card shows {line}");
+    }
+    // The card sits a pixel from where the pointer rested; a press a few
+    // pixels on, still on the chip, lands on the card's corner.
+    h.click(point(at.x + px(4.0), at.y + px(4.0)), Modifiers::none());
+    assert_eq!(
+        h.opened(),
+        [support::Opened::Url(
+            "https://linear.app/acme/issue/RT-139".to_owned()
+        )]
+    );
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        focused,
+        "a click on the chip selects no leaf"
+    );
+}
+
+#[gpui::test]
+fn a_leaf_on_a_host_with_no_linear_context_has_no_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, false);
+    assert!(painted(&mut h, "leaf-s2"));
+    assert!(!painted(&mut h, "leaf-s2-issue"));
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("leaf-s2-label").as_deref(),
+        Some("RT-139 hover card"),
+        "the label is whole"
+    );
+}
+
 #[gpui::test]
 fn rows_grow_with_the_ui_text_size_and_clicks_still_hit_them(cx: &mut TestAppContext) {
     let dir = TestDir::new();
