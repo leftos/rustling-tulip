@@ -116,7 +116,21 @@ pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
             .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
             .map(|stamp| stamp.with_timezone(&Utc)),
         ended_tasks: ended_tasks(record),
+        model: reply_model(record),
     }
+}
+
+/// The model a main-thread reply names: none for a subagent's record, a
+/// virtual one Claude Code wrote, or any record that is not a reply.
+fn reply_model(record: &Value) -> Option<String> {
+    if origin_of(record) != Origin::Model || flag(record, "isSidechain") {
+        return None;
+    }
+    record
+        .pointer("/message/model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
 }
 
 /// The tasks a task-notification record reports ended: each notification's
@@ -1038,8 +1052,49 @@ mod tests {
                     .single()
                     .map(|second| second + TimeDelta::milliseconds(500)),
                 ended_tasks: Vec::new(),
+                model: None,
             }
         );
+    }
+
+    /// An assistant reply naming `model`, with `extra` fields merged in.
+    fn reply_naming(model: &str, extra: &Value) -> String {
+        let mut record = json!({
+            "type": "assistant", "uuid": uid("50"),
+            "message": {"role": "assistant", "model": model, "content": [{"type": "text", "text": "Done."}]},
+        });
+        if let (Some(record), Some(extra)) = (record.as_object_mut(), extra.as_object()) {
+            record.extend(extra.clone());
+        }
+        record.to_string()
+    }
+
+    #[test]
+    fn a_main_reply_names_its_model_in_the_line_facts() {
+        let line = reply_naming("claude-opus-5-5", &json!({}));
+        assert_eq!(line_facts(&line).model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_sidechain_reply_names_no_model() {
+        let line = reply_naming("claude-opus-5-5", &json!({"isSidechain": true}));
+        assert_eq!(line_facts(&line).model, None);
+    }
+
+    #[test]
+    fn a_synthetic_reply_names_no_model() {
+        let line = reply_naming("<synthetic>", &json!({}));
+        assert_eq!(line_facts(&line).model, None);
+    }
+
+    #[test]
+    fn a_user_record_names_no_model() {
+        let line = json!({
+            "type": "user", "uuid": uid("51"),
+            "message": {"role": "user", "model": "claude-opus-5-5", "content": "Hello there"},
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model, None);
     }
 
     #[test]

@@ -246,6 +246,12 @@ export const FEATURE_FILE_SEARCH = "file_search";
 export const FEATURE_CHAT_CATALOG = "chat_catalog";
 
 /**
+ * `Welcome.features` entry: the daemon tells a session's chat loaders which
+ * model the session's main agent answers with ([`DaemonMessage::ChatModel`]).
+ */
+export const FEATURE_CHAT_MODEL = "chat_model";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -6408,7 +6414,20 @@ export type DaemonMessage =
    *
    * `wakeup_at`: When the earliest pending wakeup fires.
    */
-  | { type: "chat_work"; session_id: string; subagents?: WorkSubagent[]; shells?: WorkShell[]; wakeup_at?: string | null };
+  | { type: "chat_work"; session_id: string; subagents?: WorkSubagent[]; shells?: WorkShell[]; wakeup_at?: string | null }
+  /**
+   * The model the session's main agent answers with, as its transcript's
+   * newest main-thread reply names it. Sent to chat loaders only: to a new
+   * loader right after its `Chat` reply when a model is known, and to
+   * every loader when it changes. A conversation switch sends one with no
+   * model until the new conversation's first reply names one.
+   *
+   * `model`: The model's id, as the agent names it.
+   *
+   * `label`: The model in the form a person reads, which the agent plugin
+   * formats; the id itself when the plugin knows no better one.
+   */
+  | { type: "chat_model"; session_id: string; model?: string | null; label?: string | null };
 
 /** One file a [`DaemonMessage::FileMatches`] answer carries. */
 export interface FileMatch {

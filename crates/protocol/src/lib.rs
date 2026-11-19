@@ -197,6 +197,10 @@ pub const FEATURE_FILE_SEARCH: &str = "file_search";
 /// A client offers its `/` catalog only on a host that lists it.
 pub const FEATURE_CHAT_CATALOG: &str = "chat_catalog";
 
+/// `Welcome.features` entry: the daemon tells a session's chat loaders which
+/// model the session's main agent answers with ([`DaemonMessage::ChatModel`]).
+pub const FEATURE_CHAT_MODEL: &str = "chat_model";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -8104,6 +8108,21 @@ pub enum DaemonMessage {
         /// When the earliest pending wakeup fires.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wakeup_at: Option<DateTime<Utc>>,
+    },
+    /// The model the session's main agent answers with, as its transcript's
+    /// newest main-thread reply names it. Sent to chat loaders only: to a new
+    /// loader right after its `Chat` reply when a model is known, and to
+    /// every loader when it changes. A conversation switch sends one with no
+    /// model until the new conversation's first reply names one.
+    ChatModel {
+        session_id: String,
+        /// The model's id, as the agent names it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The model in the form a person reads, which the agent plugin
+        /// formats; the id itself when the plugin knows no better one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
 }
 
@@ -19076,6 +19095,45 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn chat_model_message_round_trips() {
+        let msg = DaemonMessage::ChatModel {
+            session_id: "s1".to_string(),
+            model: Some("model-7".to_string()),
+            label: Some("Model 7".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_model""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ChatModel {
+                session_id,
+                model,
+                label,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(model.as_deref(), Some("model-7"));
+                assert_eq!(label.as_deref(), Some("Model 7"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let cleared = DaemonMessage::ChatModel {
+            session_id: "s1".to_string(),
+            model: None,
+            label: None,
+        };
+        let json = serde_json::to_string(&cleared).expect("serialize");
+        assert_eq!(json, r#"{"type":"chat_model","session_id":"s1"}"#);
+        assert!(matches!(
+            serde_json::from_str::<DaemonMessage>(&json).expect("deserialize"),
+            DaemonMessage::ChatModel {
+                model: None,
+                label: None,
+                ..
+            }
+        ));
+        assert_eq!(FEATURE_CHAT_MODEL, "chat_model");
     }
 
     #[test]

@@ -472,6 +472,10 @@ impl Agent for ClaudePlugin {
         chat_entries::line_facts(line)
     }
 
+    fn model_label(&self, model: &str) -> String {
+        activity::model_display(model)
+    }
+
     fn interactive_args(
         &self,
         opts: &ClaudeOptions,
@@ -914,6 +918,14 @@ mod tests {
     use super::*;
     use protocol::OptionValues;
     use std::ffi::OsString;
+
+    #[test]
+    fn the_model_label_is_the_display_name() {
+        assert_eq!(
+            Agent::model_label(&ClaudePlugin, "claude-opus-5-5"),
+            "Opus 5.5"
+        );
+    }
 
     #[test]
     fn live_runs_dir_honours_dispatch_log_dir() {

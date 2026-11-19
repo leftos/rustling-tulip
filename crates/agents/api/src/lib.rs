@@ -244,6 +244,10 @@ pub struct TranscriptLineFacts {
     /// The ids of the background tasks the line reports ended, the same ids
     /// a turn end's task list carries.
     pub ended_tasks: Vec<String>,
+    /// The model the session's main agent answered with on this line: set
+    /// only for the main thread's own reply, never a subagent's or one the
+    /// agent wrote itself.
+    pub model: Option<String>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the
@@ -784,6 +788,12 @@ pub trait Agent: Send + Sync + 'static {
         TranscriptLineFacts::default()
     }
 
+    /// A model id, as [`TranscriptLineFacts::model`] carries it, in the
+    /// form a person reads; the id itself unless the agent knows a better one.
+    fn model_label(&self, model: &str) -> String {
+        model.to_owned()
+    }
+
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
     /// [`AgentPlugin::resolve_program`].
@@ -1146,6 +1156,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::chat_line_facts`].
     fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts;
 
+    /// See [`Agent::model_label`].
+    fn model_label(&self, model: &str) -> String;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -1424,6 +1437,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts {
         Agent::chat_line_facts(self, line)
+    }
+
+    fn model_label(&self, model: &str) -> String {
+        Agent::model_label(self, model)
     }
 
     fn interactive_args(
@@ -1964,6 +1981,12 @@ mod tests {
         assert_eq!(plugin.chat_entries(line, &|_| None, context.as_mut()), []);
         assert_eq!(plugin.chat_entries(line, &|_| None, &mut 7_u8), []);
         assert_eq!(plugin.chat_line_facts(line), TranscriptLineFacts::default());
+    }
+
+    #[test]
+    fn the_model_label_defaults_to_the_id() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        assert_eq!(plugin.model_label("model-7"), "model-7");
     }
 
     #[test]
