@@ -192,7 +192,9 @@ pub fn expect_holds(
         ScreenExpect::DialogGone => {
             after.prompt.is_none() && after.composer != ComposerState::Dialog
         }
-        ScreenExpect::SameDialog => identity(before).is_some() && identity(before) == identity(now),
+        ScreenExpect::SameDialog | ScreenExpect::SameDialogMayStay => {
+            identity(before).is_some() && identity(before) == identity(now)
+        }
         ScreenExpect::NextPrompt(kind) => {
             after
                 .prompt
@@ -263,6 +265,8 @@ mod tests {
         tabs: Vec<(&'static str, bool, bool)>,
         /// The body, when the row checks it.
         body: Option<&'static str>,
+        /// The label of the prompt's adjustable row.
+        adjust: Option<&'static str>,
     }
 
     /// A screen with no prompt and the input box in `composer`.
@@ -279,6 +283,7 @@ mod tests {
             ticked: Vec::new(),
             tabs: Vec::new(),
             body: None,
+            adjust: None,
         }
     }
 
@@ -359,6 +364,7 @@ mod tests {
             && prompt.is_some_and(|prompt| prompt.multi) == expected.multi
             && ticked(prompt) == expected.ticked
             && tabs(prompt) == expected.tabs
+            && prompt.and_then(|prompt| prompt.adjust.as_deref()) == expected.adjust
             && expected
                 .body
                 .is_none_or(|body| prompt.is_some_and(|prompt| prompt.body == body));
@@ -521,8 +527,10 @@ mod tests {
     fn every_fixture_reads_its_dialog() {
         use ChatPromptKind::{Confirm, HeadsUp, McpServer, ModelPicker, Plan, Review, Trust};
         use ComposerState::{Draft, Ready, Working};
-        let picker =
-            |cursor: u32| dialog(ModelPicker, "Select model", &PICKER_MODELS, Some(cursor));
+        let picker = |cursor: u32, adjust: Option<&'static str>| Expected {
+            adjust,
+            ..dialog(ModelPicker, "Select model", &PICKER_MODELS, Some(cursor))
+        };
         let v140_models: [(u32, &str); 10] = [
             (1, "Default (recommended)"),
             (2, "Opus 5.5"),
@@ -774,67 +782,73 @@ mod tests {
             (
                 "v140-model-picker",
                 include_str!("fixtures/v140-model-picker.txt"),
-                dialog(ModelPicker, "Select model", &v140_models, Some(1)),
+                Expected {
+                    adjust: Some("High effort"),
+                    ..dialog(ModelPicker, "Select model", &v140_models, Some(1))
+                },
             ),
             (
                 "claude--menu-model-picker",
                 include_str!("fixtures/claude--menu-model-picker.txt"),
-                dialog(ModelPicker, "Select model", &menu_models, Some(1)),
+                Expected {
+                    adjust: Some("Medium effort"),
+                    ..dialog(ModelPicker, "Select model", &menu_models, Some(1))
+                },
             ),
             (
                 "claude--v2.1.329-model-picker",
                 include_str!("fixtures/claude--v2.1.329-model-picker.txt"),
-                picker(1),
+                picker(1, Some("High effort")),
             ),
             (
                 "claude--v2.1.329-model-picker-on-sonnet",
                 include_str!("fixtures/claude--v2.1.329-model-picker-on-sonnet.txt"),
-                picker(4),
+                picker(4, Some("Medium effort (default)")),
             ),
             (
                 "claude--v2.1.329-model-picker-after-session-switch",
                 include_str!("fixtures/claude--v2.1.329-model-picker-after-session-switch.txt"),
-                picker(4),
+                picker(4, Some("Medium effort (default)")),
             ),
             (
                 "claude--v2.1.329-model-picker-effort-left",
                 include_str!("fixtures/claude--v2.1.329-model-picker-effort-left.txt"),
-                picker(2),
+                picker(2, Some("High effort")),
             ),
             (
                 "claude--v2.1.329-model-picker-effort-right",
                 include_str!("fixtures/claude--v2.1.329-model-picker-effort-right.txt"),
-                picker(2),
+                picker(2, Some("xHigh effort")),
             ),
             (
                 "claude--v2.1.329-model-picker-before-esc",
                 include_str!("fixtures/claude--v2.1.329-model-picker-before-esc.txt"),
-                picker(5),
+                picker(5, Some("High effort")),
             ),
             (
                 "claude--v2.1.329-model-switch-dialog-go-back",
                 include_str!("fixtures/claude--v2.1.329-model-switch-dialog-go-back.txt"),
-                picker(4),
+                picker(4, Some("Medium effort (default)")),
             ),
             (
                 "claude--v2.1.329-model-picker-more-models",
                 include_str!("fixtures/claude--v2.1.329-model-picker-more-models.txt"),
-                picker(6),
+                picker(6, None),
             ),
             (
                 "claude--v2.1.329-model-picker-more-models-right",
                 include_str!("fixtures/claude--v2.1.329-model-picker-more-models-right.txt"),
-                picker(6),
+                picker(6, None),
             ),
             (
                 "claude--v2.1.329-model-typed-during-turn-0.7s",
                 include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-0.7s.txt"),
-                picker(2),
+                picker(2, Some("High effort")),
             ),
             (
                 "claude--v2.1.329-model-typed-during-turn-2.7s",
                 include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-2.7s.txt"),
-                picker(2),
+                picker(2, Some("High effort")),
             ),
             (
                 "claude--v2.1.329-model-switch-dialog",

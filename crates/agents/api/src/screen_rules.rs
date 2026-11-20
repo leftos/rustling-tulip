@@ -615,6 +615,7 @@ mod tests {
             always_allow_tip: None,
             multi: false,
             cursor: None,
+            adjust: None,
         };
         let answer = protocol::ChatAnswerKind::Option { number: 1 };
         assert_eq!(

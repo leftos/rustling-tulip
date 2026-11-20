@@ -2402,6 +2402,7 @@ mod tests {
             always_allow_tip: None,
             multi: false,
             cursor: None,
+            adjust: None,
         }
     }
 

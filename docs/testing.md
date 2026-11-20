@@ -147,7 +147,7 @@ The views:
 - `update-notes`: the What's new window over a ready 0.99.0.
 - `chat`: a session pane in Chat mode with its chat drawn over a two-question prompt card whose options carry descriptions and an open Tail box on the running Bash card, and the composer's model pill (`Opus 5.5 · high`), drawn as a button.
 - `chat-compact`: the chat in Compact mode at its bottom, waiting for the run whose first id is `x1` and showing its collapsed run line of a read, a search and a run call, with both of the fixture's script lines under it.
-- `chat-model-picker`: the chat with the Claude Code 2.1.329 `/model` picker card up: one button per model row with its description, the current model's label ending in " ✔", and no button for More models.
+- `chat-model-picker`: the chat with the Claude Code 2.1.329 `/model` picker card up: one button per model row with its description, the current model's label ending in " ✔", the highlighted model's row filled, the effort label with its Less effort and More effort buttons under the rows, and no button for More models.
 - `summary`: one in Summary mode with a line open under a pinned permission card.
 - `themes`: the Themes modal over Settings, on the row after the theme in use, with a user theme, a broken file and a file named after a built-in.
 - `themes-edit`: the theme editor on a duplicate of Nord.

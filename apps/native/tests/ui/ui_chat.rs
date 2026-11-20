@@ -1497,6 +1497,7 @@ fn prompt(id: &str, kind: ChatPromptKind, list: &[(u32, &str)]) -> ChatPrompt {
         always_allow_tip: None,
         multi: false,
         cursor: None,
+        adjust: None,
     }
 }
 
@@ -1702,6 +1703,37 @@ fn a_model_picker_card_sends_the_picked_row(cx: &mut TestAppContext) {
     );
     h.click_on("chat-card-4");
     assert_eq!(answer_kinds(&mut h), [opt(4)]);
+}
+
+#[gpui::test]
+fn the_effort_buttons_send_adjust_answers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut picker = prompt(
+        "m1",
+        ChatPromptKind::ModelPicker,
+        &[
+            (1, "Default (recommended)"),
+            (2, "Opus 5.5"),
+            (3, "More models"),
+        ],
+    );
+    picker.subject = "Select model".to_owned();
+    picker.cursor = Some(1);
+    picker.options[0].selected = true;
+    picker.adjust = Some("High effort".to_owned());
+    show(&mut h, picker);
+    assert!(painted(&mut h, "chat-card-adjust"), "the effort label");
+    h.click_on("chat-card-adjust-up");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::Adjust { raise: true }]
+    );
+    h.click_on("chat-card-adjust-down");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::Adjust { raise: false }]
+    );
 }
 
 #[gpui::test]

@@ -389,6 +389,27 @@ fn model_picker_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
         .collect()
 }
 
+/// The stepper beside a model picker's adjustable row: Less effort, then
+/// More effort; none for a picker without such a row, or another kind.
+#[must_use]
+pub fn adjust_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
+    if prompt.kind != ChatPromptKind::ModelPicker || prompt.adjust.is_none() {
+        return Vec::new();
+    }
+    vec![
+        CardButton::named(
+            "adjust-down",
+            "Less effort",
+            ChatAnswerKind::Adjust { raise: false },
+        ),
+        CardButton::named(
+            "adjust-up",
+            "More effort",
+            ChatAnswerKind::Adjust { raise: true },
+        ),
+    ]
+}
+
 /// Allow once, Always allow (when offered, its tooltip the rule) and Deny.
 fn permission_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
     let mut buttons = Vec::with_capacity(3);
@@ -544,9 +565,10 @@ impl CardState {
 
     /// `answer` to the card drawn for `prompt_id` went out under
     /// `request_id` while the stack shows `current`. An answer other than a
-    /// toggle to the current card makes it busy; an answer to a card gone
-    /// since is only remembered, so its refusal is still recognised and the
-    /// current card's busy mark stays where it is.
+    /// toggle or an adjust (both leave the dialog up) to the current card
+    /// makes it busy; an answer to a card gone since is only remembered, so
+    /// its refusal is still recognised and the current card's busy mark
+    /// stays where it is.
     pub fn clicked(
         &mut self,
         prompt_id: &str,
@@ -554,7 +576,11 @@ impl CardState {
         request_id: String,
         answer: &ChatAnswerKind,
     ) {
-        if current != Some(prompt_id) || matches!(answer, ChatAnswerKind::Toggle { .. }) {
+        let stays_up = matches!(
+            answer,
+            ChatAnswerKind::Toggle { .. } | ChatAnswerKind::Adjust { .. }
+        );
+        if current != Some(prompt_id) || stays_up {
             self.toggled(prompt_id, &request_id);
         } else {
             self.answered(prompt_id, request_id);
@@ -690,9 +716,11 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// its button in its row (`chat-card-box`), and a permission card has its
 /// box under its buttons with Allow with text (`chat-card-allow-text`,
 /// when the prompt takes an amendment) and Deny with text
-/// (`chat-card-deny-text`) beside it; a refusal shows under the
-/// buttons (`chat-card-refusal`); a kind the chat cannot answer says to
-/// open the terminal (`chat-card-terminal`).
+/// (`chat-card-deny-text`) beside it; a model picker with an adjustable row
+/// shows its label (`chat-card-adjust`) under its rows with Less effort
+/// (`chat-card-adjust-down`) and More effort (`chat-card-adjust-up`); a
+/// refusal shows under the buttons (`chat-card-refusal`); a kind the chat
+/// cannot answer says to open the terminal (`chat-card-terminal`).
 pub fn prompt_card(
     offset: i8,
     shift: i8,
@@ -769,6 +797,7 @@ pub fn prompt_card(
             card.child(small(offset, &prompt.body, t.text_2))
         })
         .child(actions)
+        .children(adjust_row(offset, shift, view, on_press, t))
         .when(view.busy, |card| {
             card.child(small(offset, SENDING, t.muted).driver_id(|| "chat-card-busy".to_owned()))
         })
@@ -782,6 +811,35 @@ pub fn prompt_card(
         .children((1..=edges).rev().map(|depth| ghost_edge(depth, t)))
         .child(card)
         .into_any_element()
+}
+
+/// A model picker card's adjustable row: its label (`chat-card-adjust`),
+/// then the [`adjust_buttons`]; none when the prompt has no such row.
+fn adjust_row(
+    offset: i8,
+    shift: i8,
+    view: &CardView<'_>,
+    on_press: &OnPress,
+    t: &UiTheme,
+) -> Option<Div> {
+    let label = view.prompt.adjust.as_deref()?;
+    let buttons = adjust_buttons(view.prompt);
+    if buttons.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(CARD_GAP))
+            .child(small(offset, label, t.text_2).driver_id(|| "chat-card-adjust".to_owned()))
+            .children(
+                buttons
+                    .iter()
+                    .map(|button| card_button(offset, shift, button, view, on_press, t)),
+            ),
+    )
 }
 
 /// The option `button` answers, if it answers one.
@@ -825,8 +883,9 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
     Some(div().flex().flex_wrap().gap(px(CARD_GAP)).children(tabs))
 }
 
-/// One button of a card; a selected multi-select option is filled. A
-/// button answering an option is a full-width row, the option's
+/// One button of a card; a selected multi-select option, and a model
+/// picker's highlighted row (whose model the effort belongs to), is filled.
+/// A button answering an option is a full-width row, the option's
 /// description (`chat-card-option-desc-<n>`) under its label; the option
 /// that takes typed text shares its row with the card's box.
 fn card_button(
@@ -840,7 +899,8 @@ fn card_button(
     let (prompt, busy) = (view.prompt, view.busy);
     let selector = format!("chat-card-{}", button.id);
     let choice = option_of(prompt, button);
-    let selected = prompt.multi && choice.is_some_and(|option| option.selected);
+    let fills = prompt.multi || prompt.kind == ChatPromptKind::ModelPicker;
+    let selected = fills && choice.is_some_and(|option| option.selected);
     let base = if selected {
         primary_button(
             offset,
@@ -1080,9 +1140,9 @@ mod tests {
     };
 
     use super::{
-        AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, allow_once_option,
-        always_allow_option, card_answer_message, card_buttons, deny_option, key_action,
-        option_description_color,
+        AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, adjust_buttons,
+        allow_once_option, always_allow_option, card_answer_message, card_buttons, deny_option,
+        key_action, option_description_color,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
 
@@ -1107,6 +1167,7 @@ mod tests {
             always_allow_tip: None,
             multi: false,
             cursor: None,
+            adjust: None,
         }
     }
 
@@ -1556,6 +1617,41 @@ mod tests {
             fixed(&card_buttons(&prompt, "Claude"))[1],
             row("2", "Opus 5.5 ✔", opt(2)),
             "a current model with a bare Current description is ticked"
+        );
+    }
+
+    #[test]
+    fn a_model_picker_card_offers_the_effort_stepper() {
+        let mut prompt = model_picker();
+        prompt.adjust = Some("High effort".to_owned());
+        assert_eq!(
+            fixed(&adjust_buttons(&prompt)),
+            [
+                row(
+                    "adjust-down",
+                    "Less effort",
+                    ChatAnswerKind::Adjust { raise: false }
+                ),
+                row(
+                    "adjust-up",
+                    "More effort",
+                    ChatAnswerKind::Adjust { raise: true }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_more_models_picker_offers_no_stepper() {
+        let picker = model_picker();
+        assert_eq!(picker.adjust, None);
+        assert_eq!(adjust_buttons(&picker), []);
+        let mut confirm = prompt_with(ChatPromptKind::Confirm, &[(1, "Yes"), (2, "No")]);
+        confirm.adjust = Some("High effort".to_owned());
+        assert_eq!(
+            adjust_buttons(&confirm),
+            [],
+            "only a model picker steps its row"
         );
     }
 

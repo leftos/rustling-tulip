@@ -4959,6 +4959,7 @@ fn permission_screen() -> ChatScreen {
             always_allow_tip: None,
             multi: false,
             cursor: Some(1),
+            adjust: None,
         }),
     }
 }
@@ -5012,6 +5013,7 @@ fn question_screen() -> ChatScreen {
             always_allow_tip: None,
             multi: false,
             cursor: Some(1),
+            adjust: None,
         }),
     }
 }
@@ -5052,6 +5054,7 @@ fn model_picker_screen() -> ChatScreen {
             always_allow_tip: None,
             multi: false,
             cursor: Some(1),
+            adjust: Some("High effort".to_owned()),
         }),
     }
 }

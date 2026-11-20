@@ -838,7 +838,7 @@ async fn wait_until_ready_or_timeout(
 pub const MAX_TYPED_BYTES: usize = 65_536;
 
 /// How long a chat send waits for the typing lane.
-const SEND_LANE_WAIT: Duration = Duration::from_millis(250);
+pub(crate) const SEND_LANE_WAIT: Duration = Duration::from_millis(250);
 
 /// The longest a chat send types for, from taking the lane to its Enter.
 const SEND_CEILING: Duration = Duration::from_secs(30);
@@ -915,7 +915,7 @@ impl TypeRefusal {
         Self::refused(format!("{reason}; {LEFT_IN_BOX}"))
     }
 
-    fn busy(holder: Option<Holder>) -> Self {
+    pub(crate) fn busy(holder: Option<Holder>) -> Self {
         let message = match holder {
             Some(Holder::ViewReturn) => "the terminal is switching views",
             Some(Holder::Injector) => "the session is starting",

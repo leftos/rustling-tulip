@@ -4971,6 +4971,36 @@ mod tests {
                 assert!(a.term.typed_now().is_empty(), "no second group");
             }
 
+            const PICKER: &str =
+                include_str!("../screen/fixtures/claude--v2.1.329-model-picker.txt");
+            const PICKER_EFFORT_RIGHT: &str =
+                include_str!("../screen/fixtures/claude--v2.1.329-model-picker-effort-right.txt");
+            const RIGHT: &[u8] = b"\x1b[C";
+
+            fn adjust(raise: bool) -> ChatAnswerKind {
+                ChatAnswerKind::Adjust { raise }
+            }
+
+            #[tokio::test]
+            async fn an_effort_step_past_the_end_is_answered() {
+                let mut a = answer_on("answer-adjust-end", PICKER, adjust(true)).await;
+                a.typed(RIGHT, "the right arrow").await;
+                a.answered().await;
+                assert!(a.term.typed_now().is_empty(), "one arrow, no Enter");
+            }
+
+            #[tokio::test]
+            async fn two_effort_steps_back_to_back_are_both_answered() {
+                let mut a = answer_on("answer-adjust-twice", PICKER, adjust(true)).await;
+                a.typed(RIGHT, "the first arrow").await;
+                answer(&a.fx, &a.s_tx, &a.prompt_id, adjust(true)).await;
+                a.term.show(PICKER_EFFORT_RIGHT).await;
+                a.typed(RIGHT, "the second arrow, once the lane is free")
+                    .await;
+                a.answered().await;
+                assert!(a.term.typed_now().is_empty(), "two arrows, no Enter");
+            }
+
             #[test]
             fn no_recipe_sends_esc() {
                 let agent = agent_registry::default_agent();

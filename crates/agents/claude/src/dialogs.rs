@@ -591,8 +591,9 @@ const CURRENT: &str = "Current";
 
 /// The `/model` picker: the `Select model` title, then its numbered model
 /// rows and the `▸ More models` row. Each row's name is its label and its
-/// second column its description; the effort row and the footer stay out,
-/// so moving the cursor or the effort keeps the prompt's identity.
+/// second column its description; the effort row's label is the prompt's
+/// `adjust`, which with the footer stays out of its identity, so moving the
+/// cursor or the effort keeps the prompt.
 fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
     let floor = after_last_rule(rows).max(dialog_edge(rows));
     let title = floor
@@ -602,11 +603,12 @@ fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
             .rposition(|row| row.trim() == PICKER_TITLE)?;
     let first = (title + 1..rows.len().min(title + 1 + PICKER_GAP))
         .find(|&index| picker_row(&rows[index]).is_some())?;
-    let mut options: Vec<ChatOption> = Vec::new();
-    for row in rows[first..]
+    let listed = rows[first..]
         .iter()
         .take_while(|row| !row.trim().is_empty())
-    {
+        .count();
+    let mut options: Vec<ChatOption> = Vec::new();
+    for row in &rows[first..first + listed] {
         if let Some(option) = picker_row(row) {
             options.push(option);
         } else if let Some(selected) = more_models_row(row) {
@@ -619,12 +621,31 @@ fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
             });
         }
     }
-    Some(prompt(
-        ChatPromptKind::ModelPicker,
-        PICKER_TITLE.to_owned(),
-        String::new(),
-        options,
-    ))
+    Some(ChatPrompt {
+        adjust: effort_label(&rows[first + listed..]),
+        ..prompt(
+            ChatPromptKind::ModelPicker,
+            PICKER_TITLE.to_owned(),
+            String::new(),
+            options,
+        )
+    })
+}
+
+/// The marks the picker's effort row starts with, one per level.
+const EFFORT_MARKS: [char; 5] = ['○', '◐', '●', '◉', '◈'];
+
+/// The hint that ends the picker's effort row.
+const ADJUST_HINT: &str = "←/→ to adjust";
+
+/// The label of the first effort row (`● High effort ←/→ to adjust`) in
+/// `rows`, its mark and hint taken off: `High effort`; none without one.
+fn effort_label(rows: &[String]) -> Option<String> {
+    rows.iter().find_map(|row| {
+        let text = row.trim().strip_suffix(ADJUST_HINT)?;
+        let label = text.trim_start_matches(EFFORT_MARKS).trim();
+        (!label.is_empty()).then(|| label.to_owned())
+    })
 }
 
 /// The mark a full-screen dialog's top edge is drawn with.
@@ -1434,6 +1455,7 @@ fn prompt(
         always_allow_tip: None,
         multi: false,
         cursor,
+        adjust: None,
     }
 }
 
@@ -1538,6 +1560,9 @@ pub(crate) fn recipe(
     prompt: &ChatPrompt,
     answer: &ChatAnswerKind,
 ) -> Result<AnswerRecipe, AnswerRefusal> {
+    if let ChatAnswerKind::Adjust { raise } = answer {
+        return adjust_recipe(prompt, *raise);
+    }
     match prompt.kind {
         ChatPromptKind::Question => return question_recipe(prompt, answer),
         ChatPromptKind::Review => return review_recipe(prompt, answer),
@@ -1659,7 +1684,8 @@ const SESSION_ONLY_KEY: &str = "s";
 /// Picking a model row of the `/model` picker for this session alone: the
 /// arrows to its row, then `s`, which closes the picker or opens the Switch
 /// model? dialog. Never Enter (it saves the default), a digit, or Left and
-/// Right (they move the effort). The More models row is refused.
+/// Right (they move the effort, which only [`adjust_recipe`] does). The More
+/// models row is refused.
 fn picker_recipe(
     prompt: &ChatPrompt,
     answer: &ChatAnswerKind,
@@ -1680,6 +1706,21 @@ fn picker_recipe(
         expect: ScreenExpect::Any,
     });
     Ok(AnswerRecipe { steps })
+}
+
+/// Stepping the `/model` picker's effort one level: Right raises it, Left
+/// lowers it, and the picker stays up (at either end the key changes
+/// nothing). Never Enter. Refused on a picker without an effort row, and on
+/// any other prompt, which has no row to adjust.
+fn adjust_recipe(prompt: &ChatPrompt, raise: bool) -> Result<AnswerRecipe, AnswerRefusal> {
+    if prompt.kind != ChatPromptKind::ModelPicker {
+        return Err(AnswerRefusal::Unsupported);
+    }
+    if prompt.adjust.is_none() {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    let key = if raise { Key::Right } else { Key::Left };
+    Ok(one_step(vec![key], ScreenExpect::SameDialogMayStay))
 }
 
 /// Moving a trust or new-MCP-server dialog's cursor from where the reading
@@ -2397,6 +2438,54 @@ mod tests {
                     })
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_picker_reads_its_effort_row_as_its_adjust_label() {
+        let effort_right = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-effort-right.txt"
+        );
+        for (text, label) in [
+            (PICKER, Some("High effort")),
+            (PICKER_ON_SONNET, Some("Medium effort (default)")),
+            (effort_right, Some("xHigh effort")),
+            (PICKER_MORE_MODELS, None),
+        ] {
+            assert_eq!(prompt_in(text).adjust.as_deref(), label);
+        }
+    }
+
+    #[test]
+    fn an_adjust_answer_holds_one_arrow_and_no_enter() {
+        for text in PICKERS {
+            let prompt = prompt_in(text);
+            for (raise, key) in [(true, Key::Right), (false, Key::Left)] {
+                let steps = recipe(&prompt, &ChatAnswerKind::Adjust { raise })
+                    .expect("a recipe")
+                    .steps;
+                assert_eq!(
+                    steps,
+                    [RecipeStep {
+                        keys: vec![key],
+                        expect: ScreenExpect::SameDialogMayStay,
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_adjust_answer_is_refused_without_an_effort_row_or_off_the_picker() {
+        let more_models = prompt_in(PICKER_MORE_MODELS);
+        let confirm = prompt_in(SWITCH_DIALOG);
+        for raise in [true, false] {
+            let adjust = ChatAnswerKind::Adjust { raise };
+            assert_eq!(
+                recipe(&more_models, &adjust),
+                Err(AnswerRefusal::NotThisDialog)
+            );
+            assert_eq!(recipe(&confirm, &adjust), Err(AnswerRefusal::Unsupported));
         }
     }
 

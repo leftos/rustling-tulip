@@ -23,8 +23,8 @@ use tokio::time::{Instant, timeout};
 use tracing::debug;
 
 use crate::inject::{
-    NO_RESPONSE, OWNER_TYPED, TypeRefusal, TypeTarget, check_typed_text, return_to_main,
-    screen_reader, take_lane, type_message_under,
+    NO_RESPONSE, OWNER_TYPED, SEND_LANE_WAIT, TypeRefusal, TypeTarget, check_typed_text,
+    return_to_main, screen_reader, take_lane, type_message_under,
 };
 use crate::screen::dialogs::{expect_holds, prompt_identity, recipe_for};
 use crate::sync::lock;
@@ -181,7 +181,18 @@ async fn run(
     kind: &ChatAnswerKind,
     progress: &mut Progress,
 ) -> Result<(), TypeRefusal> {
-    let turn = take_lane(target, Holder::ChatAnswer).await?;
+    // An effort step waits out the step before it rather than refusing:
+    // the stepper is clicked several times in a row.
+    let turn = if matches!(kind, ChatAnswerKind::Adjust { .. }) {
+        target
+            .pty
+            .typing()
+            .take(Holder::ChatAnswer, SEND_LANE_WAIT)
+            .await
+            .map_err(TypeRefusal::busy)?
+    } else {
+        take_lane(target, Holder::ChatAnswer).await?
+    };
     let mut reader = screen_reader(target);
     let identity = asked.identity(target)?;
     let reading = reader.current().await;
@@ -385,6 +396,8 @@ fn step_holds(
         ScreenExpect::SameDialog => {
             before != Some(now) && expect_holds(&step.expect, before, Some(now))
         }
+        // A key that may do nothing: the same prompt up is enough.
+        ScreenExpect::SameDialogMayStay => !gone && expect_holds(&step.expect, before, Some(now)),
         expect => expect_holds(expect, before, Some(now)),
     }
 }
@@ -485,6 +498,15 @@ impl Answerer<'_> {
             if step_holds(step, before, &now, gone) && also.holds(before, &now) {
                 return Ok(now);
             }
+        }
+        if step.expect == ScreenExpect::SameDialogMayStay
+            && let Some(now) = readable(self.reader.read())
+            && !self.gone(&now)
+            && step_holds(step, before, &now, false)
+            && also.holds(before, &now)
+        {
+            // The key did nothing, so no reading came: the screen as it stands.
+            return Ok(now);
         }
         debug!(session_id = %self.target.session_id, ?step, "chat answer: the screen did not move as expected");
         let why = if box_ready && self.progress.gone {

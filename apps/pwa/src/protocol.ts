@@ -2998,6 +2998,12 @@ export interface ChatPrompt {
   multi?: boolean;
   /** The number of the option the cursor is on, when it is on one. */
   cursor?: number | null;
+  /**
+   * The label of the prompt's adjustable row as drawn (`High effort`),
+   * which [`ChatAnswerKind::Adjust`] steps; none when it has no such row.
+   * It is not part of the prompt's identity: moving it keeps the card.
+   */
+  adjust?: string | null;
 }
 
 /** What kind of prompt a [`ChatPrompt`] is, which picks its card layout. */
@@ -3073,7 +3079,12 @@ export type ChatAnswerKind =
   /** Go back to the previous question. */
   | { kind: "back" }
   /** Skip this question. */
-  | { kind: "skip" };
+  | { kind: "skip" }
+  /**
+   * Move the prompt's adjustable row ([`ChatPrompt::adjust`]) one step
+   * up (`raise`) or down, leaving the prompt up.
+   */
+  | { kind: "adjust"; raise: boolean };
 
 /**
  * Where the daemon sees a connection come from, as `Welcome.origin` reports

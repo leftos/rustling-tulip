@@ -12,7 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, tapping a path in a session's chat or terminal opens it: a file in the viewer, a folder in the browser, or a note when the host has no such path.
 - A Settings › Accounts row whose sign-in was refused has a Log in again button, which signs that account in again.
 - The phone's file page has Share, which opens the iOS share sheet to save the file to Files, AirDrop it or open it in another app.
-- The desktop chat shows the model the session's agent answers with and its effort, such as Opus 5.5 · high, at the start of the Quick replies row; clicking it opens the model list as a chat card, where picking a model switches this session only, and the pill follows the switch at once.
+- The desktop chat shows the model the session's agent answers with and its effort, such as Opus 5.5 · high, at the start of the Quick replies row; clicking it opens the model list as a chat card, where picking a model switches this session only and Less effort or More effort steps its effort, and the pill follows the switch at once.
 - The phone can browse a host's folders: walk up and down them, show hidden entries, tap a file to open it, or long-press a folder to fetch it whole.
 - A session title naming a Linear issue shows it as a chip in its state colour; hovering shows the issue, clicking opens it.
 - Linear issue identifiers such as RT-12, and linear.app issue links, are underlined in the terminal; resting on one shows the issue's card, and Ctrl+click opens it in the Linear app, or in your browser without it.

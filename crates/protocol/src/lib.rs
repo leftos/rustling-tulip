@@ -3862,6 +3862,11 @@ pub struct ChatPrompt {
     /// The number of the option the cursor is on, when it is on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<u32>,
+    /// The label of the prompt's adjustable row as drawn (`High effort`),
+    /// which [`ChatAnswerKind::Adjust`] steps; none when it has no such row.
+    /// It is not part of the prompt's identity: moving it keeps the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjust: Option<String>,
 }
 
 /// What kind of prompt a [`ChatPrompt`] is, which picks its card layout.
@@ -3954,6 +3959,9 @@ pub enum ChatAnswerKind {
     Back,
     /// Skip this question.
     Skip,
+    /// Move the prompt's adjustable row ([`ChatPrompt::adjust`]) one step
+    /// up (`raise`) or down, leaving the prompt up.
+    Adjust { raise: bool },
     /// Forward-compat fallback: an answer kind the current build doesn't
     /// know. Daemon never constructs this directly.
     #[serde(other)]
@@ -17861,6 +17869,7 @@ mod tests {
                 always_allow_tip: Some("Saved in .claude/settings.json".to_string()),
                 multi: true,
                 cursor: Some(2),
+                adjust: None,
             }),
         }
     }
@@ -19682,6 +19691,44 @@ mod tests {
         let known: ChatAnswerKind =
             serde_json::from_str(r#"{"kind":"option","number":3}"#).expect("decode");
         assert_eq!(known, ChatAnswerKind::Option { number: 3 });
+    }
+
+    #[test]
+    fn chat_answer_kind_adjust_round_trips() {
+        let raise = ChatAnswerKind::Adjust { raise: true };
+        let json = serde_json::to_string(&raise).expect("encode");
+        assert_eq!(json, r#"{"kind":"adjust","raise":true}"#);
+        let back: ChatAnswerKind = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, raise);
+        let lower: ChatAnswerKind =
+            serde_json::from_str(r#"{"kind":"adjust","raise":false}"#).expect("decode");
+        assert_eq!(lower, ChatAnswerKind::Adjust { raise: false });
+    }
+
+    #[test]
+    fn chat_prompt_adjust_round_trips_and_defaults_to_none() {
+        let mut prompt = ChatPrompt {
+            id: "p1".to_owned(),
+            kind: ChatPromptKind::ModelPicker,
+            subject: "Select model".to_owned(),
+            body: String::new(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+            adjust: None,
+        };
+        let bare = serde_json::to_string(&prompt).expect("encode");
+        assert!(!bare.contains("adjust"), "{bare}");
+        let back: ChatPrompt = serde_json::from_str(&bare).expect("decode");
+        assert_eq!(back.adjust, None);
+        prompt.adjust = Some("High effort".to_owned());
+        let json = serde_json::to_string(&prompt).expect("encode");
+        assert!(json.contains(r#""adjust":"High effort""#), "{json}");
+        let back: ChatPrompt = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, prompt);
     }
 
     #[test]

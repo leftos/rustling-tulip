@@ -69,6 +69,9 @@ pub enum ScreenExpect {
     DialogGone,
     /// The same prompt is still up.
     SameDialog,
+    /// The same dialog is still up, changed or not: for a key that may do
+    /// nothing, such as a step past the end of a range.
+    SameDialogMayStay,
     /// A new prompt of this kind is up.
     NextPrompt(ChatPromptKind),
     /// The composer reads ready or working.
