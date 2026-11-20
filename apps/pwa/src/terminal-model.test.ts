@@ -3,14 +3,13 @@ import { expect, test, vi } from "vitest";
 import type { DaemonMessage } from "./protocol";
 import {
   INITIAL_TERMINAL,
-  REQUEST_TIMEOUT,
-  RETRY_DELAYS,
   attach,
   detach,
   fold,
   ready,
+  requestTimeout,
+  retryDelay,
   tick,
-  type TerminalTransition,
 } from "./terminal-model";
 
 const T0 = 1_000;
@@ -59,21 +58,6 @@ function scrollback(
   };
 }
 
-/** The transition that ended a load after its whole schedule. */
-function failedLoad(): TerminalTransition {
-  const ids = counter();
-  let current = attach(INITIAL_TERMINAL, "s1", ids, T0);
-  while (current.state.phase === "loading") {
-    const deadline = current.state.deadline;
-    if (deadline === null) {
-      break;
-    }
-    current = tick(current.state, deadline, ids);
-  }
-  expect(current.state.phase).toBe("timed-out");
-  return current;
-}
-
 test("terminal_attach_asks_for_the_scrollback_with_a_fresh_request_id", () => {
   const attached = attach(INITIAL_TERMINAL, "s1", counter(), T0);
   expect(attached.messages).toEqual([
@@ -82,7 +66,7 @@ test("terminal_attach_asks_for_the_scrollback_with_a_fresh_request_id", () => {
   expect(attached.state.phase).toBe("loading");
   expect(attached.state.attempt).toBe(1);
   expect(attached.state.backoff).toBe(false);
-  expect(attached.state.deadline).toBe(T0 + REQUEST_TIMEOUT);
+  expect(attached.state.deadline).toBe(T0 + requestTimeout(1));
   expect(attached.writes).toEqual([]);
   expect(attached.reset).toBe(false);
 });
@@ -117,8 +101,8 @@ test("terminal_held_output_follows_the_history_in_order", () => {
 test("terminal_a_reply_to_an_older_request_is_dropped", () => {
   const ids = counter();
   const attached = attach(INITIAL_TERMINAL, "s1", ids, T0);
-  const timedOut = tick(attached.state, T0 + REQUEST_TIMEOUT, ids);
-  const retried = tick(timedOut.state, T0 + REQUEST_TIMEOUT + RETRY_DELAYS[0], ids);
+  const timedOut = tick(attached.state, T0 + requestTimeout(1), ids);
+  const retried = tick(timedOut.state, T0 + requestTimeout(1) + retryDelay(1), ids);
   expect(retried.state.requestId).toBe("req-2");
 
   const stale = fold(retried.state, scrollback("s1", "old", "req-1"));
@@ -145,11 +129,11 @@ test("terminal_tick_runs_the_desktop_timeout_and_retry_schedule", () => {
   const attached = attach(INITIAL_TERMINAL, "s1", ids, T0);
   const held = fold(attached.state, output("s1", "before"));
 
-  const t1 = T0 + REQUEST_TIMEOUT;
-  const t2 = t1 + RETRY_DELAYS[0];
-  const t3 = t2 + REQUEST_TIMEOUT;
-  const t4 = t3 + RETRY_DELAYS[1];
-  const t5 = t4 + REQUEST_TIMEOUT;
+  const t1 = T0 + requestTimeout(1);
+  const t2 = t1 + retryDelay(1);
+  const t3 = t2 + requestTimeout(2);
+  const t4 = t3 + retryDelay(2);
+  const t5 = t4 + requestTimeout(3);
 
   const early = tick(held.state, t1 - 1, ids);
   expect(early.messages).toEqual([]);
@@ -181,20 +165,63 @@ test("terminal_tick_runs_the_desktop_timeout_and_retry_schedule", () => {
   expect(retriedAgain.state.deadline).toBe(t5);
 
   const late = fold(retriedAgain.state, output("s1", "late"));
-  const failed = tick(late.state, t5, ids);
-  expect(failed.messages).toEqual([]);
-  expect(failed.state.phase).toBe("timed-out");
-  expect(failed.state.deadline).toBeNull();
-  // Output held when the load gave up is live: it is written, not dropped.
-  expect(failed.writes.map(text)).toEqual(["late"]);
+  const timedOutThird = tick(late.state, t5, ids);
+  expect(timedOutThird.messages).toEqual([]);
+  expect(timedOutThird.writes).toEqual([]);
+  expect(timedOutThird.state.phase).toBe("loading");
+  expect(timedOutThird.state.backoff).toBe(true);
+  expect(timedOutThird.state.deadline).toBe(t5 + retryDelay(3));
+});
+
+test("retries without a limit, backing off to its caps", () => {
+  // Per attempt n: the delay after it times out, then the timeout of attempt n + 1, in seconds.
+  const schedule: [number, number][] = [
+    [2, 16],
+    [4, 32],
+    [8, 60],
+    [16, 60],
+    [30, 60],
+    [30, 60],
+    [30, 60],
+    [30, 60],
+  ];
+  const ids = counter();
+  let current = attach(INITIAL_TERMINAL, "s1", ids, T0);
+  let timedOut = T0 + 8_000;
+  expect(current.state.deadline).toBe(timedOut);
+  for (const [index, [delay, timeout]] of schedule.entries()) {
+    const n = index + 1;
+    current = tick(current.state, timedOut, ids);
+    expect(current.messages).toEqual([]);
+    expect(current.state.phase).toBe("loading");
+    expect(current.state.backoff).toBe(true);
+    expect(current.state.attempt).toBe(n);
+    const retryAt = timedOut + delay * 1_000;
+    expect(retryDelay(n)).toBe(delay * 1_000);
+    expect(current.state.deadline).toBe(retryAt);
+
+    current = tick(current.state, retryAt, ids);
+    expect(current.messages).toEqual([
+      { type: "load_scrollback", session_id: "s1", request_id: `req-${n + 1}` },
+    ]);
+    expect(current.state.attempt).toBe(n + 1);
+    timedOut = retryAt + timeout * 1_000;
+    expect(requestTimeout(n + 1)).toBe(timeout * 1_000);
+    expect(current.state.deadline).toBe(timedOut);
+  }
+  expect(retryDelay(Number.MAX_SAFE_INTEGER)).toBe(30_000);
+  expect(requestTimeout(Number.MAX_SAFE_INTEGER)).toBe(60_000);
+
+  const held = fold(current.state, output("s1", "live"));
+  const replied = fold(held.state, scrollback("s1", "h", "req-9"));
+  expect(replied.writes.map(text)).toEqual(["h", "live"]);
+  expect(replied.state.phase).toBe("loaded");
 });
 
 test("terminal_a_finished_load_asks_for_the_size_again", () => {
   const attached = attach(INITIAL_TERMINAL, "s1", () => "req-1", T0);
   const loaded = fold(attached.state, scrollback("s1", "history", "req-1"));
   expect(loaded.resize).toBe(true);
-
-  expect(failedLoad().resize).toBe(true);
 });
 
 test("terminal_undecodable_bytes_leave_the_state_alone", () => {
@@ -237,14 +264,6 @@ test("terminal_a_resync_after_the_load_clears_and_replays", () => {
   expect(resynced.state.requestId).toBeNull();
 });
 
-test("terminal_a_resync_after_a_timed_out_load_clears_and_replays", () => {
-  const resynced = fold(failedLoad().state, scrollback("s1", "fresh", null, true));
-  expect(resynced.reset).toBe(true);
-  expect(resynced.writes.map(text)).toEqual(["fresh"]);
-  expect(resynced.resize).toBe(true);
-  expect(resynced.state.phase).toBe("loaded");
-});
-
 test("terminal_a_resync_while_a_load_is_pending_is_dropped", () => {
   const attached = attach(INITIAL_TERMINAL, "s1", () => "req-1", T0);
   const held = fold(attached.state, output("s1", "a"));
@@ -278,7 +297,7 @@ test("terminal_ready_reconnects_with_a_new_request", () => {
   ]);
   expect(back.state.requestId).toBe("req-2");
   expect(back.state.held).toEqual([]);
-  expect(back.state.deadline).toBe(T0 + 5_000 + REQUEST_TIMEOUT);
+  expect(back.state.deadline).toBe(T0 + 5_000 + requestTimeout(1));
 
   expect(ready(INITIAL_TERMINAL, ids, T0).messages).toEqual([]);
 });

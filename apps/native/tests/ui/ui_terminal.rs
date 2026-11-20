@@ -1523,7 +1523,7 @@ fn scrollback_timeout_retries_and_then_drains_buffered_output(cx: &mut TestAppCo
     h.advance(Duration::from_secs(8));
     let screen = h.grid_text("p1").join("\n");
     assert!(
-        screen.contains("retrying (1/2)"),
+        screen.contains("retrying, attempt 1…"),
         "retry line, got {screen:?}"
     );
     assert_eq!(requests(&h.sent()), 0, "the retry waits out its backoff");

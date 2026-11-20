@@ -4,25 +4,33 @@
 
 use std::time::{Duration, Instant};
 
-/// How long one `LoadScrollback` request waits for its reply.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(8000);
+/// `first` doubled once per attempt after the first, capped at `cap`.
+fn doubled_up_to(first: Duration, cap: Duration, attempt: usize) -> Duration {
+    let doublings = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    2u32.checked_pow(doublings)
+        .and_then(|factor| first.checked_mul(factor))
+        .map_or(cap, |wait| wait.min(cap))
+}
 
-/// The wait before each retry. Once the last retry times out, loading fails.
-pub const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(2000), Duration::from_millis(4000)];
+/// How long request number `attempt` (1-based) waits for its reply:
+/// 8 s, doubling up to 60 s.
+pub fn request_timeout(attempt: usize) -> Duration {
+    doubled_up_to(Duration::from_secs(8), Duration::from_secs(60), attempt)
+}
+
+/// The wait before retrying once request number `attempt` (1-based) timed
+/// out: 2 s, doubling up to 30 s. Loading retries until a reply comes.
+pub fn retry_delay(attempt: usize) -> Duration {
+    doubled_up_to(Duration::from_secs(2), Duration::from_secs(30), attempt)
+}
 
 /// Wipes the in-place retry line.
 const CLEAR_LINE: &str = "\r\x1b[2K";
 
 pub const TRUNCATED_BANNER: &str = "\x1b[33m[earlier output discarded]\x1b[0m\r\n";
 
-pub const FAILED_BANNER: &str = "\x1b[33m[could not load earlier output — the daemon is not responding. \
-     The session itself may still be running; reopen this pane to retry.]\x1b[0m\r\n";
-
 fn retry_line(attempt: usize) -> String {
-    format!(
-        "{CLEAR_LINE}\x1b[33m[daemon is slow to respond — retrying ({attempt}/{})…]\x1b[0m",
-        RETRY_DELAYS.len()
-    )
+    format!("{CLEAR_LINE}\x1b[33m[daemon is slow to respond — retrying, attempt {attempt}…]\x1b[0m")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +39,6 @@ pub enum State {
     /// the next one.
     Loading(usize),
     Loaded,
-    Failed,
 }
 
 /// What the pane does next, in order.
@@ -113,7 +120,6 @@ enum Phase {
     Awaiting { attempt: usize, deadline: Instant },
     Backoff { attempt: usize, until: Instant },
     Loaded,
-    Failed,
 }
 
 #[derive(Debug)]
@@ -131,7 +137,7 @@ impl ScrollbackLoad {
         Self {
             phase: Phase::Awaiting {
                 attempt: 1,
-                deadline: now + REQUEST_TIMEOUT,
+                deadline: now + request_timeout(1),
             },
             buffer: Vec::new(),
             request_id: None,
@@ -155,7 +161,6 @@ impl ScrollbackLoad {
                 State::Loading(attempt)
             }
             Phase::Loaded => State::Loaded,
-            Phase::Failed => State::Failed,
         }
     }
 
@@ -164,7 +169,7 @@ impl ScrollbackLoad {
         match self.phase {
             Phase::Awaiting { deadline, .. } => Some(deadline),
             Phase::Backoff { until, .. } => Some(until),
-            Phase::Loaded | Phase::Failed => None,
+            Phase::Loaded => None,
         }
     }
 
@@ -175,7 +180,7 @@ impl ScrollbackLoad {
                 self.buffer.push(bytes);
                 None
             }
-            State::Loaded | State::Failed => Some(bytes),
+            State::Loaded => Some(bytes),
         }
     }
 
@@ -230,26 +235,19 @@ impl ScrollbackLoad {
     fn advance(&mut self, now: Instant) -> Option<Vec<Step>> {
         match self.phase {
             Phase::Awaiting { attempt, deadline } if now >= deadline => {
-                let Some(delay) = RETRY_DELAYS.get(attempt - 1) else {
-                    self.phase = Phase::Failed;
-                    let banner = vec![
-                        Step::Status(CLEAR_LINE.to_owned()),
-                        Step::Status(FAILED_BANNER.to_owned()),
-                    ];
-                    return Some(self.finish(banner));
-                };
                 self.phase = Phase::Backoff {
                     attempt,
-                    until: now + *delay,
+                    until: now + retry_delay(attempt),
                 };
                 Some(vec![Step::Status(retry_line(attempt))])
             }
             Phase::Backoff { attempt, until } if now >= until => {
                 // The retry's reply carries everything held back so far.
                 self.buffer.clear();
+                let attempt = attempt.saturating_add(1);
                 self.phase = Phase::Awaiting {
-                    attempt: attempt + 1,
-                    deadline: now + REQUEST_TIMEOUT,
+                    attempt,
+                    deadline: now + request_timeout(attempt),
                 };
                 Some(vec![Step::Request])
             }
@@ -268,11 +266,11 @@ impl ScrollbackLoad {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::{
-        CLEAR_LINE, FAILED_BANNER, PRE_LAYOUT_CAP_BYTES, PreLayoutLog, REQUEST_TIMEOUT,
-        RETRY_DELAYS, ReplyVerdict, ScrollbackLoad, State, Step, TRUNCATED_BANNER, retry_line,
+        CLEAR_LINE, PRE_LAYOUT_CAP_BYTES, PreLayoutLog, ReplyVerdict, ScrollbackLoad, State, Step,
+        TRUNCATED_BANNER, request_timeout, retry_delay, retry_line,
     };
 
     fn clear() -> Step {
@@ -316,20 +314,20 @@ mod tests {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
         assert_eq!(
-            load.tick(t0 + REQUEST_TIMEOUT / 2),
+            load.tick(t0 + request_timeout(1) / 2),
             [] as [crate::scrollback_load::Step; 0]
         );
         assert_eq!(load.on_output(b"stale".to_vec()), None);
 
-        let timed_out = t0 + REQUEST_TIMEOUT;
+        let timed_out = t0 + request_timeout(1);
         assert_eq!(load.tick(timed_out), vec![Step::Status(retry_line(1))]);
         assert_eq!(load.state(), State::Loading(1));
-        let retry_at = timed_out + RETRY_DELAYS[0];
+        let retry_at = timed_out + retry_delay(1);
         assert_eq!(load.next_deadline(), Some(retry_at));
 
         assert_eq!(load.tick(retry_at), vec![Step::Request]);
         assert_eq!(load.state(), State::Loading(2));
-        assert_eq!(load.next_deadline(), Some(retry_at + REQUEST_TIMEOUT));
+        assert_eq!(load.next_deadline(), Some(retry_at + request_timeout(2)));
         assert_eq!(
             reply(&mut load, b"h", None, false),
             ReplyVerdict::Accepted(vec![clear(), Step::History(b"h".to_vec()), Step::Resize])
@@ -337,38 +335,49 @@ mod tests {
     }
 
     #[test]
-    fn the_full_retry_schedule_ends_in_failed() {
+    fn the_retry_schedule_never_ends_and_backs_off_to_its_caps() {
+        let delays = [2, 4, 8, 16, 30, 30, 30, 30].map(Duration::from_secs);
+        let timeouts = [16, 32, 60, 60, 60, 60, 60, 60].map(Duration::from_secs);
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
-        assert_eq!(load.on_output(b"live".to_vec()), None);
-        let mut steps = Vec::new();
-        let mut now = t0;
-        while let Some(deadline) = load.next_deadline() {
-            now = deadline;
-            steps.extend(load.tick(now));
+        load.expect_reply_to("r1".to_owned());
+        let mut timed_out = t0 + Duration::from_secs(8);
+        assert_eq!(load.next_deadline(), Some(timed_out));
+        for (n, (delay, timeout)) in (1..).zip(delays.into_iter().zip(timeouts)) {
+            assert_eq!(load.tick(timed_out), vec![Step::Status(retry_line(n))]);
+            assert_eq!(load.state(), State::Loading(n));
+            let retry_at = timed_out + delay;
+            assert_eq!(retry_delay(n), delay);
+            assert_eq!(load.next_deadline(), Some(retry_at));
+
+            assert_eq!(load.tick(retry_at), vec![Step::Request]);
+            load.expect_reply_to(format!("r{}", n + 1));
+            assert_eq!(load.state(), State::Loading(n + 1));
+            timed_out = retry_at + timeout;
+            assert_eq!(request_timeout(n + 1), timeout);
+            assert_eq!(load.next_deadline(), Some(timed_out));
         }
-        assert_eq!(load.state(), State::Failed);
+        assert_eq!(load.on_output(b"live".to_vec()), None);
         assert_eq!(
-            now - t0,
-            REQUEST_TIMEOUT * 3 + RETRY_DELAYS[0] + RETRY_DELAYS[1]
-        );
-        assert_eq!(
-            steps,
-            vec![
-                Step::Status(retry_line(1)),
-                Step::Request,
-                Step::Status(retry_line(2)),
-                Step::Request,
+            reply(&mut load, b"h", Some("r9"), false),
+            ReplyVerdict::Accepted(vec![
                 clear(),
-                Step::Status(FAILED_BANNER.to_owned()),
+                Step::History(b"h".to_vec()),
+                Step::Live(b"live".to_vec()),
                 Step::Resize,
-            ]
+            ])
         );
-        assert_eq!(
-            reply(&mut load, b"late", None, false),
-            ReplyVerdict::NotLoading
-        );
-        assert_eq!(load.on_output(b"x".to_vec()), Some(b"x".to_vec()));
+        assert_eq!(load.state(), State::Loaded);
+    }
+
+    #[test]
+    fn retry_delay_and_request_timeout_saturate() {
+        assert_eq!(retry_delay(1), Duration::from_secs(2));
+        assert_eq!(retry_delay(5), Duration::from_secs(30));
+        assert_eq!(retry_delay(usize::MAX), Duration::from_secs(30));
+        assert_eq!(request_timeout(1), Duration::from_secs(8));
+        assert_eq!(request_timeout(4), Duration::from_secs(60));
+        assert_eq!(request_timeout(usize::MAX), Duration::from_secs(60));
     }
 
     #[test]
@@ -376,8 +385,8 @@ mod tests {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
         load.expect_reply_to("first".to_owned());
-        load.tick(t0 + REQUEST_TIMEOUT);
-        let retry_at = t0 + REQUEST_TIMEOUT + RETRY_DELAYS[0];
+        load.tick(t0 + request_timeout(1));
+        let retry_at = t0 + request_timeout(1) + retry_delay(1);
         assert_eq!(load.tick(retry_at), vec![Step::Request]);
         load.expect_reply_to("second".to_owned());
 
@@ -386,7 +395,7 @@ mod tests {
             ReplyVerdict::Stale
         );
         assert_eq!(load.state(), State::Loading(2));
-        assert_eq!(load.next_deadline(), Some(retry_at + REQUEST_TIMEOUT));
+        assert_eq!(load.next_deadline(), Some(retry_at + request_timeout(2)));
 
         assert_eq!(
             reply(&mut load, b"fresh", Some("second"), true),
@@ -447,8 +456,8 @@ mod tests {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
         load.expect_reply_to("first".to_owned());
-        load.tick(t0 + REQUEST_TIMEOUT);
-        let retried = load.tick(t0 + REQUEST_TIMEOUT + RETRY_DELAYS[0]);
+        load.tick(t0 + request_timeout(1));
+        let retried = load.tick(t0 + request_timeout(1) + retry_delay(1));
         assert_eq!(retried, vec![Step::Request]);
         load.expect_reply_to("second".to_owned());
         assert_eq!(load.on_output(b"X".to_vec()), None);
@@ -472,7 +481,7 @@ mod tests {
     fn a_reply_during_the_pause_before_a_retry_is_accepted() {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
-        load.tick(t0 + REQUEST_TIMEOUT);
+        load.tick(t0 + request_timeout(1));
         assert!(matches!(
             reply(&mut load, b"", None, false),
             ReplyVerdict::Accepted(_)
