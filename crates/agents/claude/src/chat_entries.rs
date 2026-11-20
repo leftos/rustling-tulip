@@ -5,7 +5,7 @@
 //! Ids: a message's entries use the record `uuid`, a tool card the `tool_use`
 //! block's id (so its result upserts the card), a receipt `receipt:<that id>`.
 
-use agent_api::TranscriptLineFacts;
+use agent_api::{ModelSwitch, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
 use serde_json::{Map, Value};
@@ -118,6 +118,7 @@ pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
         ended_tasks: ended_tasks(record),
         model: reply_model(record),
         effort: reply_effort(record),
+        model_switch: model_switch(record),
     }
 }
 
@@ -150,6 +151,55 @@ fn reply_effort(record: &Value) -> Option<String> {
     str_at(record, "effort")
         .filter(|effort| !effort.is_empty())
         .map(str::to_owned)
+}
+
+/// The model switch a main-thread command's output records: none for a
+/// subagent's record, context Claude Code injected, a compact summary, a
+/// prompt that merely quotes a command's output, or an output that names no
+/// switch. Only the user's own record whose text starts with the output tag
+/// is the command's output; a prompt the user typed can quote one, so the tag
+/// anywhere in the text is not enough.
+fn model_switch(record: &Value) -> Option<ModelSwitch> {
+    if str_at(record, "type") != Some("user")
+        || is_meta(record)
+        || flag(record, "isCompactSummary")
+        || flag(record, "isSidechain")
+    {
+        return None;
+    }
+    let text = record.pointer("/message/content").and_then(content_text)?;
+    let output = text.trim_start();
+    if !output.starts_with("<local-command-stdout>") {
+        return None;
+    }
+    records::tag_values(output, "<local-command-stdout>", "</local-command-stdout>")
+        .next()
+        .and_then(parse_model_switch)
+}
+
+/// The switch a command's output records: `/model` prints "Set model to",
+/// the new model's label in backticks, then "for this session only". A typed
+/// `/model <name>` adds "and saved as your default for new sessions", and
+/// either names the effort in backticks after "with" when the effort moved
+/// too. "Kept model as" keeps the model, so it is no switch.
+fn parse_model_switch(text: &str) -> Option<ModelSwitch> {
+    let label = text.strip_prefix("Set model to `")?;
+    let (label, rest) = label.split_once('`')?;
+    if label.is_empty() {
+        return None;
+    }
+    Some(ModelSwitch {
+        label: label.to_owned(),
+        effort: switched_effort(rest),
+    })
+}
+
+/// The effort a switch names after its label: the backticked word between
+/// "with" and "effort", and none when the switch names no effort.
+fn switched_effort(rest: &str) -> Option<String> {
+    let (_, after) = rest.split_once(" with `")?;
+    let (effort, tail) = after.split_once('`')?;
+    (!effort.is_empty() && tail.starts_with(" effort")).then(|| effort.to_owned())
 }
 
 /// The tasks a task-notification record reports ended: each notification's
@@ -1064,7 +1114,7 @@ mod tests {
         split_at_limit, tool_kind,
     };
     use crate::scripts::ScriptBook;
-    use agent_api::TranscriptLineFacts;
+    use agent_api::{ModelSwitch, TranscriptLineFacts};
     use chrono::{TimeDelta, TimeZone as _, Utc};
     use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
     use serde_json::{Value, json};
@@ -1090,8 +1140,112 @@ mod tests {
                 ended_tasks: Vec::new(),
                 model: None,
                 effort: None,
+                model_switch: None,
             }
         );
+    }
+
+    /// A main-thread `user` record carrying `output` as its command's standard
+    /// output.
+    fn command_output(output: &str) -> String {
+        json!({
+            "type": "user", "uuid": uid("52"),
+            "message": {"role": "user",
+                "content": format!("<local-command-stdout>{output}</local-command-stdout>")},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_session_only_switch_reads_as_a_model_switch() {
+        let line = command_output("Set model to `Sonnet 5.5` for this session only");
+        assert_eq!(
+            line_facts(&line).model_switch,
+            Some(ModelSwitch {
+                label: "Sonnet 5.5".to_owned(),
+                effort: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_switch_with_effort_names_its_effort() {
+        let line =
+            command_output("Set model to `Opus 5.5` for this session only with `xhigh` effort");
+        assert_eq!(
+            line_facts(&line).model_switch,
+            Some(ModelSwitch {
+                label: "Opus 5.5".to_owned(),
+                effort: Some("xhigh".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_saved_switch_reads_as_a_model_switch() {
+        let line =
+            command_output("Set model to `Opus 5.5` and saved as your default for new sessions");
+        assert_eq!(
+            line_facts(&line).model_switch,
+            Some(ModelSwitch {
+                label: "Opus 5.5".to_owned(),
+                effort: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_kept_model_is_no_switch() {
+        let line = json!({
+            "type": "system", "subtype": "local_command", "uuid": uid("53"),
+            "content": "<local-command-stdout>Kept model as `Sonnet 5.5`</local-command-stdout>",
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model_switch, None);
+    }
+
+    #[test]
+    fn a_sidechain_switch_is_none() {
+        let line = json!({
+            "type": "user", "uuid": uid("54"), "isSidechain": true,
+            "message": {"role": "user",
+                "content": "<local-command-stdout>Set model to `Sonnet 5.5` for this session only</local-command-stdout>"},
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model_switch, None);
+    }
+
+    #[test]
+    fn a_prompt_quoting_a_switch_is_no_switch() {
+        let line = json!({
+            "type": "user", "uuid": uid("55"),
+            "message": {"role": "user",
+                "content": "see <local-command-stdout>Set model to `Sonnet 5.5` for this session only</local-command-stdout>"},
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model_switch, None);
+    }
+
+    #[test]
+    fn a_meta_record_is_no_switch() {
+        let line = json!({
+            "type": "user", "uuid": uid("56"), "isMeta": true,
+            "message": {"role": "user",
+                "content": "<local-command-stdout>Set model to `Sonnet 5.5` for this session only</local-command-stdout>"},
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model_switch, None);
+    }
+
+    #[test]
+    fn a_compact_summary_is_no_switch() {
+        let line = json!({
+            "type": "user", "uuid": uid("57"), "isCompactSummary": true,
+            "message": {"role": "user",
+                "content": "<local-command-stdout>Set model to `Sonnet 5.5` for this session only</local-command-stdout>"},
+        })
+        .to_string();
+        assert_eq!(line_facts(&line).model_switch, None);
     }
 
     /// An assistant reply naming `model`, with `extra` fields merged in.

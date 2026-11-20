@@ -1027,6 +1027,17 @@ mod tests {
         .to_string()
     }
 
+    /// A main-thread `user` record `uuid` at second `n` carrying `output` as
+    /// the standard output of the command the user ran.
+    fn command_output(uuid: &str, n: usize, output: &str) -> String {
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "message": {"role": "user",
+                "content": format!("<local-command-stdout>{output}</local-command-stdout>")},
+        })
+        .to_string()
+    }
+
     const OPUS: &str = "claude-opus-5-5";
     const SONNET: &str = "claude-sonnet-4-5";
 
@@ -1518,6 +1529,107 @@ mod tests {
             next_model(&mut a_rx).await,
             shown_effort(OPUS, "Opus 5.5", "high"),
             "the reply's effort rides the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_only_switch_updates_the_model_at_once() {
+        let fx = Fixture::new("chat-switch-at-once", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_model(&mut a_rx).await, shown(OPUS, "Opus 5.5"));
+        fx.append(
+            "conv-a",
+            &[
+                user(3),
+                command_output("u-4", 4, "Set model to `Sonnet 5.5` for this session only"),
+            ],
+        );
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            (None, Some("Sonnet 5.5".to_owned()), None),
+            "the switch's label rides a model with no id yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_switch_with_effort_carries_it() {
+        let fx = Fixture::new("chat-switch-effort", Some("conv-a"));
+        fx.append("conv-a", &[user(1), effort_reply("a-2", 2, OPUS, "high")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown_effort(OPUS, "Opus 5.5", "high")
+        );
+        fx.append(
+            "conv-a",
+            &[command_output(
+                "u-3",
+                3,
+                "Set model to `Opus 5.5` for this session only with `xhigh` effort",
+            )],
+        );
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            (None, Some("Opus 5.5".to_owned()), Some("xhigh".to_owned())),
+            "the switch names its own effort"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_reply_replaces_a_switched_label() {
+        let fx = Fixture::new("chat-switch-reply", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_model(&mut a_rx).await, shown(OPUS, "Opus 5.5"));
+        fx.append(
+            "conv-a",
+            &[
+                command_output("u-3", 3, "Set model to `Sonnet 5.5` for this session only"),
+                user(4),
+                effort_reply("a-5", 5, SONNET, "medium"),
+            ],
+        );
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            (None, Some("Sonnet 5.5".to_owned()), None),
+            "the switch first"
+        );
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown_effort(SONNET, "Sonnet 4.5", "medium"),
+            "then the reply's own model, label and effort"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_loader_gets_the_switched_label() {
+        let fx = Fixture::new("chat-switch-load", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_model(&mut a_rx).await, shown(OPUS, "Opus 5.5"));
+        fx.append(
+            "conv-a",
+            &[command_output(
+                "u-3",
+                3,
+                "Set model to `Sonnet 5.5` for this session only",
+            )],
+        );
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            (None, Some("Sonnet 5.5".to_owned()), None)
+        );
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load(2, &b_tx, "rb").await;
+        assert_eq!(
+            next_model(&mut b_rx).await,
+            (None, Some("Sonnet 5.5".to_owned()), None),
+            "the late loader is sent the switched label"
         );
     }
 

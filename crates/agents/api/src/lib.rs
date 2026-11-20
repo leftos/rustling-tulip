@@ -226,6 +226,17 @@ pub struct LiveLine {
     pub prompt_key: Option<String>,
 }
 
+/// A model switch the agent's own command reported: the new model's label as
+/// the agent printed it, and the effort when the switch named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSwitch {
+    /// The new model's label, as the agent printed it; the model's id comes
+    /// only with the next reply.
+    pub label: String,
+    /// The effort the switch named, when it named one.
+    pub effort: Option<String>,
+}
+
 /// What the chat needs of one transcript line beyond its entries: which
 /// prompt's turn it belongs to, and which background tasks it reports ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -251,6 +262,9 @@ pub struct TranscriptLineFacts {
     /// The effort the session's main agent answered with on this line: set
     /// only on the main thread's own reply, as `model` is.
     pub effort: Option<String>,
+    /// A model switch this line records, from the agent's own command output
+    /// on the main thread; the model's id comes only with the next reply.
+    pub model_switch: Option<ModelSwitch>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the

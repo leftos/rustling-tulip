@@ -492,6 +492,7 @@ impl ChatMirror {
         // The new conversation names its model and effort at its first reply.
         mirror.model = None;
         mirror.effort = None;
+        mirror.switched = None;
         mirror.update_model(session_id);
         if let Some(writer) = mirror.writer.as_mut() {
             writer.clear();
@@ -1268,6 +1269,12 @@ struct SessionMirror {
     effort: Option<String>,
     /// The effort the chat loaders were last sent in a `ChatModel`.
     effort_shown: Option<String>,
+    /// The label of the model switch the transcript's newest main-thread
+    /// command names, which no reply has replaced yet; the switch names no
+    /// model id, so the pill draws the label until a reply names one.
+    switched: Option<String>,
+    /// The switched label the chat loaders were last sent in a `ChatModel`.
+    switched_shown: Option<String>,
     /// The requests for the stretch lines and their answers, from the first
     /// summary load with a summarizer set.
     writer: Option<SummaryWriter>,
@@ -1311,6 +1318,8 @@ impl SessionMirror {
             model_shown: None,
             effort: None,
             effort_shown: None,
+            switched: None,
+            switched_shown: None,
             writer: None,
         }
     }
@@ -1326,10 +1335,7 @@ impl SessionMirror {
     ) {
         self.ended_tasks.extend(facts.ended_tasks.iter().cloned());
         // Kept while the first read catches up too; sent once it ends.
-        if let Some(model) = &facts.model {
-            self.model = Some(model.clone());
-            self.effort.clone_from(&facts.effort);
-        }
+        let model_moved = self.take_model_facts(facts);
         let mut change = self.chat.apply_line(plugin, line, facts);
         // A line applied while the first read catches up is an old one,
         // which lands no pending entry.
@@ -1348,38 +1354,67 @@ impl SessionMirror {
         if !facts.ended_tasks.is_empty() {
             self.update_work(session_id);
         }
-        if facts.model.is_some() {
+        if model_moved {
             self.update_model(session_id);
         }
     }
 
-    /// Send the model and its effort to every chat loader when either
-    /// changed since they were last sent it.
+    /// Take the model facts `facts` carries: a main-thread reply names its
+    /// model, the effort it answered with, and replaces any switched label; a
+    /// switch names its label and the effort it moved to, with the model id to
+    /// come at the next reply. Whether the line moved the model.
+    fn take_model_facts(&mut self, facts: &TranscriptLineFacts) -> bool {
+        if let Some(model) = &facts.model {
+            self.model = Some(model.clone());
+            self.effort.clone_from(&facts.effort);
+            // The reply's own model replaces a switched label and its effort.
+            self.switched = None;
+        } else if let Some(switch) = &facts.model_switch {
+            // The switch names only a label; the reply after it brings the
+            // model id and the effort it answers with.
+            self.model = None;
+            self.switched = Some(switch.label.clone());
+            self.effort.clone_from(&switch.effort);
+        }
+        facts.model.is_some() || facts.model_switch.is_some()
+    }
+
+    /// Send the model, its label and its effort to every chat loader when any
+    /// of them changed since they were last sent it.
     fn update_model(&mut self, session_id: &str) {
-        if self.model != self.model_shown || self.effort != self.effort_shown {
+        if self.model != self.model_shown
+            || self.effort != self.effort_shown
+            || self.switched != self.switched_shown
+        {
             self.model_shown.clone_from(&self.model);
             self.effort_shown.clone_from(&self.effort);
+            self.switched_shown.clone_from(&self.switched);
             self.tell(&self.model_message(session_id));
         }
     }
 
     /// The `ChatModel` a new loader of `kind` is sent after its reply and
-    /// the strip: a chat loader's only, once a model was shown.
+    /// the strip: a chat loader's only, once a model or a switch was shown.
     fn model_on_load(&self, kind: LoadKind, session_id: &str) -> Option<DaemonMessage> {
-        (kind == LoadKind::Chat && self.model_shown.is_some())
-            .then(|| self.model_message(session_id))
+        let shown = self.model_shown.is_some() || self.switched_shown.is_some();
+        (kind == LoadKind::Chat && shown).then(|| self.model_message(session_id))
     }
 
-    /// The `ChatModel` of the model and effort the chat loaders were last
-    /// sent, its label as the session's agent formats it.
+    /// The `ChatModel` of the model, label and effort the chat loaders were
+    /// last sent: a switched label as the agent printed it, else the model's
+    /// label as the session's agent formats it.
     fn model_message(&self, session_id: &str) -> DaemonMessage {
-        DaemonMessage::ChatModel {
-            session_id: session_id.to_owned(),
-            model: self.model_shown.clone(),
-            label: self
+        let label = match &self.switched_shown {
+            Some(label) => Some(label.clone()),
+            None => self
                 .model_shown
                 .as_deref()
                 .map(|model| self.plugin.model_label(model)),
+        };
+        DaemonMessage::ChatModel {
+            session_id: session_id.to_owned(),
+            model: self.model_shown.clone(),
+            label,
             effort: self.effort_shown.clone(),
         }
     }
