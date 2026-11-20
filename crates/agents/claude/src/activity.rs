@@ -49,8 +49,6 @@ const MINUTE_MS: i64 = 60_000;
 const AGENT_TOOL: &str = "Agent";
 /// The model Claude Code writes on a reply it made up itself (an API error).
 const SYNTHETIC_MODEL: &str = "<synthetic>";
-/// The slash command that starts the conversation over; it is no prompt.
-const CLEAR_COMMAND: &str = "/clear";
 /// The prefixes of a local command's own output, which Claude Code records as
 /// a user message although the user typed none of it.
 const LOCAL_COMMAND_OUTPUT: [&str; 3] = [
@@ -800,15 +798,9 @@ fn prompt_of(record: &Value) -> Option<String> {
     {
         return None;
     }
-    let command = records::tag_values(text, "<command-name>", "</command-name>")
-        .next()
-        .filter(|name| !name.is_empty());
-    let prompt = match command {
-        Some(CLEAR_COMMAND) => return None,
-        Some(name) => match records::tag_values(text, "<command-args>", "</command-args>").next() {
-            Some(args) if !args.is_empty() => format!("{name} {args}"),
-            _ => name.to_owned(),
-        },
+    let prompt = match records::command_line(text) {
+        Some(line) if records::is_clear(&line) => return None,
+        Some(line) => line,
         None if text.trim().is_empty() => return None,
         None => text.to_owned(),
     };

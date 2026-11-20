@@ -84,6 +84,30 @@ pub(crate) fn task_notification_status(text: &str) -> Option<&str> {
     tag_values(first, "<status>", "</status>").next()
 }
 
+/// The slash command that starts the conversation over; no prompt and no
+/// chat bubble.
+const CLEAR_COMMAND: &str = "/clear";
+
+/// The command line a slash command's user record carries, as the user typed
+/// it: its `<command-name>` (`/nextup`) and, when it has any, its
+/// `<command-args>` after a space. `None` for text that names no command.
+pub(crate) fn command_line(text: &str) -> Option<String> {
+    let name = tag_values(text, "<command-name>", "</command-name>")
+        .next()
+        .filter(|name| !name.is_empty())?;
+    Some(
+        match tag_values(text, "<command-args>", "</command-args>").next() {
+            Some(args) if !args.is_empty() => format!("{name} {args}"),
+            _ => name.to_owned(),
+        },
+    )
+}
+
+/// Whether command line `line` runs `/clear`.
+pub(crate) fn is_clear(line: &str) -> bool {
+    line.split_whitespace().next() == Some(CLEAR_COMMAND)
+}
+
 /// The trimmed text between each `open` tag and the `close` tag after it, in
 /// order; an `open` with no `close` after it ends the list.
 pub(crate) fn tag_values<'a>(

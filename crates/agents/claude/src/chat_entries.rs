@@ -260,10 +260,14 @@ fn bash_output_row(record: &Value, text: &str, known: Known<'_>) -> Option<ChatE
 }
 
 /// A user's typed text as its entry: an interrupt notice is the system row
-/// "Interrupted", command noise and blank text are nothing.
+/// "Interrupted", a slash command its command line as typed (`/clear`
+/// none), other command noise and blank text are nothing.
 fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
     if is_interrupt_text(text) {
         return Some(system_row(uuid, "Interrupted".to_owned()));
+    }
+    if let Some(line) = records::command_line(text) {
+        return command_bubble(uuid, line);
     }
     if is_command_noise(text) {
         return None;
@@ -280,6 +284,16 @@ fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
     Some(ChatEntry::User {
         id: uuid.to_owned(),
         text,
+        pending: false,
+    })
+}
+
+/// A slash command's command line as the user's bubble; none for `/clear`,
+/// which the chat marks by starting over.
+fn command_bubble(uuid: &str, line: String) -> Option<ChatEntry> {
+    (!records::is_clear(&line)).then(|| ChatEntry::User {
+        id: uuid.to_owned(),
+        text: line,
         pending: false,
     })
 }
@@ -798,6 +812,9 @@ fn system_entry(record: &Value, uuid: &str) -> Option<ChatEntry> {
         "compact_boundary" => Some(system_row(uuid, "Conversation compacted".to_owned())),
         "local_command" => {
             let content = str_at(record, "content")?;
+            if let Some(line) = records::command_line(content) {
+                return command_bubble(uuid, line);
+            }
             ["local-command-stdout", "local-command-stderr"]
                 .into_iter()
                 .filter_map(|tag| tag_text(content, tag))
@@ -2238,8 +2255,59 @@ mod tests {
     #[test]
     fn slash_command_output_is_a_system_row_without_sgr_escapes() {
         assert_eq!(alone("compact", "72"), [system("72", "Model set to fake")]);
-        assert_eq!(alone("compact", "73"), [], "the command line itself");
+        assert_eq!(
+            alone("compact", "73"),
+            [user("73", "/model")],
+            "the command line itself"
+        );
         assert_eq!(alone("compact", "74"), [], "empty output");
+    }
+
+    #[test]
+    fn a_slash_command_is_a_user_bubble_with_its_args() {
+        let typed = "<command-name>/nextup</command-name>\n<command-message>nextup</command-message>\n<command-args>RT-483</command-args>";
+        let as_string =
+            json!({"type": "user", "uuid": "u", "message": {"content": typed}}).to_string();
+        let as_blocks =
+            json!({"type": "user", "uuid": "u", "message": {"content": [{"type": "text", "text": typed}]}})
+                .to_string();
+        let bubble = ChatEntry::User {
+            id: "u".to_owned(),
+            text: "/nextup RT-483".to_owned(),
+            pending: false,
+        };
+        assert_eq!(
+            chat_entries(&as_string, &|_| None),
+            std::slice::from_ref(&bubble)
+        );
+        assert_eq!(chat_entries(&as_blocks, &|_| None), [bubble]);
+    }
+
+    #[test]
+    fn a_slash_command_without_args_is_its_name_alone() {
+        let line = json!({"type": "user", "uuid": "u", "message": {"content":
+            "<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args></command-args>"}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&line, &|_| None),
+            [ChatEntry::User {
+                id: "u".to_owned(),
+                text: "/review".to_owned(),
+                pending: false
+            }]
+        );
+    }
+
+    #[test]
+    fn clear_and_an_expanded_skill_draw_no_bubble() {
+        let clear = json!({"type": "user", "uuid": "u", "message": {"content":
+            "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"}})
+        .to_string();
+        let expansion = json!({"type": "user", "uuid": "v", "isMeta": true, "message": {"content":
+            "<command-name>/nextup</command-name>\nBase directory for this skill: x"}})
+        .to_string();
+        assert_eq!(chat_entries(&clear, &|_| None), []);
+        assert_eq!(chat_entries(&expansion, &|_| None), []);
     }
 
     #[test]
