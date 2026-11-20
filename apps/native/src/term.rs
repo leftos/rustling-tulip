@@ -2462,6 +2462,128 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_path_under_a_full_width_path_is_its_own_link() {
+        let dir = "/Users/builder/rt-phone-smoke/.tmp/work/demo";
+        let (readme, sub, pic) = (
+            format!("{dir}/README.md"),
+            format!("{dir}/sub"),
+            format!("{dir}/pic.png"),
+        );
+        // README.md fills the 54-column row exactly and pic.png stops two short:
+        // a shell's own line ends, not a TUI breaking one path.
+        let term = sized(
+            format!("{readme}\r\n{sub}\r\n{pic}\r\nbuilder@Leftoss-Mini demo % ").as_bytes(),
+            54,
+            6,
+        );
+        assert!(
+            !term.read_row(1).is_wrapped,
+            "a hard line break, not a soft wrap"
+        );
+        let at = |line: i32| -> Vec<(String, i32, i32)> {
+            term.detect_links_near(line)
+                .into_iter()
+                .map(|link| (link.target, link.start_row, link.end_row))
+                .collect()
+        };
+        assert_eq!(at(0), [(readme, 0, 0)]);
+        assert_eq!(
+            at(1),
+            [(sub, 1, 1)],
+            "the row under a full-width path is its own link"
+        );
+        assert_eq!(at(2), [(pic, 2, 2)]);
+        assert_eq!(at(3), [], "the prompt is no part of the path above it");
+    }
+
+    /// Each link near `line` as its target and the rows it spans.
+    fn spans(term: &Terminal, line: i32) -> Vec<(String, i32, i32)> {
+        term.detect_links_near(line)
+            .into_iter()
+            .map(|link| (link.target, link.start_row, link.end_row))
+            .collect()
+    }
+
+    /// A 54-character absolute path that fills a 54-column row.
+    const FULL_WIDTH_PATH: &str = "/Users/builder/rt-phone-smoke/.tmp/work/demo/README.md";
+
+    #[test]
+    fn url_broken_before_slash_stays_one_link() {
+        let term = sized(b"see https://a.io/abc\r\n/def", 20, 4);
+        assert_eq!(spans(&term, 0), [("https://a.io/abc/def".to_owned(), 0, 1)]);
+    }
+
+    #[test]
+    fn scheme_less_address_broken_before_slash_stays_one_link() {
+        let term = sized(b"now see claude.ai\r\n/public/x", 17, 4);
+        // A scheme-less address opens with `https://` in front.
+        assert_eq!(
+            spans(&term, 0),
+            [("https://claude.ai/public/x".to_owned(), 0, 1)]
+        );
+    }
+
+    #[test]
+    fn scheme_split_after_http_stays_one_link() {
+        let term = sized(b"see some http\r\ns://a.io/abc", 15, 4);
+        assert_eq!(spans(&term, 0), [("https://a.io/abc".to_owned(), 0, 1)]);
+    }
+
+    #[test]
+    fn line_column_suffix_after_a_break_stays_joined() {
+        let upper = "X:/dev/src/links.r";
+        let term = sized(format!("{upper}\r\ns:975:13").as_bytes(), upper.len(), 4);
+        let links = term.detect_links_near(0);
+        assert_eq!(links.len(), 1, "{links:?}");
+        // The `:975:13` suffix rides in the link's candidates, not its target.
+        assert_eq!(links[0].target, "X:/dev/src/links.rs");
+        assert_eq!(links[0].line, Some(975));
+        assert_eq!((links[0].start_row, links[0].end_row), (0, 1));
+    }
+
+    #[test]
+    fn dot_slash_path_under_a_full_width_path_is_its_own_link() {
+        assert_eq!(FULL_WIDTH_PATH.len(), 54);
+        let term = sized(format!("{FULL_WIDTH_PATH}\r\n./src/x.rs").as_bytes(), 54, 4);
+        assert_eq!(spans(&term, 0), [(FULL_WIDTH_PATH.to_owned(), 0, 0)]);
+        assert_eq!(spans(&term, 1), [("./src/x.rs".to_owned(), 1, 1)]);
+    }
+
+    #[test]
+    fn tab_separated_row_under_a_full_width_path_is_its_own_link() {
+        let term = sized(
+            format!("{FULL_WIDTH_PATH}\r\n1234\tsrc/app").as_bytes(),
+            54,
+            4,
+        );
+        assert_eq!(spans(&term, 0), [(FULL_WIDTH_PATH.to_owned(), 0, 0)]);
+    }
+
+    #[test]
+    fn lower_half_of_a_tui_broken_path_carries_the_joined_reading() {
+        let upper = "/Users/builder/rt-phone-smoke/.tmp/work/demo/subdirect";
+        assert_eq!(upper.len(), 54);
+        let term = sized(format!("{upper}\r\n/file.rs").as_bytes(), 54, 4);
+        let joined = format!("{upper}/file.rs");
+        let (upper_links, lower_links) = (term.detect_links_near(0), term.detect_links_near(1));
+        assert_eq!(
+            (upper_links.len(), lower_links.len()),
+            (1, 1),
+            "{upper_links:?} {lower_links:?}"
+        );
+        assert_eq!((upper_links[0].start_row, upper_links[0].end_row), (0, 0));
+        assert_eq!((lower_links[0].start_row, lower_links[0].end_row), (1, 1));
+        for link in upper_links.iter().chain(&lower_links) {
+            assert!(
+                link.spaced.iter().any(|reading| reading.target == joined),
+                "{} carries the joined reading: {:?}",
+                link.target,
+                link.spaced
+            );
+        }
+    }
+
+    #[test]
     fn a_link_cut_by_the_window_cap_is_not_offered() {
         let term = sized(format!("X:/dir/{}", "a".repeat(73)).as_bytes(), 20, 5);
         let whole = term.links_near(0, 64);

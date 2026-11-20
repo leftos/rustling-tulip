@@ -81,8 +81,8 @@ pub struct TerminalLink {
     /// not in them.
     pub segments: Vec<LinkSegment>,
     /// The longer readings text alone cannot confirm, longest kind first:
-    /// the path stitched onto the row below where the upper row reaches only
-    /// its box's text edge, then the whole quoted run a quote before the path
+    /// the path stitched across a [`Stitch::Candidate`] break (on each half's
+    /// link), then the whole quoted run a quote before the path
     /// opens, then an absolute path run on over the space-separated words
     /// after it, each ending on a word that holds a `\` or `/`. Text alone
     /// cannot tell `C:\Program Files\x` from prose, so one is taken only once
@@ -330,7 +330,7 @@ pub fn detect_window_links(
 
 /// Every link in `rows`. A link that would run across a
 /// [`Stitch::Candidate`] break is not one: it rides as the first spaced
-/// readings of the link it shares a cell with, the upper row's first.
+/// readings of every link it shares a cell with, so either half opens it.
 fn detect_grouped_links(
     rows: &[TerminalRow],
     cols: usize,
@@ -356,11 +356,14 @@ fn detect_grouped_links(
         let crosses = candidates
             .iter()
             .any(|upper| touches(&reading, *upper) && touches(&reading, upper + 1));
-        if crosses
-            && let Some(carrier) = links.iter().position(|link| shares_a_cell(link, &reading))
-        {
-            reading.spaced = Vec::new();
-            stitched.push((carrier, reading));
+        if !crosses {
+            continue;
+        }
+        reading.spaced = Vec::new();
+        for (carrier, link) in links.iter().enumerate() {
+            if shares_a_cell(link, &reading) {
+                stitched.push((carrier, reading.clone()));
+            }
         }
     }
     for (carrier, reading) in stitched.into_iter().rev() {
@@ -975,11 +978,62 @@ pub fn stitch(
     // stops well short of its wrap column ended rather than wrapped.
     let content_end = column_after(above, a.end.saturating_sub(1), cols);
     if content_end >= wrap_column(above, cols).saturating_sub(STITCH_TOLERANCE) {
-        return Some(Stitch::Join);
+        return Some(if ambiguous_break(below, &a, &b, cols) {
+            Stitch::Candidate
+        } else {
+            Stitch::Join
+        });
     }
     let reaches_edge = box_border(above, cols).is_some()
         && edge().is_some_and(|edge| content_end >= edge.saturating_sub(STITCH_TOLERANCE));
     reaches_edge.then_some(Stitch::Candidate)
+}
+
+/// Whether `content` opens with a path root: `/`, `\`, `~`, `./`, `../`
+/// (or their `\` forms) or a drive (`X:/`, `X:\`, never a scheme's `s://`).
+fn opens_with_root(content: &str) -> bool {
+    if content.starts_with(['/', '\\', '~'])
+        || ["./", ".\\", "../", "..\\"]
+            .iter()
+            .any(|lead| content.starts_with(lead))
+    {
+        return true;
+    }
+    let mut chars = content.chars();
+    let (letter, colon, slash) = (chars.next(), chars.next(), chars.next());
+    letter.is_some_and(|c| c.is_ascii_alphabetic())
+        && colon == Some(':')
+        && (slash == Some('\\') || (slash == Some('/') && chars.next() != Some('/')))
+}
+
+/// Whether a full upper row's hard break into `below` may as well be a
+/// shell's own line end as a TUI breaking one path: `below` opens with a
+/// root, or its first word holds no path character and the row stops short
+/// of its wrap column. A URL across the break (the upper row's last word and
+/// the lower row's first, joined) is never one: a URL has no readings.
+fn ambiguous_break(below: &TerminalRow, a: &Frame<'_>, b: &Frame<'_>, cols: usize) -> bool {
+    let tail = a
+        .content
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default();
+    let word = b
+        .content
+        .split(char::is_whitespace)
+        .next()
+        .unwrap_or_default();
+    let joined = format!("{tail}{word}");
+    if joined.contains("://") || web_address(&joined) {
+        return false;
+    }
+    if opens_with_root(b.content) {
+        return true;
+    }
+    if word.contains(['.', '/', '\\', ':']) {
+        return false;
+    }
+    let content_end = column_after(below, b.end.saturating_sub(1), cols);
+    content_end < wrap_column(below, cols).saturating_sub(STITCH_TOLERANCE)
 }
 
 /// Whether `below` continues `above` across a hard line break as one link.

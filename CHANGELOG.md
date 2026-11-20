@@ -38,6 +38,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Ctrl+click on a path printed under a full-width path opens that path, not the one above it, and a prompt under a path no longer underlines.
 - Settings › Accounts keeps every account's usage readable in a narrow window: reset times no longer wrap a letter per line, and buttons wrap instead.
 - A phone's Needs you notification now goes away once its wait is answered on another client, even when iOS drops that wait's update.
 - The accounts popover keeps its title and Auto-switch controls on screen in a short window, and its account list scrolls.
