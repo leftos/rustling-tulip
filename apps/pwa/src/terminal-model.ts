@@ -1,20 +1,32 @@
 import type { NewRequestId } from "./home-actions";
 import type { ClientMessage, DaemonMessage } from "./protocol";
 
-/**
- * How long one `load_scrollback` waits for its reply, the desktop's
- * `REQUEST_TIMEOUT` (`apps/native/src/scrollback_load.rs`).
- */
-export const REQUEST_TIMEOUT = 8_000;
+/** `first` ms doubled once per attempt after the first, capped at `cap` ms. */
+function doubledUpTo(first: number, cap: number, attempt: number): number {
+  const doublings = Math.min(Math.max(attempt - 1, 0), 30);
+  return Math.min(first * 2 ** doublings, cap);
+}
 
 /**
- * The pause after each timed-out attempt before the next one goes out; the
- * attempt after the last of these timing out ends the load (`RETRY_DELAYS`).
+ * How long attempt `attempt` (1-based) of a `load_scrollback` waits for its
+ * reply, in ms: 8 s, doubling up to 60 s, the desktop's `request_timeout`
+ * (`apps/native/src/scrollback_load.rs`).
  */
-export const RETRY_DELAYS = [2_000, 4_000] as const;
+export function requestTimeout(attempt: number): number {
+  return doubledUpTo(8_000, 60_000, attempt);
+}
+
+/**
+ * The pause, in ms, after attempt `attempt` (1-based) times out before the
+ * next one goes out: 2 s, doubling up to 30 s, the desktop's `retry_delay`
+ * (`apps/native/src/scrollback_load.rs`). The load retries until a reply comes.
+ */
+export function retryDelay(attempt: number): number {
+  return doubledUpTo(2_000, 30_000, attempt);
+}
 
 /** Where a session's terminal load stands. */
-export type TerminalPhase = "idle" | "loading" | "loaded" | "timed-out";
+export type TerminalPhase = "idle" | "loading" | "loaded";
 
 /**
  * One session's terminal on the phone: the scrollback load still running, the
@@ -131,9 +143,8 @@ export function fold(state: TerminalState, message: DaemonMessage): TerminalTran
  * Advances the load's timeout and retry schedule to `now`: a timed-out
  * attempt pauses for the retry delay and then sends its attempt again under a
  * fresh request id, leaving the held output behind since that attempt's
- * snapshot carries it; after the last attempt times out the load gives up,
- * writes the output still held and asks for the pane's size again, since the
- * grid may have changed while the history was missing.
+ * snapshot carries it. The load never gives up: it ends only on an accepted
+ * reply or when the pane detaches.
  */
 export function tick(
   state: TerminalState,
@@ -145,31 +156,25 @@ export function tick(
     return outcome(state);
   }
   const messages: ClientMessage[] = [];
-  const writes: Uint8Array[] = [];
   let current = state;
-  while (current.phase === "loading" && current.deadline !== null && now >= current.deadline) {
+  while (current.deadline !== null && now >= current.deadline) {
     if (current.backoff) {
       const requestId = nextRequestId();
+      const attempt = current.attempt + 1;
       current = {
         ...current,
-        attempt: current.attempt + 1,
+        attempt,
         backoff: false,
-        deadline: now + REQUEST_TIMEOUT,
+        deadline: now + requestTimeout(attempt),
         requestId,
         held: [],
       };
       messages.push({ type: "load_scrollback", session_id: sessionId, request_id: requestId });
       continue;
     }
-    const delay = RETRY_DELAYS[current.attempt - 1];
-    if (delay === undefined) {
-      writes.push(...current.held);
-      current = ended(current, "timed-out");
-      break;
-    }
-    current = { ...current, backoff: true, deadline: now + delay };
+    current = { ...current, backoff: true, deadline: now + retryDelay(current.attempt) };
   }
-  return outcome(current, messages, writes, false, current.phase === "timed-out");
+  return outcome(current, messages);
 }
 
 /** The model of a fresh load for `sessionId`, its first reply awaited until `now`'s timeout. */
@@ -179,7 +184,7 @@ function load(sessionId: string, requestId: string, now: number): TerminalState 
     phase: "loading",
     attempt: 1,
     backoff: false,
-    deadline: now + REQUEST_TIMEOUT,
+    deadline: now + requestTimeout(1),
     requestId,
     held: [],
   };

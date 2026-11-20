@@ -39,7 +39,7 @@ use crate::net::NetCommand;
 use crate::open::{self, LinkAction};
 use crate::paste_upload;
 use crate::scrollback_load::{
-    self, PreLayoutLog, ReplyVerdict, ScrollbackLoad, State as LoadState, Step,
+    PreLayoutLog, ReplyVerdict, ScrollbackLoad, State as LoadState, Step,
 };
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::prompt_nav::{self, Dir, Jump};
@@ -1243,13 +1243,6 @@ impl TerminalPane {
             return;
         };
         let steps = load.tick((self.now)());
-        if load.state() == LoadState::Failed {
-            tracing::warn!(
-                "scrollback for session {:?} failed after {} retries",
-                self.attachment.session_id,
-                scrollback_load::RETRY_DELAYS.len()
-            );
-        }
         if self.run_load_steps(steps, cx) {
             self.emit_retry(cx);
         }

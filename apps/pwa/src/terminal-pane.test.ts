@@ -5,7 +5,7 @@ import { ctrl, keyInput } from "./keys";
 import type { ClientMessage, DaemonMessage } from "./protocol";
 import { quickReplyBytes } from "./quick";
 import type { ConnectionNotice } from "./socket";
-import { REQUEST_TIMEOUT, RETRY_DELAYS } from "./terminal-model";
+import { requestTimeout, retryDelay } from "./terminal-model";
 import { createTerminalPane, type TerminalLike, type TerminalPane } from "./terminal-pane";
 
 const T0 = 1_000;
@@ -340,9 +340,9 @@ test("pane_opened_while_connecting_reattaches_on_the_first_ready", () => {
 test("pane_a_reply_to_an_older_request_is_not_written", () => {
   const h = harness();
   h.pane.open(80, 24, "attach");
-  h.at(T0 + REQUEST_TIMEOUT);
+  h.at(T0 + requestTimeout(1));
   h.pane.tick();
-  h.at(T0 + REQUEST_TIMEOUT + RETRY_DELAYS[0]);
+  h.at(T0 + requestTimeout(1) + retryDelay(1));
   h.pane.tick();
   h.fresh();
 
@@ -356,11 +356,11 @@ test("pane_tick_resends_the_scrollback_after_the_retry_delay", () => {
   h.pane.open(80, 24, "attach");
   h.fresh();
 
-  h.at(T0 + REQUEST_TIMEOUT);
+  h.at(T0 + requestTimeout(1));
   h.pane.tick();
   expect(h.fresh()).toEqual([]);
 
-  h.at(T0 + REQUEST_TIMEOUT + RETRY_DELAYS[0]);
+  h.at(T0 + requestTimeout(1) + retryDelay(1));
   h.pane.tick();
   expect(h.fresh()).toEqual([{ type: "load_scrollback", session_id: "s1", request_id: "r2" }]);
 });
@@ -368,7 +368,7 @@ test("pane_tick_resends_the_scrollback_after_the_retry_delay", () => {
 test("pane_open_asks_to_be_woken_at_the_loads_deadline", () => {
   const h = harness();
   h.pane.open(80, 24, "attach");
-  expect(h.wakes.at(-1)).toBe(T0 + REQUEST_TIMEOUT);
+  expect(h.wakes.at(-1)).toBe(T0 + requestTimeout(1));
 });
 
 test("pane_stops_asking_to_be_woken_once_the_load_ends", () => {
@@ -382,30 +382,30 @@ test("pane_a_timed_out_attempt_asks_to_be_woken_at_its_retry", () => {
   const h = harness();
   h.pane.open(80, 24, "attach");
 
-  const firstDeadline = T0 + REQUEST_TIMEOUT;
+  const firstDeadline = T0 + requestTimeout(1);
   h.at(firstDeadline);
   h.pane.tick();
-  const retry = firstDeadline + RETRY_DELAYS[0];
+  const retry = firstDeadline + retryDelay(1);
   expect(h.wakes.at(-1)).toBe(retry);
 
   h.at(retry);
   h.pane.tick();
-  const secondDeadline = retry + REQUEST_TIMEOUT;
+  const secondDeadline = retry + requestTimeout(2);
   expect(h.wakes.at(-1)).toBe(secondDeadline);
 
   h.at(secondDeadline);
   h.pane.tick();
-  const secondRetry = secondDeadline + RETRY_DELAYS[1];
+  const secondRetry = secondDeadline + retryDelay(2);
   expect(h.wakes.at(-1)).toBe(secondRetry);
 
   h.at(secondRetry);
   h.pane.tick();
-  const thirdDeadline = secondRetry + REQUEST_TIMEOUT;
+  const thirdDeadline = secondRetry + requestTimeout(3);
   expect(h.wakes.at(-1)).toBe(thirdDeadline);
 
   h.at(thirdDeadline);
   h.pane.tick();
-  expect(h.wakes.at(-1)).toBeNull();
+  expect(h.wakes.at(-1)).toBe(thirdDeadline + retryDelay(3));
 });
 
 test("pane_close_detaches_and_leaves_the_pane_inert", () => {
@@ -424,7 +424,7 @@ test("pane_close_detaches_and_leaves_the_pane_inert", () => {
   h.pane.key({ label: "Esc", bytes: "\x1b" });
   h.pane.quick("yes");
   h.pane.measured(100, 30, "pane-resize");
-  h.at(T0 + REQUEST_TIMEOUT * 10);
+  h.at(T0 + requestTimeout(1) * 10);
   h.pane.tick();
   h.pane.open(80, 24, "attach");
   h.pane.close();
