@@ -88,7 +88,8 @@ pub trait Opener: Send + Sync {
     /// Whether the OS has the URL scheme `scheme`, given without its `://`,
     /// registered to open an app. Windows asks the per-user class
     /// `HKCU\Software\Classes\<scheme>` and then the merged `HKCR\<scheme>`,
-    /// either key being enough; every other OS answers `false`. Reads only.
+    /// either key being enough; macOS asks `NSWorkspace` for the app that
+    /// opens a `<scheme>:` URL; every other OS answers `false`. Reads only.
     fn scheme_registered(&self, scheme: &str) -> bool;
 
     /// Opens `url` in the Linear desktop app: a `linear://` address on
@@ -1327,9 +1328,23 @@ fn scheme_registered(scheme: &str) -> bool {
     scheme_registered_by(scheme, class_key_exists)
 }
 
-/// No other OS registers a scheme in the Windows registry, so none answers
-/// for one.
-#[cfg(not(windows))]
+/// Whether macOS has an app to open a `scheme:` URL, read-only: Launch
+/// Services' answer through `NSWorkspace`, the default handler's app or none.
+/// A scheme `NSURL` cannot parse counts as unregistered.
+#[cfg(target_os = "macos")]
+fn scheme_registered(scheme: &str) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    NSURL::URLWithString(&NSString::from_str(&format!("{scheme}:"))).is_some_and(|url| {
+        NSWorkspace::sharedWorkspace()
+            .URLForApplicationToOpenURL(&url)
+            .is_some()
+    })
+}
+
+/// No OS but Windows and macOS answers which app a scheme opens, so none
+/// answers for one.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn scheme_registered(_scheme: &str) -> bool {
     false
 }
@@ -1811,6 +1826,19 @@ mod tests {
         assert!(
             !scheme_registered_by("linear", |_, _| false),
             "no class key anywhere leaves the scheme unregistered"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_knows_the_https_scheme_and_not_a_made_up_one() {
+        assert!(
+            super::scheme_registered("https"),
+            "a Mac always has a default browser for https"
+        );
+        assert!(
+            !super::scheme_registered("rt-no-such-scheme-9f2c"),
+            "no app opens a made-up scheme"
         );
     }
 
