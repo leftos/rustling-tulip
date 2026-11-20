@@ -34,6 +34,7 @@ It is alpha software.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer, its folder or Follow in tab, a tab that tails the file live on any host, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
+- Linear issue identifiers such as RT-12 and linear.app issue links are underlined in the terminal: resting on one shows the issue's card, and Ctrl+click opens it in the Linear app or your browser. A session title naming an issue shows it as a chip in its state colour. Identifiers and issue details need a Linear API key in `LINEAR_API_KEY`.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
 - On macOS hosts, programs that ask the terminal for its colours, such as bat and delta, get your theme's.
@@ -45,9 +46,11 @@ It is alpha software.
 
 - A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
 - Answer Claude's questions, plans and permission prompts from cards, by click or key or in your own words in the card's text box, and send messages from a box under the chat that keeps your text when a send is refused.
+- The message box lists the session's commands and skills as you type /, marking those that open in the terminal, and its files to mention as you type @. Paste an image, drop files on the chat or pick them with Attach, and their paths join your message.
+- Under the message box, the session's model and effort, such as Opus 5.5 · high, open a model picker in the chat that switches this session's model or steps its effort, and Quick replies such as "continue" or "yes" send in one click.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
 - A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows, wherever the file is. A file link in an answer opens the file, and Ctrl+Shift+click on it offers the same menu as the terminal's.
-- Pull a draft left in the terminal's prompt box into the message box to edit, or send it as it stands, and send or edit Claude's suggested next prompt with one click.
+- Pull a draft left in the terminal's prompt box into the message box to edit, send it as it stands or clear it once you confirm, and send or edit Claude's suggested next prompt with one click.
 - Each Code Mode script shows as one line with its description, time and the calls it ran, and a failed script's error under it.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
 - Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
@@ -58,7 +61,7 @@ It is alpha software.
 ### Claude accounts
 
 - Save several Claude logins and switch between them. The footer shows the account in use with its five-hour and weekly usage, and the account list adds its Fable weekly limit while Fable is in use; click it to switch, turn auto-switch on and see when your accounts run dry.
-- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove (after you confirm) or add, logs in a new account in a terminal session, and sets auto-switch's threshold, cooldown, strategy and forecast window.
+- Settings › Accounts lists your saved accounts to switch, rename, reorder, remove (after you confirm) or add, logs in a new account in a terminal session or signs a refused one in again, and sets auto-switch's threshold, cooldown, strategy and forecast window.
 - Each account shows its extra-usage spend and prepaid credit balance, and Settings › Accounts can let an account spend its prepaid credits once every account's usage is used up.
 - A toast tells you when auto-switch changes accounts, finds every account used up, or stops.
 
