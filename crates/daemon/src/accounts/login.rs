@@ -115,7 +115,8 @@ const NO_RUNNER: &str = "this daemon cannot run an account login";
 /// The login session's title.
 const LOGIN_TITLE: &str = "Log in a new account";
 
-/// The daemon's runner: the agent's program, resolved as for any spawn, run
+/// The daemon's runner: the agent's own CLI (its override variable, else its
+/// program; never the host's launch command, which is for chat sessions), run
 /// directly in a terminal session of its own on the hub, stopped with
 /// `stop_session_if_live` and discarded as a pane close discards a session.
 pub(crate) struct SessionRunner {
@@ -166,10 +167,12 @@ impl LoginRunner for SessionRunner {
         let spawner = self.spawner.clone();
         Box::pin(async move {
             let hub = hub.ok_or_else(|| anyhow::anyhow!(NO_RUNNER))?;
-            let (program, mut args) = crate::server::agent_program(&hub, &agent)?;
+            let plugin = agent_registry::plugin(&agent)
+                .ok_or_else(|| anyhow::anyhow!("no agent plugin `{}` is registered", agent.0))?;
+            let (program, mut args) =
+                crate::server::resolve_agent_program(&plugin.resolve_program());
             args.extend(cmd.args);
-            let passthrough: &'static [&'static str] =
-                agent_registry::plugin(&agent).map_or(&[], |plugin| plugin.passthrough_vars());
+            let passthrough: &'static [&'static str] = plugin.passthrough_vars();
             let spec = CommandSpec {
                 session_id,
                 program,
@@ -2889,6 +2892,64 @@ mod tests {
                 rows: 10,
             })
         }
+    }
+
+    /// A [`TestSpawner`] that records the spec it is handed and refuses it.
+    #[derive(Default)]
+    struct RecordingSpawner {
+        specs: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl TestSpawner for RecordingSpawner {
+        fn spawn(&self, _hub: &Hub, spec: CommandSpec) -> anyhow::Result<CommandSession> {
+            locked(&self.specs).push(spec);
+            Err(anyhow::anyhow!("recorded, not spawned"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_runs_the_agents_own_cli_not_the_launch_command() {
+        let (hub, scratch) = test_hub("login-own-cli");
+        let agent = agent_registry::default_agent();
+        hub.state
+            .set_agent_command(
+                &agent,
+                crate::state::AgentCommand {
+                    program: "cui".into(),
+                    args: "--some-flag".into(),
+                },
+            )
+            .expect("the launch command is stored");
+        let spawner = Arc::new(RecordingSpawner::default());
+        let hub_slot = Arc::new(OnceLock::new());
+        let _ = hub_slot.set(hub.clone());
+        let runner = SessionRunner::new(agent.clone(), hub_slot)
+            .spawning_with(Arc::clone(&spawner) as Arc<dyn TestSpawner>);
+        let login = ["auth", "login", "--claudeai"].map(str::to_owned);
+        let cmd = LoginCommand {
+            args: login.to_vec(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+        };
+
+        let spawned = runner.spawn("own-cli", scratch.path(), cmd).await;
+
+        assert!(
+            spawned.is_err(),
+            "the recording spawner refuses every spawn"
+        );
+        let plugin = agent_registry::plugin(&agent).expect("the default agent is registered");
+        let (own_cli, _) = crate::server::resolve_agent_program(&plugin.resolve_program());
+        let specs = locked(&spawner.specs);
+        let spec = specs.first().expect("the login reached the spawner");
+        assert_eq!(spec.program, own_cli);
+        assert_ne!(spec.program, "cui");
+        assert!(spec.args.ends_with(&login), "{:?}", spec.args);
+        assert!(
+            !spec.args.iter().any(|arg| arg == "--some-flag"),
+            "{:?}",
+            spec.args
+        );
     }
 
     impl Rig {

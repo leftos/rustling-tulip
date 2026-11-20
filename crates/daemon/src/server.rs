@@ -69,7 +69,7 @@ pub(crate) use self::spawn::resolve_agent_program;
 pub(crate) use self::spawn::resolve_env_refs;
 pub(crate) use self::spawn::spawn_session;
 /// The account login's own terminal session.
-pub(crate) use self::spawn::{CommandSession, CommandSpec, agent_program, spawn_command_session};
+pub(crate) use self::spawn::{CommandSession, CommandSpec, spawn_command_session};
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session};
 use self::hooks::{hook_handler, presented_bearer, proof_handler};

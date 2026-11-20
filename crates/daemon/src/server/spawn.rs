@@ -2349,19 +2349,6 @@ pub(crate) struct CommandSession {
     pub(crate) rows: u16,
 }
 
-/// The program `agent`'s sessions run, resolved as any spawn resolves it
-/// (the plugin's override variable, then the host's launch command, then the
-/// plugin's own program), and the arguments it needs before its own. The
-/// launch command's extra arguments are not applied.
-pub(crate) fn agent_program(hub: &Hub, agent: &AgentId) -> anyhow::Result<(String, Vec<String>)> {
-    let plugin = agent_registry::plugin(agent)
-        .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?;
-    let command = choose_agent_command(plugin, &hub.state.agent_command(agent), &|name| {
-        std::env::var(name).ok()
-    })?;
-    Ok(resolve_agent_program(&command.program))
-}
-
 /// Run `spec` directly in a PTY as a standalone plain-shell session with no
 /// stored spawn config, so Restart, Duplicate and history never rerun it.
 /// The exit notice is wired before the session's lifecycle task starts and
