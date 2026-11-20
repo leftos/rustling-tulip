@@ -2942,8 +2942,10 @@ mod tests {
         const V175: &str = include_str!("../screen/fixtures/v175-main-heads-up-panel-keys.txt");
         /// Main while a turn runs, the box empty.
         const C32: &str = include_str!("../screen/fixtures/c32-ask-chat.txt");
-        /// The model picker overlay.
+        /// The model picker, which reads as a dialog.
         const V140: &str = include_str!("../screen/fixtures/v140-model-picker.txt");
+        /// The `/btw` overlay, which reads as an overlay.
+        const V141_BTW: &str = include_str!("../screen/fixtures/v141-btw.txt");
 
         /// v174's mode line, under the box of Sleeper A's view.
         const V174_MODE_LINE: &str =
@@ -3284,8 +3286,9 @@ mod tests {
             let draft = with_box(V176, "half a thought");
             let cases = [
                 ("dialog", PERMISSION, "a dialog is open in the terminal"),
+                ("model picker", V140, "a dialog is open in the terminal"),
                 ("draft", draft.as_str(), "a draft is in the terminal's box"),
-                ("overlay", V140, "the terminal is not at its prompt"),
+                ("overlay", V141_BTW, "the terminal is not at its prompt"),
             ];
             for (name, frame, why) in cases {
                 let (fx, mut term) = Fixture::with_terminal(&format!("send-{name}"), None, frame);
@@ -3647,8 +3650,12 @@ mod tests {
                 refused(CHAT_REFUSED, "a dialog is open in the terminal")
             );
             assert_eq!(
-                pull_refused_on("pull-overlay", V140).await,
+                pull_refused_on("pull-overlay", V141_BTW).await,
                 refused(CHAT_REFUSED, "the terminal is not at its prompt")
+            );
+            assert_eq!(
+                pull_refused_on("pull-picker", V140).await,
+                refused(CHAT_REFUSED, "a dialog is open in the terminal")
             );
         }
 
