@@ -3018,7 +3018,11 @@ export type ChatPromptKind =
    */
   | "mcp_server"
   /** A heads-up notice the agent raised. */
-  | "heads_up";
+  | "heads_up"
+  /** The agent's model picker: a row picks the model for this session. */
+  | "model_picker"
+  /** A yes-or-no confirmation the agent asks before acting. */
+  | "confirm";
 
 /** What a [`DaemonMessage::SessionNotice`] tells the user. */
 export type SessionNoticeKind =

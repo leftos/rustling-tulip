@@ -3883,6 +3883,10 @@ pub enum ChatPromptKind {
     McpServer,
     /// A heads-up notice the agent raised.
     HeadsUp,
+    /// The agent's model picker: a row picks the model for this session.
+    ModelPicker,
+    /// A yes-or-no confirmation the agent asks before acting.
+    Confirm,
     /// Forward-compat fallback: a kind the current build doesn't know.
     /// Daemon never constructs this directly.
     #[serde(other)]
@@ -19644,6 +19648,14 @@ mod tests {
         assert_eq!(kind, ChatPromptKind::Unknown);
         let known: ChatPromptKind = serde_json::from_str(r#""heads_up""#).expect("decode");
         assert_eq!(known, ChatPromptKind::HeadsUp);
+        let picker: ChatPromptKind = serde_json::from_str(r#""model_picker""#).expect("decode");
+        assert_eq!(picker, ChatPromptKind::ModelPicker);
+        let confirm: ChatPromptKind = serde_json::from_str(r#""confirm""#).expect("decode");
+        assert_eq!(confirm, ChatPromptKind::Confirm);
+        assert_eq!(
+            serde_json::to_string(&ChatPromptKind::ModelPicker).expect("encode"),
+            r#""model_picker""#
+        );
     }
 
     #[test]

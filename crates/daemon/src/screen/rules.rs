@@ -1075,7 +1075,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 48] = [
+        let cases: [(&str, &str, Verdict); 71] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1269,6 +1269,121 @@ mod tests {
                 "claude--menu-model-picker",
                 include_str!("fixtures/claude--menu-model-picker.txt"),
                 Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker",
+                include_str!("fixtures/claude--v2.1.329-model-picker.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-on-sonnet",
+                include_str!("fixtures/claude--v2.1.329-model-picker-on-sonnet.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-after-session-switch",
+                include_str!("fixtures/claude--v2.1.329-model-picker-after-session-switch.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-effort-left",
+                include_str!("fixtures/claude--v2.1.329-model-picker-effort-left.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-effort-right",
+                include_str!("fixtures/claude--v2.1.329-model-picker-effort-right.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-before-esc",
+                include_str!("fixtures/claude--v2.1.329-model-picker-before-esc.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog-go-back",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog-go-back.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-picker-more-models",
+                include_str!("fixtures/claude--v2.1.329-model-picker-more-models.txt"),
+                Verdict::NoMatch,
+            ),
+            (
+                "claude--v2.1.329-model-picker-more-models-right",
+                include_str!("fixtures/claude--v2.1.329-model-picker-more-models-right.txt"),
+                Verdict::NoMatch,
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-0.7s",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-0.7s.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-2.7s",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-2.7s.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2.1.329-model-esc",
+                include_str!("fixtures/claude--v2.1.329-model-esc.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-more-models-esc",
+                include_str!("fixtures/claude--v2.1.329-model-more-models-esc.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-session-only-switch",
+                include_str!("fixtures/claude--v2.1.329-model-session-only-switch.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-s-on-current",
+                include_str!("fixtures/claude--v2.1.329-model-s-on-current.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog-yes",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog-yes.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-effort-left-s",
+                include_str!("fixtures/claude--v2.1.329-model-effort-left-s.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-effort-right-s",
+                include_str!("fixtures/claude--v2.1.329-model-effort-right-s.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-effort-status",
+                include_str!("fixtures/claude--v2.1.329-effort-status.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-esc",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-esc.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.329-model-during-turn-1s",
+                include_str!("fixtures/claude--v2.1.329-model-during-turn-1s.txt"),
+                State(Working),
+            ),
+            (
+                "claude--v2.1.329-model-during-turn-3s",
+                include_str!("fixtures/claude--v2.1.329-model-during-turn-3s.txt"),
+                State(Working),
             ),
             (
                 "claude--v2302-turn-ending-stop-hooks--w119",

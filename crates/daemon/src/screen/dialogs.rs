@@ -499,14 +499,49 @@ mod tests {
         assert_eq!(prompt.subject, WRAPPED_RULE_QUESTION);
     }
 
+    /// The model rows of the 2.1.329 `/model` picker captures.
+    const PICKER_MODELS: [(u32, &str); 6] = [
+        (1, "Default (recommended)"),
+        (2, "Opus 5.5"),
+        (3, "Fable 5.2"),
+        (4, "Sonnet 5.5"),
+        (5, "Haiku 5.5"),
+        (6, "More models"),
+    ];
+
+    /// The explanation the 2.1.329 Switch model? dialog draws.
+    const SWITCH_BODY: &str = "Your next response will be slower and use more tokens\n\n\
+        This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.";
+
     #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one row per capture; the table is the test"
     )]
     fn every_fixture_reads_its_dialog() {
-        use ChatPromptKind::{HeadsUp, McpServer, Plan, Review, Trust};
+        use ChatPromptKind::{Confirm, HeadsUp, McpServer, ModelPicker, Plan, Review, Trust};
         use ComposerState::{Draft, Ready, Working};
+        let picker =
+            |cursor: u32| dialog(ModelPicker, "Select model", &PICKER_MODELS, Some(cursor));
+        let v140_models: [(u32, &str); 10] = [
+            (1, "Default (recommended)"),
+            (2, "Opus 5.5"),
+            (3, "Fable 5.1"),
+            (4, "Sonnet 5.5"),
+            (5, "Haiku 5.5"),
+            (6, "Haiku 4.5"),
+            (7, "Sonnet 5"),
+            (8, "Opus 5"),
+            (9, "Fable 5"),
+            (10, "Opus 4.8"),
+        ];
+        let menu_models: [(u32, &str); 5] = [
+            (1, "Default (recommended)"),
+            (2, "Opus (1M context)"),
+            (3, "Fable"),
+            (4, "Sonnet"),
+            (5, "Haiku"),
+        ];
         let mut q2_typed = Q2_OPTIONS.to_vec();
         q2_typed[4] = (5, "fuzz tests");
         let mut amend_open = BASH_OPTIONS.to_vec();
@@ -739,12 +774,135 @@ mod tests {
             (
                 "v140-model-picker",
                 include_str!("fixtures/v140-model-picker.txt"),
-                overlay("model"),
+                dialog(ModelPicker, "Select model", &v140_models, Some(1)),
             ),
             (
                 "claude--menu-model-picker",
                 include_str!("fixtures/claude--menu-model-picker.txt"),
-                overlay("model"),
+                dialog(ModelPicker, "Select model", &menu_models, Some(1)),
+            ),
+            (
+                "claude--v2.1.329-model-picker",
+                include_str!("fixtures/claude--v2.1.329-model-picker.txt"),
+                picker(1),
+            ),
+            (
+                "claude--v2.1.329-model-picker-on-sonnet",
+                include_str!("fixtures/claude--v2.1.329-model-picker-on-sonnet.txt"),
+                picker(4),
+            ),
+            (
+                "claude--v2.1.329-model-picker-after-session-switch",
+                include_str!("fixtures/claude--v2.1.329-model-picker-after-session-switch.txt"),
+                picker(4),
+            ),
+            (
+                "claude--v2.1.329-model-picker-effort-left",
+                include_str!("fixtures/claude--v2.1.329-model-picker-effort-left.txt"),
+                picker(2),
+            ),
+            (
+                "claude--v2.1.329-model-picker-effort-right",
+                include_str!("fixtures/claude--v2.1.329-model-picker-effort-right.txt"),
+                picker(2),
+            ),
+            (
+                "claude--v2.1.329-model-picker-before-esc",
+                include_str!("fixtures/claude--v2.1.329-model-picker-before-esc.txt"),
+                picker(5),
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog-go-back",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog-go-back.txt"),
+                picker(4),
+            ),
+            (
+                "claude--v2.1.329-model-picker-more-models",
+                include_str!("fixtures/claude--v2.1.329-model-picker-more-models.txt"),
+                picker(6),
+            ),
+            (
+                "claude--v2.1.329-model-picker-more-models-right",
+                include_str!("fixtures/claude--v2.1.329-model-picker-more-models-right.txt"),
+                picker(6),
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-0.7s",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-0.7s.txt"),
+                picker(2),
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-2.7s",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-2.7s.txt"),
+                picker(2),
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog.txt"),
+                Expected {
+                    body: Some(SWITCH_BODY),
+                    ..dialog(
+                        Confirm,
+                        "Switch model?",
+                        &[(1, "Yes, switch to Opus 5.5"), (2, "No, go back")],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "claude--v2.1.329-model-esc",
+                include_str!("fixtures/claude--v2.1.329-model-esc.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-more-models-esc",
+                include_str!("fixtures/claude--v2.1.329-model-more-models-esc.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-session-only-switch",
+                include_str!("fixtures/claude--v2.1.329-model-session-only-switch.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-s-on-current",
+                include_str!("fixtures/claude--v2.1.329-model-s-on-current.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-switch-dialog-yes",
+                include_str!("fixtures/claude--v2.1.329-model-switch-dialog-yes.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-effort-left-s",
+                include_str!("fixtures/claude--v2.1.329-model-effort-left-s.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-effort-right-s",
+                include_str!("fixtures/claude--v2.1.329-model-effort-right-s.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-effort-status",
+                include_str!("fixtures/claude--v2.1.329-effort-status.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-typed-during-turn-esc",
+                include_str!("fixtures/claude--v2.1.329-model-typed-during-turn-esc.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2.1.329-model-during-turn-1s",
+                include_str!("fixtures/claude--v2.1.329-model-during-turn-1s.txt"),
+                no_prompt(Working),
+            ),
+            (
+                "claude--v2.1.329-model-during-turn-3s",
+                include_str!("fixtures/claude--v2.1.329-model-during-turn-3s.txt"),
+                no_prompt(Working),
             ),
             (
                 "v141-btw",

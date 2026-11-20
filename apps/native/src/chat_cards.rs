@@ -349,7 +349,9 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
         ),
         ChatPromptKind::Trust => positional(prompt, &["Trust this folder", "Exit"], None),
         ChatPromptKind::McpServer | ChatPromptKind::HeadsUp => positional(prompt, &[], None),
-        ChatPromptKind::Unknown => Vec::new(),
+        ChatPromptKind::ModelPicker | ChatPromptKind::Confirm | ChatPromptKind::Unknown => {
+            Vec::new()
+        }
     }
 }
 

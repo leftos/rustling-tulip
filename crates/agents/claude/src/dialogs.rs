@@ -52,9 +52,8 @@ const OVERLAY_ROWS: usize = 4;
 /// The key line each overlay shows, and the name the chat gives it. An
 /// `AskUserQuestion` step whose options carry previews is one: the chat
 /// recognises it but does not answer it.
-const OVERLAYS: [(&str, &str); 5] = [
+const OVERLAYS: [(&str, &str); 4] = [
     ("Showing detailed transcript", "transcript"),
-    ("Enter to set as default", "model"),
     ("f to fork · Esc to close", "btw"),
     ("Enter to continue · Esc to cancel", "rewind"),
     ("· n to add notes ·", "question_preview"),
@@ -120,6 +119,12 @@ enum Parsed {
 
 /// What the screen whose visible rows are `rows` shows the chat.
 pub(crate) fn read(rows: &[String]) -> ChatScreen {
+    if let Some(prompt) = parse_model_picker(rows) {
+        return ChatScreen {
+            composer: ComposerState::Dialog,
+            prompt: Some(prompt),
+        };
+    }
     if let Some(name) = overlay(rows) {
         return ChatScreen {
             composer: ComposerState::Overlay {
@@ -133,6 +138,7 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
         .or_else(|| parse_plan(rows, start))
         .or_else(|| parse_trust(rows, start))
         .or_else(|| parse_mcp_server(rows, start))
+        .or_else(|| parse_switch_model(rows, start))
         .or_else(|| parse_question(rows));
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
@@ -558,6 +564,150 @@ fn parse_mcp_server(rows: &[String], start: usize) -> Option<Parsed> {
         ChatPromptKind::McpServer,
         name,
         text_block(&notice, indent_of(&rows[anchor])),
+        options,
+    )))
+}
+
+/// The title row of the `/model` picker, which is also its subject.
+const PICKER_TITLE: &str = "Select model";
+
+/// How many rows under the picker's title its first model row may sit.
+const PICKER_GAP: usize = 6;
+
+/// The label of the picker's row that opens the longer model list.
+const MORE_MODELS: &str = "More models";
+
+/// The mark before the More models row.
+const MORE_MARK: char = '▸';
+
+/// The marks a scrolled picker draws before a row's number.
+const SCROLL_MARKS: [char; 2] = ['↑', '↓'];
+
+/// The mark after the name of the model in use.
+const CURRENT_TICK: char = '✔';
+
+/// The start of the description of the model in use.
+const CURRENT: &str = "Current";
+
+/// The `/model` picker: the `Select model` title, then its numbered model
+/// rows and the `▸ More models` row. Each row's name is its label and its
+/// second column its description; the effort row and the footer stay out,
+/// so moving the cursor or the effort keeps the prompt's identity.
+fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
+    let floor = after_last_rule(rows).max(dialog_edge(rows));
+    let title = floor
+        + rows
+            .get(floor..)?
+            .iter()
+            .rposition(|row| row.trim() == PICKER_TITLE)?;
+    let first = (title + 1..rows.len().min(title + 1 + PICKER_GAP))
+        .find(|&index| picker_row(&rows[index]).is_some())?;
+    let mut options: Vec<ChatOption> = Vec::new();
+    for row in rows[first..]
+        .iter()
+        .take_while(|row| !row.trim().is_empty())
+    {
+        if let Some(option) = picker_row(row) {
+            options.push(option);
+        } else if let Some(selected) = more_models_row(row) {
+            let number = options.last().map_or(1, |last| last.number + 1);
+            options.push(ChatOption {
+                number,
+                label: MORE_MODELS.to_owned(),
+                description: None,
+                selected,
+            });
+        }
+    }
+    Some(prompt(
+        ChatPromptKind::ModelPicker,
+        PICKER_TITLE.to_owned(),
+        String::new(),
+        options,
+    ))
+}
+
+/// The mark a full-screen dialog's top edge is drawn with.
+const DIALOG_EDGE: char = '▔';
+
+/// One past the last row drawn as a dialog's `▔` top edge; 0 when none is.
+fn dialog_edge(rows: &[String]) -> usize {
+    rows.iter()
+        .rposition(|row| row.trim_start().starts_with(DIALOG_EDGE))
+        .map_or(0, |index| index + 1)
+}
+
+/// `row` as a numbered picker row: the model's name (its tick taken off),
+/// and its second column, marked `Current` on the ticked row.
+fn picker_row(row: &str) -> Option<ChatOption> {
+    let text = row.trim_start();
+    let (selected, text) = match text.strip_prefix(CURSOR) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    let text = text.trim_start_matches(SCROLL_MARKS).trim_start();
+    let option = numbered(text)?;
+    let (name, column) = option.label.split_once("  ").unwrap_or((option.label, ""));
+    let name = name.trim();
+    let column = column.trim();
+    let (label, current) = match name.strip_suffix(CURRENT_TICK) {
+        Some(rest) => (rest.trim_end(), true),
+        None => (name, false),
+    };
+    let description = match (current, column.is_empty()) {
+        (true, true) => Some(CURRENT.to_owned()),
+        (true, false) => Some(format!("{CURRENT} · {column}")),
+        (false, true) => None,
+        (false, false) => Some(column.to_owned()),
+    };
+    Some(ChatOption {
+        number: option.number,
+        label: label.to_owned(),
+        description,
+        selected,
+    })
+}
+
+/// Whether `row` is the picker's `▸ More models` row, and whether the
+/// cursor is on it; `None` for any other row.
+fn more_models_row(row: &str) -> Option<bool> {
+    let text = row.trim_start();
+    let (selected, text) = match text.strip_prefix(CURSOR) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    (text.strip_prefix(MORE_MARK)?.trim() == MORE_MODELS).then_some(selected)
+}
+
+/// The title row of the dialog that asks before switching a conversation's
+/// model.
+const SWITCH_MODEL_TITLE: &str = "Switch model?";
+
+/// The Switch model? dialog the picker's `s` opens after a turn: the title,
+/// its explanation, the two options and the `Enter to confirm · Esc to
+/// cancel` footer.
+fn parse_switch_model(rows: &[String], start: usize) -> Option<Parsed> {
+    let anchor = (start..rows.len())
+        .rev()
+        .find(|&index| rows[index].trim() == SWITCH_MODEL_TITLE)?;
+    let Some(footer) = find(rows, anchor + 1, |row| {
+        row.contains("Enter to confirm · Esc to cancel")
+    }) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let (block_start, block_end) = options_block(rows, anchor + 1, footer);
+    let options = trust_options(&rows[block_start..block_end]);
+    if options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    let explanation: Vec<&str> = rows[anchor + 1..block_start]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Some(Parsed::Prompt(prompt(
+        ChatPromptKind::Confirm,
+        SWITCH_MODEL_TITLE.to_owned(),
+        text_block(&explanation, indent_of(&rows[anchor])),
         options,
     )))
 }
@@ -1391,11 +1541,13 @@ pub(crate) fn recipe(
     match prompt.kind {
         ChatPromptKind::Question => return question_recipe(prompt, answer),
         ChatPromptKind::Review => return review_recipe(prompt, answer),
+        ChatPromptKind::ModelPicker => return picker_recipe(prompt, answer),
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
         | ChatPromptKind::Trust
         | ChatPromptKind::McpServer
-        | ChatPromptKind::HeadsUp => {}
+        | ChatPromptKind::HeadsUp
+        | ChatPromptKind::Confirm => {}
         ChatPromptKind::Unknown => return Err(AnswerRefusal::Unsupported),
     }
     if field_focused(prompt) {
@@ -1481,12 +1633,12 @@ fn digit_for(prompt: &ChatPrompt, number: u32) -> Result<Key, AnswerRefusal> {
     Key::digit(number).ok_or(AnswerRefusal::TooManyOptions)
 }
 
-/// Choosing option `number`: its digit, or on a trust or new-MCP-server
-/// dialog, whose options carry no digit, the arrows to it and Enter.
+/// Choosing option `number`: its digit, or on a trust, new-MCP-server or
+/// confirm dialog, the arrows to it and Enter.
 fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
     if matches!(
         prompt.kind,
-        ChatPromptKind::Trust | ChatPromptKind::McpServer
+        ChatPromptKind::Trust | ChatPromptKind::McpServer | ChatPromptKind::Confirm
     ) {
         return trust_recipe(prompt, number);
     }
@@ -1499,6 +1651,35 @@ fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answe
         ScreenExpect::DialogGone
     };
     Ok(one_step(vec![digit_for(prompt, number)?], expect))
+}
+
+/// The key that picks the highlighted model for this session only.
+const SESSION_ONLY_KEY: &str = "s";
+
+/// Picking a model row of the `/model` picker for this session alone: the
+/// arrows to its row, then `s`, which closes the picker or opens the Switch
+/// model? dialog. Never Enter (it saves the default), a digit, or Left and
+/// Right (they move the effort). The More models row is refused.
+fn picker_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    let ChatAnswerKind::Option { number } = answer else {
+        return Err(AnswerRefusal::NotThisDialog);
+    };
+    let more_models = prompt
+        .options
+        .iter()
+        .any(|option| option.number == *number && option.label == MORE_MODELS);
+    if more_models {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    let mut steps: Vec<RecipeStep> = cursor_move(prompt, *number)?.into_iter().collect();
+    steps.push(RecipeStep {
+        keys: vec![Key::Text(SESSION_ONLY_KEY.to_owned())],
+        expect: ScreenExpect::Any,
+    });
+    Ok(AnswerRecipe { steps })
 }
 
 /// Moving a trust or new-MCP-server dialog's cursor from where the reading
@@ -2013,7 +2194,276 @@ mod tests {
         AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal,
         ViewReading, ViewRefusal, ViewStep,
     };
-    use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
+    use protocol::{
+        ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState,
+    };
+
+    /// The `/model` picker and its Switch model? dialog as 2.1.329 draws
+    /// them, from the daemon's screen fixtures.
+    const PICKER: &str =
+        include_str!("../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker.txt");
+    const PICKER_ON_SONNET: &str = include_str!(
+        "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-on-sonnet.txt"
+    );
+    const PICKER_MORE_MODELS: &str = include_str!(
+        "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-more-models.txt"
+    );
+    const SWITCH_DIALOG: &str = include_str!(
+        "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-switch-dialog.txt"
+    );
+    const SESSION_ONLY_SWITCH: &str = include_str!(
+        "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-session-only-switch.txt"
+    );
+    /// Every capture that shows the picker with its `s` footer.
+    const PICKERS: [&str; 7] = [
+        PICKER,
+        PICKER_ON_SONNET,
+        include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-after-session-switch.txt"
+        ),
+        include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-effort-left.txt"
+        ),
+        include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-effort-right.txt"
+        ),
+        include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-picker-before-esc.txt"
+        ),
+        include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2.1.329-model-switch-dialog-go-back.txt"
+        ),
+    ];
+
+    /// The rows of a capture.
+    fn capture(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    /// The prompt a capture shows.
+    fn prompt_in(text: &str) -> ChatPrompt {
+        read(&capture(text))
+            .prompt
+            .expect("the capture shows a prompt")
+    }
+
+    /// A picker option.
+    fn model(number: u32, label: &str, description: Option<&str>, selected: bool) -> ChatOption {
+        ChatOption {
+            number,
+            label: label.to_owned(),
+            description: description.map(str::to_owned),
+            selected,
+        }
+    }
+
+    #[test]
+    fn the_model_picker_reads_as_a_prompt_with_its_rows() {
+        let screen = read(&capture(PICKER));
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.expect("a picker prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+        assert_eq!(prompt.subject, "Select model");
+        assert_eq!(prompt.body, "");
+        assert_eq!(prompt.cursor, Some(1));
+        assert_eq!(
+            prompt.options,
+            [
+                model(
+                    1,
+                    "Default (recommended)",
+                    Some("Current · Opus 5.5 · Best for everyday, complex tasks"),
+                    true
+                ),
+                model(
+                    2,
+                    "Opus 5.5",
+                    Some("For complex work and everyday tasks"),
+                    false
+                ),
+                model(3, "Fable 5.2", Some("For your toughest challenges"), false),
+                model(
+                    4,
+                    "Sonnet 5.5",
+                    Some("Most efficient for simpler tasks"),
+                    false
+                ),
+                model(5, "Haiku 5.5", Some("Fastest for quick answers"), false),
+                model(6, "More models", None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_picker_cursor_follows_the_highlighted_row() {
+        let prompt = prompt_in(PICKER_ON_SONNET);
+        assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+        assert_eq!(prompt.cursor, Some(4));
+        let selected: Vec<u32> = prompt
+            .options
+            .iter()
+            .filter(|option| option.selected)
+            .map(|option| option.number)
+            .collect();
+        assert_eq!(selected, [4]);
+        assert!(
+            prompt.options[0]
+                .description
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Current · "))
+        );
+    }
+
+    #[test]
+    fn more_models_is_option_six() {
+        let prompt = prompt_in(PICKER_MORE_MODELS);
+        assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+        assert_eq!(prompt.cursor, Some(6));
+        assert_eq!(prompt.options[5], model(6, "More models", None, true));
+        assert_eq!(
+            prompt.options[1].description.as_deref(),
+            Some("Current · For complex work and everyday tasks")
+        );
+    }
+
+    #[test]
+    fn the_switch_model_dialog_reads_as_a_confirm() {
+        let screen = read(&capture(SWITCH_DIALOG));
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.expect("a confirm prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Confirm);
+        assert_eq!(prompt.subject, "Switch model?");
+        assert_eq!(
+            prompt.body,
+            "Your next response will be slower and use more tokens\n\n\
+             This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read."
+        );
+        let options: Vec<(u32, &str)> = prompt
+            .options
+            .iter()
+            .map(|option| (option.number, option.label.as_str()))
+            .collect();
+        assert_eq!(
+            options,
+            [(1, "Yes, switch to Opus 5.5"), (2, "No, go back")]
+        );
+        assert_eq!(prompt.cursor, Some(1));
+    }
+
+    /// The answer that picks option `number`.
+    fn pick(number: u32) -> ChatAnswerKind {
+        ChatAnswerKind::Option { number }
+    }
+
+    #[test]
+    fn a_picker_answer_moves_then_presses_s() {
+        let prompt = prompt_in(PICKER);
+        let steps = recipe(&prompt, &pick(4)).expect("a recipe").steps;
+        assert_eq!(
+            steps,
+            [
+                RecipeStep {
+                    keys: vec![Key::Down; 3],
+                    expect: ScreenExpect::OptionSelected(4),
+                },
+                RecipeStep {
+                    keys: vec![Key::Text("s".to_owned())],
+                    expect: ScreenExpect::Any,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_picker_answer_never_holds_enter_a_digit_or_left_right() {
+        for text in PICKERS {
+            let prompt = prompt_in(text);
+            assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+            for number in 1..=5 {
+                let steps = recipe(&prompt, &pick(number)).expect("a recipe").steps;
+                let keys: Vec<&Key> = steps.iter().flat_map(|step| &step.keys).collect();
+                assert!(
+                    keys.iter().all(|key| !matches!(
+                        key,
+                        Key::Enter | Key::Digit(_) | Key::Left | Key::Right
+                    )),
+                    "option {number} holds {keys:?}"
+                );
+                assert_eq!(
+                    steps.last(),
+                    Some(&RecipeStep {
+                        keys: vec![Key::Text("s".to_owned())],
+                        expect: ScreenExpect::Any,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn more_models_cannot_be_answered() {
+        for text in [PICKER, PICKER_MORE_MODELS] {
+            let prompt = prompt_in(text);
+            assert_eq!(recipe(&prompt, &pick(6)), Err(AnswerRefusal::NotThisDialog));
+        }
+    }
+
+    #[test]
+    fn a_confirm_answer_moves_then_presses_enter() {
+        let prompt = prompt_in(SWITCH_DIALOG);
+        let steps = recipe(&prompt, &pick(2)).expect("a recipe").steps;
+        assert_eq!(
+            steps,
+            [
+                RecipeStep {
+                    keys: vec![Key::Down],
+                    expect: ScreenExpect::OptionSelected(2),
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::DialogGone,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quoted_picker_above_the_input_box_is_no_prompt() {
+        let picker = capture(PICKER);
+        let title = picker
+            .iter()
+            .position(|row| row.trim() == "Select model")
+            .expect("the picker's title");
+        let mut rows: Vec<String> = picker[title..]
+            .iter()
+            .map(|row| format!("  {row}"))
+            .collect();
+        let closed = capture(SESSION_ONLY_SWITCH);
+        let rule = closed
+            .iter()
+            .position(|row| row.starts_with('─'))
+            .expect("the input box's rule");
+        rows.extend(closed[rule..].iter().cloned());
+        let screen = read(&rows);
+        assert_eq!(screen.prompt, None);
+        assert_eq!(screen.composer, ComposerState::Ready);
+    }
+
+    #[test]
+    fn a_quoted_switch_title_above_the_dialog_keeps_the_body() {
+        let mut rows = vec!["  Switch model?".to_owned(), String::new()];
+        rows.extend(capture(SWITCH_DIALOG));
+        let prompt = read(&rows).prompt.expect("a confirm prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Confirm);
+        assert_eq!(prompt.body, prompt_in(SWITCH_DIALOG).body);
+    }
+
+    #[test]
+    fn a_closed_picker_reads_no_prompt() {
+        let screen = read(&capture(SESSION_ONLY_SWITCH));
+        assert_eq!(screen.prompt, None);
+        assert_ne!(screen.composer, ComposerState::Dialog);
+    }
 
     #[test]
     fn plan_feedback_finds_its_option_by_label() {

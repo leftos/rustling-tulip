@@ -107,7 +107,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "overlay_model_picker".to_string(),
             priority: 990,
             region: ScreenRegion::BottomNonEmpty { rows: 4 },
-            matcher: LineMatcher::Contains("Enter to set as default".to_string()),
+            matcher: LineMatcher::Contains("s to use this session only".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::Keep,
         },
