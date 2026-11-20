@@ -8161,7 +8161,7 @@ pub enum DaemonMessage {
     /// The model the session's main agent answers with, as its transcript's
     /// newest main-thread reply names it. Sent to chat loaders only: to a new
     /// loader right after its `Chat` reply when a model is known, and to
-    /// every loader when it changes. A conversation switch sends one with no
+    /// every loader when it or its effort changes. A conversation switch sends one with no
     /// model until the new conversation's first reply names one.
     ChatModel {
         session_id: String,
@@ -8172,6 +8172,10 @@ pub enum DaemonMessage {
         /// formats; the id itself when the plugin knows no better one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// The effort the agent reports for the main agent, verbatim; none
+        /// when the newest reply names none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
 }
 
@@ -19441,6 +19445,7 @@ mod tests {
             session_id: "s1".to_string(),
             model: Some("model-7".to_string()),
             label: Some("Model 7".to_string()),
+            effort: Some("high".to_string()),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""type":"chat_model""#));
@@ -19449,10 +19454,12 @@ mod tests {
                 session_id,
                 model,
                 label,
+                effort,
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(model.as_deref(), Some("model-7"));
                 assert_eq!(label.as_deref(), Some("Model 7"));
+                assert_eq!(effort.as_deref(), Some("high"));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -19460,6 +19467,7 @@ mod tests {
             session_id: "s1".to_string(),
             model: None,
             label: None,
+            effort: None,
         };
         let json = serde_json::to_string(&cleared).expect("serialize");
         assert_eq!(json, r#"{"type":"chat_model","session_id":"s1"}"#);

@@ -489,8 +489,9 @@ impl ChatMirror {
         mirror.chat = ChatState::starting_with(head, path.is_some());
         mirror.pending.drop_all();
         mirror.summary_sent.clear();
-        // The new conversation names its model at its first reply.
+        // The new conversation names its model and effort at its first reply.
         mirror.model = None;
+        mirror.effort = None;
         mirror.update_model(session_id);
         if let Some(writer) = mirror.writer.as_mut() {
             writer.clear();
@@ -1262,6 +1263,11 @@ struct SessionMirror {
     model: Option<String>,
     /// The model the chat loaders were last sent in a `ChatModel`.
     model_shown: Option<String>,
+    /// The effort the transcript's newest main-thread reply answers with;
+    /// none since the last conversation switch until a reply names one.
+    effort: Option<String>,
+    /// The effort the chat loaders were last sent in a `ChatModel`.
+    effort_shown: Option<String>,
     /// The requests for the stretch lines and their answers, from the first
     /// summary load with a summarizer set.
     writer: Option<SummaryWriter>,
@@ -1303,6 +1309,8 @@ impl SessionMirror {
             },
             model: None,
             model_shown: None,
+            effort: None,
+            effort_shown: None,
             writer: None,
         }
     }
@@ -1320,6 +1328,7 @@ impl SessionMirror {
         // Kept while the first read catches up too; sent once it ends.
         if let Some(model) = &facts.model {
             self.model = Some(model.clone());
+            self.effort.clone_from(&facts.effort);
         }
         let mut change = self.chat.apply_line(plugin, line, facts);
         // A line applied while the first read catches up is an old one,
@@ -1344,11 +1353,12 @@ impl SessionMirror {
         }
     }
 
-    /// Send the model to every chat loader when it changed since they were
-    /// last sent it.
+    /// Send the model and its effort to every chat loader when either
+    /// changed since they were last sent it.
     fn update_model(&mut self, session_id: &str) {
-        if self.model != self.model_shown {
+        if self.model != self.model_shown || self.effort != self.effort_shown {
             self.model_shown.clone_from(&self.model);
+            self.effort_shown.clone_from(&self.effort);
             self.tell(&self.model_message(session_id));
         }
     }
@@ -1360,8 +1370,8 @@ impl SessionMirror {
             .then(|| self.model_message(session_id))
     }
 
-    /// The `ChatModel` of the model the chat loaders were last sent, its
-    /// label as the session's agent formats it.
+    /// The `ChatModel` of the model and effort the chat loaders were last
+    /// sent, its label as the session's agent formats it.
     fn model_message(&self, session_id: &str) -> DaemonMessage {
         DaemonMessage::ChatModel {
             session_id: session_id.to_owned(),
@@ -1370,6 +1380,7 @@ impl SessionMirror {
                 .model_shown
                 .as_deref()
                 .map(|model| self.plugin.model_label(model)),
+            effort: self.effort_shown.clone(),
         }
     }
 

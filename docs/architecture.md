@@ -177,7 +177,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   The record owns each item's identity, age and command or type, and the screen only pads with placeholders when its count is higher and never removes an item. A task leaves when a later `Stop` stops listing it or its `<task-notification>` arrives in the transcript, and the agent's end clears the lot. `ChatWork` goes only to chat and summary loaders, on load, after the first transcript read and on each change, never on a timer and not on the session snapshot.
 
-  The session's model rides the same way but to chat loaders only: `ChatModel` carries the model id and the plugin's label from the newest main-thread, model-written reply (`TranscriptLineFacts.model`), and the chat composer shows it as a pill.
+  The session's model rides the same way but to chat loaders only: `ChatModel` carries the model id, the plugin's label and the effort from the newest main-thread, model-written reply (`TranscriptLineFacts.model` and `effort`), and the chat composer shows them as a pill.
 
   The summary view is one line per stretch of work. A stretch is a turn (it starts at a user prompt, never at an "Interrupted" notice, which falls inside the previous turn), split for a long turn into windows counted from its first time ([0, 5 min), [5, 15), [15, 30), then 30-minute windows), and keeps the range of entry ids it covers so expanding it shows exactly those entries.
 

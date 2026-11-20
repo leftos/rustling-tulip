@@ -5070,6 +5070,7 @@ fn chat_model(session_id: &str) -> DaemonMessage {
         session_id: session_id.to_owned(),
         model: Some("claude-opus-5-5".to_owned()),
         label: Some("Opus 5.5".to_owned()),
+        effort: Some("high".to_owned()),
     }
 }
 

@@ -173,6 +173,9 @@ pub(crate) struct SessionChat {
     /// That model in the form a person reads, as the agent plugin formatted
     /// it; none while the daemon sent no label.
     label: Option<String>,
+    /// The effort the session's main agent answers with, as the daemon's
+    /// last `ChatModel` named it: shown verbatim, mapped by nothing.
+    effort: Option<String>,
     /// The screen's last composer state; none until the chat loaded.
     composer_state: Option<ComposerState>,
     /// Esc was sent to interrupt the running turn; held until the next
@@ -350,6 +353,17 @@ impl SessionChat {
         self.label.as_deref().or(self.model.as_deref())
     }
 
+    /// The text the chat's model pill shows: the model's label, followed by
+    /// the effort the main agent answered with when it named one; none while
+    /// no model is known.
+    fn pill_text(&self) -> Option<String> {
+        let label = self.model_label()?;
+        match self.effort.as_deref() {
+            Some(effort) if !effort.is_empty() => Some(format!("{label} · {effort}")),
+            _ => Some(label.to_owned()),
+        }
+    }
+
     /// The composer's text, empty before the composer is made.
     fn composer_text(&self, cx: &App) -> String {
         self.composer
@@ -521,9 +535,15 @@ impl SessionChat {
                 wakeup_at,
                 ..
             } => self.work.set(subagents, shells, wakeup_at),
-            DaemonMessage::ChatModel { model, label, .. } => {
+            DaemonMessage::ChatModel {
+                model,
+                label,
+                effort,
+                ..
+            } => {
                 self.model = model;
                 self.label = label;
+                self.effort = effort;
             }
             _ => return false,
         }
@@ -1337,11 +1357,7 @@ impl RootView {
     /// chat; none while no pane shows its chat or no model is known.
     #[must_use]
     pub fn chat_model_label(&self, session_id: &str) -> Option<String> {
-        self.chat
-            .sessions
-            .get(session_id)?
-            .model_label()
-            .map(str::to_owned)
+        self.chat.sessions.get(session_id)?.pill_text()
     }
 
     /// Session `session_id`'s running-work strip as drawn now; none while
@@ -4393,9 +4409,7 @@ impl RootView {
         let shift = crate::fonts::ui_weight_shift(cx);
         let saved = &self.sidebar.ui_state().phone_agent_replies;
         let groups = quick_replies::groups(saved.as_deref(), ReplySet::Agent);
-        let pill = chat
-            .model_label()
-            .map(|label| model_pill(offset, label, &t));
+        let pill = chat.pill_text().map(|label| model_pill(offset, &label, &t));
         if groups.iter().all(|group| group.replies.is_empty()) && pill.is_none() {
             return None;
         }
@@ -5941,6 +5955,7 @@ mod tests {
             session_id: "s1".to_owned(),
             model: model.map(str::to_owned),
             label: label.map(str::to_owned),
+            effort: None,
         }
     }
 

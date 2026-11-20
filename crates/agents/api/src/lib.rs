@@ -248,6 +248,9 @@ pub struct TranscriptLineFacts {
     /// only for the main thread's own reply, never a subagent's or one the
     /// agent wrote itself.
     pub model: Option<String>,
+    /// The effort the session's main agent answered with on this line: set
+    /// only on the main thread's own reply, as `model` is.
+    pub effort: Option<String>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the

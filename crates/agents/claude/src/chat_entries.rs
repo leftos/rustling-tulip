@@ -117,19 +117,38 @@ pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
             .map(|stamp| stamp.with_timezone(&Utc)),
         ended_tasks: ended_tasks(record),
         model: reply_model(record),
+        effort: reply_effort(record),
     }
+}
+
+/// Whether `record` is the session's own reply: the model answered, not a
+/// subagent and not a virtual record Claude Code wrote.
+fn is_main_reply(record: &Value) -> bool {
+    origin_of(record) == Origin::Model && !flag(record, "isSidechain")
 }
 
 /// The model a main-thread reply names: none for a subagent's record, a
 /// virtual one Claude Code wrote, or any record that is not a reply.
 fn reply_model(record: &Value) -> Option<String> {
-    if origin_of(record) != Origin::Model || flag(record, "isSidechain") {
+    if !is_main_reply(record) {
         return None;
     }
     record
         .pointer("/message/model")
         .and_then(Value::as_str)
         .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+}
+
+/// The effort a main-thread reply answered with, as the record's top-level
+/// field names it: none for a subagent's record, a virtual one Claude Code
+/// wrote, any record that is not a reply, or a reply that names no effort.
+fn reply_effort(record: &Value) -> Option<String> {
+    if !is_main_reply(record) {
+        return None;
+    }
+    str_at(record, "effort")
+        .filter(|effort| !effort.is_empty())
         .map(str::to_owned)
 }
 
@@ -1070,6 +1089,7 @@ mod tests {
                     .map(|second| second + TimeDelta::milliseconds(500)),
                 ended_tasks: Vec::new(),
                 model: None,
+                effort: None,
             }
         );
     }
@@ -1090,6 +1110,27 @@ mod tests {
     fn a_main_reply_names_its_model_in_the_line_facts() {
         let line = reply_naming("claude-opus-5-5", &json!({}));
         assert_eq!(line_facts(&line).model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_main_reply_names_its_effort_in_the_line_facts() {
+        let line = reply_naming("claude-opus-5-5", &json!({"effort": "high"}));
+        assert_eq!(line_facts(&line).effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_sidechain_reply_names_no_effort() {
+        let line = reply_naming(
+            "claude-opus-5-5",
+            &json!({"isSidechain": true, "effort": "high"}),
+        );
+        assert_eq!(line_facts(&line).effort, None);
+    }
+
+    #[test]
+    fn a_main_reply_without_effort_names_none() {
+        let line = reply_naming("claude-opus-5-5", &json!({}));
+        assert_eq!(line_facts(&line).effort, None);
     }
 
     #[test]

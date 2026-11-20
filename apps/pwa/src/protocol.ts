@@ -6464,15 +6464,18 @@ export type DaemonMessage =
    * The model the session's main agent answers with, as its transcript's
    * newest main-thread reply names it. Sent to chat loaders only: to a new
    * loader right after its `Chat` reply when a model is known, and to
-   * every loader when it changes. A conversation switch sends one with no
+   * every loader when it or its effort changes. A conversation switch sends one with no
    * model until the new conversation's first reply names one.
    *
    * `model`: The model's id, as the agent names it.
    *
    * `label`: The model in the form a person reads, which the agent plugin
    * formats; the id itself when the plugin knows no better one.
+   *
+   * `effort`: The effort the agent reports for the main agent, verbatim; none
+   * when the newest reply names none.
    */
-  | { type: "chat_model"; session_id: string; model?: string | null; label?: string | null };
+  | { type: "chat_model"; session_id: string; model?: string | null; label?: string | null; effort?: string | null };
 
 /** One file a [`DaemonMessage::FileMatches`] answer carries. */
 export interface FileMatch {

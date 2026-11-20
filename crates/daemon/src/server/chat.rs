@@ -955,12 +955,18 @@ mod tests {
             .collect()
     }
 
-    /// A model's id and label, as a `ChatModel` carries them.
-    type ModelShown = (Option<String>, Option<String>);
+    /// A model's id, its label and the effort it answered with, as a
+    /// `ChatModel` carries them.
+    type ModelShown = (Option<String>, Option<String>, Option<String>);
 
     fn model_shown(msg: DaemonMessage) -> Option<ModelShown> {
         match msg {
-            DaemonMessage::ChatModel { model, label, .. } => Some((model, label)),
+            DaemonMessage::ChatModel {
+                model,
+                label,
+                effort,
+                ..
+            } => Some((model, label, effort)),
             _ => None,
         }
     }
@@ -1010,11 +1016,31 @@ mod tests {
         .to_string()
     }
 
+    /// A main-thread reply `uuid` at second `n` that names `model` and the
+    /// effort it answered with.
+    fn effort_reply(uuid: &str, n: usize, model: &str, effort: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "uuid": uuid, "timestamp": stamp(n), "effort": effort,
+            "message": {"id": format!("msg-{uuid}"), "role": "assistant", "type": "message",
+                "model": model, "content": [{"type": "text", "text": "Done."}]},
+        })
+        .to_string()
+    }
+
     const OPUS: &str = "claude-opus-5-5";
     const SONNET: &str = "claude-sonnet-4-5";
 
     fn shown(model: &str, label: &str) -> ModelShown {
-        (Some(model.to_owned()), Some(label.to_owned()))
+        (Some(model.to_owned()), Some(label.to_owned()), None)
+    }
+
+    /// The model, label and effort of a reply that answered at `effort`.
+    fn shown_effort(model: &str, label: &str, effort: &str) -> ModelShown {
+        (
+            Some(model.to_owned()),
+            Some(label.to_owned()),
+            Some(effort.to_owned()),
+        )
     }
 
     /// A subagent's and a shell's ids, as a strip lists them.
@@ -1483,6 +1509,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_model_carries_the_replys_effort() {
+        let fx = Fixture::new("chat-model-effort", Some("conv-a"));
+        fx.append("conv-a", &[user(1), effort_reply("a-2", 2, OPUS, "high")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown_effort(OPUS, "Opus 5.5", "high"),
+            "the reply's effort rides the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_effort_change_alone_reaches_loaders() {
+        let fx = Fixture::new("chat-model-effort-change", Some("conv-a"));
+        fx.append("conv-a", &[user(1), effort_reply("a-2", 2, OPUS, "high")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(
+            next_model(&mut a_rx).await,
+            shown_effort(OPUS, "Opus 5.5", "high")
+        );
+        fx.append(
+            "conv-a",
+            &[user(3), effort_reply("a-4", 4, OPUS, "max"), user(5)],
+        );
+        assert_eq!(
+            models_until(&mut a_rx, |msg| carries(msg, "u-5")).await,
+            [shown_effort(OPUS, "Opus 5.5", "max")],
+            "the same model with a new effort sends once"
+        );
+    }
+
+    #[tokio::test]
     async fn no_chat_model_when_nothing_changed() {
         let fx = Fixture::new("chat-model-unchanged", Some("conv-a"));
         fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
@@ -1543,7 +1603,7 @@ mod tests {
         });
         assert_eq!(
             next_model(&mut a_rx).await,
-            (None, None),
+            (None, None, None),
             "the switch clears it"
         );
         fx.append("conv-b", &[user(3), reply("a-4", 4, SONNET)]);
