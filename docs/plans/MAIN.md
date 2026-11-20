@@ -200,8 +200,6 @@
 
 ## Chat mirror
 
-- [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies · release vNext
-  - [ ] RT-1926 Switch the session's model and effort from the chat's pills · release vNext
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
@@ -234,6 +232,7 @@
 - [ ] RT-1804 Keep the Chat message box focused after a composer-row button click
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
+- [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
 
 ## Settings and themes
 
@@ -802,6 +801,8 @@
 - [ ] RT-1957 Open the web page without a Windows error box when the Linear app fails to start
 - [ ] RT-1966 Log each phone push round at info in the daemon
 - [ ] RT-1971 Match the Settings › Accounts keyboard order to the drawn row
+- [ ] RT-1986 Deliver a chat send made in the first second of a turn, or report its refusal
+- [ ] RT-1987 Stop reading a command's output record as a user prompt in the chat mirror
 
 ## Design files
 
@@ -821,7 +822,7 @@
 - [hook-status.md](hook-status.md) — RT-277
 - [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-110, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111, RT-1926
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [push-relay.md](push-relay.md) — RT-1519
