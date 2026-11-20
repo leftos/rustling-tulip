@@ -4,6 +4,14 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.17.1-alpha
+
+### Fixed
+
+- A pane keeps loading a session's earlier output until the host answers, waiting longer between tries, instead of giving up after two.
+- Log in again and Log in a new account work when Settings › Claude's launch command names a shell function or alias.
+- On a Mac, Linear issues open in the Linear app when it is installed, not always in the browser.
+
 ## v0.17.0-alpha
 
 ### Highlights
