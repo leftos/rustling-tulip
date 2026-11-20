@@ -24,6 +24,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone keeps the files it fetches, deletes copies left unopened for 30 days, and shows their size with a Clear button under Settings › Storage.
 - A file fetched on the phone opens in a viewer page, with code highlighted, Markdown rendered and images scaled to fit; other files show their name and size.
 - Reopening a kept file on the phone checks the host first: it fetches the file again when it changed, and marks the copy as possibly out of date when the host can't be reached.
+- On the phone, tapping a terminal program that takes mouse clicks clicks it without raising the keyboard; the key bar's Keyboard key raises it.
 
 ### Fixed
 

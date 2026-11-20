@@ -30,6 +30,7 @@ use super::sheet::{
     CANCEL_LABEL, NO_RESUME_TEXT, OFFLINE_TEXT, PhoneReply, Sheet, SheetStep, SheetTap,
 };
 use super::sweep::{self, HostNow};
+use super::terminal_view::TerminalTap;
 use super::{PhoneLayout, content_padding, home, hosts_view};
 use crate::buttons::ButtonKind;
 use crate::connection::State;
@@ -99,6 +100,8 @@ pub struct PhoneRoot {
     /// The pan the open terminal's cursor row last needed, so its redraw
     /// redraws the page only when that changes.
     pub(super) terminal_need: f32,
+    /// What a tap on the open terminal does, as the key bar last drew it.
+    pub(super) terminal_tap: TerminalTap,
     /// The open terminal's redraws, watched for its cursor's row.
     pub(super) terminal_watch: Option<gpui::Subscription>,
     /// The viewport size the open terminal was last laid out at.
@@ -241,6 +244,7 @@ impl PhoneRoot {
             terminal_hidden: 0.0,
             terminal_pan: super::terminal_fit::Pan::default(),
             terminal_need: 0.0,
+            terminal_tap: TerminalTap::RaisesKeyboard,
             terminal_watch: None,
             terminal_viewport: None,
             key_bar: Rc::new(RefCell::new(KeyBar::new())),

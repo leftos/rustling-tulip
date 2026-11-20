@@ -1482,6 +1482,67 @@ fn a_tap_on_the_terminal_with_the_keyboard_down_raises_it(cx: &mut TestAppContex
     );
 }
 
+/// The program in session `n` turns on mouse reports in SGR encoding, as a
+/// TUI with clickable parts does.
+fn program_reports_the_mouse(h: &mut Harness<'_>) {
+    h.host(&saved_remote()).pty("n", b"\x1b[?1000h\x1b[?1006h");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+}
+
+#[gpui::test]
+fn a_tap_on_a_terminal_whose_program_reports_the_mouse_clicks_it_and_leaves_the_keyboard_down(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    program_reports_the_mouse(&mut h);
+    draw_keyboard(&mut h, false);
+    clear_keyboard_calls();
+
+    h.tap_on("phone-session-terminal");
+
+    assert_eq!(keyboard_calls(), [], "the tap is the program's click");
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        sent.iter().any(
+            |msg| matches!(msg, ClientMessage::SendInput { session_id, .. } if session_id == "n")
+        ),
+        "the click reaches the program: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn the_key_bar_raises_the_keyboard_only_while_a_tap_cannot(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    draw_keyboard(&mut h, false);
+    assert!(
+        !drawn(&mut h, "phone-bar-keyboard"),
+        "no Keyboard key while a tap raises the keyboard"
+    );
+
+    program_reports_the_mouse(&mut h);
+    assert!(
+        drawn(&mut h, "phone-bar-keyboard"),
+        "a Keyboard key while the program takes the taps"
+    );
+    clear_keyboard_calls();
+    h.click_on("phone-bar-keyboard");
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Raise),
+        "the Keyboard key brings the keyboard up"
+    );
+
+    draw_keyboard(&mut h, true);
+    assert!(
+        !drawn(&mut h, "phone-bar-keyboard"),
+        "Hide takes its place with the keyboard up"
+    );
+    assert!(drawn(&mut h, "phone-bar-hide"), "Hide shows");
+}
+
 #[gpui::test]
 fn the_key_bar_fits_a_375_point_phone_with_the_keyboard_up(cx: &mut TestAppContext) {
     let dir = TestDir::new();

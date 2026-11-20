@@ -39,6 +39,31 @@ const BAR_KEY_MAX: f32 = 96.0;
 /// The Hide key's label, pinned at the bar's right end.
 const HIDE_LABEL: &str = "Hide";
 
+/// The Keyboard key's label, pinned where Hide sits while a tap cannot raise
+/// the keyboard.
+const KEYBOARD_LABEL: &str = "Keyboard";
+
+/// What a tap on the phone's terminal does while the keyboard is down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalTap {
+    /// The tap raises the keyboard.
+    RaisesKeyboard,
+    /// The program reports the mouse, so the tap is its click and the key
+    /// bar's Keyboard key raises the keyboard.
+    Clicks,
+}
+
+impl TerminalTap {
+    /// What a tap on `pane` does now.
+    fn of(pane: &TerminalPane) -> Self {
+        if pane.reports_mouse() {
+            Self::Clicks
+        } else {
+            Self::RaisesKeyboard
+        }
+    }
+}
+
 /// The points one line of a line-counted scroll pans the terminal by.
 const PAN_LINE: f32 = 20.0;
 
@@ -95,7 +120,9 @@ impl PhoneRoot {
                 }
                 let filter = self.typed_ctrl(cx);
                 pane.update(cx, |pane, _| pane.set_typed_filter(Some(filter)));
-                self.terminal_watch = Some(cx.observe(&pane, |this, _, cx| this.follow_cursor(cx)));
+                self.terminal_tap = TerminalTap::of(pane.read(cx));
+                self.terminal_watch =
+                    Some(cx.observe(&pane, |this, _, cx| this.follow_terminal(cx)));
             }
         }
         self.claim_on_resize(window, cx);
@@ -122,9 +149,20 @@ impl PhoneRoot {
         }
     }
 
-    /// After the terminal redraws: the page redraws too when the cursor's
-    /// row moved what the pan must show, so the row stays in sight.
-    fn follow_cursor(&mut self, cx: &mut Context<Self>) {
+    /// After the terminal redraws: the page redraws too when its program
+    /// turned mouse reports on or off, which decides the key bar's Keyboard
+    /// key, or when the cursor's row moved what the pan must show, so the
+    /// row stays in sight.
+    fn follow_terminal(&mut self, cx: &mut Context<Self>) {
+        let tap = self
+            .terminal_pane(cx)
+            .map_or(TerminalTap::RaisesKeyboard, |pane| {
+                TerminalTap::of(pane.read(cx))
+            });
+        if tap != self.terminal_tap {
+            self.terminal_tap = tap;
+            cx.notify();
+        }
         if self.terminal_hidden <= 0.0 {
             return;
         }
@@ -278,8 +316,10 @@ impl PhoneRoot {
 
     /// The key bar: one sideways-scrolling row of the grid's keys in order,
     /// Ctrl lit while it is armed, then Hide pinned at its end while the
-    /// on-screen keyboard is up; Back and the status pinned at its start
-    /// while the terminal fills the screen.
+    /// on-screen keyboard is up, or Keyboard while it is down and the
+    /// program reports the mouse, so a tap is its click and cannot raise
+    /// it; Back and the status pinned at its start while the terminal fills
+    /// the screen.
     fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.key_bar.borrow().armed();
         let mut scroll = div()
@@ -326,6 +366,17 @@ impl PhoneRoot {
                     cx.notify();
                 }))
         });
+        let raise = (!keyboard_up && self.terminal_tap == TerminalTap::Clicks).then(|| {
+            phone_button("phone-bar-keyboard", ButtonKind::Outlined, cx)
+                .flex_none()
+                .min_h(px(TOUCH_TARGET))
+                .px(px(BAR_KEY_PAD))
+                .child(KEYBOARD_LABEL)
+                .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
+                    crate::keyboard::raise(window);
+                    cx.notify();
+                }))
+        });
         div()
             .driver_id(|| "phone-key-bar".to_owned())
             .flex_none()
@@ -336,6 +387,7 @@ impl PhoneRoot {
             .children(self.bar_lead(cx))
             .child(scroll)
             .children(hide)
+            .children(raise)
     }
 
     /// While the terminal fills the screen, pinned at the bar's start

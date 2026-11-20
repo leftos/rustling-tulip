@@ -1955,6 +1955,12 @@ impl TerminalPane {
         self.phone_keyboard_up = up;
     }
 
+    /// Whether the program asked for mouse reports, so a plain press is its
+    /// click.
+    pub(crate) fn reports_mouse(&self) -> bool {
+        mouse::reports(self.term.mode(), false)
+    }
+
     /// Makes this pane the phone's terminal: its links open on a tap with no
     /// modifier and are underlined at all times.
     pub(crate) fn set_phone_links(&mut self) {
@@ -2027,14 +2033,19 @@ impl TerminalPane {
         // On the phone a tap toggles the soft keyboard: while it is up, the
         // tap puts it away and goes no further, so nothing reaches the
         // program and no selection starts; while it is down, the tap raises
-        // it as a text field does. A first-mouse press only brings the window
-        // forward, and a session that takes no input has nothing to type
-        // into.
+        // it as a text field does, unless the program reports the mouse, when
+        // the tap is the program's click and the key bar raises the keyboard.
+        // A first-mouse press only brings the window forward, and a session
+        // that takes no input has nothing to type into.
         if event.button == MouseButton::Left && !event.first_mouse && self.phone_keyboard_up {
             crate::keyboard::lower(window);
             return;
         }
-        if event.button == MouseButton::Left && !event.first_mouse && self.accepts_input() {
+        if event.button == MouseButton::Left
+            && !event.first_mouse
+            && self.accepts_input()
+            && !mouse::reports(self.term.mode(), event.modifiers.shift)
+        {
             crate::keyboard::raise(window);
         }
         // Ctrl+click on a URL or a path opens it, and Ctrl+Shift+click on a path
