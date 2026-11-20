@@ -184,6 +184,7 @@
 - [ ] RT-1961 Make clippy pass for the iOS simulator target
 - [ ] RT-2014 Let fake-tailscale answer a host name the phone accepts
 - [ ] RT-2017 Refuse an rt-driver launch from an install older than the checkout's isolation rules
+- [ ] RT-2025 Gate rt-driver-mcp's Windows-only token constants so the macOS clippy pass runs
 
 ## Elevated daemon and security
 
@@ -634,6 +635,8 @@
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
 - [ ] RT-1951 Read the Linear key from the env-secrets store too
+- [ ] RT-2022 Show Linear chips in the Dashboard and on subagent and dispatch-run rows · release vNext
+- [ ] RT-2024 Add a Settings › Linear page: key, on/off switch, status and Test · release vNext
 
 ## Repos, workspaces and worktrees
 
