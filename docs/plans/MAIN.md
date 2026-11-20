@@ -182,6 +182,8 @@
 - [ ] RT-1943 Map the follow-tab and tab-close files in the test map
 - [ ] RT-1960 Map the follow-tab and tab-close files in tools/test-map.json
 - [ ] RT-1961 Make clippy pass for the iOS simulator target
+- [ ] RT-2014 Let fake-tailscale answer a host name the phone accepts
+- [ ] RT-2017 Refuse an rt-driver launch from an install older than the checkout's isolation rules
 
 ## Elevated daemon and security
 
@@ -297,6 +299,27 @@
 - [ ] RT-1725 Remove the single-variant SidebarChrome enum and its always-true checks
 - [ ] RT-1762 Follow Markdown links and stretches in a popped-out pane window
 - [ ] RT-1929 Keep the daemon troubleshooting flyout on screen in a short window
+- [ ] RT-1991 Polish found by the v0.17.0-alpha smoke run
+  - [ ] RT-1992 Say "1 account", not "1 accounts", in the Accounts forecast
+  - [ ] RT-1993 Keep a failed account login from reading as a success
+  - [ ] RT-1994 Keep a terminal draft's note on one line while Clear is armed
+  - [ ] RT-1995 Show the Fable row's whole description in the model picker card
+  - [ ] RT-1996 Show a /model switch's result in the chat
+  - [ ] RT-1997 Keep the Quick replies row on one line at a 640 px pane
+  - [ ] RT-1998 Open a Linear chip's card beside the chip, not over it
+  - [ ] RT-1999 Show a Linear card's Updated age in days past a day
+  - [ ] RT-2000 Draw the Linear chip in a lone shell's renamed folder heading too
+  - [ ] RT-2001 Name the phone or iPad, not "this PC", in the phone's pairing dialog
+  - [ ] RT-2002 Drop the leading space before "Have a code?" on the phone
+  - [ ] RT-2003 Dim the status bar and bottom strip under the phone's pairing dialog
+  - [ ] RT-2004 Raise the number pad for the phone's pairing code field
+  - [ ] RT-2005 Keep the phone key bar's → key clear of Hide
+  - [ ] RT-2006 Give the landscape key bar's session status room to read
+  - [ ] RT-2007 Inset the phone viewer's line-number gutter from the screen edge
+  - [ ] RT-2008 Keep two-digit line numbers on one line in the phone viewer
+  - [ ] RT-2009 Keep the phone browser's rows still when a fetch finishes
+  - [ ] RT-2010 Remove the empty folders Storage's Clear leaves in the phone's Documents
+  - [ ] RT-2011 Keep a Needs you card's options inside their boxes in the phone's narrow list column
 
 ## Terminal, panes and links
 
@@ -331,6 +354,7 @@
 - [ ] RT-1592 Profile why the app uses up to 6.5% CPU with about 10 panes open, and fix what it finds
 - [ ] RT-1646 Sweep pending request binds a layout update did not take
 - [ ] RT-1970 Split TerminalPane::on_mouse_down under the function limits
+- [ ] RT-2019 Keep colon prompts and relative listings from joining a full-width path row
 
 ## Spawn, launch and shells
 
@@ -552,6 +576,8 @@
 - [ ] RT-1975 Say on the phone why a tapped path could not open when no reading fits
 - [ ] RT-1977 Build the iPad app icons and check the notification extension for an iPad upload
 - [ ] RT-1978 Fit the Needs you tray card's options in the phone's two-pane list
+- [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up
+- [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain
 
 ## Dashboard, Gates and Linear
 
@@ -717,6 +743,8 @@
 - [ ] RT-1767 Define the phone's key bar, composer, Quick dock and Keys tray in the glossary, and index the phone screens
 - [ ] RT-1839 Make the TailFile docs say a link to a network or device path is followed, not refused
 - [ ] RT-1976 Name every variable an isolated experiment daemon must set or clear
+- [ ] RT-2015 Correct native-client.md: a model picker switch keeps the stepped effort
+- [ ] RT-2016 Correct testing.md: the real CLI's folder-trust dialog needs Down then Enter
 
 ## Backlog
 
