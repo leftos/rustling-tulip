@@ -4,33 +4,42 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.17.0-alpha
+
+### Highlights
+
+- The phone app runs on the iPad and in iPhone landscape.
+- The phone opens, browses, keeps and shares host files.
+- The chat composer completes commands and files, takes attachments, and switches the session's model and effort.
+- Linear issue identifiers link to their issues in the terminal and in session titles.
+
 ### Added
 
 - Turning an iPhone on its side fills the screen with the session's terminal, with Back and the session's status in its key bar.
-- On the iPad, and on an iPhone on its side, the phone app shows the session list beside the selected session.
-- The phone app runs on the iPad and turns to landscape on the iPhone, and an open terminal redraws at the new width when the screen turns.
-- On the phone, tapping a path in a session's chat or terminal opens it: a file in the viewer, a folder in the browser, or a note when the host has no such path.
+- The phone app runs on the iPad and in iPhone landscape, with the session list beside the selected session; the terminal redraws when turned.
+- On the phone, tapping a path in a session's chat or terminal opens the file in the viewer or the folder in the browser.
 - A Settings › Accounts row whose sign-in was refused has a Log in again button, which signs that account in again.
-- The phone's file page has Share, which opens the iOS share sheet to save the file to Files, AirDrop it or open it in another app.
-- The desktop chat shows the model the session's agent answers with and its effort, such as Opus 5.5 · high, at the start of the Quick replies row; clicking it opens the model list as a chat card, where picking a model switches this session only and Less effort or More effort steps its effort, and the pill follows the switch at once.
-- The phone can browse a host's folders: walk up and down them, show hidden entries, tap a file to open it, or long-press a folder to fetch it whole.
+- The phone's file page has Share, opening the iOS share sheet to save the file to Files, AirDrop it or open it elsewhere.
+- The desktop chat's Quick replies row opens with the session's model and effort, such as Opus 5.5 · high.
+- Clicking the model pill opens a model picker in the chat that switches this session's model or steps its effort.
+- The phone browses a host's folders: walk them, show hidden entries, tap a file to open it, or long-press a folder to fetch it.
 - A session title naming a Linear issue shows it as a chip in its state colour; hovering shows the issue, clicking opens it.
-- Linear issue identifiers such as RT-12, and linear.app issue links, are underlined in the terminal; resting on one shows the issue's card, and Ctrl+click opens it in the Linear app, or in your browser without it.
+- Linear issue IDs and links in the terminal are underlined; resting on one shows its card, and Ctrl+click opens it in Linear's app or browser.
 - The desktop chat composer has a row of Quick replies, such as "continue" or "yes", that send in one click.
 - Typing @ in the chat composer, on the desktop or the phone, lists the session's matching files, and picking one inserts its mention.
 - Typing / in the chat composer, on the desktop or the phone, lists the session's commands and skills, marking those that open in the terminal.
-- The desktop chat composer takes attachments: paste an image, drop files on the chat, or pick them with Attach, and their paths go into your message.
+- The desktop chat composer takes attachments: paste an image, drop files on the chat or pick them with Attach, and their paths join your message.
 - A terminal draft's Pull and Send now come with Clear, which empties the prompt box, pasted text and images included, once you confirm.
-- The phone keeps the files it fetches, deletes copies left unopened for 30 days, and shows their size with a Clear button under Settings › Storage.
-- A file fetched on the phone opens in a viewer page, with code highlighted, Markdown rendered and images scaled to fit; other files show their name and size.
-- Reopening a kept file on the phone checks the host first: it fetches the file again when it changed, and marks the copy as possibly out of date when the host can't be reached.
+- The phone keeps fetched files, deletes copies unopened for 30 days, and shows their size with a Clear button under Settings › Storage.
+- A file fetched on the phone opens in a viewer page with code highlighted, Markdown rendered and images fitted; other files show name and size.
+- Reopening a kept file on the phone fetches it again when the host's copy changed, and marks it possibly stale when the host is unreachable.
 - On the phone, tapping a terminal program that takes mouse clicks clicks it without raising the keyboard; the key bar's Keyboard key raises it.
 - Slash commands and skills you run, such as /nextup, show in the chat as your message.
 
 ### Fixed
 
-- Settings › Accounts keeps every account's usage readable in a narrower window: reset times no longer wrap one letter per line, and the row's buttons wrap instead.
-- A Needs you notification on the phone now goes away once its wait is answered on another client, even when iOS drops that wait's own update.
+- Settings › Accounts keeps every account's usage readable in a narrow window: reset times no longer wrap a letter per line, and buttons wrap instead.
+- A phone's Needs you notification now goes away once its wait is answered on another client, even when iOS drops that wait's update.
 - The accounts popover keeps its title and Auto-switch controls on screen in a short window, and its account list scrolls.
 - A failed account login's message now reads after the login's own output, not above it.
 - A fetched folder that holds one file now says "1 file", not "1 files", while it fetches and once it is done.
@@ -41,7 +50,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Changed
 
-- The phone's Composer Quick replies now send as chat messages, so they wait while a question or a draft is showing, or the host is offline.
+- The phone's Composer Quick replies now send as chat messages, waiting while a question or draft is showing or the host is offline.
 
 ## v0.16.0-alpha
 
