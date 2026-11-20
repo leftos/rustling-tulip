@@ -176,6 +176,10 @@ pub(crate) struct SessionChat {
     /// The effort the session's main agent answers with, as the daemon's
     /// last `ChatModel` named it: shown verbatim, mapped by nothing.
     effort: Option<String>,
+    /// The text the chat sends to open the agent's own model switcher, as
+    /// the daemon's last `ChatModel` named it; none when the agent has none,
+    /// and the model pill is then read-only.
+    switch_command: Option<String>,
     /// The screen's last composer state; none until the chat loaded.
     composer_state: Option<ComposerState>,
     /// Esc was sent to interrupt the running turn; held until the next
@@ -539,11 +543,13 @@ impl SessionChat {
                 model,
                 label,
                 effort,
+                switch_command,
                 ..
             } => {
                 self.model = model;
                 self.label = label;
                 self.effort = effort;
+                self.switch_command = switch_command;
             }
             _ => return false,
         }
@@ -4392,7 +4398,9 @@ impl RootView {
     }
 
     /// Session `session_id`'s Quick reply row under the composer field
-    /// (`chat-quick`): the model pill (`chat-model`) first, then the agent
+    /// (`chat-quick`): the model pill (`chat-model`) first, a button sending
+    /// the agent's model switch command when the agent names one and
+    /// read-only otherwise, then the agent
     /// reply set's groups in order, a gap between groups, every reply a chip
     /// (`chat-quick-{group}-{reply}`) sending its own text as a chat message
     /// and leaving the composer's text alone. A chip is live whenever
@@ -4409,7 +4417,30 @@ impl RootView {
         let shift = crate::fonts::ui_weight_shift(cx);
         let saved = &self.sidebar.ui_state().phone_agent_replies;
         let groups = quick_replies::groups(saved.as_deref(), ReplySet::Agent);
-        let pill = chat.pill_text().map(|label| model_pill(offset, &label, &t));
+        let pill = chat.pill_text().map(|label| match &chat.switch_command {
+            Some(command) => {
+                let id = session_id.to_owned();
+                let command = command.clone();
+                let enabled = self.send_enabled(session_id, chat, &command);
+                outlined_button(
+                    offset,
+                    shift,
+                    "chat-model",
+                    ButtonSize::Compact,
+                    enabled,
+                    Layer::Base,
+                    &t,
+                )
+                .child(label)
+                .when(enabled, |pill| {
+                    pill.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.send_text(&id, &command, cx);
+                    }))
+                })
+                .into_any_element()
+            }
+            None => model_pill(offset, &label, &t),
+        });
         if groups.iter().all(|group| group.replies.is_empty()) && pill.is_none() {
             return None;
         }
@@ -5956,6 +5987,7 @@ mod tests {
             model: model.map(str::to_owned),
             label: label.map(str::to_owned),
             effort: None,
+            switch_command: None,
         }
     }
 

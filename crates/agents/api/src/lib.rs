@@ -811,6 +811,12 @@ pub trait Agent: Send + Sync + 'static {
         model.to_owned()
     }
 
+    /// The text that opens the agent's own model switcher when typed at its
+    /// prompt; none when it has none.
+    fn model_switch_command(&self) -> Option<&'static str> {
+        None
+    }
+
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
     /// [`AgentPlugin::resolve_program`].
@@ -1176,6 +1182,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::model_label`].
     fn model_label(&self, model: &str) -> String;
 
+    /// See [`Agent::model_switch_command`].
+    fn model_switch_command(&self) -> Option<&'static str>;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -1458,6 +1467,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn model_label(&self, model: &str) -> String {
         Agent::model_label(self, model)
+    }
+
+    fn model_switch_command(&self) -> Option<&'static str> {
+        Agent::model_switch_command(self)
     }
 
     fn interactive_args(

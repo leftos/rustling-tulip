@@ -6478,8 +6478,11 @@ export type DaemonMessage =
    *
    * `effort`: The effort the agent reports for the main agent, verbatim; none
    * when the newest reply names none.
+   *
+   * `switch_command`: The text the chat sends to open the agent's own model switcher;
+   * none when the agent has none.
    */
-  | { type: "chat_model"; session_id: string; model?: string | null; label?: string | null; effort?: string | null };
+  | { type: "chat_model"; session_id: string; model?: string | null; label?: string | null; effort?: string | null; switch_command?: string | null };
 
 /** One file a [`DaemonMessage::FileMatches`] answer carries. */
 export interface FileMatch {

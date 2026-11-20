@@ -5126,6 +5126,7 @@ fn chat_model(session_id: &str) -> DaemonMessage {
         model: Some("claude-opus-5-5".to_owned()),
         label: Some("Opus 5.5".to_owned()),
         effort: Some("high".to_owned()),
+        switch_command: Some("/model".to_owned()),
     }
 }
 

@@ -1533,6 +1533,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_model_names_the_switch_command() {
+        let fx = Fixture::new("chat-model-switch", Some("conv-a"));
+        fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let plugin = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered");
+        let expected = plugin.model_switch_command().map(str::to_owned);
+        let switch = loop {
+            if let DaemonMessage::ChatModel { switch_command, .. } =
+                test_support::next_message(&mut a_rx).await
+            {
+                break switch_command;
+            }
+        };
+        assert_eq!(
+            switch, expected,
+            "the model carries the plugin's switch command"
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_only_switch_updates_the_model_at_once() {
         let fx = Fixture::new("chat-switch-at-once", Some("conv-a"));
         fx.append("conv-a", &[user(1), reply("a-2", 2, OPUS)]);

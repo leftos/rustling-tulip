@@ -1416,6 +1416,7 @@ impl SessionMirror {
             model: self.model_shown.clone(),
             label,
             effort: self.effort_shown.clone(),
+            switch_command: self.plugin.model_switch_command().map(str::to_owned),
         }
     }
 

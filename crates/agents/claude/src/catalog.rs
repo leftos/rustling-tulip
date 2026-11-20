@@ -46,7 +46,7 @@ const BUILT_INS: [(&str, &str, bool); 23] = [
     (
         "model",
         "Choose the model and effort the session runs with.",
-        true,
+        false,
     ),
     ("config", "Open the agent's settings.", true),
     ("resume", "Resume an earlier conversation.", true),
@@ -777,7 +777,6 @@ mod tests {
         assert_eq!(entries.len(), BUILT_INS.len());
 
         let in_terminal = [
-            "model",
             "config",
             "resume",
             "mcp",
@@ -833,7 +832,6 @@ mod tests {
             .collect();
         flagged.sort_unstable();
         let mut expected = vec![
-            "model",
             "config",
             "resume",
             "memory",

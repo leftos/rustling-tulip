@@ -142,7 +142,7 @@ Every Claude session can be shown three ways, on every client: **Terminal**, **C
 
   It refuses unless the session is hook-confirmed idle with no background work (AT.1), types `/clear`, waits for `SessionStart source=clear` (HS.7), then types `/nextup` (the command comes from the marker table, AT.2). A `/clear` typed by hand during the action does not trigger a second one.
 - **SV.6 Session vitals.** Context % with the 40% `/nextup` line marked, cost, and the prompt-cache expiry countdown, on each sidebar leaf, chat header and phone card. Source: the per-session `statusline.json` (only it carries the cache expiry), or the transcript's `usage`. This also fixes `CLAUDE.md:135`'s claim that cost is tailed today.
-- **SV.7 Composer niceties** (from Orca): `/` catalog of commands and skills, `@` file mentions, image attach (uses PF.12), quick replies ("continue", "yes"), model / effort pills (the model pill and the effort it shows are delivered; switching the effort waits, RT-1926), dictation (RT-75, MA11).
+- **SV.7 Composer niceties** (from Orca): `/` catalog of commands and skills, `@` file mentions, image attach (uses PF.12), quick replies ("continue", "yes"), model / effort pills (the model pill and the effort it shows are delivered, and the pill opens the agent's model picker; the effort stepper waits, RT-1926), dictation (RT-75, MA11).
 
 ## 4. Remote desktop client (`RD`)
 

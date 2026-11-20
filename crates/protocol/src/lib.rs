@@ -8180,6 +8180,10 @@ pub enum DaemonMessage {
         /// when the newest reply names none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// The text the chat sends to open the agent's own model switcher;
+        /// none when the agent has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch_command: Option<String>,
     },
 }
 
@@ -19450,6 +19454,7 @@ mod tests {
             model: Some("model-7".to_string()),
             label: Some("Model 7".to_string()),
             effort: Some("high".to_string()),
+            switch_command: Some("/model".to_string()),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""type":"chat_model""#));
@@ -19459,11 +19464,13 @@ mod tests {
                 model,
                 label,
                 effort,
+                switch_command,
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(model.as_deref(), Some("model-7"));
                 assert_eq!(label.as_deref(), Some("Model 7"));
                 assert_eq!(effort.as_deref(), Some("high"));
+                assert_eq!(switch_command.as_deref(), Some("/model"));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -19472,6 +19479,7 @@ mod tests {
             model: None,
             label: None,
             effort: None,
+            switch_command: None,
         };
         let json = serde_json::to_string(&cleared).expect("serialize");
         assert_eq!(json, r#"{"type":"chat_model","session_id":"s1"}"#);
@@ -19480,6 +19488,7 @@ mod tests {
             DaemonMessage::ChatModel {
                 model: None,
                 label: None,
+                switch_command: None,
                 ..
             }
         ));

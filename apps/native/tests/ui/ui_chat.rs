@@ -104,6 +104,20 @@ fn chat_model(
         model: model.map(str::to_owned),
         label: label.map(str::to_owned),
         effort: effort.map(str::to_owned),
+        switch_command: None,
+    }
+}
+
+/// A `ChatModel` for `session_id` naming `label` as the model its main agent
+/// answers with, and `switch` as the text that opens the agent's model
+/// picker.
+fn chat_model_with_switch(session_id: &str, label: &str, switch: &str) -> DaemonMessage {
+    DaemonMessage::ChatModel {
+        session_id: session_id.to_owned(),
+        model: Some("claude-opus-5-5".to_owned()),
+        label: Some(label.to_owned()),
+        effort: None,
+        switch_command: Some(switch.to_owned()),
     }
 }
 
@@ -3207,6 +3221,58 @@ fn a_chat_with_no_model_draws_no_pill(cx: &mut TestAppContext) {
 
     assert!(!painted(&mut h, "chat-model"), "no model, no pill");
     assert_eq!(pill_label(&mut h), None);
+}
+
+#[gpui::test]
+fn clicking_the_pill_sends_the_switch_command(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model_with_switch("s1", "Opus 5.5", "/model"));
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn");
+    h.sent();
+
+    h.click_on("chat-model");
+
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1, "one send: {sent:?}");
+    assert_eq!(sent[0].0, "/model");
+}
+
+#[gpui::test]
+fn the_pill_without_a_switch_command_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model(
+        "s1",
+        Some("claude-opus-5-5"),
+        Some("Opus 5.5"),
+        None,
+    ));
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn");
+    h.sent();
+
+    h.click_on("chat-model");
+
+    let sent = sends(&mut h);
+    assert!(sent.is_empty(), "a read-only pill sends nothing: {sent:?}");
+}
+
+#[gpui::test]
+fn the_pill_sends_nothing_while_a_card_is_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model_with_switch("s1", "Opus 5.5", "/model"));
+    show(&mut h, permission("p1"));
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn, disabled");
+    h.sent();
+
+    h.click_on("chat-model");
+
+    let sent = sends(&mut h);
+    assert!(sent.is_empty(), "a disabled pill sends nothing: {sent:?}");
 }
 
 #[gpui::test]

@@ -476,6 +476,10 @@ impl Agent for ClaudePlugin {
         activity::model_display(model)
     }
 
+    fn model_switch_command(&self) -> Option<&'static str> {
+        Some("/model")
+    }
+
     fn interactive_args(
         &self,
         opts: &ClaudeOptions,
@@ -925,6 +929,11 @@ mod tests {
             Agent::model_label(&ClaudePlugin, "claude-opus-5-5"),
             "Opus 5.5"
         );
+    }
+
+    #[test]
+    fn the_model_switch_command_is_slash_model() {
+        assert_eq!(Agent::model_switch_command(&ClaudePlugin), Some("/model"));
     }
 
     #[test]
