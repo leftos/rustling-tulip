@@ -1,0 +1,32 @@
+
+ ▐▛███▛█   Claude Code v2.1.329
+▝▜██████▀  Opus 5.5 with high effort · Claude Ultra
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+
+⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on
+⚠ 1 MCP server needs authentication · run /mcp
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ /model
+  ⎿  Kept model as Sonnet 5.5
+
+❯ Reply with the single word ok.
+
+● ok
+
+✻ Baked for 4s · done 8:18 PM                                                                                  ⧉ Reply
+
+❯ /model
+  ⎿  Set model to Opus 5.5 for this session only
+
+                                                                                                      ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ctx:   8%  |  sub: 7d   2% (4d08h)  |  X: 384G free  |  Opus 5.5  |  main  |  X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 3 agents

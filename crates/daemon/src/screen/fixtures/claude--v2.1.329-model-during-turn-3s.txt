@@ -1,0 +1,32 @@
+
+
+❯ Reply with the single word ok.
+
+● ok
+
+✻ Baked for 4s · done 8:18 PM                                                                                  ⧉ Reply
+
+❯ /model
+  ⎿  Set model to Opus 5.5 for this session only
+
+❯ /model
+  ⎿  Set model to Opus 5.5 for this session only with xhigh effort
+
+❯ /model
+  ⎿  Set model to Opus 5.5 for this session only with high effort
+
+❯ /effort status
+  ⎿  Current effort level: high (Comprehensive implementation with extensive testing and documentation)
+
+❯ /model
+  ⎿  Kept model as Opus 5.5
+
+❯ Count from 1 to 150, one number per line.
+
+· Seasoning… (3s · ↓ 16 tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ctx:   8%  |  sub: 7d   2% (4d08h)  |  X: 384G free  |  Opus 5.5  |  main  |  X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 3 agents

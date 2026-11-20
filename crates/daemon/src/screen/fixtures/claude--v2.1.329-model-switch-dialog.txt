@@ -1,0 +1,32 @@
+
+ ▐▛███▛█   Claude Code v2.1.329
+▝▜██████▀  Sonnet 5.5 · Claude Ultra
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+
+⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on
+⚠ 1 MCP server needs authentication · run /mcp
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ /model
+  ⎿  Kept model as Sonnet 5.5
+
+❯ Reply with the single word ok.
+
+● ok
+
+✻ Baked for 4s · done 8:18 PM                                                                                  ⧉ Reply
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Switch model?
+  Your next response will be slower and use more tokens
+
+  This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.
+
+  ❯ 1. Yes, switch to Opus 5.5
+    2. No, go back
+
+  Enter to confirm · Esc to cancel

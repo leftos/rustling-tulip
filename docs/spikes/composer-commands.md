@@ -127,9 +127,27 @@ The first bare `/model` closed with Esc was recorded as `system` records (subtyp
 - `/effort max` and `/effort status` are safe for one session from the composer. Bare `/model` and bare `/effort` are overlays ("opens in the terminal").
 - The chat can read the active model from the next `assistant` record's `message.model`, and the effort from its top-level `effort`.
 
+### The picker's session-only paths on 2.1.329
+
+Measured on Claude Code 2.1.329 with the same Setup, at 120 by 32: every path below goes through the picker's `s`, never Enter, and none of them wrote `settings.json` (its hash was checked after each step). The screens are fixtures in `crates/daemon/src/screen/fixtures/`, named `claude--v2.1.329-model-*.txt` and `claude--v2.1.329-effort-status.txt`.
+
+- **The picker.** Bare `/model` draws the rows of the earlier section, with the tick on `1.  Default (recommended) ✔` when `settings.json` names no model, a `▸   More models` row, the effort row and the footer `s to use this session only · Enter to save · Esc to cancel` (`claude--v2.1.329-model-picker.txt`). The daemon reads the session as `idle` while the picker is open (`working` over a running turn), so the picker is found by its `Select model` row, never by status.
+- **The effort row follows the cursor**: on Sonnet it reads `◐ Medium effort (default) ←/→ to adjust` (`…-model-picker-on-sonnet.txt`).
+- **`s` on another row** prints `⎿  Set model to Sonnet 5.5 for this session only`, and the status line, the effort indicator and the banner follow the new model (`…-model-session-only-switch.txt`). Reopened, the picker has the tick and the cursor on the session's model (`…-model-picker-after-session-switch.txt`).
+- **`s` on the ticked row** opens no dialog and prints the same line again (`…-model-s-on-current.txt`), also after a turn.
+- **`s` with the effort row moved** adds the level: `⎿  Set model to Opus 5.5 for this session only with xhigh effort`, and the indicator reads `◉ xhigh · /effort` (`…-model-picker-effort-right.txt`, `…-model-effort-right-s.txt`; Left: `…-effort-left*.txt`). `/effort status` then reports the level (`claude--v2.1.329-effort-status.txt`).
+- **The `Switch model?` dialog** opens for `s` on another model after a turn, and the daemon reads it as `awaiting_input` (`…-model-switch-dialog.txt`). `2. No, go back` returns to the picker with the cursor back on the ticked row, not the row it left (`…-model-switch-dialog-go-back.txt`); `1. Yes, switch to …` prints the session-only line (`…-model-switch-dialog-yes.txt`).
+- **More models** hides the effort row and changes the footer to `Enter to expand · Esc to cancel`, with no `s`; Right does nothing there (`…-model-picker-more-models*.txt`).
+- **Esc** prints `⎿  Kept model as Sonnet 5.5` and saves nothing, even with the cursor and effort moved (`…-model-picker-before-esc.txt`, `…-model-esc.txt`). Over a running turn the close shows as a notice beside the prompt instead (`…-model-typed-during-turn-esc.txt`).
+- **Over a running turn**, `/model` typed as keys opens the picker at once above the spinner, and the turn finishes underneath it (`…-model-typed-during-turn-0.7s.txt`, `…-2.7s.txt`). A composer `send` of `/model` made in the turn's first second never reached the prompt and left no log line (`…-model-during-turn-1s.txt`, `…-3s.txt`).
+
+**The transcript.** Each `s` switch appends four records: a `file-history-snapshot`, a meta `user` record holding the local-command caveat, a `user` record `<command-name>/model</command-name>` with empty `<command-args>`, and a `user` record `<local-command-stdout>Set model to \`Sonnet 5.5\` for this session only</local-command-stdout>` (with `with \`xhigh\` effort` after it when the effort moved).
+
+An Esc close is two `system` records of subtype `local_command`, the second `<local-command-stdout>Kept model as \`Sonnet 5.5\`</local-command-stdout>`. The main-thread replies after a switch name the new model and its effort.
+
 ### Not measured
 
 - Typed `/model sonnet`, `/model haiku`, and `/model opus high`, because each would write the owner's default model. Whether a typed `/model <name>` in a conversation with a turn opens the `Switch model?` dialog, and whether it saves before or after that dialog.
-- Haiku 5.5, Fable 5.2 and the `More models` rows.
+- Switching to Haiku 5.5 or Fable 5.2, and the models behind `More models`.
 - `/effort low|medium|xhigh|auto` and `/effort ultracode`, and the picker's Enter path, all of which save.
 - Whether the daemon's own chat mirror shows the switched model: `sessions --json` carries no model field.

@@ -1,0 +1,32 @@
+  142
+  143
+  144
+  145
+  146
+  147
+  148
+  149
+  150
+
+✻ Sautéed for 5s · done 8:19 PM                                                                                ⧉ Reply
+
+❯ /model
+  ⎿  Kept model as Opus 5.5
+
+❯ Count from 1 to 150, one number per line.
+
+✶ Noodling… (2s · ↓ 10 tokens)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Select model
+  Your pick is the default for new sessions. For other models, use --model.
+
+    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+  ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+    3.  Fable 5.2              For your toughest challenges
+    4.  Sonnet 5.5             Most efficient for simpler tasks
+    5.  Haiku 5.5              Fastest for quick answers
+    ▸   More models
+
+  ● High effort ←/→ to adjust
+
+  s to use this session only · Enter to save · Esc to cancel

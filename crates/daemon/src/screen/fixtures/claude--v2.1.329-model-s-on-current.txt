@@ -1,0 +1,32 @@
+
+ ▐▛███▛█   Claude Code v2.1.329
+▝▜██████▀  Sonnet 5.5 · Claude Ultra
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+
+⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on
+⚠ 1 MCP server needs authentication · run /mcp
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sub: 7d   2% (4d08h)  |  X: 384G free  |  Sonnet 5.5  |  main  |  X:\dev\rustling-tulip\.tmp\rt-1984\cwd
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 3 agents

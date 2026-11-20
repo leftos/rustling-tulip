@@ -47,6 +47,8 @@ What the captures measured about the box, which the draft reader and the clear r
 - ctrl+u bytes written together act one per byte up to a 40-byte write; an 88-byte write was dropped whole, so a recipe writes them in small groups.
 - Tab accepts a suggestion as plain text, the whole of it, even when the box shows it cut.
 
+`claude--v2.1.329-model-*.txt` and `claude--v2.1.329-effort-status.txt` are Claude Code 2.1.329 screens (120 columns) taken for RT-1984: the `/model` picker and its session-only `s` paths, the effort row moved, the `Switch model?` dialog and its two answers, `More models`, an Esc close, and the picker opened over a running turn (`docs/spikes/composer-commands.md`, "The picker's session-only paths on 2.1.329").
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.
