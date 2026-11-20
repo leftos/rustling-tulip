@@ -1652,6 +1652,61 @@ fn an_mcp_server_card_offers_its_three_options_and_sends_the_pick(cx: &mut TestA
 }
 
 #[gpui::test]
+fn a_model_picker_card_sends_the_picked_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut picker = prompt(
+        "m1",
+        ChatPromptKind::ModelPicker,
+        &[
+            (1, "Default (recommended)"),
+            (2, "Opus 5.5"),
+            (3, "Fable 5.2"),
+            (4, "Sonnet 5.5"),
+            (5, "Haiku 5.5"),
+            (6, "More models"),
+        ],
+    );
+    picker.subject = "Select model".to_owned();
+    picker.cursor = Some(1);
+    picker.options[0].description =
+        Some("Current · Opus 5.5 · Best for everyday, complex tasks".to_owned());
+    picker.options[1].description = Some("For complex work and everyday tasks".to_owned());
+    show(&mut h, picker);
+    for button in [
+        "chat-card-1",
+        "chat-card-2",
+        "chat-card-3",
+        "chat-card-4",
+        "chat-card-5",
+    ] {
+        assert!(painted(&mut h, button), "{button}");
+    }
+    assert!(
+        !painted(&mut h, "chat-card-6"),
+        "More models gets no button"
+    );
+    h.click_on("chat-card-4");
+    assert_eq!(answer_kinds(&mut h), [opt(4)]);
+}
+
+#[gpui::test]
+fn a_switch_model_card_sends_no_go_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(
+        &mut h,
+        prompt(
+            "m2",
+            ChatPromptKind::Confirm,
+            &[(1, "Yes, switch to Opus 5.5"), (2, "No, go back")],
+        ),
+    );
+    h.click_on("chat-card-2");
+    assert_eq!(answer_kinds(&mut h), [opt(2)]);
+}
+
+#[gpui::test]
 fn question_review_plan_trust_and_heads_up_cards_send_their_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

@@ -311,6 +311,8 @@ const SUMMARY_OPEN_LINE: &str = "t1";
 /// The stretch the `chat` shot's finished answer draws open, with a closed
 /// stretch nested in it and another closed beside it.
 const CHAT_OPEN_STRETCH: &str = "pills";
+/// The prompt id the `chat-model-picker` shot's card answers.
+const MODEL_PICKER_PROMPT: &str = "model-1";
 /// The `chat` shot's running Bash call, drawn open one statement per line.
 const FOOTER_SPECS: &str = "cargo build -p rustling-tulip-native 2>&1 | tail -n 3; \
      cargo nextest run -p rustling-tulip-native -E 'test(/footer/)' > .tmp/footer.log 2>&1 && \
@@ -371,6 +373,7 @@ enum View {
     UpdateCountdown,
     Chat,
     ChatCompact,
+    ChatModelPicker,
     Summary,
     Themes,
     ThemesEdit,
@@ -420,7 +423,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 68] = [
+    const ALL: [Self; 69] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -443,6 +446,7 @@ impl View {
         Self::UpdateCountdown,
         Self::Chat,
         Self::ChatCompact,
+        Self::ChatModelPicker,
         Self::Summary,
         Self::Themes,
         Self::ThemesEdit,
@@ -590,6 +594,7 @@ impl View {
             Self::UpdateCountdown => "update-countdown",
             Self::Chat => "chat",
             Self::ChatCompact => "chat-compact",
+            Self::ChatModelPicker => "chat-model-picker",
             Self::Summary => "summary",
             Self::Themes => "themes",
             Self::ThemesEdit => "themes-edit",
@@ -679,7 +684,7 @@ impl View {
             Self::Toast => TOAST_WINDOW_SIZE,
             Self::DashboardCompact => DASHBOARD_COMPACT_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
-            Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
+            Self::Chat | Self::ChatCompact | Self::ChatModelPicker => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             Self::PhoneHome
             | Self::PhoneSheet
@@ -863,6 +868,14 @@ impl View {
                         |row| matches!(row, RowShape::Run { ids, .. } if ids.first().is_some_and(|id| id == "x1")),
                     )
             }
+            // The chat with the `/model` picker's card up, its current
+            // model row ticked.
+            Self::ChatModelPicker => {
+                root.pane_shows_chat("p1")
+                    && root
+                        .chat_card("s-petal")
+                        .is_some_and(|(prompt, _)| prompt == MODEL_PICKER_PROMPT)
+            }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
                     && root.summary_line_open("s-petal", SUMMARY_OPEN_LINE)
@@ -990,6 +1003,7 @@ impl Shot {
             | View::UpdateCountdown
             | View::Chat
             | View::ChatCompact
+            | View::ChatModelPicker
             | View::Summary
             | View::Themes
             | View::ThemesEdit
@@ -2345,7 +2359,7 @@ fn drive(
         View::UpdateNotes => drive_update_notes(step, window, cx),
         View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
-        View::ChatCompact => open_chat(window, cx),
+        View::ChatCompact | View::ChatModelPicker => open_chat(window, cx),
         View::Chat => {
             let root = window
                 .root::<RootView>()
@@ -3930,6 +3944,7 @@ impl FakeDaemon {
         let screen = match self.view {
             View::Summary => permission_screen(),
             View::Chat => question_screen(),
+            View::ChatModelPicker => model_picker_screen(),
             _ => ChatScreen {
                 composer: ComposerState::Working,
                 prompt: None,
@@ -4993,6 +5008,46 @@ fn question_screen() -> ChatScreen {
             body: String::new(),
             options,
             questions,
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: Some(1),
+        }),
+    }
+}
+
+/// The `chat-model-picker` shot's screen: the 2.1.329 `/model` picker with
+/// its rows as the daemon reads them, its first the current model.
+fn model_picker_screen() -> ChatScreen {
+    let options = [
+        (
+            1,
+            "Default (recommended)",
+            Some("Current · Opus 5.5 · Best for everyday, complex tasks"),
+        ),
+        (2, "Opus 5.5", Some("For complex work and everyday tasks")),
+        (3, "Fable 5.2", Some("For your toughest challenges")),
+        (4, "Sonnet 5.5", Some("Most efficient for simpler tasks")),
+        (5, "Haiku 5.5", Some("Fastest for quick answers")),
+        (6, "More models", None),
+    ]
+    .into_iter()
+    .map(|(number, label, description)| ChatOption {
+        number,
+        label: label.to_owned(),
+        description: description.map(str::to_owned),
+        selected: number == 1,
+    })
+    .collect();
+    ChatScreen {
+        composer: ComposerState::Dialog,
+        prompt: Some(ChatPrompt {
+            id: MODEL_PICKER_PROMPT.to_owned(),
+            kind: ChatPromptKind::ModelPicker,
+            subject: "Select model".to_owned(),
+            body: String::new(),
+            options,
+            questions: Vec::new(),
             can_amend: false,
             always_allow_tip: None,
             multi: false,

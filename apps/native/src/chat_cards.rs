@@ -348,11 +348,45 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
             Some(2),
         ),
         ChatPromptKind::Trust => positional(prompt, &["Trust this folder", "Exit"], None),
-        ChatPromptKind::McpServer | ChatPromptKind::HeadsUp => positional(prompt, &[], None),
-        ChatPromptKind::ModelPicker | ChatPromptKind::Confirm | ChatPromptKind::Unknown => {
-            Vec::new()
+        ChatPromptKind::McpServer | ChatPromptKind::HeadsUp | ChatPromptKind::Confirm => {
+            positional(prompt, &[], None)
         }
+        ChatPromptKind::ModelPicker => model_picker_buttons(prompt),
+        ChatPromptKind::Unknown => Vec::new(),
     }
+}
+
+/// The label of the model picker's last row: the daemon refuses its answer,
+/// so the card offers no button for it.
+const MORE_MODELS: &str = "More models";
+
+/// The tick the picker draws on the current model's row.
+const TICK: &str = "✔";
+
+/// One button per model row, the picker's own label for each, its current
+/// model's ticked as the picker ticks it; no button for More models.
+fn model_picker_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
+    prompt
+        .options
+        .iter()
+        .filter(|choice| choice.label != MORE_MODELS)
+        .map(|choice| {
+            let current = choice
+                .description
+                .as_deref()
+                .is_some_and(|text| text == "Current" || text.starts_with("Current · "));
+            let label = if current {
+                format!("{} {TICK}", choice.label)
+            } else {
+                choice.label.clone()
+            };
+            CardButton::numbered(
+                choice.number,
+                &label,
+                ButtonAnswer::Fixed(option(choice.number)),
+            )
+        })
+        .collect()
 }
 
 /// Allow once, Always allow (when offered, its tooltip the rule) and Deny.
@@ -1475,6 +1509,77 @@ mod tests {
             ),
             KeyAction::Pass,
             "Esc has no button on the card"
+        );
+    }
+
+    /// The 2.1.329 `/model` picker's rows as the daemon reads them.
+    fn model_picker() -> ChatPrompt {
+        let described = |number: u32, label: &str, description: Option<&str>| ChatOption {
+            number,
+            label: label.to_owned(),
+            description: description.map(str::to_owned),
+            selected: false,
+        };
+        prompt(
+            "p1",
+            ChatPromptKind::ModelPicker,
+            vec![
+                described(
+                    1,
+                    "Default (recommended)",
+                    Some("Current · Opus 5.5 · Best for everyday, complex tasks"),
+                ),
+                described(2, "Opus 5.5", Some("For complex work and everyday tasks")),
+                described(3, "Fable 5.2", Some("For your toughest challenges")),
+                described(4, "Sonnet 5.5", Some("Most efficient for simpler tasks")),
+                described(5, "Haiku 5.5", Some("Fastest for quick answers")),
+                described(6, "More models", None),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_model_picker_card_offers_each_model_and_ticks_the_current_one() {
+        let mut prompt = model_picker();
+        assert_eq!(
+            fixed(&card_buttons(&prompt, "Claude")),
+            [
+                row("1", "Default (recommended) ✔", opt(1)),
+                row("2", "Opus 5.5", opt(2)),
+                row("3", "Fable 5.2", opt(3)),
+                row("4", "Sonnet 5.5", opt(4)),
+                row("5", "Haiku 5.5", opt(5)),
+            ]
+        );
+        prompt.options[1].description = Some("Current".to_owned());
+        assert_eq!(
+            fixed(&card_buttons(&prompt, "Claude"))[1],
+            row("2", "Opus 5.5 ✔", opt(2)),
+            "a current model with a bare Current description is ticked"
+        );
+    }
+
+    #[test]
+    fn a_model_picker_card_offers_no_more_models_button() {
+        let buttons = fixed(&card_buttons(&model_picker(), "Claude"));
+        assert!(
+            buttons.iter().all(|(id, _, _)| id != "6"),
+            "the daemon refuses More models: {buttons:?}"
+        );
+    }
+
+    #[test]
+    fn a_confirm_card_takes_the_screens_labels() {
+        let confirm = prompt_with(
+            ChatPromptKind::Confirm,
+            &[(1, "Yes, switch to Opus 5.5"), (2, "No, go back")],
+        );
+        assert_eq!(
+            fixed(&card_buttons(&confirm, "Claude")),
+            [
+                row("1", "Yes, switch to Opus 5.5", opt(1)),
+                row("2", "No, go back", opt(2)),
+            ]
         );
     }
 
