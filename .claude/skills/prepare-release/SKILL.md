@@ -1,6 +1,6 @@
 ---
 name: prepare-release
-description: Use when cutting a rustling-tulip release, when the owner invokes /prepare-release or a /nextup run finds every item of vNext (or vHotfix) Done. Walks scope, version, changelog, gates, feature smoke tests, README, the signed Windows and macOS builds, tag, GitHub release, the Linear cut and the next release's scope.
+description: Use when cutting a rustling-tulip release, when the owner invokes /prepare-release or a /nextup run finds every item of vNext (or vHotfix) Done. Walks scope, version, changelog, gates, feature smoke tests, README, the signed Windows, macOS and TestFlight builds, tag, GitHub release, the Linear cut and the next release's scope.
 ---
 
 Cut and publish a rustling-tulip release from the repo root. Walk the phases in order; each ends on its **Done when** line. A red anywhere stops the cut until its fix lands as an ordinary item, and the cut resumes at Phase 4 on the new head.
@@ -77,8 +77,9 @@ The assets are built from `HEAD`, which is the commit Phase 8 tags: nothing land
 
 1. **Windows.** `pwsh -NoProfile -File ./rt.ps1 installer`, signed in to Azure and never with `-Unsigned` (prerequisites: `tools/installer/README.md`, "Code signing"). It also builds the phone app into the install folder, so it needs pnpm. `Get-AuthenticodeSignature target\installer\rustling-tulip-<version>-setup.exe` must show `Valid` with a timestamp. A release runs no hand test of the installer.
 2. **macOS.** `pwsh -NoProfile -File tools/installer/pack-macos-signed.ps1`. The pack refuses unless codesign, spctl and stapler pass, so check only that the dmg, zip and `.zip.sha256` are back in `target/installer` and that the `.zip.sha256` names the zip. When the Mac mini is unreachable, ask the owner whether the release goes out Windows-only, its macOS assets added later with `gh release upload v<version> <the three files> --repo leftos/rustling-tulip`.
+3. **iPhone.** `pwsh -NoProfile -File tools/ios/testflight.ps1` builds the phone app from `HEAD`, signs it for the App Store and uploads it to TestFlight on the Mac mini; its last line is `testflight: uploaded build <n>`. When the Mac mini is unreachable, the release goes out without it, and the upload runs from the tag's commit once the Mac is back.
 
-**Done when** the setup exe (signature `Valid`), its `.sha256`, and the macOS dmg, zip and `.zip.sha256` are in `target/installer`, each `.sha256` naming its file, or the owner has approved a Windows-only release.
+**Done when** the setup exe (signature `Valid`), its `.sha256`, and the macOS dmg, zip and `.zip.sha256` are in `target/installer`, each `.sha256` naming its file, or the owner has approved a Windows-only release, and the TestFlight upload printed `testflight: uploaded build <n>`.
 
 ## Phase 8: Tag and push
 

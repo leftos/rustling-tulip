@@ -9,6 +9,7 @@ What a versioned release of rustling-tulip publishes, starting with `v0.1.0-alph
 - The macOS (Apple silicon) assets: `rustling-tulip-<version>-macos-arm64.dmg` (what a person downloads), and `rustling-tulip-<version>-macos-arm64.zip` with `rustling-tulip-<version>-macos-arm64.zip.sha256` (what the app's updater downloads and checks on a Mac). They are signed with the Developer ID, notarized and stapled, built by `tools/installer/pack-macos-signed.ps1` (`tools/installer/README.md` "macOS code signing").
 
   A release missing the macOS pair stays valid for Windows and is simply not offered to a Mac as an update ([auto-update.md](./auto-update.md)).
+- A TestFlight build of the phone app from the same commit, signed for the App Store and uploaded by `tools/ios/testflight.ps1` (`tools/installer/README.md` "iOS signing"). It is not a GitHub release asset.
 - The release's notes, which are the version's `CHANGELOG.md` section without its `## v<version>` heading (the client's What's new window shows each release's body under its own heading, [auto-update.md](./auto-update.md)), opening with the breaking marker when the release has one.
 - The version lives in one place, `[workspace.package] version` in `Cargo.toml`, which every crate inherits; the installer reads it from there.
 
