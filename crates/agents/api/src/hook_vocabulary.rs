@@ -30,6 +30,14 @@ const MAX_QUESTIONS: usize = 8;
 /// Option labels kept per question.
 const MAX_OPTIONS: usize = 8;
 
+/// The opening of a prompt the agent delivers as its own finished background
+/// work: a task's notice envelope.
+const DELIVERED_TASK_NOTIFICATION_PREFIX: &str = "<task-notification>";
+
+/// The opening of a prompt the agent delivers as a poll event it watched for.
+/// The trailing space keeps a prompt starting "<eventual" the owner's own.
+const DELIVERED_EVENT_PREFIX: &str = "<event ";
+
 /// The work a main agent's turn end reports still running beside its idle
 /// turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -238,13 +246,31 @@ pub fn map(body: &Value) -> Option<HookReport> {
 
 /// Whether the payload delivers the agent's own background result as a
 /// prompt: a `UserPromptSubmit` naming a non-empty string `source`, which a
-/// prompt the owner types does not carry.
+/// prompt the owner types does not carry, or one whose `prompt` is a
+/// delivered envelope (see [`delivered_envelope`]), which the agent's CLI
+/// sends in its place on a payload with no `source` at all.
 fn delivers_result(body: &Value) -> bool {
-    body.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")
-        && body
-            .get("source")
+    if body.get("hook_event_name").and_then(Value::as_str) != Some("UserPromptSubmit") {
+        return false;
+    }
+    let named_source = body
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| !source.is_empty());
+    named_source
+        || body
+            .get("prompt")
             .and_then(Value::as_str)
-            .is_some_and(|source| !source.is_empty())
+            .is_some_and(delivered_envelope)
+}
+
+/// Whether a prompt's text is an envelope the agent delivers rather than
+/// input the owner typed: a finished task's notice or a poll event, after
+/// any leading whitespace.
+fn delivered_envelope(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    prompt.starts_with(DELIVERED_TASK_NOTIFICATION_PREFIX)
+        || prompt.starts_with(DELIVERED_EVENT_PREFIX)
 }
 
 /// The live line a `MessageDisplay` payload carries: its `delta` as the

@@ -193,9 +193,10 @@ pub struct HookReport {
     /// An idle the agent reports while it may still be waiting on a prompt,
     /// which leaves a pending prompt alone.
     pub weak_idle: bool,
-    /// The event is a prompt the agent's CLI marks as delivering its own
-    /// background result (a `source` on the prompt), not input from the owner:
-    /// it never ends a waiting prompt.
+    /// The event is the agent's CLI delivering its own background result as a
+    /// prompt, not input from the owner: a non-empty `source` on the prompt,
+    /// or a prompt opening with a delivered task notice or poll event. It
+    /// never ends a waiting prompt.
     pub delivered: bool,
 }
 

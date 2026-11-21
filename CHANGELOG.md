@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A question card shows a path or link that wraps past the terminal's width whole, so it opens, and a path written in backticks links too.
 - On the phone, Ctrl then the keyboard's Backspace sends Ctrl+Backspace and releases Ctrl, and Ctrl then a typed C interrupts even over a selection.
 - On the phone, Back with the Terminal page's Quick dock open closes the dock first.
+- A session waiting on your answer stays under Needs you, on the phone and the desktop, when a finished background task reports in.
 
 ## v0.18.1-alpha
 

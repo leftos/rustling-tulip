@@ -86,6 +86,8 @@ A reached run runs the same checks when a selected row in `tools/test-map.json` 
 
 A daemon a client, `bridge` or verb starts inherits none of the caller's handles and cannot hold a remote SSH command's channel open, but a script that starts one over SSH still wraps the local `ssh` in a timeout, so a regression fails the run instead of hanging it.
 
+To compare a session's status with what is on screen, `rustling-tulipd sessions --json` and `read <session id> --json` against the running daemon are a read-only way to do it; with Detailed logging on, the `status_trace` lines in `daemon.log` date each status change and name its cause.
+
 Measuring an elevated daemon against an ordinary one on a builder needs the real ordinary profile: under a `RUSTLING_TULIP_CONFIG_DIR` override both profiles resolve to one folder. With no daemon running, rename the real ordinary config folder aside, set `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to scratch folders and `RUSTLING_TULIP_CLAUDE` to a path that does not exist, and rename the folder back afterwards. An SSH logon of an administrator is High; a Medium process comes from a scheduled task with `-LogonType Interactive -RunLevel Limited` while the console session is logged on, and a daemon such a task starts comes through the WMI launch, since the task's job refuses breakaway.
 
 ## Reproducing a terminal fault
