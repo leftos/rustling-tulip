@@ -12,9 +12,11 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's session list can be sorted A–Z, with sessions that need you first, or grouped by the desktop's tabs on that host.
 - The phone's Chat box selects a word on a double tap or long press, with handles to drag and a Cut, Copy, Paste and Select All bar.
 - The phone's Chat box pastes an image from the clipboard, and its Photos button sends a picture from the photo library.
+- Paths in chat answers and question cards are links that open the file, drawn in their own colour on the desktop and the phone.
 
 ### Fixed
 
+- On the phone, a slash command such as /reload-plugins is no longer underlined as a path that opens nothing.
 - The chat shows Submit and Cancel at a question's review step with current Claude Code, and answering one of several questions keeps the session waiting for you.
 
 ### Changed
