@@ -244,3 +244,18 @@ These need TestFlight builds, an iPad and an iPhone, and a host with a working C
 - [ ] Turn an iPhone on its side on Home. **Expect:** the list and the selected session sit side by side, with "Pick a session" before a tap.
 - [ ] Open a session on Chat on the iPhone, then turn it on its side. **Expect:** the screen fills with the session's terminal and no header, and the key bar starts with `Back` and the session's status. Tap `Back`. **Expect:** the list and the session on Chat sit side by side. Turn the iPhone upright. **Expect:** the session shows Chat.
 - [ ] With Claude's terminal open, turn the device (the iPad, and the iPhone upright and on its side) and look at the terminal after each turn. **Expect:** the terminal redraws at the new width and Claude's TUI fits it.
+
+### Paste, the key bar and Needs you
+
+These need a TestFlight build from this work, an iPhone at iOS's default "Paste from Other Apps: Ask", and, for the keyboard steps, an iPad or iPhone with a hardware keyboard.
+
+- [ ] Copy text in another app, open a session's Chat page, tap `Keys` and tap the dock's `Paste` key. **Expect:** the text lands in the box with no "Allow Paste" refusal.
+- [ ] Type a line in the Chat box, double-tap a word so the edit bar shows, and tap the bar's `Paste`. **Expect:** the copied text replaces the word, no refusal, and the bar closes.
+- [ ] In Settings › Keys move `Paste` to the end of the grid, open `Keys` on a Chat page, select a word so the edit bar lies over the dock's last row, and tap the bar's `Copy` and then `Select All`. **Expect:** each does what it says; nothing is pasted.
+- [ ] Copy a HEIC photo from Photos and paste it into the Chat box, then copy a GIF and paste it. **Expect:** each attaches, with at most one "Allow Paste" question per paste (none on iOS 16 and later through the paste button).
+- [ ] Paste or pick a photo over 8 MB. **Expect:** it attaches; on the host its longer side is exactly 2048 pixels.
+- [ ] With a hardware keyboard, in the Terminal page select text and press Command-C, then press Command-V in the Chat box. **Expect:** the text copies and pastes. If Command-V does nothing or iOS refuses it, report it.
+- [ ] On the Terminal page tap the key bar's `Ctrl`, then the keyboard's Backspace. **Expect:** Claude's input deletes a word (Ctrl+Backspace), and the next letter you type is plain.
+- [ ] On the Terminal page open the Quick dock and tap `Back`. **Expect:** the dock closes and the page stays; a second `Back` leaves the page.
+- [ ] With the keyboard up on the Terminal page, look at the key bar's right end. **Expect:** `Hide` sits apart from the scrolling keys behind a thin line, and no key looks cut by it. Turn the phone on its side. **Expect:** the session's status sits in its own box between `Back` and the keys, readable.
+- [ ] Leave a session asking you a question (AskUserQuestion) while one of its background tasks or Monitor events finishes. **Expect:** the session stays under Needs you on Home the whole time, and tapping it shows the question.
