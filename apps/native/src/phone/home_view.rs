@@ -9,7 +9,7 @@ use std::rc::Rc;
 use chrono::{DateTime, Utc};
 use gpui::{
     App, ClickEvent, Context, Div, FontWeight, Pixels, ScrollEvent, ScrollHandle, SharedString,
-    Stateful, StyledText, TouchPhase, Window, div, prelude::*, px,
+    Stateful, StyledText, TouchPhase, Window, canvas, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -255,6 +255,38 @@ fn header_indexes(home: &Home, tray: bool) -> Vec<usize> {
         .collect()
 }
 
+/// The index in Home's hosts of the host whose header is pinned over the
+/// list's top, as `handle` last placed the list's children and scrolled
+/// them; `headers` are the host headers' child indexes ([`header_indexes`]).
+fn pinned_host_index(handle: &ScrollHandle, headers: &[usize]) -> Option<usize> {
+    let list_top = handle.bounds().top();
+    let tops: Vec<f32> = headers
+        .iter()
+        .map_while(|&ix| handle.bounds_for_item(ix))
+        .map(|bounds| f32::from(bounds.top() - list_top))
+        .collect();
+    pinned_host(&tops, -f32::from(handle.offset().y))
+}
+
+/// A zero-size check drawn after Home's list: once the list's layout has
+/// placed its children and clamped its offset, it works out the pinned host
+/// again and, when that is not `drawn`, the one this frame pinned, asks for
+/// another frame, so a list that changed without a scroll pins the right
+/// header.
+fn pin_check(handle: ScrollHandle, headers: Vec<usize>, drawn: Option<usize>) -> impl IntoElement {
+    canvas(
+        move |_, window: &mut Window, cx: &mut App| {
+            if pinned_host_index(&handle, &headers) != drawn {
+                // A refresh while drawing is ignored: ask once this frame is done.
+                window.defer(cx, |window, _| window.refresh());
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .size_0()
+}
+
 /// A host header's head row: its state's dot, its name and, while not
 /// online, where its connection stands, the status tagged
 /// `phone-home-{kind}-status-{tag}`; the header adds its buttons after it.
@@ -389,8 +421,10 @@ fn empty_line(t: &UiTheme) -> Div {
 impl PhoneRoot {
     /// Home: each open host's groups, under a header per host while more
     /// than one is open, scrolling within the height it is given.
-    /// Beside it, the header of the host scrolled past the list's top,
-    /// drawn over that top while more than one host is listed.
+    /// Beside it, the layer drawn after the list: the header of the host
+    /// scrolled past the list's top, drawn over that top while more than
+    /// one host is listed, and the check that pins again once the list's
+    /// layout is done.
     pub(super) fn home_list(&self, cx: &mut Context<Self>) -> (Stateful<Div>, Option<Div>) {
         let home = self.home(cx);
         let t = theme(cx);
@@ -419,7 +453,17 @@ impl PhoneRoot {
         if home.rows().next().is_none() {
             children.push(empty_line(&t));
         }
-        let pinned = self.pinned_header(&home, tray, &t, cx);
+        let headers = header_indexes(&home, tray);
+        let drawn = pinned_host_index(&self.home_scroll, &headers);
+        let pinned = self.pinned_header(&home, drawn, &t, cx);
+        // After the list, so its check runs once the list's layout is done.
+        let over = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .child(pin_check(self.home_scroll.clone(), headers, drawn))
+            .children(pinned);
         let list = div()
             .id("phone-home")
             .driver_id(|| "phone-home".to_owned())
@@ -435,33 +479,21 @@ impl PhoneRoot {
             // The handle holds the last frame's place: draw again with it.
             .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| cx.notify()))
             .children(children);
-        (list, pinned)
+        (list, Some(over))
     }
 
-    /// The index in `home.hosts` of the host whose header is pinned over
-    /// the list's top, as the list's last frame placed its headers; `tray`
-    /// says whether the tray heads the list.
-    fn pinned_index(&self, home: &Home, tray: bool) -> Option<usize> {
-        let list_top = self.home_scroll.bounds().top();
-        let tops: Vec<f32> = header_indexes(home, tray)
-            .into_iter()
-            .map_while(|ix| self.home_scroll.bounds_for_item(ix))
-            .map(|bounds| f32::from(bounds.top() - list_top))
-            .collect();
-        pinned_host(&tops, -f32::from(self.home_scroll.offset().y))
-    }
-
-    /// The pinned host's header over the list's top: its head row alone,
-    /// on the header's ground, taking taps without acting on them; `None`
-    /// while no header has scrolled past the top.
+    /// The pinned host's header over the list's top, `index` in
+    /// `home.hosts`: its head row alone, on the header's ground, taking taps
+    /// without acting on them; `None` while no header has scrolled past the
+    /// top.
     fn pinned_header(
         &self,
         home: &Home,
-        tray: bool,
+        index: Option<usize>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let host = home.hosts.get(self.pinned_index(home, tray)?)?;
+        let host = home.hosts.get(index?)?;
         let state = self.root.read(cx).host_header_state(&host.host);
         let id = format!("phone-home-pinned-{}", host_tag(&host.host));
         Some(
@@ -485,7 +517,8 @@ impl PhoneRoot {
     pub fn pinned_host(&self, cx: &App) -> Option<String> {
         let home = self.home(cx);
         let tray = self.tray_now(cx).is_some();
-        let host = home.hosts.get(self.pinned_index(&home, tray)?)?;
+        let index = pinned_host_index(&self.home_scroll, &header_indexes(&home, tray));
+        let host = home.hosts.get(index?)?;
         Some(host_tag(&host.host).to_owned())
     }
 

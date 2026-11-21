@@ -2068,6 +2068,77 @@ fn the_scrolled_past_host_header_is_pinned_at_the_list_top(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_tray_appearing_without_a_scroll_re_checks_the_pin(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    let first = saved_remote();
+    let scrolled = px(150.0);
+    scroll_list(&mut h, scrolled);
+    assert_eq!(pinned(&mut h), Some(wire(&first)), "the first host pins");
+
+    let mut sessions: Vec<SessionSnapshot> = listed().into_iter().filter(|s| s.id != "c").collect();
+    sessions.push(waiting("c", 2, question(&["main", "dev"])));
+    sessions.extend(
+        filler_ids()
+            .iter()
+            .map(|id| session(id).in_repo("r1").status("idle").build()),
+    );
+    h.host(&first).send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+
+    let list_top = h.bounds("phone-home").top();
+    let tray_height = h.bounds("phone-tray").size.height;
+    let header_top = h.bounds(&format!("phone-home-host-{}", wire(&first))).top() - list_top;
+    assert_eq!(
+        header_top,
+        tray_height - scrolled,
+        "the first host's header sits under the {tray_height:?} tray scrolled {scrolled:?}"
+    );
+    assert_eq!(
+        pinned(&mut h),
+        None,
+        "the first host's header at {header_top:?} below the list's top is wholly visible"
+    );
+    assert!(
+        !drawn(&mut h, &pinned_selector(&first)),
+        "no pinned header covers the tray's card at {scrolled:?}"
+    );
+}
+
+#[gpui::test]
+fn a_list_that_shrinks_under_its_offset_drops_the_stale_pin(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    let first = saved_remote();
+    scroll_list(&mut h, px(400.0));
+    assert_eq!(pinned(&mut h), Some(wire(&first)), "the first host pins");
+
+    for target in [saved_remote(), den()] {
+        h.host(&target)
+            .send(DaemonMessage::Sessions { sessions: listed() });
+    }
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        pinned(&mut h),
+        None,
+        "the shrunk list fits: nothing is pinned"
+    );
+    for target in [saved_remote(), den()] {
+        assert!(
+            !drawn(&mut h, &pinned_selector(&target)),
+            "no stale pin of {} covers the first host's header",
+            wire(&target)
+        );
+    }
+    assert_eq!(
+        h.bounds(&format!("phone-home-host-{}", wire(&first))).top(),
+        h.bounds("phone-home").top(),
+        "the first host's own header is at the list's top"
+    );
+}
+
+#[gpui::test]
 fn a_tap_on_the_pinned_header_opens_no_session(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_long_hosts(cx, &dir);

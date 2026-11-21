@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's Chat box pastes any image type, such as HEIC or GIF, and pastes the text on a host that takes no uploads.
 - On an iPad, the Chat box's Paste keeps working while a sheet covers only the session list.
 - The phone's paste button comes back after a theme change, and grabbing the Chat box's end selection handle low no longer pastes.
+- The phone's pinned host header is right again as soon as the Home list changes without a scroll, such as when a Needs you card appears.
 
 ### Changed
 
