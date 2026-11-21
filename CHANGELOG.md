@@ -4,26 +4,34 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.18.1-alpha
+
+### Highlights
+
+- The phone's Settings › Keys lists each key as a row under a live key bar preview, with an Edit mode to delete and reorder keys.
+- The phone's Needs you first is a switch beside the sort, so sessions that need you come first under any sort.
+- The phone's Paste key and Chat box paste through iOS's own paste button, including any image type.
+- A Mac daemon started outside the desktop session says its login Keychain is out of reach.
+
+### Changed
+
+- The phone's Needs you first is a switch beside the sort, so sessions that need you come first under A–Z or the desktop's tabs too.
+- The phone's Settings › Keys lists each key as a row under a live key bar preview, with an Edit mode to delete and reorder keys.
+- The phone's key editor previews the key as you change it, and lays each press out on two lines with a handle to reorder it.
+- Dragging a key, press or quick reply to the top or bottom of the phone's Settings page scrolls the page.
+
 ### Fixed
 
-- A Windows path in a chat answer, such as one through a `.tmp` folder, keeps every backslash where it is drawn and where its link opens.
-- A Mac whose daemon was started outside the desktop session says its login Keychain is out of reach, instead of a bare error saving a secret.
+- A Windows path in a chat answer, such as one through a `.tmp` folder, keeps every backslash, both drawn and in its link.
+- A Mac daemon started outside the desktop session says its login Keychain is out of reach, instead of a bare error saving a secret.
 - Settings › Linear offers Clear only for a saved key, and a refused key's line says whether Linear refused the saved key or LINEAR_API_KEY.
 - A narrow chat pane whose Stop is armed drops its context label instead of squeezing the session's name.
 - The phone terminal's Paste key reads the clipboard through iOS's own paste button, so iOS 16 and later no longer refuse it.
 - The phone's Chat box pastes any image type, such as HEIC or GIF, and pastes the text on a host that takes no uploads.
 - On an iPad, the Chat box's Paste keeps working while a sheet covers only the session list.
 - The phone's paste button comes back after a theme change, and grabbing the Chat box's end selection handle low no longer pastes.
-- The phone's pinned host header is right again as soon as the Home list changes without a scroll, such as when a Needs you card appears.
+- The phone's pinned host header updates as soon as the Home list changes without a scroll, such as when a Needs you card appears.
 - The phone's Chat box keeps its keyboard button, now labelled Hide, inside the button row while the keyboard is up.
-
-### Changed
-
-- The phone's Needs you first is a switch beside the sort, so sessions that need you come first under A–Z or the desktop's tabs too.
-- The phone's Settings › Keys lists one key per row, saying what each sends, under a live preview of the key bar, and shows where a dragged key will land.
-- The phone's Settings › Keys has an Edit mode: a minus and Delete remove a key, and a drag handle moves one without a long press.
-- The phone's key editor previews the key as you change it, and lays each press out on two lines with a handle to reorder it.
-- Dragging a key, press or quick reply to the top or bottom of the phone's Settings page scrolls the page.
 
 ## v0.18.0-alpha
 
