@@ -445,6 +445,7 @@ enum View {
     PhoneIpadPortrait,
     PhoneLandscapeHome,
     PhoneLandscapeTerminal,
+    PhonePairing,
 }
 
 impl View {
@@ -523,6 +524,7 @@ impl View {
         Self::PhoneIpadPortrait,
         Self::PhoneLandscapeHome,
         Self::PhoneLandscapeTerminal,
+        Self::PhonePairing,
     ];
 
     /// Whether the view is the phone app's, drawn over `PhoneRoot`.
@@ -550,6 +552,7 @@ impl View {
                 | Self::PhoneIpadPortrait
                 | Self::PhoneLandscapeHome
                 | Self::PhoneLandscapeTerminal
+                | Self::PhonePairing
         )
     }
 
@@ -682,6 +685,7 @@ impl View {
             Self::PhoneIpadPortrait => "phone-ipad-portrait",
             Self::PhoneLandscapeHome => "phone-landscape-home",
             Self::PhoneLandscapeTerminal => "phone-landscape-terminal",
+            Self::PhonePairing => "phone-pairing",
         }
     }
 
@@ -748,7 +752,8 @@ impl View {
             | Self::PhoneSettingsReplyGroup
             | Self::PhoneViewer
             | Self::PhoneViewerMd
-            | Self::PhoneBrowser => PHONE_WINDOW_SIZE,
+            | Self::PhoneBrowser
+            | Self::PhonePairing => PHONE_WINDOW_SIZE,
             Self::PhoneIpad => IPAD_WINDOW_SIZE,
             Self::PhoneIpadPortrait => IPAD_PORTRAIT_WINDOW_SIZE,
             Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal => PHONE_LANDSCAPE_WINDOW_SIZE,
@@ -811,7 +816,8 @@ impl View {
             | Self::PhoneIpad
             | Self::PhoneIpadPortrait
             | Self::PhoneLandscapeHome
-            | Self::PhoneLandscapeTerminal => true,
+            | Self::PhoneLandscapeTerminal
+            | Self::PhonePairing => true,
             // The popover open over the fake daemon's accounts.
             Self::Accounts => root.accounts_open() && root.accounts_chip_text().is_some(),
             // The Gates panel over the fake daemon's gate state.
@@ -1118,6 +1124,7 @@ impl Shot {
             | View::PhoneIpadPortrait
             | View::PhoneLandscapeHome
             | View::PhoneLandscapeTerminal
+            | View::PhonePairing
             | View::Toast => None,
         }
     }
@@ -1887,7 +1894,11 @@ fn start_phone_home_shot(
     let now = Utc::now();
     let failure = Arc::new(Mutex::new(None));
     // The phone opens no This PC connection: "box" takes the first pair.
-    let remote = start_box_daemon(shot.view, now, &failure)?;
+    let remote = if shot.view == View::PhonePairing {
+        not_approved_pair()
+    } else {
+        start_box_daemon(shot.view, now, &failure)?
+    };
     let lab = if shot.view == View::PhoneHomeHosts {
         let fixture = RemoteFixture::phone_lab(now)?;
         Some(start_remote_daemon(
@@ -1947,7 +1958,11 @@ async fn capture_phone_home(
     failure: &Mutex<Option<anyhow::Error>>,
 ) -> Result<()> {
     cx.background_executor().timer(LOAD_WAIT).await;
-    check_phone_home(shot.view, handle, cx)?;
+    if shot.view == View::PhonePairing {
+        open_phone_pairing(handle, cx).await?;
+    } else {
+        check_phone_home(shot.view, handle, cx)?;
+    }
     check_phone_home_view(shot.view, handle, cx).await?;
     let layout = handle.update(cx, |phone, _, _| phone.layout())?;
     check_phone_layout(shot.view, layout)?;
@@ -1956,6 +1971,39 @@ async fn capture_phone_home(
     check_phone_session_sheet(shot.view, handle, cx)?;
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// The `phone-pairing` shot's "box": a pair nothing answers but its state,
+/// which says "box" does not know this device.
+fn not_approved_pair() -> HostPair {
+    let (tx, _) = unbounded();
+    let (states, events) = unbounded();
+    let mut conn = Connection::for_target(Target::tailnet(SHOT_TAILNET_HOST, Some(8787)));
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_not_approved("device not approved".to_owned(), false);
+    if states.unbounded_send(NetEvent::State(conn)).is_err() {
+        tracing::warn!("the phone-pairing shot's host state found no listener");
+    }
+    (tx, events)
+}
+
+/// Opens the `phone-pairing` view's dialog with "box", as its row's Pair
+/// does, and checks it names the phone.
+async fn open_phone_pairing(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let host = HostKey::of(&Target::tailnet(SHOT_TAILNET_HOST, Some(8787)));
+    let line = handle.update(cx, |phone, window, cx| {
+        phone.pair_with(&host, window, cx);
+        phone.root().read(cx).device_pairing_line()
+    })?;
+    if !line
+        .as_deref()
+        .is_some_and(|line| line.contains("this phone"))
+    {
+        bail!("the phone-pairing view's dialog reads {line:?}, not naming this phone");
+    }
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    Ok(())
 }
 
 /// Checks the `view`'s Home lists the rows its fixture docks — the shot's
@@ -2669,7 +2717,8 @@ fn drive(
         | View::PhoneIpad
         | View::PhoneIpadPortrait
         | View::PhoneLandscapeHome
-        | View::PhoneLandscapeTerminal => Ok(()),
+        | View::PhoneLandscapeTerminal
+        | View::PhonePairing => Ok(()),
         View::PanesAccentChosen => drive_panes_accent_chosen(step, window, cx),
         View::Accounts => open_accounts(window, cx),
         View::Gates => show_gates(window, cx),

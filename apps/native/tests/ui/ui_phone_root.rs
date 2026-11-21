@@ -5,7 +5,7 @@
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{TestAppContext, point, px};
+use gpui::{Edges, TestAppContext, WindowInsets, point, px};
 use protocol::{
     ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome, FEATURE_CLIENT_PRESENCE,
     FEATURE_RELAY_PUSH,
@@ -330,6 +330,94 @@ fn a_host_with_no_token_offers_pair_and_opens_the_dialog(cx: &mut TestAppContext
         })
         .collect();
     assert_eq!(redeemed, ["123456"]);
+}
+
+/// A phone whose one saved host has no token, with its Pair dialog open.
+fn phone_with_pairing_open<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.host(&saved_remote())
+        .event(NetEvent::State(not_approved_without_token()));
+    h.click_on(&format!("phone-host-pair-{REMOTE}"));
+    assert!(h.root(|root, _| root.device_pairing_open()));
+    h
+}
+
+#[gpui::test]
+fn the_phone_pairing_dialog_names_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_pairing_open(cx, &dir);
+
+    let line = h
+        .root(|root, _| root.device_pairing_line())
+        .unwrap_or_default();
+    assert!(
+        line.contains("this phone"),
+        "the line names the phone: {line:?}"
+    );
+    assert!(
+        !line.contains("this PC"),
+        "the line never says this PC: {line:?}"
+    );
+}
+
+#[gpui::test]
+fn have_a_code_lines_up_with_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_pairing_open(cx, &dir);
+    h.click_on("device-pairing-ask");
+    h.host(&saved_remote())
+        .send(DaemonMessage::DevicePairPending {
+            request_id: "r1".to_owned(),
+            expires_in_secs: 300,
+        });
+
+    assert!(drawn(&mut h, "device-pairing-have-code"), "the link shows");
+    // The link's box holds its hover wash; its words are what line up.
+    assert!(
+        drawn(&mut h, "device-pairing-have-code-label"),
+        "its words show"
+    );
+    assert_eq!(
+        h.bounds("device-pairing-have-code-label").left(),
+        h.bounds("device-pairing-line").left(),
+        "Have a code? starts where the line above it starts"
+    );
+}
+
+#[gpui::test]
+fn the_pairing_scrim_covers_the_whole_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_pairing_open(cx, &dir);
+    let insets = WindowInsets {
+        safe_area: Edges {
+            top: px(47.0),
+            right: px(0.0),
+            bottom: px(34.0),
+            left: px(0.0),
+        },
+        ..WindowInsets::default()
+    };
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.set_insets_override(Some(insets), cx));
+    });
+    h.cx.run_until_parked();
+
+    let window = h.cx.update(|window, _| window.viewport_size());
+    let scrim = h.bounds("device-pairing-scrim");
+    assert_eq!(scrim.top(), px(0.0), "the scrim dims the status bar");
+    assert_eq!(scrim.size.width, window.width, "the scrim spans the window");
+    assert_eq!(
+        scrim.size.height, window.height,
+        "the scrim dims the bottom strip"
+    );
 }
 
 /// Whether `msg` is a presence report or one of This PC's tab and layout

@@ -1,4 +1,4 @@
-//! This PC pairing itself with a tailnet host, as the device: the dialog's
+//! This device pairing itself with a tailnet host: the dialog's
 //! phases from the first ask through the code the owner reads on the host,
 //! with their lines, buttons and countdowns. The network thread stores the
 //! token the host issues; nothing of it reaches this model. The screen is
@@ -29,6 +29,33 @@ const CODE_REFUSALS: [&str; 3] = [
 /// Whether `reason` refuses the typed code itself rather than the request.
 fn refuses_the_code(reason: &str) -> bool {
     CODE_REFUSALS.contains(&reason)
+}
+
+/// The device the dialog runs on, as its lines name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceNoun {
+    /// The desktop app.
+    Pc,
+    /// The phone app on an iPhone, and the phone shape off iOS.
+    Phone,
+    /// The phone app on an iPad.
+    Ipad,
+}
+
+impl DeviceNoun {
+    /// The phone app's noun: an iPad's when `is_pad`, else a phone's.
+    pub(crate) fn of_phone(is_pad: bool) -> Self {
+        if is_pad { Self::Ipad } else { Self::Phone }
+    }
+
+    /// "this PC", "this phone" or "this iPad".
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pc => "this PC",
+            Self::Phone => "this phone",
+            Self::Ipad => "this iPad",
+        }
+    }
 }
 
 /// Which phase the dialog is in.
@@ -127,6 +154,7 @@ enum Phase {
 pub(crate) struct DevicePairing {
     host: String,
     had_token: bool,
+    noun: DeviceNoun,
     phase: Phase,
 }
 
@@ -135,6 +163,7 @@ impl fmt::Debug for DevicePairing {
         f.debug_struct("DevicePairing")
             .field("host", &self.host)
             .field("had_token", &self.had_token)
+            .field("noun", &self.noun)
             .field("phase", &self.kind())
             .finish_non_exhaustive()
     }
@@ -142,13 +171,21 @@ impl fmt::Debug for DevicePairing {
 
 impl DevicePairing {
     /// The dialog for `host` in its Intro phase; `had_token` says whether
-    /// the host turned down a token this PC held.
+    /// the host turned down a token this device held. Its lines name the
+    /// device "this PC" until [`Self::with_noun`] says otherwise.
     pub(crate) fn new(host: &str, had_token: bool) -> Self {
         Self {
             host: host.to_owned(),
             had_token,
+            noun: DeviceNoun::Pc,
             phase: Phase::Intro,
         }
+    }
+
+    /// The dialog with its lines naming the device `noun`.
+    pub(crate) fn with_noun(mut self, noun: DeviceNoun) -> Self {
+        self.noun = noun;
+        self
     }
 
     pub(crate) fn kind(&self) -> PhaseKind {
@@ -168,13 +205,14 @@ impl DevicePairing {
     /// The phase's sentence.
     pub(crate) fn line(&self) -> String {
         let host = &self.host;
+        let noun = self.noun.as_str();
         match &self.phase {
             Phase::Intro if self.had_token => {
-                format!("{host} no longer accepts this PC's pairing.")
+                format!("{host} no longer accepts {noun}'s pairing.")
             }
-            Phase::Intro => format!("{host} does not know this PC."),
+            Phase::Intro => format!("{host} does not know {noun}."),
             Phase::Asking { .. } => format!("Asking {host}…"),
-            Phase::Waiting { .. } => format!("Approve this PC on {host}."),
+            Phase::Waiting { .. } => format!("Approve {noun} on {host}."),
             Phase::CodeEntry { .. } => format!("Type the code {host} shows."),
             Phase::Ended(reason) => self.end_line(reason),
         }
@@ -182,11 +220,12 @@ impl DevicePairing {
 
     fn end_line(&self, reason: &EndReason) -> String {
         let host = &self.host;
+        let noun = self.noun.as_str();
         match reason {
-            EndReason::Denied => format!("{host} turned this PC down."),
-            EndReason::NotAccepted => format!("{host} did not accept this PC's request."),
+            EndReason::Denied => format!("{host} turned {noun} down."),
+            EndReason::NotAccepted => format!("{host} did not accept {noun}'s request."),
             EndReason::Expired => "The request expired.".to_owned(),
-            EndReason::Superseded => "A newer request from this PC replaced this one.".to_owned(),
+            EndReason::Superseded => format!("A newer request from {noun} replaced this one."),
             EndReason::Unknown => "The request ended.".to_owned(),
             EndReason::Lost => {
                 format!("The connection to {host} dropped, and the request with it.")
@@ -439,7 +478,7 @@ mod tests {
 
     use protocol::{DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome};
 
-    use super::{DeviceButton, DevicePairing, PhaseKind};
+    use super::{DeviceButton, DeviceNoun, DevicePairing, PhaseKind};
 
     const HOST: &str = "box.tail1234.ts.net";
 
@@ -718,6 +757,47 @@ mod tests {
         entry.on_message(&signal, now);
         assert_eq!(entry.kind(), PhaseKind::CodeEntry);
         assert_eq!(entry.refusal(), None);
+    }
+
+    #[test]
+    fn line_names_the_device_noun() {
+        let now = Instant::now();
+        for (noun, said) in [
+            (DeviceNoun::Pc, "this PC"),
+            (DeviceNoun::Phone, "this phone"),
+            (DeviceNoun::Ipad, "this iPad"),
+        ] {
+            assert_eq!(noun.as_str(), said);
+            let intro = DevicePairing::new(HOST, false).with_noun(noun);
+            assert_eq!(intro.line(), format!("{HOST} does not know {said}."));
+            let stale = DevicePairing::new(HOST, true).with_noun(noun);
+            assert_eq!(
+                stale.line(),
+                format!("{HOST} no longer accepts {said}'s pairing.")
+            );
+
+            let mut pairing = DevicePairing::new(HOST, false).with_noun(noun);
+            assert!(pairing.ask());
+            pairing.on_message(&pending(300), now);
+            assert_eq!(pairing.line(), format!("Approve {said} on {HOST}."));
+            let mut denied = pairing.clone();
+            denied.on_message(&decided(DevicePairOutcome::Denied), now);
+            assert_eq!(denied.line(), format!("{HOST} turned {said} down."));
+            pairing.on_message(&decided(DevicePairOutcome::Superseded), now);
+            assert_eq!(
+                pairing.line(),
+                format!("A newer request from {said} replaced this one.")
+            );
+
+            let mut refused = DevicePairing::new(HOST, false).with_noun(noun);
+            assert!(refused.ask());
+            refused.on_request_sent();
+            refused.on_message(&failed(DEVICE_NOT_APPROVED), now);
+            assert_eq!(
+                refused.line(),
+                format!("{HOST} did not accept {said}'s request.")
+            );
+        }
     }
 
     #[test]

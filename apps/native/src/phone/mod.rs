@@ -10,6 +10,8 @@ mod fetched;
 mod home;
 mod home_view;
 mod hosts_view;
+#[cfg(target_os = "ios")]
+mod idiom_ios;
 mod key_bar;
 pub mod key_grid;
 mod keys_view;

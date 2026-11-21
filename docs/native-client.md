@@ -162,7 +162,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   **Pair dialog** (`device_pairing.rs` model, `device_pairing_view.rs` view): "Pair with {host}" opens only from that host's row `Pair` button, never from the footer pill and never by itself at launch or on a reconnect. A not-approved tailnet host still reports its daemon id, so a duplicate of another connection is dropped before it offers Pair.
 
-  Intro ("{host} does not know this PC." or "{host} no longer accepts this PC's pairing.") offers Ask to pair and Close. Asking ("Asking {host}…", Cancel) becomes Waiting ("Approve this PC on {host}.", `expires in m:ss`, a keyboard-reachable `Have a code?` link, Cancel) until the owner approves on the host PC.
+  The dialog names the device it runs on: this PC on the desktop, this phone on an iPhone (and in the phone shape off iOS), this iPad on an iPad (`UIDevice.userInterfaceIdiom`, read once when the phone's root opens). Intro ("{host} does not know this PC." or "{host} no longer accepts this PC's pairing.") offers Ask to pair and Close. Asking ("Asking {host}…", Cancel) becomes Waiting ("Approve this PC on {host}.", `expires in m:ss`, a keyboard-reachable `Have a code?` link, Cancel) until the owner approves on the host PC.
 
   `Have a code?` reveals the 6-digit field with Pair and Cancel while the wait continues: Pair sends `DevicePairRedeem`, so a code minted by `rustling-tulipd pair` on the host can be typed there.
 
@@ -174,7 +174,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   Denied, expired, superseded, ended, a dropped connection, "Could not save this device's token; pair again." and the host's own reason end on a line with Ask again and Close; a failed redial after Ask again withdraws the request. Esc sends `PairCancel` while a request is out. The typed code never reaches a log. One token store (`RootDeps.tokens`) is shared by the net thread and the view: the production `Transport` captures it for `NetDeps::production`.
 
-  `native.log` records at info "device pairing: the dialog opens" (fields `host`, `had_token`), "… asking the host", "… sending the code", "… withdrawing the request" and "… paired; the dialog closes", and warns "device pairing: the token was lost with no dialog open".
+  `native.log` records at info "device pairing: the dialog opens" (fields `host`, `had_token`, `noun`), "… asking the host", "… sending the code", "… withdrawing the request" and "… paired; the dialog closes", and warns "device pairing: the token was lost with no dialog open".
 
   **Several hosts**: one window shows This PC and every saved tailnet and SSH host at once. Tabs can mix hosts, so one tab may split panes from different hosts. This PC's daemon is the layout home: it holds every tab of the window, a pane names its session as `{host, session_id}`, and a remote daemon supplies sessions only (its own per-client layout for this client is ignored). This PC is always connected.
 

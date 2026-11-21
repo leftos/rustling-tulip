@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- On the phone, the pairing dialog names the phone or iPad instead of "this PC", lines "Have a code?" up with its text, and dims the status bar and bottom strip too.
 - Sessions started at nearly the same moment keep their list order after a reload or restart, and a session still starting never shows a row that vanishes.
 - A question still on screen never reads Idle after a minute, and it returns to Needs you when something other than your answer ends its wait.
 - Settings › Accounts says "1 account" for a single account.

@@ -16,7 +16,7 @@ use protocol::DaemonMessage;
 use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
 use crate::connection::State;
-use crate::device_pairing::{DeviceButton, DevicePairing};
+use crate::device_pairing::{DeviceButton, DeviceNoun, DevicePairing};
 use crate::driver_id::DriverId as _;
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
@@ -34,6 +34,10 @@ const CODE_WIDTH: f32 = 120.0;
 /// The link that reveals the code field while the request waits.
 const CODE_LINK_LABEL: &str = "Have a code?";
 const CODE_LINK_SELECTOR: &str = "device-pairing-have-code";
+/// The link's words, inside its box.
+const CODE_LINK_LABEL_SELECTOR: &str = "device-pairing-have-code-label";
+/// The phone's scrim, which dims the whole window under the dialog.
+const PHONE_SCRIM_SELECTOR: &str = "device-pairing-scrim";
 /// The code link's corner radius.
 const LINK_RADIUS: f32 = 4.0;
 
@@ -108,6 +112,8 @@ pub(crate) struct DevicePairingView {
     /// The countdown as last drawn, so a tick redraws only on a change.
     drawn: Option<String>,
     tick: Option<Task<()>>,
+    /// How the dialog's lines name the device it runs on.
+    noun: DeviceNoun,
 }
 
 impl DevicePairingView {
@@ -118,6 +124,7 @@ impl DevicePairingView {
             pair_on_not_approved: HashSet::new(),
             drawn: None,
             tick: None,
+            noun: DeviceNoun::Pc,
         }
     }
 }
@@ -153,6 +160,12 @@ fn phase_control(model: &DevicePairing) -> Option<DeviceControl> {
 }
 
 impl RootView {
+    /// Names the device the dialog runs on as `noun` in every dialog that
+    /// opens from now on; the desktop's is "this PC".
+    pub(crate) fn set_device_noun(&mut self, noun: DeviceNoun) {
+        self.device_pairing.noun = noun;
+    }
+
     /// Whether the pairing dialog is open.
     #[must_use]
     pub fn device_pairing_open(&self) -> bool {
@@ -279,9 +292,11 @@ impl RootView {
             tracing::warn!("a pairing connection that is not to a tailnet host; no dialog");
             return;
         };
+        let noun = self.device_pairing.noun;
         tracing::info!(
             host = name.as_str(),
             had_token,
+            noun = noun.as_str(),
             "device pairing: the dialog opens"
         );
         self.close_flyout();
@@ -289,7 +304,7 @@ impl RootView {
         let subscriptions = Self::watch_device_code_field(&code_input, window, cx);
         self.device_pairing.dialog = Some(DevicePairingDialog {
             host: host.clone(),
-            model: DevicePairing::new(&name, had_token),
+            model: DevicePairing::new(&name, had_token).with_noun(noun),
             code_input,
             control: None,
             _subscriptions: subscriptions,
@@ -681,6 +696,47 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it, drawn
     /// above the first-connect overlay.
     pub(crate) fn device_pairing_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panel = self.device_pairing_panel(cx)?;
+        Some(backdrop("device-pairing", panel, &theme(cx)))
+    }
+
+    /// The phone's dialog in two layers: a scrim that takes every click
+    /// beneath it, for the whole window, then the panel centred over the
+    /// space it is given, which the phone keeps clear of its insets and the
+    /// keyboard.
+    pub(crate) fn device_pairing_phone_layers(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<(AnyElement, AnyElement)> {
+        let panel = self.device_pairing_panel(cx)?;
+        let t = theme(cx);
+        let scrim = div()
+            .id(PHONE_SCRIM_SELECTOR)
+            .driver_id(|| PHONE_SCRIM_SELECTOR.to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .into_any_element();
+        let centred = div()
+            .id("device-pairing")
+            .driver_id(|| "device-pairing".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(panel)
+            .into_any_element();
+        Some((scrim, centred))
+    }
+
+    /// The dialog's panel: its title, its body and its buttons.
+    fn device_pairing_panel(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let t = theme(cx);
         let dialog = self.device_pairing.dialog.as_ref()?;
         let model = &dialog.model;
@@ -738,7 +794,7 @@ impl RootView {
         )
         .child(body)
         .child(footer);
-        Some(backdrop("device-pairing", panel, &theme(cx)))
+        Some(panel)
     }
 }
 
@@ -758,7 +814,8 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .id(CODE_LINK_SELECTOR)
         .driver_id(|| CODE_LINK_SELECTOR.to_owned())
         .relative()
-        .px(px(4.0))
+        // No left pad: the words start where the line above them does.
+        .pr(px(4.0))
         .py(px(2.0))
         .rounded(px(LINK_RADIUS))
         .text_color(gpui::rgb(if focused { t.text } else { t.muted }))
@@ -771,7 +828,11 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .when(focused, |link| {
             link.child(focus_ring(LINK_RADIUS, &theme(cx)))
         })
-        .child(CODE_LINK_LABEL)
+        .child(
+            div()
+                .driver_id(|| CODE_LINK_LABEL_SELECTOR.to_owned())
+                .child(CODE_LINK_LABEL),
+        )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.reveal_device_code(window, cx);
         }))

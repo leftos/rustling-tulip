@@ -36,6 +36,7 @@ use super::terminal_view::TerminalTap;
 use super::{PhoneLayout, content_padding, home, hosts_view};
 use crate::buttons::ButtonKind;
 use crate::connection::State;
+use crate::device_pairing::DeviceNoun;
 use crate::driver_id::DriverId as _;
 use crate::file_fetch::{self, FetchRequest};
 use crate::open::LinkAction;
@@ -250,6 +251,7 @@ impl PhoneRoot {
                 this.sweep_fetched(cx);
             }
         });
+        root.update(cx, |root, _| root.set_device_noun(device_noun()));
         let fetched_path = root.read(cx).ui_dir().map(|dir| dir.join(FETCHED_FILE));
         let fetched = fetched_path.as_deref().map(Index::read).unwrap_or_default();
         let mut this = Self {
@@ -679,6 +681,13 @@ impl PhoneRoot {
     pub fn set_insets_override(&mut self, insets: Option<WindowInsets>, cx: &mut Context<Self>) {
         self.insets_override = insets;
         cx.notify();
+    }
+
+    /// Pair on `host`'s row, as a tap on its Pair button does: the dialog
+    /// opens while the host says "not approved".
+    pub fn pair_with(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.root
+            .update(cx, |root, cx| root.pair_with_host(host, window, cx));
     }
 
     /// The same root sharing through `share`; it shares through a sheet that
@@ -2083,6 +2092,24 @@ impl PhoneRoot {
     }
 }
 
+/// How the pairing dialog names the device: "this iPad" on an iPad, else
+/// "this phone".
+fn device_noun() -> DeviceNoun {
+    DeviceNoun::of_phone(is_pad())
+}
+
+/// Whether the app runs on an iPad, from `UIKit`'s interface idiom.
+#[cfg(target_os = "ios")]
+fn is_pad() -> bool {
+    super::idiom_ios::is_pad()
+}
+
+/// The phone shape off iOS, in specs and shots, is a phone.
+#[cfg(not(target_os = "ios"))]
+fn is_pad() -> bool {
+    false
+}
+
 impl Render for PhoneRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The ready line follows the first frame, not the window's opening.
@@ -2110,7 +2137,7 @@ impl Render for PhoneRoot {
         let body = self.page_body(host_open, keyboard_up, window, cx);
         let pairing = self
             .root
-            .update(cx, |root, cx| root.device_pairing_layer(cx));
+            .update(cx, |root, cx| root.device_pairing_phone_layers(cx));
         let split = self.split(host_open, cx);
         let (layers, covers_session) = self.sheet_layers(host_open, padding, window, cx);
         let pairing_covers = pairing.is_some() && layer_covers_session(split, SheetLayer::Pairing);
@@ -2143,14 +2170,26 @@ impl Render for PhoneRoot {
             .child(padded().size_full().child(body))
             .children(self.copied_chip_layer(padding.top, cx))
             .children(layers)
-            .children(pairing.map(|layer| {
-                padded()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .child(div().relative().size_full().child(layer))
-            }))
+            // The pairing scrim dims the whole window, the status bar and the
+            // bottom strip too; its panel stays inside the padding, so it
+            // still lifts above the keyboard.
+            .children(
+                pairing
+                    .map(|(scrim, panel)| {
+                        [
+                            scrim,
+                            padded()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .child(div().relative().size_full().child(panel))
+                                .into_any_element(),
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
             // Last, so its prepaint follows the Paste button's.
             .children(paste_end)
     }
