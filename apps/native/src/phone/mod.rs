@@ -17,6 +17,12 @@ pub(crate) mod lifecycle;
 mod long_press;
 mod open_tap;
 pub(crate) mod order;
+pub mod pasteboard;
+#[cfg(target_os = "ios")]
+mod pasteboard_ios;
+pub mod photos;
+#[cfg(target_os = "ios")]
+mod photos_ios;
 mod prompt_sheet;
 pub mod push;
 #[cfg(target_os = "ios")]
@@ -50,6 +56,8 @@ use crate::{
     SilentSounder,
 };
 pub use layout::PhoneLayout;
+use pasteboard::PhonePasteboard;
+use photos::PhotoPicker;
 use push::PushPlatform;
 pub use root_view::PhoneRoot;
 use share::ShareSheet;
@@ -80,7 +88,12 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
             let root_share = Arc::clone(&share);
             let opened = cx.open_window(WindowOptions::default(), |window, cx| {
                 let root = cx.new(|cx| RootView::with_transport(phone_deps(), window, cx));
-                cx.new(|cx| PhoneRoot::new(root, platform, window, cx).with_share(root_share))
+                cx.new(|cx| {
+                    PhoneRoot::new(root, platform, window, cx)
+                        .with_share(root_share)
+                        .with_pasteboard(phone_pasteboard())
+                        .with_photos(photo_picker())
+                })
             });
             if let Err(err) = opened {
                 tracing::error!(error = %err, "phone window failed to open");
@@ -103,6 +116,30 @@ fn share_sheet() -> Arc<dyn ShareSheet> {
 #[cfg(not(target_os = "ios"))]
 fn share_sheet() -> Arc<dyn ShareSheet> {
     Arc::new(share::LoggingShare)
+}
+
+/// The phone's pasteboard on iOS: `UIPasteboard`.
+#[cfg(target_os = "ios")]
+fn phone_pasteboard() -> Arc<dyn PhonePasteboard> {
+    Arc::new(pasteboard_ios::IosPasteboard)
+}
+
+/// No pasteboard image off iOS: Paste pastes text.
+#[cfg(not(target_os = "ios"))]
+fn phone_pasteboard() -> Arc<dyn PhonePasteboard> {
+    Arc::new(pasteboard::LoggingPasteboard)
+}
+
+/// The phone's photo picker on iOS: `PHPickerViewController`.
+#[cfg(target_os = "ios")]
+fn photo_picker() -> Arc<dyn PhotoPicker> {
+    Arc::new(photos_ios::IosPhotoPicker)
+}
+
+/// No photo picker off iOS: Photos only logs.
+#[cfg(not(target_os = "ios"))]
+fn photo_picker() -> Arc<dyn PhotoPicker> {
+    Arc::new(photos::LoggingPhotos)
 }
 
 /// Launched with [`share_ios::SHARE_SELFTEST_ARG`], presents the share sheet

@@ -135,18 +135,23 @@ block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
     "NSArray",
     "NSData",
     "NSDictionary",
     "NSEnumerator",
     "NSError",
+    "NSItemProvider",
     "NSObject",
+    "NSProgress",
     "NSString",
     "NSURL",
 ] }
 # The share sheet (src/phone/share_ios.rs): `UIActivityViewController` for a
 # file URL, presented from the key window's view controller, its iPad popover
-# anchored by a source view and rect.
+# anchored by a source view and rect. The composer's image paste
+# (src/phone/pasteboard_ios.rs): `UIPasteboard`, and `UIImage` to re-encode
+# or scale a pasted or picked image.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -154,12 +159,27 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIActivity",
     "UIActivityViewController",
     "UIApplication",
+    "UIImage",
+    "UIPasteboard",
     "UIPopoverPresentationController",
     "UIPresentationController",
     "UIResponder",
     "UIView",
     "UIViewController",
     "UIWindow",
+] }
+# The size a pasted or picked image is scaled to (`CGSize`).
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+] }
+# The composer's Photos (src/phone/photos_ios.rs): `PHPickerViewController`'s
+# configuration, filter, results and delegate protocol; the crate links
+# PhotosUI. It declares the picker controller for macOS only, so the iOS
+# class is declared in the app.
+objc2-photos-ui = { version = "0.3", default-features = false, features = [
+    "std",
+    "PHPicker",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",

@@ -10,23 +10,27 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    BackGesturePhase, Edges, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
-    TestAppContext, TouchPhase, WindowInsets, point, px,
+    BackGesturePhase, Edges, ImageFormat, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
+    ScrollSource, TestAppContext, TouchPhase, WindowInsets, point, px,
 };
 use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ChatEntry, ChatOption,
     ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
     FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH,
-    FEATURE_FILE_TAIL, FileMatch, ScriptFacts, SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
+    FEATURE_FILE_TAIL, FEATURE_UPLOAD_FILE, FileMatch, ScriptFacts, SessionSnapshot, ToolKind,
+    ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::{self, RowShape};
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::phone::pasteboard::FakePasteboard;
+use rustling_tulip_native::phone::photos::FakePhotoPicker;
 use rustling_tulip_native::phone::quick_replies::{ReplyGroup, ReplySet};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
 
@@ -1290,6 +1294,209 @@ fn paste_inserts_the_clipboard_text(cx: &mut TestAppContext) {
     h.click_on("phone-composer-paste");
 
     assert_eq!(composer_text(&mut h).as_deref(), Some("pasted text"));
+}
+
+/// Gives the phone a [`FakePasteboard`] holding `image` and, when `text`,
+/// some text, and hands back the spec's handle on it.
+fn fake_pasteboard(
+    h: &mut Harness<'_>,
+    image: Option<(Vec<u8>, ImageFormat)>,
+    text: bool,
+) -> Arc<FakePasteboard> {
+    let board = Arc::new(FakePasteboard::new(image, text));
+    let given = board.clone();
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_pasteboard(given));
+    });
+    board
+}
+
+/// Gives the phone a [`FakePhotoPicker`] whose every pick answers `answer`,
+/// and hands back the spec's handle on it.
+fn fake_photos(
+    h: &mut Harness<'_>,
+    answer: Option<(Vec<u8>, ImageFormat)>,
+) -> Arc<FakePhotoPicker> {
+    let picker = Arc::new(FakePhotoPicker::answering(answer));
+    let given = picker.clone();
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_photos(given));
+    });
+    picker
+}
+
+/// An `UploadFile` the phone sent: its request id, session, name and bytes.
+#[derive(Debug)]
+struct Upload {
+    request_id: String,
+    session_id: String,
+    name: String,
+    bytes: Vec<u8>,
+}
+
+/// The `UploadFile`s [`REMOTE`] was sent since the last drain.
+fn uploads(h: &mut Harness<'_>) -> Vec<Upload> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::UploadFile {
+                request_id,
+                session_id,
+                name,
+                data_b64,
+            } => Some(Upload {
+                request_id,
+                session_id,
+                name,
+                bytes: B64.decode(data_b64).expect("upload base64"),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn paste_uploads_a_clipboard_image_that_holds_no_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    let board = fake_pasteboard(&mut h, Some((png.clone(), ImageFormat::Png)), false);
+
+    h.click_on("phone-composer-paste");
+
+    assert_eq!(board.reads(), 1, "the image is read on the tap");
+    let [upload]: [Upload; 1] = uploads(&mut h).try_into().expect("exactly one upload");
+    assert_eq!(upload.session_id, "a");
+    assert_eq!(upload.name, "paste.png", "the desktop paste's name");
+    assert_eq!(upload.bytes, png, "the pasteboard's own bytes go up");
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+
+    h.host(&saved_remote()).send(DaemonMessage::FileUploaded {
+        request_id: upload.request_id,
+        session_id: upload.session_id,
+        path: "/work/.tmp/rt-uploads/paste-1.png".to_owned(),
+    });
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/work/.tmp/rt-uploads/paste-1.png "),
+        "the host path and one space are inserted at the caret"
+    );
+}
+
+#[gpui::test]
+fn paste_with_text_pastes_the_text_and_uploads_nothing(cx: &mut TestAppContext) {
+    for image in [None, Some((vec![1, 2, 3], ImageFormat::Png))] {
+        let dir = TestDir::new();
+        let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+        let had_image = image.is_some();
+        let board = fake_pasteboard(&mut h, image, true);
+        h.set_clipboard("pasted text");
+
+        h.click_on("phone-composer-paste");
+
+        assert_eq!(
+            composer_text(&mut h).as_deref(),
+            Some("pasted text"),
+            "text wins (image too: {had_image})"
+        );
+        assert_eq!(
+            board.reads(),
+            0,
+            "no image is read (image too: {had_image})"
+        );
+        assert!(
+            uploads(&mut h).is_empty(),
+            "nothing goes up (image too: {had_image})"
+        );
+    }
+}
+
+#[gpui::test]
+fn paste_never_reads_the_image_on_a_host_without_upload_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[]);
+    let board = fake_pasteboard(&mut h, Some((vec![1, 2, 3], ImageFormat::Png)), false);
+
+    h.click_on("phone-composer-paste");
+
+    assert_eq!(
+        board.reads(),
+        0,
+        "no image is read for a host that cannot take it"
+    );
+    assert!(uploads(&mut h).is_empty(), "nothing goes up");
+}
+
+#[gpui::test]
+fn photos_is_drawn_only_when_the_host_takes_uploads(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[]);
+    assert!(
+        !drawn(&mut h, "phone-composer-photos"),
+        "a host without upload_file draws no Photos"
+    );
+
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    assert!(
+        drawn(&mut h, "phone-composer-photos"),
+        "a host listing upload_file draws Photos"
+    );
+}
+
+#[gpui::test]
+fn a_picked_photo_uploads_and_inserts_its_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 4, 5, 6];
+    let picker = fake_photos(&mut h, Some((jpeg.clone(), ImageFormat::Jpeg)));
+
+    h.click_on("phone-composer-photos");
+
+    assert_eq!(picker.picks(), 1, "the tap opens the picker");
+    let [upload]: [Upload; 1] = uploads(&mut h).try_into().expect("exactly one upload");
+    assert_eq!(upload.session_id, "a");
+    assert!(
+        upload.name.starts_with("photo-")
+            && std::path::Path::new(&upload.name)
+                .extension()
+                .is_some_and(|ext| ext == "jpg"),
+        "a picked photo's name: {}",
+        upload.name
+    );
+    assert_eq!(upload.bytes, jpeg, "the picked bytes go up");
+
+    h.host(&saved_remote()).send(DaemonMessage::FileUploaded {
+        request_id: upload.request_id,
+        session_id: upload.session_id,
+        path: "/work/.tmp/rt-uploads/photo.jpg".to_owned(),
+    });
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some("/work/.tmp/rt-uploads/photo.jpg ")
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_pick_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let picker = fake_photos(&mut h, None);
+
+    h.click_on("phone-composer-photos");
+
+    assert_eq!(picker.picks(), 1, "the tap opens the picker");
+    assert!(uploads(&mut h).is_empty(), "a cancelled pick sends nothing");
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
 }
 
 #[gpui::test]

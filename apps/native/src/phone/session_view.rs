@@ -14,9 +14,12 @@ use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color}
 use super::hosts_view::phone_button;
 use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
+use super::pasteboard;
+use super::photos::{self, PHOTOS_LABEL};
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use super::{PhoneLayout, PhoneRoot};
+use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
 use crate::chat_view::{HandleAreas, HandleEnd, chat_available, composer_line_disables};
@@ -26,7 +29,7 @@ use crate::keyboard;
 use crate::target::HostKey;
 use crate::term_input;
 use crate::ui_theme::{UiTheme, theme};
-use protocol::ShiftEnter;
+use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
@@ -37,6 +40,14 @@ const SEND_LABEL: &str = "Send";
 const PASTE_LABEL: &str = "Paste";
 /// The Quick dock's button's label.
 const QUICK_LABEL: &str = "Quick";
+
+/// Whether session `session_id`'s chat host takes uploads
+/// (`FEATURE_UPLOAD_FILE`), so the composer offers Photos.
+fn takes_uploads(root: &RootView, session_id: &str) -> bool {
+    root.loaded_chat_host(session_id)
+        .and_then(|host| root.conn_of(&host))
+        .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE))
+}
 /// What the Quick dock says while its set has no groups.
 const QUICK_EMPTY_TEXT: &str = "No quick replies. Add them in Settings › Quick replies.";
 /// The Quick dock's line while its set has no groups.
@@ -53,8 +64,10 @@ const DRAFT_CLEAR_ASK: &str = "Clear the terminal's draft?";
 /// One of the composer row's buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComposerButton {
-    /// Paste the clipboard's text into the field.
+    /// Paste the clipboard's text into the field, or upload its image.
     Paste,
+    /// Pick a photo to upload.
+    Photos,
     /// Open the Quick replies' dock.
     Quick,
     /// Open the Keys tray's dock.
@@ -68,6 +81,7 @@ impl ComposerButton {
     fn id(self) -> &'static str {
         match self {
             Self::Paste => "phone-composer-paste",
+            Self::Photos => "phone-composer-photos",
             Self::Quick => "phone-composer-quick",
             Self::Keys => "phone-composer-keys",
             Self::Hide => "phone-composer-hide",
@@ -78,6 +92,7 @@ impl ComposerButton {
     fn label(self) -> &'static str {
         match self {
             Self::Paste => PASTE_LABEL,
+            Self::Photos => PHOTOS_LABEL,
             Self::Quick => QUICK_LABEL,
             Self::Keys => KEYS_LABEL,
             Self::Hide => HIDE_LABEL,
@@ -85,14 +100,15 @@ impl ComposerButton {
     }
 }
 
-/// The composer row's buttons in the order it draws them: Paste, Quick and
-/// Keys, and Hide keyboard while the on-screen keyboard is up.
-fn buttons_shown(keyboard_up: bool) -> Vec<ComposerButton> {
-    let mut buttons = vec![
-        ComposerButton::Paste,
-        ComposerButton::Quick,
-        ComposerButton::Keys,
-    ];
+/// The composer row's buttons in the order it draws them: Paste, Photos
+/// while the session's host takes uploads (`photos`), Quick and Keys, and
+/// Hide keyboard while the on-screen keyboard is up.
+fn buttons_shown(keyboard_up: bool, photos: bool) -> Vec<ComposerButton> {
+    let mut buttons = vec![ComposerButton::Paste];
+    if photos {
+        buttons.push(ComposerButton::Photos);
+    }
+    buttons.extend([ComposerButton::Quick, ComposerButton::Keys]);
     if keyboard_up {
         buttons.push(ComposerButton::Hide);
     }
@@ -457,6 +473,7 @@ impl PhoneRoot {
                 root.chat_composer_error(session_id),
             )
         };
+        let photos = takes_uploads(self.root.read(cx), session_id);
         let chip_live = !composer_line_disables(line.as_ref());
         let note = line.map(|line| self.composer_note_row(session_id, &line, cx));
         let chip = chip
@@ -528,7 +545,7 @@ impl PhoneRoot {
                         .text_color(gpui::rgb(t.danger))
                         .child(reason)
                 }))
-                .child(Self::composer_buttons(keyboard_up, cx)),
+                .child(Self::composer_buttons(keyboard_up, photos, cx)),
         )
     }
 
@@ -754,11 +771,12 @@ impl PhoneRoot {
     }
 
     /// The buttons under the composer's field, in the order
-    /// [`buttons_shown`] gives them: Paste, Quick and Keys, and Hide
-    /// keyboard while the on-screen keyboard is up.
-    fn composer_buttons(keyboard_up: bool, cx: &mut Context<Self>) -> Div {
+    /// [`buttons_shown`] gives them: Paste, Photos while the host takes
+    /// uploads, Quick and Keys, and Hide keyboard while the on-screen
+    /// keyboard is up.
+    fn composer_buttons(keyboard_up: bool, photos: bool, cx: &mut Context<Self>) -> Div {
         let mut row = div().flex().gap(px(COMPOSER_GAP));
-        for button in buttons_shown(keyboard_up) {
+        for button in buttons_shown(keyboard_up, photos) {
             let drawn = phone_button(button.id(), ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))
                 .flex_1()
@@ -768,6 +786,9 @@ impl PhoneRoot {
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.paste_into_composer(window, cx);
                     }))
+                }
+                ComposerButton::Photos => {
+                    drawn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_photo(cx)))
                 }
                 ComposerButton::Quick => drawn.on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_quick(cx)),
@@ -787,8 +808,14 @@ impl PhoneRoot {
         row
     }
 
-    /// Paste's tap: the clipboard's text goes into the composer's field at
-    /// its caret. A clipboard with no text changes nothing.
+    /// Paste's tap: a pasteboard holding an image and no text uploads the
+    /// image to the session's host when that host takes uploads, whose path
+    /// then goes in at the caret, as the desktop's image paste does; the
+    /// image is never read for a host that cannot take it. Else the
+    /// clipboard's text goes into
+    /// the composer's field at its caret. The probes raise no "Allow Paste"
+    /// prompt; only the image's read does, on this tap. A clipboard with
+    /// neither changes nothing.
     fn paste_into_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, session_id)) = self.shown.as_ref() else {
             return;
@@ -797,7 +824,47 @@ impl PhoneRoot {
         let Some(input) = self.root.read(cx).phone_composer_input(&session_id) else {
             return;
         };
+        if self.pasteboard.has_image()
+            && !self.pasteboard.has_text()
+            && takes_uploads(self.root.read(cx), &session_id)
+        {
+            let Some((bytes, format)) = self.pasteboard.image() else {
+                tracing::info!(session = %session_id, "phone: the pasteboard's image could not be read");
+                return;
+            };
+            let name = pasteboard::pasted_name(format);
+            self.root.update(cx, |root, cx| {
+                root.on_chat_paste_image(&session_id, &name, &bytes, cx);
+            });
+            return;
+        }
         input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// Photos' tap: the platform's picker opens for one image, which uploads
+    /// to the shown session's host as a pasted image does; a cancelled pick
+    /// sends nothing.
+    fn pick_photo(&mut self, cx: &mut Context<Self>) {
+        let Some((_, session_id)) = self.shown.clone() else {
+            return;
+        };
+        let picked = self.photos.pick();
+        cx.spawn(async move |this, cx| {
+            let Some((bytes, format)) = picked.await else {
+                tracing::info!(session = %session_id, "phone: no photo picked");
+                return;
+            };
+            let name = photos::picked_name(chrono::Local::now().naive_local(), format);
+            let sent = this.update(cx, |this, cx| {
+                this.root.update(cx, |root, cx| {
+                    root.on_chat_paste_image(&session_id, &name, &bytes, cx);
+                });
+            });
+            if sent.is_err() {
+                tracing::debug!("phone: a photo was picked after the phone's root was gone");
+            }
+        })
+        .detach();
     }
 
     /// The composer's open dock above its row, while one is.
@@ -1145,7 +1212,7 @@ mod tests {
     #[test]
     fn the_composer_shows_hide_keyboard_only_while_the_keyboard_is_up() {
         let ids = |keyboard_up: bool| -> Vec<&'static str> {
-            buttons_shown(keyboard_up)
+            buttons_shown(keyboard_up, false)
                 .into_iter()
                 .map(ComposerButton::id)
                 .collect()
@@ -1167,5 +1234,20 @@ mod tests {
                 "phone-composer-hide"
             ]
         );
+    }
+
+    #[test]
+    fn the_composer_shows_photos_after_paste_only_when_the_host_takes_uploads() {
+        let shown: Vec<ComposerButton> = buttons_shown(false, true);
+        assert_eq!(
+            shown.iter().map(|button| button.id()).collect::<Vec<_>>(),
+            [
+                "phone-composer-paste",
+                "phone-composer-photos",
+                "phone-composer-quick",
+                "phone-composer-keys"
+            ]
+        );
+        assert_eq!(ComposerButton::Photos.label(), "Photos");
     }
 }

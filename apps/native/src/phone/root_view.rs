@@ -21,6 +21,8 @@ use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
+use super::pasteboard::{LoggingPasteboard, PhonePasteboard};
+use super::photos::{LoggingPhotos, PhotoPicker};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::quick_replies::{ReplyGroup, ReplySet};
@@ -183,6 +185,10 @@ pub struct PhoneRoot {
     pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
     /// The platform's share sheet, which the viewer's Share hands its copy.
     share: Arc<dyn ShareSheet>,
+    /// The platform's pasteboard, whose image the composer's Paste uploads.
+    pub(super) pasteboard: Arc<dyn PhonePasteboard>,
+    /// The platform's photo picker, which the composer's Photos opens.
+    pub(super) photos: Arc<dyn PhotoPicker>,
     /// The host browser, drawn over the page shown while open, under the
     /// viewer.
     pub(super) browser: Option<super::browser_view::BrowserPage>,
@@ -282,6 +288,8 @@ impl PhoneRoot {
             storage_error: None,
             viewer: None,
             share: Arc::new(LoggingShare),
+            pasteboard: Arc::new(LoggingPasteboard),
+            photos: Arc::new(LoggingPhotos),
             browser: None,
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
@@ -673,6 +681,32 @@ impl PhoneRoot {
     /// Shares through `share` from now on.
     pub fn set_share(&mut self, share: Arc<dyn ShareSheet>) {
         self.share = share;
+    }
+
+    /// The same root reading images off `pasteboard`; its Paste pastes only
+    /// text until then.
+    #[must_use]
+    pub fn with_pasteboard(mut self, pasteboard: Arc<dyn PhonePasteboard>) -> Self {
+        self.pasteboard = pasteboard;
+        self
+    }
+
+    /// Reads images off `pasteboard` from now on.
+    pub fn set_pasteboard(&mut self, pasteboard: Arc<dyn PhonePasteboard>) {
+        self.pasteboard = pasteboard;
+    }
+
+    /// The same root picking photos through `photos`; its Photos picks
+    /// nothing until then.
+    #[must_use]
+    pub fn with_photos(mut self, photos: Arc<dyn PhotoPicker>) -> Self {
+        self.photos = photos;
+        self
+    }
+
+    /// Picks photos through `photos` from now on.
+    pub fn set_photos(&mut self, photos: Arc<dyn PhotoPicker>) {
+        self.photos = photos;
     }
 
     /// Share on the viewer page: hands the open copy, as it is, to the share
