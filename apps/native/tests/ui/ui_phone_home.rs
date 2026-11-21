@@ -843,6 +843,59 @@ fn a_tray_card_draws_each_answers_description_under_it(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn a_needs_you_option_stays_inside_its_box(cx: &mut TestAppContext) {
+    let label = "Use the newest copy and discard the rest of them";
+    let description = "keep the newest copy and drop the older ones from the migration's history, \
+                       leaving the branch pointer where it is";
+    let dir = TestDir::new();
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting(
+            "b",
+            3,
+            question_described(&[label, "Stop"], &[description, description]),
+        )],
+    );
+    h.cx.simulate_resize(gpui::size(px(1180.0), px(820.0)));
+    h.cx.run_until_parked();
+
+    assert!(
+        drawn(&mut h, "phone-tray-choice-desc-1"),
+        "the description draws"
+    );
+    let choice = h.bounds("phone-tray-choice-1");
+    let inside = h.bounds("phone-tray-choice-desc-1");
+    assert!(
+        inside.right() <= choice.right() && inside.bottom() <= choice.bottom(),
+        "the answer's description {inside:?} stays inside its box {choice:?}"
+    );
+
+    send_waits(
+        &mut h,
+        vec![waiting(
+            "b",
+            3,
+            question_described(
+                &[label, "Merge both", "Stop", "Ask later"],
+                &[description, description, description, description],
+            ),
+        )],
+    );
+
+    assert!(
+        drawn(&mut h, "phone-tray-option-desc-1-1"),
+        "the read-only description draws"
+    );
+    let option = h.bounds("phone-tray-option-1-1");
+    let inside = h.bounds("phone-tray-option-desc-1-1");
+    assert!(
+        inside.right() <= option.right() && inside.bottom() <= option.bottom(),
+        "the read-only description {inside:?} stays inside its box {option:?}"
+    );
+}
+
+#[gpui::test]
 fn every_tray_card_offers_open(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = waiting_phone(

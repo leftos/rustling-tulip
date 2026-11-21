@@ -300,12 +300,45 @@ fn remove_copy(
         ));
     }
     match remove(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => {
+            prune_empty_parents(copies_root, &path);
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            prune_empty_parents(copies_root, &path);
+            Ok(())
+        }
         Err(err) => {
             tracing::warn!(path = %path.display(), error = %err, "removing a fetched copy");
             Err(err)
         }
+    }
+}
+
+/// Removes the folders that held the copy at `removed`, from its own folder
+/// up to, never including, `root`, while each is empty or already gone: the
+/// first folder that still holds something, or any other failed delete, ends
+/// the walk, the failure no error. Nothing
+/// is removed when any folder between `root` and the copy is a link or a
+/// junction, or when `removed` lies outside `root`.
+fn prune_empty_parents(root: &Path, removed: &Path) {
+    let Ok(relative) = removed.strip_prefix(root) else {
+        return;
+    };
+    if linked_folder(root, relative).is_some() {
+        return;
+    }
+    let mut folder = removed.parent();
+    while let Some(path) = folder {
+        if path == root || !path.starts_with(root) {
+            return;
+        }
+        match std::fs::remove_dir(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return,
+        }
+        folder = path.parent();
     }
 }
 
@@ -909,6 +942,93 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(outside_file.exists(), "the file outside the root survives");
         assert_eq!(index.entries.len(), 1, "the entry it refused stays");
+    }
+
+    #[test]
+    fn clearing_a_copy_removes_its_empty_folders() {
+        let dir = TestDir::new("prune");
+        let root = dir.0.join("copies");
+        std::fs::create_dir_all(root.join("host-a/dir")).expect("create the first folder");
+        std::fs::create_dir_all(root.join("host-a/other")).expect("create the sibling folder");
+        std::fs::write(root.join("host-a/dir/x.txt"), b"hi").expect("write the first copy");
+        std::fs::write(root.join("host-a/other/y.txt"), b"hi").expect("write the sibling copy");
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/dir/x.txt", 1));
+        index.upsert(opened_at("host-a/other/y.txt", 1));
+
+        index
+            .remove_where(
+                &root,
+                |entry| entry.local_path == "host-a/dir/x.txt",
+                remove_path,
+            )
+            .expect("clear the first copy");
+
+        assert!(!root.join("host-a/dir").exists(), "the emptied folder goes");
+        assert!(
+            root.join("host-a/other/y.txt").exists(),
+            "the sibling copy stays"
+        );
+
+        index.clear(&root).expect("clear the sibling copy");
+
+        assert!(
+            !root.join("host-a").exists(),
+            "the host's emptied folder goes"
+        );
+        assert!(root.is_dir(), "the copies folder itself stays");
+    }
+
+    #[test]
+    fn pruning_walks_past_a_folder_already_gone() {
+        let dir = TestDir::new("prune-gone");
+        let root = dir.0.join("copies");
+        std::fs::create_dir_all(root.join("host-a/root/Users/me")).expect("create the folders");
+        std::fs::write(root.join("host-a/root/Users/me/a.txt"), b"hi").expect("write the copy");
+        let mut index = Index::default();
+        index.upsert(opened_at("host-a/root/Users/me/a.txt", 1));
+        std::fs::remove_dir_all(root.join("host-a/root/Users/me"))
+            .expect("delete the copy's folder by hand");
+
+        index.clear(&root).expect("clear the missing copy");
+
+        assert!(
+            index.entries.is_empty(),
+            "the missing copy leaves the index"
+        );
+        assert!(
+            !root.join("host-a").exists(),
+            "the empty folders above the vanished one go"
+        );
+        assert!(root.is_dir(), "the copies folder itself stays");
+    }
+
+    #[test]
+    fn pruning_stops_at_a_non_empty_folder_and_a_link() {
+        let dir = TestDir::new("prune-stop");
+        let root = dir.0.join("copies");
+        std::fs::create_dir_all(root.join("host-a/dir")).expect("create the emptied folder");
+        std::fs::write(root.join("host-a/keep.txt"), b"hi").expect("write a file beside it");
+
+        prune_empty_parents(&root, &root.join("host-a/dir/x.txt"));
+
+        assert!(!root.join("host-a/dir").exists(), "the empty folder goes");
+        assert!(
+            root.join("host-a/keep.txt").exists(),
+            "the folder holding another file stays"
+        );
+
+        let outside = dir.0.join("outside");
+        std::fs::create_dir_all(outside.join("sub")).expect("create the outside folder");
+        link_folder(&outside, &root.join("host-b"));
+
+        prune_empty_parents(&root, &root.join("host-b/sub/x.txt"));
+
+        assert!(
+            outside.join("sub").is_dir(),
+            "nothing is removed through a linked folder"
+        );
+        assert!(is_link(&root.join("host-b")), "the link itself stays");
     }
 
     /// An entry for `local_path`, its host path its own, last opened at

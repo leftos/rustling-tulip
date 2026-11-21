@@ -1021,7 +1021,9 @@ pub(crate) struct OptionRow<'a> {
 }
 
 /// [`OptionRow`] drawn: its label, and under it its description in the
-/// colour a filled row's text takes, as plain text.
+/// colour a filled row's text takes, as plain text. Both wrap inside the
+/// row's width, which never grows past what its parent gives it, and the row
+/// never shrinks below their height.
 pub(crate) fn option_row(row: OptionRow<'_>, t: &UiTheme) -> Stateful<Div> {
     option_row_linked(row, None, t)
 }
@@ -1056,7 +1058,12 @@ fn option_row_linked(
             t,
         )
     };
-    let base = base.flex_col().items_start().child(row.label.to_owned());
+    let base = base
+        .flex_col()
+        .items_start()
+        .min_w(px(0.0))
+        .flex_shrink_0()
+        .child(div().w_full().min_w(px(0.0)).child(row.label.to_owned()));
     let base = match row.description {
         Some(description) => {
             let text = match links {
@@ -1065,6 +1072,8 @@ fn option_row_linked(
             };
             base.child(
                 small_div(offset, option_description_color(row.selected, t))
+                    .w_full()
+                    .min_w(px(0.0))
                     .child(text)
                     .when_some(row.description_selector, |line, selector| {
                         line.driver_id(move || selector)
