@@ -200,17 +200,44 @@ fn permission_line(tool_name: &str, summary: &str) -> Option<String> {
     }
 }
 
-/// A plan approval, named by the plan's first line.
+/// A plan approval, named by the plan's first line without a heading's marks.
 fn plan_line(plan: Option<&str>) -> String {
-    plan.and_then(first_line).map_or_else(
+    plan.and_then(plan_subject).map_or_else(
         || "Approve plan".to_owned(),
         |line| format!("Approve plan: {line}"),
     )
 }
 
-/// The first line of `text` that holds anything but whitespace, as one line.
-fn first_line(text: &str) -> Option<String> {
-    text.lines().map(one_line).find(|line| !line.is_empty())
+/// The plan's first non-blank line, as one line and without a Markdown
+/// heading's marks.
+fn plan_subject(text: &str) -> Option<String> {
+    text.lines()
+        .map(heading_text)
+        .map(one_line)
+        .find(|line| !line.is_empty())
+}
+
+/// `line` without the Markdown heading it opens with: a run of `#`s, up to
+/// three spaces in (a tab is not one of those spaces), followed by whitespace
+/// or by nothing else. A line whose marks begin a word ("#hashtag") or that is
+/// indented like code keeps them.
+fn heading_text(line: &str) -> &str {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return line;
+    }
+    let rest = &line[indent..];
+    let after = rest.trim_start_matches('#');
+    if after.len() == rest.len() {
+        return line;
+    }
+    if after.is_empty() {
+        return "";
+    }
+    if after.starts_with([' ', '\t']) {
+        return after.trim_start_matches([' ', '\t']);
+    }
+    line
 }
 
 /// `text` with every run of whitespace, newlines included, as one space.
@@ -609,6 +636,33 @@ mod tests {
     fn plan_approval_detail_is_the_plans_first_line() {
         let pending = PendingInput::PlanApproval {
             plan: Some("\n\n# Plan\nstep 1".to_owned()),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Approve plan: Plan");
+    }
+
+    #[test]
+    fn plan_approval_detail_drops_a_deep_headings_marks() {
+        let pending = PendingInput::PlanApproval {
+            plan: Some("### Deep heading\nstep 1".to_owned()),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Approve plan: Deep heading");
+    }
+
+    #[test]
+    fn a_plan_detail_indented_like_code_keeps_its_marks() {
+        let pending = PendingInput::PlanApproval {
+            plan: Some("    # not a heading\nstep 1".to_owned()),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Approve plan: # not a heading");
+    }
+
+    #[test]
+    fn a_no_break_space_after_the_marks_is_no_heading() {
+        let pending = PendingInput::PlanApproval {
+            plan: Some("#\u{00A0}Plan".to_owned()),
         };
         let listed = rows(&list(vec![asking_with("s1", pending)]));
         assert_eq!(listed[0].detail, "Approve plan: # Plan");

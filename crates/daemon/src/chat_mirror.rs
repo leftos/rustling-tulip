@@ -1839,10 +1839,10 @@ impl ScreenState {
 
 /// `reading` with the hook's text drawn in: a plan prompt whose own body is
 /// empty takes the plan text as its body and, with no subject of its own, the
-/// plan's first non-blank line as its subject; a question prompt takes the
-/// hook question it asks ([`card_asks`]) whole as its subject, and that
-/// question's descriptions ([`fill_descriptions`]). Every other reading is
-/// shown as it is.
+/// plan's first non-blank line, without a Markdown heading's marks, as its
+/// subject; a question prompt takes the hook question it asks ([`card_asks`])
+/// whole as its subject, and that question's descriptions
+/// ([`fill_descriptions`]). Every other reading is shown as it is.
 fn filled(reading: &ChatScreen, plan: Option<&str>, questions: &[PendingQuestion]) -> ChatScreen {
     let mut screen = reading.clone();
     let Some(prompt) = screen.prompt.as_mut() else {
@@ -1854,7 +1854,10 @@ fn filled(reading: &ChatScreen, plan: Option<&str>, questions: &[PendingQuestion
     {
         plan.clone_into(&mut prompt.body);
         if prompt.subject.trim().is_empty()
-            && let Some(line) = plan.lines().map(str::trim).find(|line| !line.is_empty())
+            && let Some(line) = plan
+                .lines()
+                .map(|line| heading_text(line).trim())
+                .find(|line| !line.is_empty())
         {
             line.clone_into(&mut prompt.subject);
         }
@@ -1868,6 +1871,29 @@ fn filled(reading: &ChatScreen, plan: Option<&str>, questions: &[PendingQuestion
         fill_descriptions(prompt, asked);
     }
     screen
+}
+
+/// `line` without the Markdown heading it opens with: a run of `#`s, up to
+/// three spaces in (a tab is not one of those spaces), followed by whitespace
+/// or by nothing else. A line whose marks begin a word ("#hashtag") or that is
+/// indented like code keeps them.
+fn heading_text(line: &str) -> &str {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return line;
+    }
+    let rest = &line[indent..];
+    let after = rest.trim_start_matches('#');
+    if after.len() == rest.len() {
+        return line;
+    }
+    if after.is_empty() {
+        return "";
+    }
+    if after.starts_with([' ', '\t']) {
+        return after.trim_start_matches([' ', '\t']);
+    }
+    line
 }
 
 /// Whether the question card `prompt` asks `asked`, whitespace aside: a card
@@ -2578,6 +2604,26 @@ mod tests {
         }
     }
 
+    /// A plan card awaiting approval with no subject or body of its own.
+    fn plan_card() -> ChatScreen {
+        ChatScreen {
+            composer: protocol::ComposerState::Dialog,
+            prompt: Some(ChatPrompt {
+                id: "p1".to_owned(),
+                kind: ChatPromptKind::Plan,
+                subject: String::new(),
+                body: String::new(),
+                options: Vec::new(),
+                questions: Vec::new(),
+                can_amend: false,
+                always_allow_tip: None,
+                multi: false,
+                cursor: None,
+                adjust: None,
+            }),
+        }
+    }
+
     /// A hook question asking `question`, its options each a label and a
     /// description.
     fn hook_question(question: &str, options: &[(&str, &str)]) -> PendingQuestion {
@@ -2593,6 +2639,45 @@ mod tests {
 
     fn card_prompt(screen: &ChatScreen) -> &ChatPrompt {
         screen.prompt.as_ref().expect("a question card")
+    }
+
+    #[test]
+    fn a_plan_subject_filled_from_the_hook_drops_its_leading_hashes() {
+        let subject = |plan: &str| {
+            card_prompt(&filled(&plan_card(), Some(plan), &[]))
+                .subject
+                .clone()
+        };
+        assert_eq!(subject("# Long smoke plan\nstep 1"), "Long smoke plan");
+        assert_eq!(subject("## Two\nstep 1"), "Two");
+        assert_eq!(
+            subject("#hashtag plan\nstep 1"),
+            "#hashtag plan",
+            "a hash that begins a word is not a heading"
+        );
+        assert_eq!(subject("#\nThe real plan"), "The real plan");
+    }
+
+    #[test]
+    fn a_plan_indented_like_code_keeps_its_marks_in_the_subject() {
+        let shown = filled(&plan_card(), Some("    # not a heading\nstep 1"), &[]);
+        assert_eq!(card_prompt(&shown).subject, "# not a heading");
+    }
+
+    #[test]
+    fn a_heading_is_read_only_within_three_spaces_of_the_margin() {
+        assert_eq!(heading_text("   # Indented"), "Indented");
+        assert_eq!(
+            heading_text("    # Code"),
+            "    # Code",
+            "four spaces read as a code block"
+        );
+        assert_eq!(heading_text("Plan: fix #12"), "Plan: fix #12");
+        assert_eq!(
+            heading_text("\t# Tab"),
+            "\t# Tab",
+            "a tab indents like code"
+        );
     }
 
     #[test]
