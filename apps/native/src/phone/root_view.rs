@@ -1773,6 +1773,40 @@ enum Pane {
     Session,
 }
 
+/// A layer drawn over the page.
+#[derive(Debug, Clone, Copy)]
+enum SheetLayer {
+    /// Home's long-press sheet.
+    HomeSheet,
+    /// Home's sort sheet.
+    SortSheet,
+    /// The browser's folder sheet.
+    BrowserSheet,
+    /// The prompt sheet.
+    PromptSheet,
+    /// The device pairing layer, over the whole window.
+    Pairing,
+}
+
+impl SheetLayer {
+    /// The pane the layer covers alone in two panes; `None` for one over
+    /// the whole window.
+    const fn pane(self) -> Option<Pane> {
+        match self {
+            Self::HomeSheet | Self::SortSheet => Some(Pane::List),
+            Self::BrowserSheet | Self::PromptSheet => Some(Pane::Session),
+            Self::Pairing => None,
+        }
+    }
+}
+
+/// Whether `layer` covers the session pane, the window drawing two panes
+/// when `split`: in one pane every layer covers the page; in two, every
+/// layer but those boxed to the list pane.
+const fn layer_covers_session(split: bool, layer: SheetLayer) -> bool {
+    !split || !matches!(layer.pane(), Some(Pane::List))
+}
+
 impl PhoneRoot {
     /// Whether the window draws Home's list beside the session pane: a
     /// two-pane layout with no full-screen terminal, Settings closed and
@@ -1942,45 +1976,51 @@ impl PhoneRoot {
 
     /// The sheets over the page, in order: Home's long-press sheet, the
     /// browser's folder sheet, then the prompt sheet; in two panes each
-    /// covers its own pane only.
+    /// covers its own pane only. With them, whether any covers the session
+    /// pane ([`layer_covers_session`]).
     fn sheet_layers(
         &mut self,
         host_open: bool,
         padding: Edges<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Vec<Div> {
+    ) -> (Vec<Div>, bool) {
         let split = self.split(host_open, cx);
-        let boxed =
-            |pane: Pane| move |layer: Div| Self::boxed(layer, split.then_some(pane), &padding);
         let sheet = self
             .home_sheet_over(host_open, cx)
             .then(|| self.sheet_layer(padding.bottom, cx))
-            .flatten()
-            .map(boxed(Pane::List));
+            .flatten();
         let sort_sheet = self
             .home_sheet_over(host_open, cx)
             .then(|| self.sort_sheet_layer(padding.bottom, cx))
-            .flatten()
-            .map(boxed(Pane::List));
+            .flatten();
         let browser_sheet = self
             .browser_sheet_shown()
             .then(|| self.browser_sheet_layer(padding.bottom, cx))
-            .flatten()
-            .map(boxed(Pane::Session));
+            .flatten();
         self.sync_prompt_sheet(cx);
         let screen_height = window.viewport_size().height;
         let prompt_sheet = self
             .prompt_sheet_shown()
             .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
-            .flatten()
-            .map(boxed(Pane::Session));
-        sheet
+            .flatten();
+        let drawn = [
+            (SheetLayer::HomeSheet, sheet),
+            (SheetLayer::SortSheet, sort_sheet),
+            (SheetLayer::BrowserSheet, browser_sheet),
+            (SheetLayer::PromptSheet, prompt_sheet),
+        ];
+        let covers_session = drawn
+            .iter()
+            .any(|(layer, div)| div.is_some() && layer_covers_session(split, *layer));
+        let layers = drawn
             .into_iter()
-            .chain(sort_sheet)
-            .chain(browser_sheet)
-            .chain(prompt_sheet)
-            .collect()
+            .filter_map(|(layer, div)| {
+                let pane = if split { layer.pane() } else { None };
+                div.map(|div| Self::boxed(div, pane, &padding))
+            })
+            .collect();
+        (layers, covers_session)
     }
 
     /// Whether Home's long-press sheet may draw: in two panes over the
@@ -2056,8 +2096,10 @@ impl Render for PhoneRoot {
         let pairing = self
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
-        let layers = self.sheet_layers(host_open, padding, window, cx);
-        let paste_end = Self::paste_frame_end(self, !layers.is_empty() || pairing.is_some(), cx);
+        let split = self.split(host_open, cx);
+        let (layers, covers_session) = self.sheet_layers(host_open, padding, window, cx);
+        let pairing_covers = pairing.is_some() && layer_covers_session(split, SheetLayer::Pairing);
+        let paste_end = Self::paste_frame_end(self, covers_session || pairing_covers, cx);
         let padded = || {
             div()
                 .pt(padding.top)
@@ -2096,5 +2138,33 @@ impl Render for PhoneRoot {
             }))
             // Last, so its prepaint follows the Paste button's.
             .children(paste_end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SheetLayer, layer_covers_session};
+
+    #[test]
+    fn a_list_pane_sheet_leaves_the_session_pane_uncovered_in_two_panes() {
+        let rows = [
+            (true, SheetLayer::HomeSheet, false),
+            (true, SheetLayer::SortSheet, false),
+            (true, SheetLayer::BrowserSheet, true),
+            (true, SheetLayer::PromptSheet, true),
+            (true, SheetLayer::Pairing, true),
+            (false, SheetLayer::HomeSheet, true),
+            (false, SheetLayer::SortSheet, true),
+            (false, SheetLayer::BrowserSheet, true),
+            (false, SheetLayer::PromptSheet, true),
+            (false, SheetLayer::Pairing, true),
+        ];
+        for (split, layer, covers) in rows {
+            assert_eq!(
+                layer_covers_session(split, layer),
+                covers,
+                "split {split}, {layer:?}"
+            );
+        }
     }
 }

@@ -43,9 +43,12 @@ impl ShareSheet for IosShareSheet {
             return;
         }
         let path = path.to_path_buf();
-        DispatchQueue::main().exec_async(move || match MainThreadMarker::new() {
-            Some(mtm) => present_on_main(&path, mtm),
-            None => tracing::warn!("phone: the main queue ran off the main thread; no share sheet"),
+        DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                present_on_main(&path, mtm);
+            } else {
+                tracing::warn!("phone: the main queue ran off the main thread; no share sheet");
+            }
         });
     }
 }

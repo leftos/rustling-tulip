@@ -256,6 +256,10 @@ const TOUCH_TARGET: f32 = 44.0;
 const HANDLE_STEM: f32 = 2.0;
 /// A selection handle's knob diameter, in px, as the phone chat's.
 const HANDLE_KNOB: f32 = 10.0;
+/// How far the end handle's touch area reaches under the input's box, in
+/// px: the phone composer's Paste row starts 15 under it (the field's 6 of
+/// padding, its 1 of border and the composer's 8 of gap).
+const HANDLE_REACH_BELOW: f32 = 14.0;
 /// The edit bar's padding around its buttons, and the gap between them, in px.
 const BAR_PAD: f32 = 4.0;
 /// The edit bar's corner radius, in px.
@@ -1699,6 +1703,39 @@ fn label_width(label: &str, text_size: Pixels, cx: &App) -> Pixels {
     px(width.ceil() + 4.0)
 }
 
+/// The centre of the `side` handle's knob: above the start's caret, below
+/// the end's row.
+fn handle_knob(side: HandleSide, spots: TouchSpots) -> Point<Pixels> {
+    let caret = spots.of(side);
+    let knob_x = caret.x + px(HANDLE_STEM / 2.0);
+    match side {
+        HandleSide::Start => point(knob_x, caret.y - px(HANDLE_KNOB / 2.0)),
+        HandleSide::End => point(knob_x, caret.y + spots.line_height + px(HANDLE_KNOB / 2.0)),
+    }
+}
+
+/// The `side` handle's touch area: a touch-target square centred on its
+/// knob, except that the end's stops [`HANDLE_REACH_BELOW`] under the
+/// input's box, clear of what sits below the field (the phone composer's
+/// Paste row), though never so short that the knob leaves it (as when the
+/// end's row runs below the box).
+fn handle_hit(side: HandleSide, spots: TouchSpots) -> Bounds<Pixels> {
+    let knob = handle_knob(side, spots);
+    let half = px(TOUCH_TARGET / 2.0);
+    let origin = point(knob.x - half, knob.y - half);
+    let mut height = px(TOUCH_TARGET);
+    let reach = spots.field.bottom() + px(HANDLE_REACH_BELOW) - origin.y;
+    let to_knob_bottom = half + px(HANDLE_KNOB / 2.0);
+    if side == HandleSide::End && reach < height {
+        height = if reach < to_knob_bottom {
+            to_knob_bottom
+        } else {
+            reach
+        };
+    }
+    Bounds::new(origin, size(px(TOUCH_TARGET), height))
+}
+
 /// The `side` handle of the selection at `spots`, as the phone chat's
 /// handles draw: a stem the caret's height and a round knob above the start
 /// or below the end, in `color`, inside a touch-target square centred on
@@ -1711,13 +1748,9 @@ fn handle_element(
     input: WeakEntity<TextInput>,
 ) -> AnyElement {
     let caret = spots.of(side);
-    let knob_x = caret.x + px(HANDLE_STEM / 2.0);
-    let knob = match side {
-        HandleSide::Start => point(knob_x, caret.y - px(HANDLE_KNOB / 2.0)),
-        HandleSide::End => point(knob_x, caret.y + spots.line_height + px(HANDLE_KNOB / 2.0)),
-    };
-    let half = px(TOUCH_TARGET / 2.0);
-    let hit = point(knob.x - half, knob.y - half);
+    let knob = handle_knob(side, spots);
+    let area = handle_hit(side, spots);
+    let hit = area.origin;
     let local = hit - spots.field.origin;
     deferred(
         div()
@@ -1727,7 +1760,8 @@ fn handle_element(
             .absolute()
             .left(local.x)
             .top(local.y)
-            .size(px(TOUCH_TARGET))
+            .w(area.size.width)
+            .h(area.size.height)
             .child(
                 div()
                     .absolute()
@@ -2723,10 +2757,73 @@ mod tests {
     };
 
     use super::{
-        CompletionEvent, PlatformReport, TextChanged, TextInput, TextInputEvent, Token, bind_keys,
-        caret_scroll_x, clipboard_image_entry, marked_after_replace, next_boundary,
-        offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
+        CompletionEvent, HandleSide, PlatformReport, TextChanged, TextInput, TextInputEvent, Token,
+        TouchSpots, bind_keys, caret_scroll_x, clipboard_image_entry, handle_hit,
+        marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary,
+        single_line,
     };
+
+    #[test]
+    fn the_end_handle_stops_short_of_the_paste_row() {
+        use gpui::{Bounds, size};
+
+        // A two-row input whose box ends at y 220, the last row's bottom.
+        let field = Bounds::new(point(px(0.0), px(180.0)), size(px(300.0), px(40.0)));
+        let on_last = TouchSpots {
+            start: point(px(50.0), px(180.0)),
+            end: point(px(100.0), px(200.0)),
+            line_height: px(20.0),
+            field,
+        };
+        let end = handle_hit(HandleSide::End, on_last);
+        // The knob sits 5 below the row's bottom (225), the square 22 above it.
+        assert_eq!(end.origin, point(px(79.0), px(203.0)));
+        assert_eq!(end.size.width, px(44.0));
+        assert_eq!(
+            end.bottom(),
+            px(234.0),
+            "14 under the last row, short of Paste at 15"
+        );
+        let start = handle_hit(HandleSide::Start, on_last);
+        assert_eq!(start.origin, point(px(29.0), px(153.0)));
+        assert_eq!(start.size, size(px(44.0), px(44.0)));
+        // An end on the upper row keeps its whole square inside the reach.
+        let on_upper = TouchSpots {
+            end: point(px(100.0), px(180.0)),
+            ..on_last
+        };
+        let upper = handle_hit(HandleSide::End, on_upper);
+        assert_eq!(upper.origin, point(px(79.0), px(183.0)));
+        assert_eq!(upper.size, size(px(44.0), px(44.0)));
+    }
+
+    #[test]
+    fn the_end_handle_keeps_its_knob_while_its_row_runs_below_the_box() {
+        use gpui::{Bounds, size};
+
+        let field = Bounds::new(point(px(0.0), px(180.0)), size(px(300.0), px(40.0)));
+        let knob_bottom =
+            |spots: TouchSpots| spots.end.y + spots.line_height + px(super::HANDLE_KNOB);
+        // A 20 pt row whose bottom is 9 under the box (229 against 220).
+        let partly_below = TouchSpots {
+            start: point(px(50.0), px(180.0)),
+            end: point(px(100.0), px(209.0)),
+            line_height: px(20.0),
+            field,
+        };
+        let hit = handle_hit(HandleSide::End, partly_below);
+        assert!(hit.size.height > px(0.0));
+        assert!(hit.bottom() >= knob_bottom(partly_below), "{hit:?}");
+        // A 40 pt row starting 5 above the box's bottom.
+        let tall = TouchSpots {
+            end: point(px(100.0), px(215.0)),
+            line_height: px(40.0),
+            ..partly_below
+        };
+        let hit = handle_hit(HandleSide::End, tall);
+        assert!(hit.size.height > px(0.0), "{hit:?}");
+        assert!(hit.bottom() >= knob_bottom(tall), "{hit:?}");
+    }
 
     #[test]
     fn clipboard_image_entry_prefers_a_non_bmp_image_and_skips_empty_ones() {

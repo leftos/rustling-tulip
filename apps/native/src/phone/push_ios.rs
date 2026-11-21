@@ -411,18 +411,18 @@ extern "C-unwind" fn did_fail(
 /// fallback alert) names nothing and is logged.
 fn tap_of(response: &UNNotificationResponse, handler: &ResponseHandler) {
     let info = response.notification().request().content().userInfo();
-    match (info_string(&info, "host"), info_string(&info, "session_id")) {
-        (Some(host), Some(session_id)) => {
-            tracing::info!("phone: a notification was tapped");
-            match TAP_SENDER.get() {
-                // A receiver gone means the phone's root was dropped.
-                Some(sender) => {
-                    let _unheard = sender.unbounded_send(Tap { host, session_id });
-                }
-                None => tracing::warn!("phone: a tap came before its channel"),
-            }
+    if let (Some(host), Some(session_id)) =
+        (info_string(&info, "host"), info_string(&info, "session_id"))
+    {
+        tracing::info!("phone: a notification was tapped");
+        if let Some(sender) = TAP_SENDER.get() {
+            // A receiver gone means the phone's root was dropped.
+            let _unheard = sender.unbounded_send(Tap { host, session_id });
+        } else {
+            tracing::warn!("phone: a tap came before its channel");
         }
-        _ => tracing::debug!("phone: a tapped notification names no session"),
+    } else {
+        tracing::debug!("phone: a tapped notification names no session");
     }
     handler.call(());
 }

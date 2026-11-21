@@ -39,6 +39,7 @@ pub fn run_value(daemon_path: &str) -> String {
 /// A registration that exists but cannot be read is logged and reported as
 /// `false`; it is not this call's place to fail a startup. Always `false`
 /// where autostart is unsupported.
+#[cfg(any(windows, target_os = "macos"))]
 #[must_use]
 pub fn get() -> bool {
     match imp::get() {
@@ -48,6 +49,14 @@ pub fn get() -> bool {
             false
         }
     }
+}
+
+/// Whether the daemon is registered to start on login: never, where
+/// autostart is unsupported.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub const fn get() -> bool {
+    false
 }
 
 /// Register or unregister the daemon to start on login. Enabling locates the
@@ -325,10 +334,6 @@ mod imp {
 #[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use anyhow::bail;
-
-    pub fn get() -> anyhow::Result<bool> {
-        Ok(false)
-    }
 
     pub fn set(_enabled: bool) -> anyhow::Result<()> {
         bail!("starting the daemon on login is only supported on Windows and macOS")

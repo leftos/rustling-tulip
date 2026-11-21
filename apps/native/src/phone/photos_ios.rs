@@ -112,9 +112,10 @@ impl PhotoPicker for IosPhotoPicker {
         if let Some(mtm) = MainThreadMarker::new() {
             present_on_main(mtm);
         } else {
-            DispatchQueue::main().exec_async(|| match MainThreadMarker::new() {
-                Some(mtm) => present_on_main(mtm),
-                None => {
+            DispatchQueue::main().exec_async(|| {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    present_on_main(mtm);
+                } else {
                     tracing::warn!(
                         "phone: the main queue ran off the main thread; no photo picker"
                     );
@@ -189,13 +190,12 @@ fn finished(picker: &UIViewController, results: &NSArray<PHPickerResult>) {
         // SAFETY: the provider hands the completion a live data object, or
         // null with a live error, for the call.
         let (data, error) = unsafe { (data.as_ref(), error.as_ref()) };
-        match data {
-            Some(data) => answer.send(as_jpeg(data.to_vec())),
-            None => {
-                let why = error.map(|error| error.localizedDescription().to_string());
-                tracing::warn!(error = ?why, "phone: the picked photo could not be loaded");
-                answer.send(None);
-            }
+        if let Some(data) = data {
+            answer.send(as_jpeg(data.to_vec()));
+        } else {
+            let why = error.map(|error| error.localizedDescription().to_string());
+            tracing::warn!(error = ?why, "phone: the picked photo could not be loaded");
+            answer.send(None);
         }
     });
     // SAFETY: the completion touches only the answer channel, `NSData` and

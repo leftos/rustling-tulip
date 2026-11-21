@@ -14,7 +14,7 @@ use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color}
 use super::hosts_view::phone_button;
 use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
-use super::pasteboard;
+use super::pasteboard::{self, PasteSpot};
 use super::photos::{self, PHOTOS_LABEL};
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
@@ -62,13 +62,16 @@ const fn control_pastes() -> bool {
     false
 }
 
-/// The Paste button, recording where it is drawn each frame, for the
-/// system paste control to sit over.
+/// The Paste button at `spot`, recording where it is drawn each frame and
+/// the clip it is drawn in, for the system paste control to sit over.
 #[cfg(target_os = "ios")]
-fn record_paste_bounds(button: Stateful<Div>) -> Stateful<Div> {
+pub(super) fn record_paste_bounds(button: Stateful<Div>, spot: PasteSpot) -> Stateful<Div> {
     button.child(
         gpui::canvas(
-            |bounds, _, _| super::paste_control_ios::record_button(bounds),
+            move |bounds, window, _| {
+                let clip = window.content_mask().bounds;
+                super::paste_control_ios::record_button(spot, bounds, clip);
+            },
             |_, (), _, _| {},
         )
         .absolute()
@@ -80,7 +83,7 @@ fn record_paste_bounds(button: Stateful<Div>) -> Stateful<Div> {
 
 /// Off iOS there is no paste control to place.
 #[cfg(not(target_os = "ios"))]
-fn record_paste_bounds(button: Stateful<Div>) -> Stateful<Div> {
+pub(super) fn record_paste_bounds(button: Stateful<Div>, _: PasteSpot) -> Stateful<Div> {
     button
 }
 
@@ -816,15 +819,16 @@ impl PhoneRoot {
                 .flex_1()
                 .child(button.label());
             let drawn = match button {
-                ComposerButton::Paste => record_paste_bounds(drawn.on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| {
+                ComposerButton::Paste => record_paste_bounds(
+                    drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         // On iOS 16 and later the system's paste control
                         // over the button takes the tap.
                         if !control_pastes() {
                             this.paste_into_composer(window, cx);
                         }
-                    },
-                ))),
+                    })),
+                    PasteSpot::Composer,
+                ),
                 ComposerButton::Photos => {
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_photo(cx)))
                 }
@@ -893,15 +897,24 @@ impl PhoneRoot {
             return None;
         }
         let session = this.shown.as_ref().map(|(_, id)| id.clone());
+        let uploads = session
+            .as_deref()
+            .is_some_and(|id| takes_uploads(this.root.read(cx), id));
         let root = cx.entity().downgrade();
         let t = theme(cx);
-        let colors = super::paste_control_ios::PasteColors {
-            text: t.text,
-            ground: t.ground,
+        let frame = super::paste_control_ios::PasteFrame {
+            covered,
+            session,
+            terminal: this.terminal_session(),
+            uploads,
+            colors: super::paste_control_ios::PasteColors {
+                text: t.text,
+                ground: t.ground,
+            },
         };
         let end = gpui::canvas(
             move |_, _, cx| {
-                super::paste_control_ios::frame_end(covered, session, root, colors, cx);
+                super::paste_control_ios::frame_end(frame, root, cx);
             },
             |_, (), _, _| {},
         )
@@ -1114,6 +1127,9 @@ impl PhoneRoot {
             KeyAction::Ctrl => self.key_bar.borrow_mut().toggle_ctrl(),
             KeyAction::Paste => match surface {
                 KeySurface::Dock => self.paste_into_composer(window, cx),
+                // On iOS 16 and later the system's paste control over the
+                // key bar's Paste takes the tap.
+                KeySurface::Terminal if control_pastes() => {}
                 KeySurface::Terminal => {
                     let pane = self.terminal_pane(cx);
                     Self::paste_into_terminal(pane, self.terminal_session(), cx);

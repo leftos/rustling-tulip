@@ -10,6 +10,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Mac whose daemon was started outside the desktop session says its login Keychain is out of reach, instead of a bare error saving a secret.
 - Settings › Linear offers Clear only for a saved key, and a refused key's line says whether Linear refused the saved key or LINEAR_API_KEY.
 - A narrow chat pane whose Stop is armed drops its context label instead of squeezing the session's name.
+- The phone terminal's Paste key reads the clipboard through iOS's own paste button, so iOS 16 and later no longer refuse it.
+- The phone's Chat box pastes any image type, such as HEIC or GIF, and pastes the text on a host that takes no uploads.
+- On an iPad, the Chat box's Paste keeps working while a sheet covers only the session list.
+- The phone's paste button comes back after a theme change, and grabbing the Chat box's end selection handle low no longer pastes.
 
 ### Changed
 

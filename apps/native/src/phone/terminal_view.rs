@@ -15,8 +15,9 @@ use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::key_bar::KeyBar;
 use super::key_grid::{self, KeyAction};
+use super::pasteboard::PasteSpot;
 use super::session::Page;
-use super::session_view::{KeySurface, QuickTarget, status_line};
+use super::session_view::{KeySurface, QuickTarget, record_paste_bounds, status_line};
 use super::settings_view::BACK_LABEL;
 use super::terminal_fit::{self, Pan};
 use super::{PhoneLayout, PhoneRoot};
@@ -338,22 +339,27 @@ impl PhoneRoot {
                 ButtonKind::Outlined
             };
             let dimmed = key_grid::is_inert(key);
-            scroll = scroll.child(
-                phone_button(&format!("phone-bar-{}", key.id), kind, cx)
-                    .flex_none()
-                    .min_w(px(TOUCH_TARGET))
-                    .max_w(px(BAR_KEY_MAX))
-                    .min_h(px(TOUCH_TARGET))
-                    .px(px(BAR_KEY_PAD))
-                    .truncate()
-                    .child(key.label.clone())
-                    .when(dimmed, |button| {
-                        button.opacity(crate::spawn_view::DISABLED_OPACITY)
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.press_grid_key(index, KeySurface::Terminal, window, cx);
-                    })),
-            );
+            let drawn = phone_button(&format!("phone-bar-{}", key.id), kind, cx)
+                .flex_none()
+                .min_w(px(TOUCH_TARGET))
+                .max_w(px(BAR_KEY_MAX))
+                .min_h(px(TOUCH_TARGET))
+                .px(px(BAR_KEY_PAD))
+                .truncate()
+                .child(key.label.clone())
+                .when(dimmed, |button| {
+                    button.opacity(crate::spawn_view::DISABLED_OPACITY)
+                })
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.press_grid_key(index, KeySurface::Terminal, window, cx);
+                }));
+            // The system paste control sits over the Paste key, as over the
+            // composer's Paste button.
+            scroll = scroll.child(if key.action == KeyAction::Paste {
+                record_paste_bounds(drawn, PasteSpot::Terminal)
+            } else {
+                drawn
+            });
         }
         let hide = keyboard_up.then(|| {
             phone_button("phone-bar-hide", ButtonKind::Outlined, cx)
