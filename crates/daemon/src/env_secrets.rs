@@ -877,10 +877,11 @@ mod tests {
 
     /// The login Keychain as this process's store: a value written through
     /// `keyring_core` reads back and can be deleted. Touches the real Keychain,
-    /// so it stays ignored until run on the Mac builder.
+    /// so it stays ignored; `tools/mac/desktop-test.ps1` runs it in the Mac
+    /// builder's logged-on desktop session (a gate job over SSH gets -25308).
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "touches the login Keychain; run on the Mac builder"]
+    #[ignore = "touches the login Keychain; run it with tools/mac/desktop-test.ps1"]
     fn keychain_store_round_trips_a_value() {
         init().expect("the login Keychain is installed as the store");
         let service = format!("rustling-tulip-test-{}", uuid::Uuid::new_v4().simple());
