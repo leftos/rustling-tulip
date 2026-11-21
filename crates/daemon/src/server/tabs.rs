@@ -862,7 +862,7 @@ fn one_binding(
 fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
     let panes: Vec<crate::tabs::PaneRef> = hub
         .sessions
-        .snapshots()
+        .listed_snapshots()
         .into_iter()
         .map(|s| crate::tabs::PaneRef {
             pane_id: uuid::Uuid::new_v4().to_string(),

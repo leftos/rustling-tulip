@@ -1380,6 +1380,8 @@ fn interactive_record(
         hook_agent: None,
         hook_options: OptionValues::new(),
         resumed_from: new.resumed_from,
+        announced: false,
+        listed_at: None,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -1475,6 +1477,8 @@ fn plain_shell_record(
         hook_agent: new.hook_agent,
         hook_options: new.hook_options,
         resumed_from: new.resumed_from,
+        announced: false,
+        listed_at: None,
     };
     push_recent_action(
         &mut record,
@@ -2706,6 +2710,8 @@ impl HeadlessRecord<'_> {
             hook_agent: None,
             hook_options: OptionValues::new(),
             resumed_from: self.cfg.extras.resumed_from.clone(),
+            announced: false,
+            listed_at: None,
         }
     }
 }

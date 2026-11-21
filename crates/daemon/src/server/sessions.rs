@@ -42,7 +42,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
     match msg {
         ClientMessage::ListSessions => {
             let _ = out_tx.send(DaemonMessage::Sessions {
-                sessions: hub.sessions.snapshots(),
+                sessions: hub.sessions.listed_snapshots(),
             });
         }
         ClientMessage::DuplicateSession {
@@ -983,7 +983,7 @@ pub(super) fn spawn_session_forwarder(
 /// sessions this connection's own requests spawned, since the list carries
 /// no `request_id` and the reply may have been among the events it missed.
 fn resync_messages(registry: &SessionRegistry, connection: u64) -> Vec<DaemonMessage> {
-    let listed = registry.snapshots_with_spawn_origins();
+    let listed = registry.listed_snapshots_with_spawn_origins();
     let replies: Vec<DaemonMessage> = listed
         .iter()
         .filter_map(|(session, origin)| {

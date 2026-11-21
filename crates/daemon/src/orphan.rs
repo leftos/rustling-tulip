@@ -69,6 +69,14 @@ pub struct OrphanMeta {
     pub mode: SessionMode,
     pub members: Vec<SessionMember>,
     pub started_at: DateTime<Utc>,
+    /// The session's listing key ([`crate::session::SessionRecord::listed_at`]),
+    /// mirrored from the record once clients first heard of the session. A
+    /// restart restores it, so sessions list in the order the previous run
+    /// listed them. `None` before then and for sidecars written before this
+    /// field existed; a session recovered from such a sidecar takes its
+    /// `started_at` as its key.
+    #[serde(default)]
+    pub listed_at: Option<DateTime<Utc>>,
     /// Workspace id for `kind == Workspace`. `None` for single-repo sessions
     /// and for metas written by earlier daemon versions.
     #[serde(default)]
@@ -681,6 +689,8 @@ pub fn meta_from_record(
         mode,
         members,
         started_at,
+        // Mirrored from the record once its first snapshot is sent.
+        listed_at: None,
         workspace_id,
         program_name,
         agent,
@@ -740,6 +750,8 @@ pub struct RecordMirror {
     /// The agent a plain shell maps its hooks with: a recovered shell's,
     /// set at spawn, or a promoted shell's, set when the screen saw it.
     pub hook_agent: Option<AgentId>,
+    /// The record's listing key, set when clients first heard of it.
+    pub listed_at: Option<DateTime<Utc>>,
 }
 
 impl RecordMirror {
@@ -762,6 +774,7 @@ impl RecordMirror {
             && meta.agent_in_shell == self.agent_in_shell
             && meta.shell_label == self.shell_label
             && meta.hook_agent == self.hook_agent
+            && meta.listed_at == self.listed_at
     }
 
     fn apply(&self, meta: &mut OrphanMeta) {
@@ -786,6 +799,7 @@ impl RecordMirror {
         meta.agent_in_shell = self.agent_in_shell;
         meta.shell_label.clone_from(&self.shell_label);
         meta.hook_agent.clone_from(&self.hook_agent);
+        meta.listed_at = self.listed_at;
     }
 }
 
@@ -1074,6 +1088,7 @@ mod tests {
             mode: SessionMode::Interactive,
             members: vec![],
             started_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            listed_at: chrono::DateTime::from_timestamp(5, 0),
             workspace_id: None,
             program_name: Some("rt-tracer".to_string()),
             agent: Some(agent_registry::default_agent()),
@@ -1445,6 +1460,7 @@ mod tests {
             agent_in_shell: false,
             shell_label: None,
             hook_agent: None,
+            listed_at: None,
         }
     }
 

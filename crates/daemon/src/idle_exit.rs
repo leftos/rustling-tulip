@@ -306,6 +306,8 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             resumed_from: Vec::new(),
+            announced: false,
+            listed_at: None,
         }
     }
 

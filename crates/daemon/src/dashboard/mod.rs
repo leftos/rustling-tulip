@@ -605,7 +605,7 @@ fn listed_sessions(
     runs: Option<&crate::dispatch_runs::DispatchRuns>,
 ) -> Vec<Listed> {
     sessions
-        .snapshots()
+        .listed_snapshots()
         .into_iter()
         .filter(|snapshot| {
             snapshot.agent.is_some() && !snapshot.is_inactive && !snapshot.is_abandoned
@@ -1175,8 +1175,34 @@ mod tests {
         SessionStatus, StuckReason,
     };
 
-    use super::{Job, Listed, State, TreeContext, agent_tree, apply_jobs, build_facts, ledger};
+    use super::{
+        Job, Listed, State, TreeContext, agent_tree, apply_jobs, build_facts, ledger,
+        listed_sessions,
+    };
     use crate::server::test_support::ScratchDir;
+
+    #[test]
+    fn the_dashboard_never_lists_a_pending_session() {
+        let (hub, _dir) = crate::server::test_support::test_hub("dashboard-pending");
+        hub.sessions
+            .insert(crate::server::test_support::idle_record("s1"));
+        let pending = hub
+            .sessions
+            .insert_pending(crate::server::test_support::idle_record("s2"));
+
+        let ids: Vec<String> = listed_sessions(&hub.sessions, None)
+            .into_iter()
+            .map(|listed| listed.id)
+            .collect();
+        assert_eq!(ids, ["s1"], "a pending session is not on the Dashboard");
+
+        pending.publish();
+        let ids: Vec<String> = listed_sessions(&hub.sessions, None)
+            .into_iter()
+            .map(|listed| listed.id)
+            .collect();
+        assert_eq!(ids, ["s1", "s2"], "it is once clients hear of it");
+    }
 
     fn at(minute: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 28, 12, 0, 0)

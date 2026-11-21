@@ -431,6 +431,19 @@ pub struct SessionRecord {
     /// [`protocol::SessionSnapshot::resumed_from`]). Written to the sidecar once
     /// at spawn and never changed after.
     pub resumed_from: Vec<String>,
+    /// Whether clients have heard of this session: false while the record
+    /// is pending, set by [`PendingInsert::publish_from`] as it sends the
+    /// first `SessionUpdated`. A client-facing listing skips an unannounced
+    /// record, and an update to one is applied without a broadcast.
+    pub announced: bool,
+    /// The registry's listing key: when clients first heard of the session,
+    /// handed out by [`PendingInsert::publish_from`] and strictly increasing
+    /// within a run. A recovered session keeps the key its sidecar holds, so
+    /// a restart lists sessions in the order the previous run did, and one
+    /// whose sidecar predates the key takes its `started_at` as its key.
+    /// `None` only while a fresh record is pending; a listing falls back to
+    /// `started_at` for it. Mirrored into the sidecar.
+    pub listed_at: Option<DateTime<Utc>>,
     /// The cols and rows last applied to this session's PTY. Until a client's
     /// `Resize` has sized this session it is `None`, and any `Resize` applies;
     /// after that a claimed one does, and an unclaimed one only from
@@ -855,6 +868,12 @@ pub struct SessionRegistry {
     /// The conversations live dispatch runs name; every record inserted gets
     /// a clone, so its snapshot sees the links.
     dispatch_links: crate::dispatch_runs::DispatchLinks,
+    /// The highest listing key [`PendingInsert::publish_from`] has handed
+    /// out or restored. Held across a publish's key assignment and its
+    /// broadcast, so keys go up in the order clients hear of sessions. Taken
+    /// first, before the publishing record's lock, and `by_id` is never
+    /// taken under it; a listing takes `by_id`, then each record's lock.
+    publish: Mutex<Option<DateTime<Utc>>>,
 }
 
 /// Answers whether a session's stop line is on its way.
@@ -953,14 +972,18 @@ struct SidecarGate {
     deleted: bool,
 }
 
-/// Sort rows oldest first by their start time, ties by id, so a list read from
-/// the registry's map comes out in the order clients build it live.
-fn oldest_first<T>(rows: &mut [T], key: impl Fn(&T) -> (&DateTime<Utc>, &str)) {
-    rows.sort_by(|a, b| {
-        let (a_start, a_id) = key(a);
-        let (b_start, b_id) = key(b);
-        a_start.cmp(b_start).then_with(|| a_id.cmp(b_id))
-    });
+/// The listing key a publish hands out: now, or just past the highest key
+/// handed out so far when the clock reads no later than it (a step back, or
+/// two publishes inside one clock tick).
+fn next_listing_key(last: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    let now = Utc::now();
+    last.and_then(|last| last.checked_add_signed(chrono::TimeDelta::microseconds(1)))
+        .map_or(now, |next| now.max(next))
+}
+
+/// A record's snapshot beside the origin of the request that spawned it.
+fn snapshot_with_spawn_origin(rec: &SessionRecord) -> (SessionSnapshot, Option<UpdateOrigin>) {
+    (rec.snapshot(), rec.spawn_origin.clone())
 }
 
 impl SessionRegistry {
@@ -975,6 +998,7 @@ impl SessionRegistry {
             discovery: Discovery::default(),
             stop_line_due: RwLock::new(None),
             dispatch_links: crate::dispatch_runs::DispatchLinks::default(),
+            publish: Mutex::new(None),
         })
     }
 
@@ -1096,36 +1120,57 @@ impl SessionRegistry {
         self.events.subscribe()
     }
 
-    /// Every session's snapshot, oldest first, ties by id, so a client that
-    /// appends each new session to its list (see `update_session`) sees the
-    /// same order on a reload as it built live.
+    /// Every session's snapshot, pending ones included, in the order clients
+    /// first heard of them ([`SessionRecord::listed_at`]; a session without
+    /// that key by its `started_at`), ties by id, so a client that appends
+    /// each new session to its list (see `update_session`) sees the same
+    /// order on a reload as it built live. The daemon's own readers use
+    /// this; a client is sent [`Self::listed_snapshots`].
     pub fn snapshots(&self) -> Vec<SessionSnapshot> {
-        let guard = read(&self.by_id);
-        let mut snapshots: Vec<SessionSnapshot> =
-            guard.values().map(|rec| lock(rec).snapshot()).collect();
-        drop(guard);
-        oldest_first(&mut snapshots, |snapshot| {
-            (&snapshot.started_at, snapshot.id.as_str())
-        });
-        snapshots
+        self.listing(false, SessionRecord::snapshot)
+    }
+
+    /// [`Self::snapshots`] without the records no client has heard of yet:
+    /// the list a client is sent, so it never lists a pending record that
+    /// may still be discarded without a `SessionRemoved`.
+    pub fn listed_snapshots(&self) -> Vec<SessionSnapshot> {
+        self.listing(true, SessionRecord::snapshot)
     }
 
     /// Every session's snapshot with the origin of the request that spawned
     /// it, each pair read under one lock, in [`Self::snapshots`]'s order.
+    #[cfg(test)]
     pub fn snapshots_with_spawn_origins(&self) -> Vec<(SessionSnapshot, Option<UpdateOrigin>)> {
+        self.listing(false, snapshot_with_spawn_origin)
+    }
+
+    /// [`Self::snapshots_with_spawn_origins`] without the records no client
+    /// has heard of yet: the list a lagged client is resent.
+    pub fn listed_snapshots_with_spawn_origins(
+        &self,
+    ) -> Vec<(SessionSnapshot, Option<UpdateOrigin>)> {
+        self.listing(true, snapshot_with_spawn_origin)
+    }
+
+    /// One `row` per record (only the announced ones when `announced_only`),
+    /// each read under its record lock, in listing order: by listing key,
+    /// falling back to `started_at`, then by id.
+    fn listing<T>(&self, announced_only: bool, row: impl Fn(&SessionRecord) -> T) -> Vec<T> {
         let guard = read(&self.by_id);
-        let mut listed: Vec<(SessionSnapshot, Option<UpdateOrigin>)> = guard
+        let mut rows: Vec<(DateTime<Utc>, String, T)> = guard
             .values()
-            .map(|rec| {
+            .filter_map(|rec| {
                 let rec = lock(rec);
-                (rec.snapshot(), rec.spawn_origin.clone())
+                let listed = rec.announced || !announced_only;
+                listed.then(|| {
+                    let key = rec.listed_at.unwrap_or(rec.started_at);
+                    (key, rec.id.clone(), row(&rec))
+                })
             })
             .collect();
         drop(guard);
-        oldest_first(&mut listed, |(snapshot, _)| {
-            (&snapshot.started_at, snapshot.id.as_str())
-        });
-        listed
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        rows.into_iter().map(|(_, _, row)| row).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Mutex<SessionRecord>>> {
@@ -1306,6 +1351,7 @@ impl SessionRegistry {
             agent_in_shell: guard.agent_in_shell,
             shell_label: guard.shell_label.clone(),
             hook_agent: guard.hook_agent.clone(),
+            listed_at: guard.listed_at,
         }
     }
 
@@ -1448,7 +1494,10 @@ impl SessionRegistry {
                 }
             }
             let entered_error = !was_error && guard.status == SessionStatus::Error;
-            (guard.snapshot(), entered_error, status_change, follow_up)
+            // No client has heard of a pending record: the change rides in
+            // the snapshot its publish sends.
+            let snap = guard.announced.then(|| guard.snapshot());
+            (snap, entered_error, status_change, follow_up)
         };
         // Record the change in the status-change log, outside the record lock
         // and never failing the update: the Dashboard's activity track reads
@@ -1477,9 +1526,7 @@ impl SessionRegistry {
         // session's sidecar gate that every write of its sidecar takes, so
         // the last writer always writes the newest values.
         self.sync_sidecar(id);
-        let _ = self
-            .events
-            .send(SessionEvent::Updated(Box::new(snap), origin));
+        self.broadcast_update(snap, origin);
         if let Some(event) = follow_up {
             let _ = self.events.send(event);
         }
@@ -1487,6 +1534,16 @@ impl SessionRegistry {
             self.fan_out_attention(id.to_owned(), protocol::AttentionReason::Error);
         }
         true
+    }
+
+    /// Send an update's `SessionUpdated`, unless it has no snapshot because
+    /// its record is still pending.
+    fn broadcast_update(&self, snap: Option<SessionSnapshot>, origin: Option<UpdateOrigin>) {
+        if let Some(snap) = snap {
+            let _ = self
+                .events
+                .send(SessionEvent::Updated(Box::new(snap), origin));
+        }
     }
 
     pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
@@ -1500,7 +1557,10 @@ impl SessionRegistry {
 /// `publish()` to fire `SessionEvent::Updated`. Required when fields like
 /// `scrollback_snapshot_req` need to be set by infrastructure that's only
 /// available after the record is reachable in the registry — calling the
-/// regular `insert()` would publish a half-wired snapshot first.
+/// regular `insert()` would publish a half-wired snapshot first. Until then
+/// no client hears of the record: the daemon's own readers see it in the
+/// registry, but a client-facing listing skips it and an update to it is
+/// applied without a broadcast.
 pub struct PendingInsert<'a> {
     registry: &'a SessionRegistry,
     arc: Arc<Mutex<SessionRecord>>,
@@ -1516,7 +1576,8 @@ impl PendingInsert<'_> {
     }
 
     /// Takes the unpublished record back out of the registry. No client
-    /// heard of it, so nothing is broadcast.
+    /// heard of it (no listing sent to a client holds it, and no update to
+    /// it was broadcast), so nothing is broadcast.
     pub fn discard(self) {
         let id = lock(&self.arc).id.clone();
         write(&self.registry.by_id).remove(&id);
@@ -1527,18 +1588,15 @@ impl PendingInsert<'_> {
     /// [`Self::publish`], its broadcast carrying `origin`, which the record
     /// keeps as its spawn origin.
     pub fn publish_from(self, origin: Option<UpdateOrigin>) {
-        let (snap, log_id, log_at, log_status) = {
-            let mut rec = lock(&self.arc);
-            rec.spawn_origin.clone_from(&origin);
-            let log_id = rec.id.clone();
+        let (log_id, log_at, log_status) = {
+            let rec = lock(&self.arc);
             let log_at = rec.status_since.unwrap_or_else(Utc::now);
-            let log_status = rec.status;
-            (rec.snapshot(), log_id, log_at, log_status)
+            (rec.id.clone(), log_at, rec.status)
         };
         // Every insert — a spawn, an orphan, a reattached or an abandoned
         // session — reaches clients through here, so this is where the
         // status-change log learns the status it starts in. Written outside
-        // the record lock, and never failing the insert.
+        // the record lock and the publish lock, and never failing the insert.
         if let Some(dirs) = self.registry.dirs.as_ref() {
             activity_log::append(
                 &dirs.activity_dir(),
@@ -1547,10 +1605,35 @@ impl PendingInsert<'_> {
                 log_status,
             );
         }
+        if self.announce(origin) {
+            // Put the new key in the sidecar, so the next start lists the
+            // session where this run did. Through the sidecar gate, outside
+            // the publish lock; a session without a sidecar writes nothing,
+            // and a failed write logs and leaves the publish standing.
+            self.registry.sync_sidecar(&log_id);
+        }
+    }
+
+    /// Under the registry's publish lock: give the record its listing key
+    /// (a recovered record keeps its own), mark it announced and send its
+    /// first `SessionUpdated`, so keys go up in the order clients hear of
+    /// sessions. The record lock is held across the send, so an update's
+    /// newer snapshot never reaches clients ahead of this one. Answers
+    /// whether the key is new.
+    fn announce(&self, origin: Option<UpdateOrigin>) -> bool {
+        let mut last = lock(&self.registry.publish);
+        let mut rec = lock(&self.arc);
+        rec.spawn_origin.clone_from(&origin);
+        let fresh = rec.listed_at.is_none();
+        let key = rec.listed_at.unwrap_or_else(|| next_listing_key(*last));
+        rec.listed_at = Some(key);
+        *last = Some(last.map_or(key, |last| last.max(key)));
+        rec.announced = true;
         let _ = self
             .registry
             .events
-            .send(SessionEvent::Updated(Box::new(snap), origin));
+            .send(SessionEvent::Updated(Box::new(rec.snapshot()), origin));
+        fresh
     }
 }
 
@@ -2062,6 +2145,10 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
+            announced: false,
+            // An older sidecar holds no key: its start stands in, so a
+            // restart lists by start whatever order the recoveries finish.
+            listed_at: meta.listed_at.or(Some(meta.started_at)),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -2155,6 +2242,10 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
+            announced: false,
+            // An older sidecar holds no key: its start stands in, so a
+            // restart lists by start whatever order the recoveries finish.
+            listed_at: meta.listed_at.or(Some(meta.started_at)),
         };
         push_recent_action(
             &mut record,
@@ -2225,6 +2316,10 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
+            announced: false,
+            // An older sidecar holds no key: its start stands in, so a
+            // restart lists by start whatever order the recoveries finish.
+            listed_at: meta.listed_at.or(Some(meta.started_at)),
         };
         push_recent_action(
             &mut record,
@@ -2324,6 +2419,8 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             resumed_from: Vec::new(),
+            announced: false,
+            listed_at: None,
         }
     }
 
@@ -2348,17 +2445,18 @@ mod tests {
         }
     }
 
-    /// The registry lists sessions oldest first, ties by id, whatever order
-    /// they were inserted in and however the map happens to iterate, so a
-    /// client's reload reproduces the list it built from live updates.
+    /// Sessions published in start order list oldest first, ties by id,
+    /// however the map happens to iterate, so a client's reload reproduces
+    /// the list it built from live updates.
     #[test]
     fn snapshots_list_sessions_in_start_order() {
         let dirs = scratch_dirs("snapshot-order");
         let registry = SessionRegistry::new(dirs);
         let base = Utc::now();
-        // Twelve sessions whose ids, insertion order and start times all
-        // disagree; `s03` and `s05` share a start time to pin the tie-break.
-        let starts = [
+        // Twelve sessions whose ids and start times disagree, published in
+        // start order; `s03` and `s05` share a start time to pin the
+        // tie-break.
+        let mut starts = [
             ("s00", 50),
             ("s01", 10),
             ("s02", 70),
@@ -2372,6 +2470,7 @@ mod tests {
             ("s10", 80),
             ("s11", 100),
         ];
+        starts.sort_by_key(|&(id, seconds)| (seconds, id));
         for (id, seconds) in starts {
             let mut rec = record(id);
             rec.started_at = base + chrono::TimeDelta::seconds(seconds);
@@ -2392,6 +2491,227 @@ mod tests {
             .map(|(snapshot, _)| snapshot.id.as_str())
             .collect();
         assert_eq!(listed, expected, "snapshots_with_spawn_origins() agrees");
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            expected,
+            "listed_snapshots() agrees"
+        );
+        let listed: Vec<String> = registry
+            .listed_snapshots_with_spawn_origins()
+            .into_iter()
+            .map(|(snapshot, _)| snapshot.id)
+            .collect();
+        assert_eq!(
+            listed, expected,
+            "listed_snapshots_with_spawn_origins() agrees"
+        );
+    }
+
+    /// The ids `rows` lists, in order.
+    fn ids(rows: &[SessionSnapshot]) -> Vec<&str> {
+        rows.iter().map(|snapshot| snapshot.id.as_str()).collect()
+    }
+
+    /// The listing key `id`'s record holds.
+    fn listed_at(registry: &SessionRegistry, id: &str) -> Option<DateTime<Utc>> {
+        lock(&registry.get(id).expect("the session is in the registry")).listed_at
+    }
+
+    #[test]
+    fn pending_record_is_not_in_the_client_listing() {
+        let dirs = scratch_dirs("pending-listing");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1"));
+        let pending = registry.insert_pending(record("s2"));
+
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            ["s1"],
+            "a client is never listed a pending record"
+        );
+        let with_origins: Vec<String> = registry
+            .listed_snapshots_with_spawn_origins()
+            .into_iter()
+            .map(|(snapshot, _)| snapshot.id)
+            .collect();
+        assert_eq!(with_origins, ["s1"], "nor in a resync's list");
+        assert_eq!(
+            ids(&registry.snapshots()),
+            ["s1", "s2"],
+            "the daemon's own readers still see it"
+        );
+
+        pending.publish();
+        assert_eq!(ids(&registry.listed_snapshots()), ["s1", "s2"]);
+        assert_eq!(ids(&registry.snapshots()), ["s1", "s2"]);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn update_to_a_pending_record_broadcasts_nothing() {
+        let dirs = scratch_dirs("pending-update");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        registry.update("s1", |rec| rec.terminal_title = Some("wired".to_owned()));
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "no client hears of a pending record's update"
+        );
+
+        pending.publish();
+        let title = match events.try_recv() {
+            Ok(SessionEvent::Updated(snapshot, _)) => Some(snapshot.terminal_title),
+            _ => None,
+        };
+        assert_eq!(
+            title.expect("the publish sends an update"),
+            Some("wired".to_owned()),
+            "the change rides in the first snapshot"
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "the publish sends exactly one update"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn listing_follows_publish_order_not_start_order() {
+        let dirs = scratch_dirs("publish-order");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut later_start = record("a");
+        later_start.started_at = Utc::now() + chrono::TimeDelta::seconds(60);
+        let earlier_start = record("b");
+
+        registry.insert(later_start);
+        registry.insert(earlier_start);
+
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            ["a", "b"],
+            "the session clients heard of first lists first"
+        );
+        assert_eq!(ids(&registry.snapshots()), ["a", "b"]);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn listing_key_increases_when_the_clock_steps_back() {
+        let dirs = scratch_dirs("clock-step");
+        let registry = SessionRegistry::new(dirs.clone());
+        // A recovered key an hour ahead stands for a clock that stepped back
+        // since the previous run handed it out.
+        let ahead = Utc::now() + chrono::TimeDelta::hours(1);
+        let mut recovered = record("z-recovered");
+        recovered.listed_at = Some(ahead);
+
+        registry.insert(recovered);
+        registry.insert(record("a-fresh"));
+
+        assert_eq!(
+            listed_at(&registry, "z-recovered"),
+            Some(ahead),
+            "a recovered key is kept"
+        );
+        let fresh = listed_at(&registry, "a-fresh").expect("a publish hands out a key");
+        assert!(fresh > ahead, "{fresh} is above the recovered {ahead}");
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            ["z-recovered", "a-fresh"]
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn old_sidecar_without_listed_at_reads_as_none() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("old-sidecar-listing");
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        // The fixture's literal JSON has no `listed_at`, as every older
+        // sidecar; it started in 2024.
+        write_sidecar_with_status(&dirs, "s9", "idle", since);
+        let meta = crate::orphan::load_meta(&dirs, "s9").expect("load meta");
+        assert_eq!(meta.listed_at, None, "an older sidecar holds no key");
+
+        let registry = SessionRegistry::new(dirs.clone());
+        let _fresh = registry.insert_pending(record("s0"));
+        let (pty, _exit_tx) = fake_pty();
+        let _old = registry.insert_reattached(&meta, pty);
+
+        assert_eq!(
+            ids(&registry.snapshots()),
+            ["s9", "s0"],
+            "a record from an older sidecar lists by its start"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn recovered_sessions_without_a_key_list_in_start_order() {
+        let dirs = scratch_dirs("recovered-unkeyed");
+        let registry = SessionRegistry::new(dirs.clone());
+        let t1 = Utc::now() - chrono::TimeDelta::hours(2);
+        let t2 = t1 + chrono::TimeDelta::minutes(5);
+        // Two older sidecars, with no key: the earlier start is published
+        // last, as a reattach that finished later would be.
+        let mut earlier = standalone_meta();
+        earlier.session_id = "z-earlier".to_owned();
+        earlier.started_at = t1;
+        let mut later = standalone_meta();
+        later.session_id = "a-later".to_owned();
+        later.started_at = t2;
+
+        registry.insert_orphan(&later);
+        registry.insert_orphan(&earlier);
+
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            ["z-earlier", "a-later"],
+            "a restart over older sidecars lists by start"
+        );
+        assert_eq!(
+            listed_at(&registry, "z-earlier"),
+            Some(t1),
+            "the key is the start, so nothing new is written to its sidecar"
+        );
+        assert_eq!(listed_at(&registry, "a-later"), Some(t2));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn recovered_sessions_keep_their_listed_order() {
+        let dirs = scratch_dirs("recovered-order");
+        let registry = SessionRegistry::new(dirs.clone());
+        let t1 = Utc::now() - chrono::TimeDelta::hours(2);
+        let t2 = t1 + chrono::TimeDelta::minutes(5);
+        let mut second = standalone_meta();
+        second.session_id = "a-second".to_owned();
+        second.listed_at = Some(t2);
+        let mut first = standalone_meta();
+        first.session_id = "z-first".to_owned();
+        first.listed_at = Some(t1);
+        // Started after the other, so start order would list it last.
+        first.started_at = second.started_at + chrono::TimeDelta::minutes(1);
+
+        registry.insert_orphan(&second);
+        registry.insert_orphan(&first);
+
+        assert_eq!(
+            ids(&registry.listed_snapshots()),
+            ["z-first", "a-second"],
+            "a restart lists in the previous run's order"
+        );
+        assert_eq!(listed_at(&registry, "z-first"), Some(t1));
+        assert_eq!(listed_at(&registry, "a-second"), Some(t2));
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

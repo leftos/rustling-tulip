@@ -297,7 +297,7 @@ The daemon's core files under the config dir (see `crates/daemon/src/paths.rs`):
 - `daemon.json` — handshake (port, token, pid, supported protocol versions, build version)
 - `daemon-id` — the daemon's stable UUID, written atomically on first start
 - `daemon-id.machine` — the machine stamp of that id, written beside it
-- `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn before the session's first snapshot is sent (so a session any client has seen survives a daemon crash), deleted on graceful stop
+- `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn before the session's first snapshot is sent (so a session any client has seen survives a daemon crash), then gains `listed_at` (RFC 3339, optional) once the session is published: the listing key a restart restores so sessions list in the order clients first heard of them (a sidecar without it lists by `started_at`), deleted on graceful stop
 - `sessions/<id>/hook-settings.json` — the hooks document an interactive Claude spawn passes as `--settings` (a recovered shell's `shell_resume` command names its path); written at spawn, deleted on a graceful stop
 - `sessions/<id>/summary.json` — the session's summary ring (a protocol `SessionSummary`); written atomically after each ring update while `meta.json` exists, deleted with the sidecar
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to about 1.5 MB on overflow, cut at the next line start within 4 KiB, off the async workers), held open by the session's scrollback gate while it runs and replayed via `LoadScrollback` on attach

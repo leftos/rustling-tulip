@@ -435,7 +435,7 @@ pub(super) fn push_initial_state(
             });
         }
     }
-    let sessions = hub.sessions.snapshots();
+    let sessions = hub.sessions.listed_snapshots();
     let session_count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
     let _ = out_tx.send(DaemonMessage::Sessions { sessions });
     send_dispatch_runs(hub, out_tx);

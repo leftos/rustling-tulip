@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- Sessions started at nearly the same moment keep their list order after a reload or restart, and a session still starting never shows a row that vanishes.
+
 ## v0.18.2-alpha
 
 ### Highlights
