@@ -254,7 +254,7 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 ### Linear context
 
-The Dashboard reads Linear through the daemon's one Linear client and issue cache, which [architecture.md](../architecture.md) "Linear issue links" documents and whose rules stand here: the key is `LINEAR_API_KEY` through `user_env::resolve` (the process environment, then the Windows user and system scopes), an identifier counts only when its team key is one of the workspace's (fetched daily), and live identifiers are refreshed every 5 minutes in one batched query, a copy older than 1 minute refetched on demand.
+The Dashboard reads Linear through the daemon's one Linear client and issue cache, which [architecture.md](../architecture.md) "Linear issue links" documents and whose rules stand here: the key is the one saved in Settings › Linear (the secret store, user `linear/api-key`), else `LINEAR_API_KEY` through `user_env::resolve` (the process environment, then the Windows user and system scopes), an identifier counts only when its team key is one of the workspace's (fetched daily), and live identifiers are refreshed every 5 minutes in one batched query, a copy older than 1 minute refetched on demand.
 
 **Orchestrator decision (not an owner ruling):** the Dashboard adds to that client only what its rows need:
 
@@ -262,7 +262,7 @@ The Dashboard reads Linear through the daemon's one Linear client and issue cach
 - **Issue fields**: the card's fields (identifier, title, state and its colour, priority, project, release) and the URL; plus each release's done and total counts for the header's bars, one more query batched with LL.3's refresh. Field names are checked against Linear's schema in DB.7's brief; none is measured here.
 - **Issues Done**: keys found in the session's branch, first prompt and commit messages since it started that Linear reports completed after `started_at`.
 - **Sync age**: the oldest `fetched_at` among the listed sessions' issues.
-- **Without a key**: the Linear column shows the detected key alone, with the Linear card's no-key notice (set `LINEAR_API_KEY`).
+- **Without a key**: the Linear column shows the detected key alone, with the Linear card's no-key notice (add a key in Settings › Linear).
 
 ### Recent work
 
@@ -417,7 +417,7 @@ A **Dashboard** tab after Notifications in `settings_view.rs`:
 1. Summaries on / off; the provider (Claude Haiku through the CLI, DeepSeek) with its privacy line; for DeepSeek, the key source (Stored key, Environment variable), a masked field with Save and Clear or a variable-name field, and the key state.
 2. The daily cap and today's spend.
 3. Test: sends `TestSummary` and shows the reply, its source, latency and cost.
-4. Linear: whether `LINEAR_API_KEY` is found (RT-133's `LinearContext`), read-only.
+4. Linear: whether a Linear key is found, the saved one or `LINEAR_API_KEY` (RT-133's `LinearContext`), read-only.
 
 ## Mobile
 
