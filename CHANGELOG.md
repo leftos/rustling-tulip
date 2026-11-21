@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, Back with the Terminal page's Quick dock open closes the dock first.
 - A session waiting on your answer stays under Needs you, on the phone and the desktop, when a finished background task reports in.
 - Settings › Dashboard's fields take no typing or paste while a newer host locks them, and Apply sends no key for that host.
+- A reload lists sessions in the order they started, so rows on the phone's Home and in the sidebar no longer jump around.
 
 ## v0.18.1-alpha
 

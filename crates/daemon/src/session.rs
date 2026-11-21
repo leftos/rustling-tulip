@@ -953,6 +953,16 @@ struct SidecarGate {
     deleted: bool,
 }
 
+/// Sort rows oldest first by their start time, ties by id, so a list read from
+/// the registry's map comes out in the order clients build it live.
+fn oldest_first<T>(rows: &mut [T], key: impl Fn(&T) -> (&DateTime<Utc>, &str)) {
+    rows.sort_by(|a, b| {
+        let (a_start, a_id) = key(a);
+        let (b_start, b_id) = key(b);
+        a_start.cmp(b_start).then_with(|| a_id.cmp(b_id))
+    });
+}
+
 impl SessionRegistry {
     pub fn new(dirs: Dirs) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
@@ -1086,22 +1096,36 @@ impl SessionRegistry {
         self.events.subscribe()
     }
 
+    /// Every session's snapshot, oldest first, ties by id, so a client that
+    /// appends each new session to its list (see `update_session`) sees the
+    /// same order on a reload as it built live.
     pub fn snapshots(&self) -> Vec<SessionSnapshot> {
         let guard = read(&self.by_id);
-        guard.values().map(|rec| lock(rec).snapshot()).collect()
+        let mut snapshots: Vec<SessionSnapshot> =
+            guard.values().map(|rec| lock(rec).snapshot()).collect();
+        drop(guard);
+        oldest_first(&mut snapshots, |snapshot| {
+            (&snapshot.started_at, snapshot.id.as_str())
+        });
+        snapshots
     }
 
     /// Every session's snapshot with the origin of the request that spawned
-    /// it, each pair read under one lock.
+    /// it, each pair read under one lock, in [`Self::snapshots`]'s order.
     pub fn snapshots_with_spawn_origins(&self) -> Vec<(SessionSnapshot, Option<UpdateOrigin>)> {
         let guard = read(&self.by_id);
-        guard
+        let mut listed: Vec<(SessionSnapshot, Option<UpdateOrigin>)> = guard
             .values()
             .map(|rec| {
                 let rec = lock(rec);
                 (rec.snapshot(), rec.spawn_origin.clone())
             })
-            .collect()
+            .collect();
+        drop(guard);
+        oldest_first(&mut listed, |(snapshot, _)| {
+            (&snapshot.started_at, snapshot.id.as_str())
+        });
+        listed
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Mutex<SessionRecord>>> {
@@ -2322,6 +2346,52 @@ mod tests {
             extra_args: Vec::new(),
             extra_env: Vec::new(),
         }
+    }
+
+    /// The registry lists sessions oldest first, ties by id, whatever order
+    /// they were inserted in and however the map happens to iterate, so a
+    /// client's reload reproduces the list it built from live updates.
+    #[test]
+    fn snapshots_list_sessions_in_start_order() {
+        let dirs = scratch_dirs("snapshot-order");
+        let registry = SessionRegistry::new(dirs);
+        let base = Utc::now();
+        // Twelve sessions whose ids, insertion order and start times all
+        // disagree; `s03` and `s05` share a start time to pin the tie-break.
+        let starts = [
+            ("s00", 50),
+            ("s01", 10),
+            ("s02", 70),
+            ("s03", 30),
+            ("s04", 20),
+            ("s05", 30),
+            ("s06", 60),
+            ("s07", 0),
+            ("s08", 40),
+            ("s09", 90),
+            ("s10", 80),
+            ("s11", 100),
+        ];
+        for (id, seconds) in starts {
+            let mut rec = record(id);
+            rec.started_at = base + chrono::TimeDelta::seconds(seconds);
+            registry.insert(rec);
+        }
+        let expected = [
+            "s07", "s01", "s04", "s03", "s05", "s08", "s00", "s06", "s02", "s10", "s09", "s11",
+        ];
+        let snapshots = registry.snapshots();
+        let listed: Vec<&str> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id.as_str())
+            .collect();
+        assert_eq!(listed, expected, "snapshots() lists oldest first");
+        let with_origins = registry.snapshots_with_spawn_origins();
+        let listed: Vec<&str> = with_origins
+            .iter()
+            .map(|(snapshot, _)| snapshot.id.as_str())
+            .collect();
+        assert_eq!(listed, expected, "snapshots_with_spawn_origins() agrees");
     }
 
     #[test]
