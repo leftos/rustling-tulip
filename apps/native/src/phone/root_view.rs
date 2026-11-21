@@ -249,6 +249,8 @@ impl PhoneRoot {
                 this.swept = None;
                 this.sweep_delivered(cx);
                 this.sweep_fetched(cx);
+                // Home draws its hosts' rows afresh: stale until they list.
+                cx.notify();
             }
         });
         root.update(cx, |root, _| root.set_device_noun(device_noun()));

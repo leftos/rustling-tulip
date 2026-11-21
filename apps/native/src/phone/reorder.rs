@@ -30,12 +30,14 @@ const LIFTED_ID: &str = "phone-drag-lifted";
 /// The driver id of the accent line at the drop slot.
 const SLOT_ID: &str = "phone-drag-slot";
 
-/// A drawn list's box in the window: `len` rows share its height.
+/// A drawn list's box in the window: `len` rows share its height, while the
+/// drop slot's accent line is not drawn there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ListBox {
     /// The window y of the list's top.
     pub(crate) top: f32,
-    /// Its height: its rows' together.
+    /// Its height: its rows' together, and the drop slot's line's while that
+    /// is drawn.
     pub(crate) height: f32,
 }
 
@@ -77,6 +79,9 @@ pub(crate) struct RecordedList {
     pub(crate) list: ListBox,
     /// How many rows it holds.
     pub(crate) rows: usize,
+    /// Whether it draws its drop slot's accent line, which the box's height
+    /// includes and no row shares.
+    pub(crate) slot_shown: bool,
 }
 
 impl RecordedList {
@@ -86,12 +91,12 @@ impl RecordedList {
         let y = at.y / px(1.0);
         y >= self.list.top
             && y <= self.list.top + self.list.height
-            && list_slot(y, self.list, self.rows).is_some()
+            && list_slot(y, self.list, self.rows, self.slot_shown).is_some()
     }
 
     /// The row `at` points at, and which half of it.
     fn slot(self, at: Point<Pixels>) -> Option<(usize, Side)> {
-        list_slot(at.y / px(1.0), self.list, self.rows)
+        list_slot(at.y / px(1.0), self.list, self.rows, self.slot_shown)
     }
 }
 
@@ -113,18 +118,26 @@ pub(crate) struct DragPage {
 pub(crate) type ListBoxes = Rc<DragPage>;
 
 /// The row of an equal-height list a finger at `y` points at, and which half
-/// of it; none while the list holds no row or drew no height.
+/// of it; none while the list holds no row or drew no height. `slot_shown`
+/// says the list draws its drop slot's accent line, whose height the box
+/// also holds and which is no row's, so the pitch is the rows' alone.
 #[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "a drawn list holds far fewer rows than an f32 counts exactly, and the row is clamped into it first"
 )]
-pub(crate) fn list_slot(y: f32, list: ListBox, len: usize) -> Option<(usize, Side)> {
-    if len == 0 || list.height <= 0.0 {
+pub(crate) fn list_slot(
+    y: f32,
+    list: ListBox,
+    len: usize,
+    slot_shown: bool,
+) -> Option<(usize, Side)> {
+    let height = list.height - if slot_shown { SLOT_LINE } else { 0.0 };
+    if len == 0 || height <= 0.0 {
         return None;
     }
-    let pitch = list.height / len as f32;
+    let pitch = height / len as f32;
     let row = ((y - list.top) / pitch)
         .floor()
         .clamp(0.0, (len - 1) as f32);
@@ -157,8 +170,14 @@ fn record(boxes: &ListBoxes, drawn: RecordedList) {
 
 /// Records `list`'s box and its `rows` as it is drawn this frame, replacing
 /// the one the list recorded before, for a press on the page to hit-test
-/// against.
-pub(super) fn list_box_canvas(boxes: &ListBoxes, list: ListId, rows: usize) -> impl IntoElement {
+/// against; `slot_shown` is whether the box this frame holds the drop slot's
+/// accent line.
+pub(super) fn list_box_canvas(
+    boxes: &ListBoxes,
+    list: ListId,
+    rows: usize,
+    slot_shown: bool,
+) -> impl IntoElement {
     let boxes = boxes.clone();
     canvas(
         move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
@@ -171,6 +190,7 @@ pub(super) fn list_box_canvas(boxes: &ListBoxes, list: ListId, rows: usize) -> i
                         height: bounds.size.height / px(1.0),
                     },
                     rows,
+                    slot_shown,
                 },
             );
         },
@@ -476,38 +496,38 @@ mod tests {
 
     #[test]
     fn list_slot_top_half_of_the_first_row() {
-        assert_eq!(list_slot(100.0, list(), 4), Some((0, Side::Before)));
-        assert_eq!(list_slot(124.9, list(), 4), Some((0, Side::Before)));
+        assert_eq!(list_slot(100.0, list(), 4, false), Some((0, Side::Before)));
+        assert_eq!(list_slot(124.9, list(), 4, false), Some((0, Side::Before)));
     }
 
     #[test]
     fn list_slot_middle_counts_as_after() {
-        assert_eq!(list_slot(125.0, list(), 4), Some((0, Side::After)));
+        assert_eq!(list_slot(125.0, list(), 4, false), Some((0, Side::After)));
     }
 
     #[test]
     fn list_slot_second_row() {
-        assert_eq!(list_slot(160.0, list(), 4), Some((1, Side::Before)));
+        assert_eq!(list_slot(160.0, list(), 4, false), Some((1, Side::Before)));
     }
 
     #[test]
     fn list_slot_bottom_of_the_last_row() {
-        assert_eq!(list_slot(299.0, list(), 4), Some((3, Side::After)));
+        assert_eq!(list_slot(299.0, list(), 4, false), Some((3, Side::After)));
     }
 
     #[test]
     fn list_slot_above_is_before_the_first() {
-        assert_eq!(list_slot(40.0, list(), 4), Some((0, Side::Before)));
+        assert_eq!(list_slot(40.0, list(), 4, false), Some((0, Side::Before)));
     }
 
     #[test]
     fn list_slot_below_is_after_the_last() {
-        assert_eq!(list_slot(400.0, list(), 4), Some((3, Side::After)));
+        assert_eq!(list_slot(400.0, list(), 4, false), Some((3, Side::After)));
     }
 
     #[test]
     fn list_slot_empty_list_has_no_slot() {
-        assert_eq!(list_slot(150.0, list(), 0), None);
+        assert_eq!(list_slot(150.0, list(), 0, false), None);
         assert_eq!(
             list_slot(
                 150.0,
@@ -515,9 +535,29 @@ mod tests {
                     top: 100.0,
                     height: 0.0
                 },
-                4
+                4,
+                false
             ),
             None
+        );
+    }
+
+    /// Twenty 44 pt rows from y 100, with a drop slot's accent line drawn
+    /// under one of them.
+    fn slot_list() -> ListBox {
+        ListBox {
+            top: 100.0,
+            height: 20.0 * 44.0 + SLOT_LINE,
+        }
+    }
+
+    #[test]
+    fn list_slot_centre_of_a_late_row_is_after_with_the_slot_line() {
+        // The twentieth row's exact centre: the line's height belongs to no
+        // row, so every row keeps the 44 pt it was drawn at.
+        assert_eq!(
+            list_slot(100.0 + 19.0 * 44.0 + 22.0, slot_list(), 20, true),
+            Some((19, Side::After))
         );
     }
 

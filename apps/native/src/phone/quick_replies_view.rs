@@ -456,6 +456,7 @@ impl PhoneRoot {
                         &self.list_boxes,
                         ListId::ReplyGroups(set),
                         groups.len(),
+                        drag.is_some_and(|drag| drag.over.is_some()),
                     )),
             )
             .child(Self::add_group_row(set, cx))
@@ -646,6 +647,7 @@ impl PhoneRoot {
                         &self.list_boxes,
                         ListId::Replies,
                         entry.replies.len(),
+                        drag.is_some_and(|drag| drag.over.is_some()),
                     )),
             )
             .child(

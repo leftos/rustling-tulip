@@ -20,6 +20,7 @@ use super::root_view::LIST_PANE_WIDTH;
 use super::settings_view::{CHECK, CHEVRON};
 use super::sheet::CANCEL_LABEL;
 use super::tray::{self, Arranged, Buttons, TrayCard};
+use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::chat_cards;
 use crate::connection::Connection;
@@ -49,6 +50,9 @@ const HOST_CHIP_MAX_WIDTH: f32 = 120.0;
 const SELECTED_EDGE_WIDTH: f32 = 3.0;
 /// What Home says with no session to list.
 const EMPTY_TEXT: &str = "No sessions yet";
+/// What Home says under a host whose rows are the ones it listed before the
+/// phone came to the foreground.
+const REFRESHING_TEXT: &str = "Refreshing…";
 /// The Needs you card's height, whatever it holds, so the rows under the
 /// tray keep their place while cards come, go and change: room for the
 /// session's line and three described answer rows, each a 44 pt target,
@@ -236,20 +240,35 @@ fn host_tag(host: &HostKey) -> &str {
     host.wire().unwrap_or("local")
 }
 
+/// Whether each of `home`'s hosts draws its rows as the ones it listed
+/// before the phone came to the foreground: it lists a session row and has
+/// not sent its list since. A host with no rows says nothing, so no line
+/// comes or goes over an empty host, and one that listed since says nothing.
+fn refreshing_hosts(root: &RootView, home: &Home) -> Vec<bool> {
+    home.hosts
+        .iter()
+        .map(|host| !host.groups.is_empty() && !root.listed_since_foreground(&host.host))
+        .collect()
+}
+
 /// Which of Home's list children are host headers, in host order, as
 /// `home_list` builds them: the tray first while it is shown, then per host
-/// its header, its note while it has one and a child per group. Empty
-/// while no host has a header.
-fn header_indexes(home: &Home, tray: bool) -> Vec<usize> {
+/// its header, its refreshing line while `refreshing` says so, its note while
+/// it has one and a child per group. Empty while no host has a header.
+fn header_indexes(home: &Home, tray: bool, refreshing: &[bool]) -> Vec<usize> {
     if !home.host_headers {
         return Vec::new();
     }
     let mut at = usize::from(tray);
     home.hosts
         .iter()
-        .map(|host| {
+        .enumerate()
+        .map(|(index, host)| {
             let header = at;
-            at += 1 + usize::from(host.note.is_some()) + host.groups.len();
+            at += 1
+                + usize::from(host.note.is_some())
+                + usize::from(refreshing.get(index).copied().unwrap_or(false))
+                + host.groups.len();
             header
         })
         .collect()
@@ -397,6 +416,29 @@ fn note_line(host: &HostKey, note: &'static str, t: &UiTheme, cx: &Context<Phone
         .child(note)
 }
 
+/// What a host says while its rows are the ones it listed before the phone
+/// came to the foreground: under its header, or at its place with one host,
+/// over its groups.
+fn refreshing_line(host: &HostKey, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+    let id = format!("phone-home-refreshing-{}", host_tag(host));
+    div()
+        .driver_id(|| id)
+        .px(px(SIDE_PADDING))
+        .py(px(4.0))
+        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
+        .child(REFRESHING_TEXT)
+}
+
+/// How a host's rows draw: its chip while more than one host is listed, and
+/// whether the rows are the ones it listed before the phone came to the
+/// foreground.
+#[derive(Clone, Copy)]
+struct RowLook<'a> {
+    chip: Option<&'a str>,
+    refreshing: bool,
+}
+
 /// The line between two rows of a group, inset by the side padding.
 fn hairline(t: &UiTheme) -> Div {
     div()
@@ -430,7 +472,11 @@ impl PhoneRoot {
         let t = theme(cx);
         let mut children: Vec<Div> = self.needs_you_tray(&home, cx).into_iter().collect();
         let tray = !children.is_empty();
-        for host in &home.hosts {
+        let refreshing = {
+            let root = self.root.read(cx);
+            refreshing_hosts(root, &home)
+        };
+        for (at, host) in home.hosts.iter().enumerate() {
             if home.host_headers {
                 let (state, parts) = {
                     let root = self.root.read(cx);
@@ -441,19 +487,26 @@ impl PhoneRoot {
                 };
                 children.push(Self::host_header(host, state, &parts, &t, cx));
             }
+            let refreshing = refreshing.get(at).copied().unwrap_or(false);
+            if refreshing {
+                children.push(refreshing_line(&host.host, &t, cx));
+            }
             if let Some(note) = host.note {
                 children.push(note_line(&host.host, note, &t, cx));
             }
-            let chip = home.host_chip(&host.host);
+            let look = RowLook {
+                chip: home.host_chip(&host.host),
+                refreshing,
+            };
             for group in &host.groups {
                 let selected = self.selected_in(group);
-                children.push(Self::home_group(group, selected.as_deref(), chip, &t, cx));
+                children.push(Self::home_group(group, selected.as_deref(), look, &t, cx));
             }
         }
         if home.rows().next().is_none() {
             children.push(empty_line(&t));
         }
-        let headers = header_indexes(&home, tray);
+        let headers = header_indexes(&home, tray, &refreshing);
         let drawn = pinned_host_index(&self.home_scroll, &headers);
         let pinned = self.pinned_header(&home, drawn, &t, cx);
         // After the list, so its check runs once the list's layout is done.
@@ -517,7 +570,9 @@ impl PhoneRoot {
     pub fn pinned_host(&self, cx: &App) -> Option<String> {
         let home = self.home(cx);
         let tray = self.tray_now(cx).is_some();
-        let index = pinned_host_index(&self.home_scroll, &header_indexes(&home, tray));
+        let refreshing = refreshing_hosts(self.root.read(cx), &home);
+        let headers = header_indexes(&home, tray, &refreshing);
+        let index = pinned_host_index(&self.home_scroll, &headers);
         let host = home.hosts.get(index?)?;
         Some(host_tag(&host.host).to_owned())
     }
@@ -857,7 +912,7 @@ impl PhoneRoot {
     fn home_group(
         group: &HomeGroup,
         selected: Option<&str>,
-        chip: Option<&str>,
+        look: RowLook<'_>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -872,7 +927,7 @@ impl PhoneRoot {
                 body = body.child(hairline(t));
             }
             let chosen = selected == Some(row.session_id.as_str());
-            body = body.child(Self::session_row(row, chosen, chip, t, cx));
+            body = body.child(Self::session_row(row, chosen, look, t, cx));
         }
         body
     }
@@ -1041,7 +1096,7 @@ impl PhoneRoot {
     fn session_row(
         row: &HomeRow,
         selected: bool,
-        chip: Option<&str>,
+        look: RowLook<'_>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1088,6 +1143,9 @@ impl PhoneRoot {
             })
             .when(selected, |line| line.bg(gpui::rgb(t.raised)))
             .active(move |line| line.bg(gpui::rgb(raised)))
+            .when(look.refreshing, |line| {
+                line.opacity(crate::spawn_view::DISABLED_OPACITY)
+            })
             .children(mark)
             .child(dot(color))
             .child(
@@ -1102,7 +1160,7 @@ impl PhoneRoot {
                             .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
                             .child(row.label.clone()),
                     )
-                    .child(status_line(row, &leaf, chip, t, cx)),
+                    .child(status_line(row, &leaf, look.chip, t, cx)),
             )
             .child(
                 div()

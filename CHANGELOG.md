@@ -17,6 +17,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Needs you card's options stay inside their boxes in the phone's narrow list column.
 - Apply sends nothing on a locked Settings › Dashboard, including changes made before it locked.
 - A question card keeps the space after a word like "and/or" at a row's end, while long paths and addresses still rejoin whole.
+- On the phone, dropping a dragged key or quick reply on a row's lower half places it after that row all the way down the list.
+- After the phone returns to the foreground, Home dims each host's sessions and says "Refreshing…" until their fresh list arrives.
 - Sessions started at nearly the same moment keep their list order after a reload or restart, and a session still starting never shows a row that vanishes.
 - A question still on screen never reads Idle after a minute, and it returns to Needs you when something other than your answer ends its wait.
 - Settings › Accounts says "1 account" for a single account.

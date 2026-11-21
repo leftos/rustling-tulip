@@ -734,6 +734,7 @@ impl PhoneRoot {
                 &self.list_boxes,
                 ListId::KeyList,
                 keys.len(),
+                drag.is_some_and(|drag| drag.over.is_some()),
             ))
     }
 
@@ -1055,6 +1056,7 @@ impl PhoneRoot {
                 &self.list_boxes,
                 ListId::KeySteps,
                 editor.draft.steps.len(),
+                drag.is_some_and(|drag| drag.over.is_some()),
             ))
     }
 

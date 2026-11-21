@@ -153,6 +153,16 @@ fn drop_connection(h: &mut Harness<'_>, target: &Target) {
     h.cx.run_until_parked();
 }
 
+/// `target`'s connection dialling, as it is when the phone redials it on
+/// coming back to the foreground.
+fn dialling(h: &mut Harness<'_>, target: &Target) {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    h.host(target).event(NetEvent::State(conn));
+    h.cx.run_until_parked();
+}
+
 fn row_bounds(h: &mut Harness<'_>, targets: &[Target]) -> Vec<Bounds<Pixels>> {
     targets
         .iter()
@@ -388,6 +398,97 @@ fn rows_do_not_move_when_a_host_disconnects(cx: &mut TestAppContext) {
         "both hosts' rows keep their place"
     );
     assert!(drawn(&mut h, &status), "the dropped host's header says so");
+}
+
+#[gpui::test]
+fn home_marks_rows_refreshing_until_the_fresh_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    let remote_line = format!("phone-home-refreshing-{}", wire(&saved_remote()));
+    let den_line = format!("phone-home-refreshing-{}", wire(&den()));
+    assert!(
+        !drawn(&mut h, &remote_line) && !drawn(&mut h, &den_line),
+        "a host that listed since the foreground says nothing"
+    );
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    assert!(
+        drawn(&mut h, &remote_line) && drawn(&mut h, &den_line),
+        "the rows are the ones from before the foreground until the hosts list again"
+    );
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions: listed() });
+    assert!(
+        !drawn(&mut h, &remote_line),
+        "the fresh list is the one Home draws"
+    );
+    assert!(drawn(&mut h, &den_line), "the other host still waits");
+
+    dialling(&mut h, &den());
+    assert!(
+        drawn(&mut h, &den_line),
+        "a host on its way waits for its list too"
+    );
+}
+
+#[gpui::test]
+fn refreshing_rows_stay_put_when_the_host_drops(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    let den_line = format!("phone-home-refreshing-{}", wire(&den()));
+    let hosts = [saved_remote(), den()];
+
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    assert!(drawn(&mut h, &den_line), "both hosts wait for their lists");
+    let before = row_bounds(&mut h, &hosts);
+
+    drop_connection(&mut h, &den());
+
+    assert!(
+        drawn(&mut h, &den_line),
+        "a host that has not listed keeps its line when it drops"
+    );
+    assert_eq!(
+        row_bounds(&mut h, &hosts),
+        before,
+        "a dropped host's rows stay where they were"
+    );
+}
+
+#[gpui::test]
+fn no_refreshing_line_for_a_host_without_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    let remote_line = format!("phone-home-refreshing-{}", wire(&saved_remote()));
+    let den_line = format!("phone-home-refreshing-{}", wire(&den()));
+    h.host(&saved_remote()).connect();
+    h.host(&den()).connect();
+    assert!(
+        !drawn(&mut h, &remote_line) && !drawn(&mut h, &den_line),
+        "a cold launch has listed nothing and says nothing"
+    );
+
+    open_host(&mut h, &saved_remote());
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    h.cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    h.cx.run_until_parked();
+    assert!(
+        drawn(&mut h, &remote_line),
+        "a host with rows waits for its list"
+    );
+    assert!(
+        !drawn(&mut h, &den_line),
+        "a host with no sessions says nothing, stale or not"
+    );
 }
 
 #[gpui::test]
