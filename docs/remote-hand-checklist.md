@@ -208,6 +208,9 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Fetch a folder from the browser: press and hold a folder row and tap `Fetch folder`. **Expect:** a result line reads `Fetching <name>…`, then `Fetched <name> · <size>`, and the folder shows in the Files app under On My iPhone › Rustling Tulip.
 - [ ] Sort on Home: each order (Manual, A–Z, Needs you first, Desktop tabs) regroups the list; Desktop tabs mirrors the desktop's tabs on that host. **Expect:** after each pick the sheet closes and the list regroups, with the pick checked when the sheet reopens; Desktop tabs shows one group per tab of that host's desktop layout, then `Not in a tab`.
 - [ ] A session row shows a › and a pressed highlight; a tap anywhere on it opens the session. **Expect:** each row ends in a `›`, darkens while the finger is down, and opens its session wherever on the row you tap.
+- [ ] Copy some text in another app, open a Claude session's Chat and tap `Paste`. **Expect:** the text lands at the caret with no Allow Paste prompt. Copy a photo in Photos and tap `Paste`. **Expect:** the image uploads and its path joins the message. Tap `Photos` and pick a picture. **Expect:** it uploads the same way.
+- [ ] With two hosts added, scroll Home. **Expect:** each row and Needs you card names its host in a small chip, and the header of the host whose sessions are under the top stays pinned there, swapping when the next host's header arrives.
+- [ ] Open a Claude session's page. **Expect:** the header shows `ctx NN%` beside the status once the session has used some context, red above 80%.
 
 ### Files from the host
 
