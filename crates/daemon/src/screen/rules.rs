@@ -1075,7 +1075,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 78] = [
+        let cases: [(&str, &str, Verdict); 82] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1233,6 +1233,11 @@ mod tests {
                 State(AwaitingInput),
             ),
             (
+                "v42-ask-review-session-rule--synthesized",
+                include_str!("fixtures/v42-ask-review-session-rule--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
                 "claude--v2330-ask-review-w54",
                 include_str!("fixtures/claude--v2330-ask-review-w54.txt"),
                 State(AwaitingInput),
@@ -1245,6 +1250,16 @@ mod tests {
             (
                 "claude--v2330-ask-review-gutter-w54--synthesized",
                 include_str!("fixtures/claude--v2330-ask-review-gutter-w54--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v42-ask-review-w40-bar-wrapped",
+                include_str!("fixtures/v42-ask-review-w40-bar-wrapped--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v42-ask-review-w40-bar-scrolled",
+                include_str!("fixtures/v42-ask-review-w40-bar-scrolled--synthesized.txt"),
                 State(AwaitingInput),
             ),
             (
@@ -1265,7 +1280,12 @@ mod tests {
             (
                 "v03-ready-draft-under-review-quote--synthesized",
                 include_str!("fixtures/v03-ready-draft-under-review-quote--synthesized.txt"),
-                State(AwaitingInput),
+                State(Idle),
+            ),
+            (
+                "v03-ready-draft-submit-under-review-quote--synthesized",
+                include_str!("fixtures/v03-ready-draft-submit-under-review-quote--synthesized.txt"),
+                State(Idle),
             ),
             (
                 "v51-plan-dialog",

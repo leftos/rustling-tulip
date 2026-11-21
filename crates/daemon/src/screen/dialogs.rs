@@ -1035,6 +1035,11 @@ mod tests {
                 no_prompt(Draft),
             ),
             (
+                "v03-ready-draft-submit-under-review-quote",
+                include_str!("fixtures/v03-ready-draft-submit-under-review-quote--synthesized.txt"),
+                no_prompt(Draft),
+            ),
+            (
                 "claude--fresh-idle",
                 include_str!("fixtures/claude--fresh-idle.txt"),
                 no_prompt(Ready),

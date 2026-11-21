@@ -156,14 +156,14 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "dialog_question_review".to_string(),
             priority: 980,
             // No footer, and its matched row sits above the cursor on `2. Cancel`.
-            region: ScreenRegion::BottomNonEmpty { rows: 24 },
+            // Its options end the screen, so only the last few rows matter.
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
             matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$".to_string()),
-            // An input box's own prompt row above the matched one: the review
+            // A bare rule row under the matched one: the input box's border,
+            // which a live review never draws below its options, so the review
             // was quoted in a reply above the box, not drawn by a dialog. A
-            // transcript's user prompt starts with `❯` too, and carries text.
-            not: vec![LineMatcher::Regex(
-                r#"^\s*❯\s*(?:Try "[^"]*")?\s*$"#.to_string(),
-            )],
+            // labelled rule is a named session's or a subagent's view.
+            not: vec![LineMatcher::Regex(r"^\s*─{3,}\s*$".to_string())],
             verdict: ScreenVerdict::AwaitingInput,
         },
         ScreenRule {
