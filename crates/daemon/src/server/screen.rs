@@ -107,6 +107,9 @@ fn verdict_text(verdict: Verdict) -> &'static str {
 fn region_text(region: ScreenRegion) -> String {
     match region {
         ScreenRegion::BottomNonEmpty { rows } => format!("bottom_non_empty({rows})"),
+        ScreenRegion::BottomNonEmptyAboveTasks { rows } => {
+            format!("bottom_non_empty_above_tasks({rows})")
+        }
         ScreenRegion::PromptBoxBody => "prompt_box_body".to_owned(),
         ScreenRegion::AbovePromptBox { rows } => format!("above_prompt_box({rows})"),
         ScreenRegion::Title => "title".to_owned(),

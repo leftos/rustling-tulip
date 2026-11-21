@@ -592,9 +592,10 @@ const CURRENT: &str = "Current";
 
 /// The `/model` picker: the `Select model` title, then its numbered model
 /// rows and the `▸ More models` row. Each row's name is its label and its
-/// second column its description; the effort row's label is the prompt's
-/// `adjust`, which with the footer stays out of its identity, so moving the
-/// cursor or the effort keeps the prompt.
+/// second column its description, a description the pane wraps onto a row of
+/// its own read whole. The effort row's label is the prompt's `adjust`, which
+/// with the footer stays out of its identity, so moving the cursor or the
+/// effort keeps the prompt.
 fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
     let floor = after_last_rule(rows).max(dialog_edge(rows));
     let title = floor
@@ -603,23 +604,28 @@ fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
             .iter()
             .rposition(|row| row.trim() == PICKER_TITLE)?;
     let first = (title + 1..rows.len().min(title + 1 + PICKER_GAP))
-        .find(|&index| picker_row(&rows[index]).is_some())?;
+        .find(|&index| listed_row(&rows[index]).is_some())?;
     let listed = rows[first..]
         .iter()
         .take_while(|row| !row.trim().is_empty())
         .count();
     let mut options: Vec<ChatOption> = Vec::new();
+    let mut description_column: Option<usize> = None;
     for row in &rows[first..first + listed] {
-        if let Some(option) = picker_row(row) {
-            options.push(option);
+        if let Some(listed) = listed_row(row) {
+            description_column = listed.description_column;
+            options.push(listed.option);
         } else if let Some(selected) = more_models_row(row) {
             let number = options.last().map_or(1, |last| last.number + 1);
+            description_column = None;
             options.push(ChatOption {
                 number,
                 label: MORE_MODELS.to_owned(),
                 description: None,
                 selected,
             });
+        } else if let (Some(column), Some(option)) = (description_column, options.last_mut()) {
+            append_wrapped_description(row, column, option);
         }
     }
     Some(ChatPrompt {
@@ -659,9 +665,17 @@ fn dialog_edge(rows: &[String]) -> usize {
         .map_or(0, |index| index + 1)
 }
 
+/// A numbered picker row: its option, and the column its description's first
+/// line starts at, in characters, when the row draws one.
+struct Listed {
+    option: ChatOption,
+    description_column: Option<usize>,
+}
+
 /// `row` as a numbered picker row: the model's name (its tick taken off),
-/// and its second column, marked `Current` on the ticked row.
-fn picker_row(row: &str) -> Option<ChatOption> {
+/// its second column marked `Current` on the ticked row, and where that
+/// column starts.
+fn listed_row(row: &str) -> Option<Listed> {
     let text = row.trim_start();
     let (selected, text) = match text.strip_prefix(CURSOR) {
         Some(rest) => (true, rest.trim_start()),
@@ -670,24 +684,49 @@ fn picker_row(row: &str) -> Option<ChatOption> {
     let text = text.trim_start_matches(SCROLL_MARKS).trim_start();
     let option = numbered(text)?;
     let (name, column) = option.label.split_once("  ").unwrap_or((option.label, ""));
+    let column_text = column.trim();
+    let description_column = if column_text.is_empty() {
+        None
+    } else {
+        let start = row.len() - column.trim_start().len();
+        Some(row[..start].chars().count())
+    };
     let name = name.trim();
-    let column = column.trim();
     let (label, current) = match name.strip_suffix(CURRENT_TICK) {
         Some(rest) => (rest.trim_end(), true),
         None => (name, false),
     };
-    let description = match (current, column.is_empty()) {
+    let description = match (current, column_text.is_empty()) {
         (true, true) => Some(CURRENT.to_owned()),
-        (true, false) => Some(format!("{CURRENT} · {column}")),
+        (true, false) => Some(format!("{CURRENT} · {column_text}")),
         (false, true) => None,
-        (false, false) => Some(column.to_owned()),
+        (false, false) => Some(column_text.to_owned()),
     };
-    Some(ChatOption {
-        number: option.number,
-        label: label.to_owned(),
-        description,
-        selected,
+    Some(Listed {
+        option: ChatOption {
+            number: option.number,
+            label: label.to_owned(),
+            description,
+            selected,
+        },
+        description_column,
     })
+}
+
+/// Appends `row` to `option`'s description with one space when its text
+/// starts at or right of `column`, where the description's first line
+/// starts: the picker wraps one long description onto rows of its own. Any
+/// other row leaves the option alone.
+fn append_wrapped_description(row: &str, column: usize, option: &mut ChatOption) {
+    let indent = row.chars().count() - row.trim_start().chars().count();
+    if indent < column {
+        return;
+    }
+    let Some(description) = option.description.as_mut() else {
+        return;
+    };
+    description.push(' ');
+    description.push_str(row.trim());
 }
 
 /// Whether `row` is the picker's `▸ More models` row, and whether the
@@ -2459,6 +2498,11 @@ mod tests {
         ),
     ];
 
+    /// The `/model` picker as 2.1.330 draws it at 80 columns, where Fable's
+    /// description wraps onto an unnumbered row of its own.
+    const PICKER_W80: &str =
+        include_str!("../../../daemon/src/screen/fixtures/claude--v2.1.330-model-picker-w80.txt");
+
     /// The rows of a capture.
     fn capture(text: &str) -> Vec<String> {
         text.lines().map(str::to_owned).collect()
@@ -2515,6 +2559,41 @@ mod tests {
                 model(5, "Haiku 5.5", Some("Fastest for quick answers"), false),
                 model(6, "More models", None, false),
             ]
+        );
+    }
+
+    #[test]
+    fn a_wrapped_model_description_is_read_whole() {
+        let prompt = prompt_in(PICKER_W80);
+        assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+        let options = &prompt.options;
+        assert_eq!(options.len(), 5, "one option per model row");
+        assert_eq!(
+            options[2],
+            model(
+                3,
+                "Fable",
+                Some("Fable 5.2 · Most capable for your hardest and longest-running tasks"),
+                false
+            )
+        );
+        assert_eq!(
+            options[3],
+            model(
+                4,
+                "Opus",
+                Some("Opus 5.5 · Best for everyday, complex tasks"),
+                false
+            )
+        );
+        assert_eq!(
+            options[4],
+            model(
+                5,
+                "Haiku",
+                Some("Haiku 5.5 · Fastest for quick answers"),
+                false
+            )
         );
     }
 

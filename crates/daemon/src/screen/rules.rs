@@ -490,6 +490,9 @@ impl CompiledMatcher {
 fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
     match region {
         ScreenRegion::BottomNonEmpty { rows } => screen.bottom_non_empty_lines(rows),
+        ScreenRegion::BottomNonEmptyAboveTasks { rows } => {
+            last_non_empty_above_tasks(&screen.rows(), rows)
+        }
         ScreenRegion::PromptBoxBody => screen.prompt_box_body(),
         ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
         ScreenRegion::Title => screen.title().into_iter().collect(),
@@ -501,6 +504,77 @@ fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
         } => from_last_marked_row(&screen.rows(), marker, or_marker, rows),
         ScreenRegion::Unknown => Vec::new(),
     }
+}
+
+/// The marks a task panel draws before one of its rows.
+const TASK_MARKS: [char; 6] = ['◻', '◼', '✔', '✓', '☐', '☒'];
+
+/// One row of a task panel: a task's state mark and a space, then its text.
+fn is_task_row(row: &str) -> bool {
+    let text = row.trim_start();
+    TASK_MARKS.iter().any(|&mark| {
+        text.strip_prefix(mark)
+            .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
+/// Whether `row` heads a task panel: a `3/3 tasks done` (or `1 task done`)
+/// count.
+fn is_task_panel_header(row: &str) -> bool {
+    let Some((done, rest)) = row.trim().split_once('/') else {
+        return false;
+    };
+    let Some((total, tail)) = rest.split_once(' ') else {
+        return false;
+    };
+    let tail = tail
+        .strip_prefix("tasks ")
+        .or_else(|| tail.strip_prefix("task "));
+    is_count(done)
+        && is_count(total)
+        && tail.is_some_and(|after| after.strip_prefix("done").is_some_and(is_word_end))
+}
+
+/// Whether `text` is a run of ASCII digits, the counts a task panel's header
+/// carries.
+fn is_count(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether nothing word-like follows the text just matched: the word boundary
+/// that ends the header's count.
+fn is_word_end(after: &str) -> bool {
+    after
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+}
+
+/// The last `n` non-empty rows of `rows`, a trailing task panel left out:
+/// blank rows, then a run of task rows and the `N/M tasks done` header
+/// directly above them. Without both a task row and its header there is no
+/// panel, and the rows read exactly as [`Screen::bottom_non_empty_lines`]
+/// gives them.
+fn last_non_empty_above_tasks(rows: &[String], n: usize) -> Vec<String> {
+    let mut end = rows.len();
+    while end > 0 && rows[end - 1].is_empty() {
+        end -= 1;
+    }
+    let mut top = end;
+    while top > 0 && is_task_row(&rows[top - 1]) {
+        top -= 1;
+    }
+    if top < end && top > 0 && is_task_panel_header(&rows[top - 1]) {
+        end = top - 1;
+    }
+    let mut lines: Vec<String> = rows[..end]
+        .iter()
+        .filter(|row| !row.is_empty())
+        .cloned()
+        .collect();
+    let excess = lines.len().saturating_sub(n);
+    lines.drain(..excess);
+    lines
 }
 
 /// The last `n` non-empty rows of `rows` from the last one that starts with
@@ -602,6 +676,55 @@ mod tests {
             .filter(|rule| rule.verdict == Verdict::Background)
             .count();
         assert_eq!(background, 2, "two of them read background work");
+    }
+
+    #[test]
+    fn a_review_above_a_task_panel_reads_awaiting_input() {
+        let reading = read_claude(&screen_from(include_str!(
+            "fixtures/claude--v2.1.330-ask-review-tasks-w200.txt"
+        )));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
+        assert_eq!(reading.rule.as_deref(), Some("dialog_question_review"));
+    }
+
+    /// `rows` as a screen hands them over.
+    fn rows_of(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|row| (*row).to_owned()).collect()
+    }
+
+    #[test]
+    fn above_tasks_drops_a_trailing_task_panel() {
+        let rows = rows_of(&[
+            "❯ 1. Submit answers",
+            "2. Cancel",
+            "",
+            "  0/3 tasks done",
+            "  ◻ a",
+            "  ◻ b",
+        ]);
+        assert_eq!(
+            last_non_empty_above_tasks(&rows, 2),
+            ["❯ 1. Submit answers", "2. Cancel"]
+        );
+        let done = rows_of(&["1. Submit answers", "1/1 task done", "  ✔ Fix it"]);
+        assert_eq!(last_non_empty_above_tasks(&done, 2), ["1. Submit answers"]);
+    }
+
+    #[test]
+    fn above_tasks_without_a_panel_is_bottom_non_empty() {
+        let rows = rows_of(&["a", "", "b", "c"]);
+        assert_eq!(last_non_empty_above_tasks(&rows, 2), ["b", "c"]);
+    }
+
+    #[test]
+    fn a_lone_task_like_row_is_not_a_panel() {
+        let rows = rows_of(&["a", "", "b", "◻ x"]);
+        assert_eq!(last_non_empty_above_tasks(&rows, 2), ["b", "◻ x"]);
+        let header_only = rows_of(&["a", "", "0/3 tasks done"]);
+        assert_eq!(
+            last_non_empty_above_tasks(&header_only, 2),
+            ["a", "0/3 tasks done"]
+        );
     }
 
     /// The background rule Claude's rules read on `text`, as a screen.

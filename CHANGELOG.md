@@ -7,6 +7,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - On the phone, a tap on Paste, Quick, Keys or Hide under a selection reaches the button, and the Cut/Copy/Paste bar stays clear of the keyboard.
+- The chat's model picker card shows a model's whole description when the terminal is narrow enough to wrap it.
+- A question's "Review your answers" step reads as waiting on you when a task list is drawn under it.
 - On the phone, the pairing dialog names the phone or iPad instead of "this PC", lines "Have a code?" up with its text, and dims the status bar and bottom strip too.
 - In the viewer, two-digit and longer line numbers stay on one line, and on the phone they sit clear of the screen edge.
 - In the phone's host browser, rows no longer jump when a fetch starts or finishes.

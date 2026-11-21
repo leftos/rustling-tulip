@@ -178,6 +178,14 @@ pub enum ScreenRegion {
         /// How many rows to read.
         rows: usize,
     },
+    /// The last `rows` non-empty rows, a trailing task panel left out: blank
+    /// rows, then a run of task rows and the `N/M tasks done` header directly
+    /// above them. When the screen ends in no such panel the region reads
+    /// exactly as [`ScreenRegion::BottomNonEmpty`] does.
+    BottomNonEmptyAboveTasks {
+        /// How many rows to read.
+        rows: usize,
+    },
     /// The rows between the prompt box's two rules.
     PromptBoxBody,
     /// The last `rows` non-empty rows above the prompt box.

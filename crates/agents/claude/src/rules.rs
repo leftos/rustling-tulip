@@ -156,8 +156,9 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "dialog_question_review".to_string(),
             priority: 980,
             // No footer, and its matched row sits above the cursor on `2. Cancel`.
-            // Its options end the screen, so only the last few rows matter.
-            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            // Its options end the screen, so only the last few rows matter; a
+            // task panel drawn under them is not part of the reading.
+            region: ScreenRegion::BottomNonEmptyAboveTasks { rows: 4 },
             matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$".to_string()),
             // A bare rule row under the matched one: the input box's border,
             // which a live review never draws below its options, so the review
