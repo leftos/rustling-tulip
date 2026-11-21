@@ -22,6 +22,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's Needs you first is a switch beside the sort, so sessions that need you come first under A–Z or the desktop's tabs too.
 - The phone's Settings › Keys lists one key per row, saying what each sends, under a live preview of the key bar, and shows where a dragged key will land.
 - The phone's Settings › Keys has an Edit mode: a minus and Delete remove a key, and a drag handle moves one without a long press.
+- The phone's key editor previews the key as you change it, and lays each press out on two lines with a handle to reorder it.
 
 ## v0.18.0-alpha
 

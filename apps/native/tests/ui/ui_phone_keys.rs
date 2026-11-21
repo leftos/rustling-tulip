@@ -842,6 +842,141 @@ fn a_long_press_drag_reorders_a_keys_presses(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_press_handle_drag_reorders_the_presses(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({ "phone_keys": [
+        grid_key("seq", "vim save", &send_action(&["esc", "tab", "enter"])),
+    ] });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_keys(&mut h);
+    h.click_on("phone-keys-row-0");
+    assert!(
+        h.bounds("phone-key-editor-step-0-handle").size.height >= touch_target(),
+        "each press has a handle a touch target tall"
+    );
+
+    let from = h.center("phone-key-editor-step-0-handle");
+    let to = point(
+        h.center("phone-key-editor-step-0").x,
+        h.bounds("phone-key-editor-steps").bottom() + px(4.0),
+    );
+    h.touch(TouchPhase::Started, from);
+    h.touch(TouchPhase::Moved, to);
+    assert!(
+        drawn(&mut h, "phone-drag-lifted"),
+        "the press lifts with no wait"
+    );
+    assert!(drawn(&mut h, "phone-drag-slot"), "and its slot line draws");
+    h.touch(TouchPhase::Ended, to);
+    assert!(
+        !drawn(&mut h, "phone-drag-lifted"),
+        "the drop ends the lift"
+    );
+    assert_eq!(
+        saved_ui(&dir)["phone_keys"][0]["action"]["steps"][0]["key"]["name"],
+        json!("esc"),
+        "the move stays in the draft until Save"
+    );
+    h.click_on("phone-key-editor-save");
+
+    let saved = saved_ui(&dir);
+    let steps = saved["phone_keys"][0]["action"]["steps"]
+        .as_array()
+        .expect("the saved presses");
+    let names: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step["key"]["name"].as_str())
+        .collect();
+    assert_eq!(names, ["tab", "enter", "esc"], "the first press moved last");
+}
+
+#[gpui::test]
+fn each_press_row_has_its_modifiers_on_a_second_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-ctrl");
+    pick_char(&mut h, 0, "b");
+
+    let key = h.bounds("phone-key-editor-step-0-key");
+    let handle = h.bounds("phone-key-editor-step-0-handle");
+    assert!(
+        key.size.height >= touch_target(),
+        "the key button is a target"
+    );
+    assert!(
+        handle.left() >= key.right(),
+        "the handle sits at the key button's right"
+    );
+    assert!(
+        handle.top() < key.bottom() && key.top() < handle.bottom(),
+        "on the key button's line"
+    );
+    for part in ["ctrl", "alt", "shift", "remove"] {
+        let drawn_part = h.bounds(&format!("phone-key-editor-step-0-{part}"));
+        assert!(drawn_part.size.width > px(0.0), "{part} draws");
+        assert!(
+            drawn_part.top() >= key.bottom(),
+            "{part} sits on the line under the key button"
+        );
+        assert!(
+            drawn_part.size.height >= touch_target(),
+            "{part} is a target"
+        );
+    }
+    assert!(
+        h.bounds("phone-key-editor-step-0-remove").left()
+            > h.bounds("phone-key-editor-step-0-shift").right(),
+        "Remove sits at the line's right"
+    );
+    assert!(
+        h.bounds("phone-key-editor-steps").right()
+            >= h.bounds("phone-key-editor-step-0-remove").right(),
+        "inside the press list"
+    );
+}
+
+#[gpui::test]
+fn the_key_editor_previews_the_key_as_its_label_changes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+    tap_add_key(&mut h);
+
+    let blank = h.bounds("phone-key-editor-preview");
+    assert!(blank.size.width > px(0.0), "the preview draws on a new key");
+    assert!(
+        blank.bottom() <= h.bounds("phone-key-editor-label").top(),
+        "over the label field"
+    );
+
+    type_text(&mut h, "tmux new");
+
+    let typed = h.bounds("phone-key-editor-preview");
+    assert!(
+        typed.size.width > blank.size.width,
+        "the preview key widens to hold the typed label"
+    );
+    h.click_on("phone-key-editor-preview");
+    assert!(
+        !drawn(&mut h, "phone-key-picker-char"),
+        "the preview takes no tap"
+    );
+
+    h.click_on("phone-key-editor-add-step");
+    pick_named(&mut h, 0, "esc");
+    h.click_on("phone-key-editor-save");
+
+    assert_eq!(
+        saved_ui(&dir)["phone_keys"][21]["label"],
+        json!("tmux new"),
+        "the label the preview drew is the one saved"
+    );
+}
+
+#[gpui::test]
 fn a_long_press_on_add_key_still_opens_the_editor(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir);

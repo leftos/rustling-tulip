@@ -87,6 +87,23 @@ fn preview_button(selector: &str, kind: ButtonKind, cx: &Context<PhoneRoot>) -> 
     )
 }
 
+/// `base` sized as a bar key: at least a touch target, at most
+/// [`BAR_KEY_MAX`] wide, its label truncated.
+fn bar_key_sized(base: Stateful<Div>) -> Stateful<Div> {
+    base.flex_none()
+        .min_w(px(TOUCH_TARGET))
+        .max_w(px(BAR_KEY_MAX))
+        .min_h(px(TOUCH_TARGET))
+        .px(px(BAR_KEY_PAD))
+        .truncate()
+}
+
+/// One preview key tagged `selector` holding `label`, as the bar draws a
+/// key, which takes no tap: the key editor's preview of the key it builds.
+pub(super) fn preview_key(selector: &str, label: String, cx: &Context<PhoneRoot>) -> Stateful<Div> {
+    bar_key_sized(preview_button(selector, ButtonKind::Outlined, cx)).child(label)
+}
+
 /// The Hide key's label, pinned at the bar's right end.
 const HIDE_LABEL: &str = "Hide";
 
@@ -453,13 +470,7 @@ impl PhoneRoot {
             BarKeys::Terminal => phone_button(&keys.key_id(key), kind, cx),
             BarKeys::Preview => preview_button(&keys.key_id(key), kind, cx),
         };
-        let drawn = base
-            .flex_none()
-            .min_w(px(TOUCH_TARGET))
-            .max_w(px(BAR_KEY_MAX))
-            .min_h(px(TOUCH_TARGET))
-            .px(px(BAR_KEY_PAD))
-            .truncate()
+        let drawn = bar_key_sized(base)
             .child(key.label.clone())
             .when(dimmed, |button| {
                 button.opacity(crate::spawn_view::DISABLED_OPACITY)

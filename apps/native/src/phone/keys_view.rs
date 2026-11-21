@@ -20,7 +20,7 @@ use super::long_press::touch_drag_area_ending;
 use super::reorder::{self, ListId};
 use super::settings::{Page, Settings, SubPage};
 use super::settings_view::{CHEVRON, section_label};
-use super::terminal_view::BarKeys;
+use super::terminal_view::{BarKeys, preview_key};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
 use crate::drag::Side;
 use crate::driver_id::DriverId as _;
@@ -142,6 +142,9 @@ pub(super) struct KeyEditor {
     error: Option<String>,
     picker_error: Option<String>,
     _keys: Subscription,
+    /// Redraws the editor as the label field changes, so the preview
+    /// follows the typed label.
+    _typed: Subscription,
 }
 
 impl KeyEditor {
@@ -261,11 +264,13 @@ impl PhoneRoot {
         }
     }
 
-    /// A touch on the drag handle of the row at `index`: the row lifts at
-    /// once, and no row stays armed.
-    fn lift_key_by_handle(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.keys_edit = self.keys_edit.disarmed();
-        self.reorder_lift(ListId::KeyList, index, cx);
+    /// A touch on the drag handle of the row at `index` of `list`: the row
+    /// lifts at once, and on the Keys list no row stays armed.
+    fn lift_by_handle(&mut self, list: ListId, index: usize, cx: &mut Context<Self>) {
+        if list == ListId::KeyList {
+            self.keys_edit = self.keys_edit.disarmed();
+        }
+        self.reorder_lift(list, index, cx);
     }
 
     /// Drops the editor once its sub-page left the stack or Settings closed,
@@ -368,6 +373,7 @@ impl PhoneRoot {
                 this.save_key_editor(cx);
             }
         });
+        let typed = cx.observe(&input, |_, _, cx| cx.notify());
         KeyEditor {
             sub,
             label: input,
@@ -376,6 +382,7 @@ impl PhoneRoot {
             error: None,
             picker_error: None,
             _keys: keys,
+            _typed: typed,
         }
     }
 
@@ -566,18 +573,16 @@ impl PhoneRoot {
         else {
             return;
         };
-        let Some(press) = self
-            .key_editor
-            .as_mut()
-            .and_then(|editor| editor.draft.steps.get_mut(step))
-        else {
+        let Some(editor) = self.key_editor.as_mut() else {
+            return;
+        };
+        let Some(mut press) = editor.draft.steps.get(step).copied() else {
             return;
         };
         press.key = Some(key);
-        if let Some(editor) = self.key_editor.as_mut() {
-            editor.picker = None;
-            editor.picker_error = None;
-        }
+        editor.draft.set_step(step, press);
+        editor.picker = None;
+        editor.picker_error = None;
         if let Some(settings) = self.settings.as_mut() {
             settings.back();
         }
@@ -588,12 +593,8 @@ impl PhoneRoot {
     /// A tap on Add press: an empty press joins the draft.
     fn add_step(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.key_editor.as_mut() {
-            editor.draft.steps.push(DraftStep {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                key: None,
-            });
+            let end = editor.draft.steps.len();
+            editor.draft.insert_step(end, DraftStep::default());
         }
         self.refresh_key_placeholder(cx);
         cx.notify();
@@ -601,10 +602,8 @@ impl PhoneRoot {
 
     /// A tap on a press's Remove: the press leaves the draft.
     fn remove_step(&mut self, step: usize, cx: &mut Context<Self>) {
-        if let Some(editor) = self.key_editor.as_mut()
-            && step < editor.draft.steps.len()
-        {
-            editor.draft.steps.remove(step);
+        if let Some(editor) = self.key_editor.as_mut() {
+            editor.draft.remove_step(step);
         }
         self.refresh_key_placeholder(cx);
         cx.notify();
@@ -613,11 +612,10 @@ impl PhoneRoot {
     /// A tap on a press's Ctrl, Alt or Shift: it turns that modifier on or
     /// off.
     fn toggle_step(&mut self, toggle: Toggle, cx: &mut Context<Self>) {
-        let Some(press) = self
-            .key_editor
-            .as_mut()
-            .and_then(|editor| editor.draft.steps.get_mut(toggle.step))
-        else {
+        let Some(editor) = self.key_editor.as_mut() else {
+            return;
+        };
+        let Some(mut press) = editor.draft.steps.get(toggle.step).copied() else {
             return;
         };
         let held = match toggle.modifier {
@@ -626,6 +624,7 @@ impl PhoneRoot {
             Modifier::Shift => &mut press.shift,
         };
         *held = !*held;
+        editor.draft.set_step(toggle.step, press);
         self.refresh_key_placeholder(cx);
         cx.notify();
     }
@@ -824,7 +823,9 @@ impl PhoneRoot {
                     }))
                     .into_any_element(),
             ),
-            RowEnd::Handle => Some(Self::key_handle(id, index, t, cx).into_any_element()),
+            RowEnd::Handle => {
+                Some(Self::drag_handle(id, ListId::KeyList, index, t, cx).into_any_element())
+            }
         }
     }
 
@@ -866,17 +867,29 @@ impl PhoneRoot {
             .into_any_element()
     }
 
-    /// A row's drag handle in edit mode, a touch target square: a touch that
-    /// starts on it lifts the row at once, its moves pick the drop slot, and
-    /// its lift drops the row there through the page's reorder path.
-    fn key_handle(id: &str, index: usize, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The drag handle of the row at `index` of `list` (a key's row in edit
+    /// mode, or a press's row), a touch target square: a touch that starts on
+    /// it lifts the row at once, its moves pick the drop slot, and its lift
+    /// drops the row there through the page's reorder path.
+    fn drag_handle(
+        id: &str,
+        list: ListId,
+        index: usize,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let handle = format!("{id}-handle");
+        let key = if list == ListId::KeyList {
+            "phone-keys-handle"
+        } else {
+            "phone-key-editor-handle"
+        };
         let (lift, moved, end) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
         // Each update fails only when the phone's root is gone.
         let area = touch_drag_area_ending(
-            "phone-keys-handle",
+            key,
             move |_, _, cx| {
-                lift.update(cx, |this, cx| this.lift_key_by_handle(index, cx))
+                lift.update(cx, |this, cx| this.lift_by_handle(list, index, cx))
                     .ok();
             },
             move |at, _, cx| {
@@ -946,43 +959,24 @@ impl PhoneRoot {
         }
     }
 
-    /// The open editor: its label field, a row per press, Add press, its
-    /// refusal and Save, at the top of its sub-page, and Remove key for a
-    /// saved key.
+    /// The open editor: the key as the bar draws it, its label field, a
+    /// row per press, Add press, its refusal and Save, at the top of its
+    /// sub-page, and Remove key for a saved key.
     fn key_editor_body(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let Some(editor) = self.key_editor.as_ref() else {
             return div();
         };
         let saved = matches!(editor.sub, SubPage::KeyEditor { key: Some(_) });
-        let rows: Vec<Stateful<Div>> = editor
-            .draft
-            .steps
-            .iter()
-            .enumerate()
-            .map(|(step, press)| Self::press_row(step, press, cx))
-            .collect();
         let mut page = div()
             .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .p(px(SIDE_PADDING))
+            .child(Self::key_preview(editor, cx))
             .child(field_box("phone-key-editor-label", &editor.label, t, cx))
             .child(section_label(PRESSES_LABEL, t, cx))
-            .child(
-                div()
-                    .driver_id(|| "phone-key-editor-steps".to_owned())
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .children(rows)
-                    .child(reorder::list_box_canvas(
-                        &self.list_boxes,
-                        ListId::KeySteps,
-                        editor.draft.steps.len(),
-                    )),
-            )
+            .child(self.press_list(editor, t, cx))
             .child(
                 phone_button("phone-key-editor-add-step", ButtonKind::Outlined, cx)
                     .min_h(px(TOUCH_TARGET))
@@ -1007,58 +1001,108 @@ impl PhoneRoot {
         page.child(reorder::reorder_area(&self.list_boxes, cx))
     }
 
-    /// One press of the editor: its Ctrl, Alt and Shift toggles, its key
-    /// button and its Remove.
-    fn press_row(step: usize, press: &DraftStep, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The key the editor builds, drawn as one bar key: the typed label, or
+    /// the label its presses make while the field is blank. It takes no tap.
+    fn key_preview(editor: &KeyEditor, cx: &mut Context<Self>) -> Div {
+        let typed = editor.label.read(cx).text().trim().to_owned();
+        let label = if typed.is_empty() {
+            editor.draft.derived_label()
+        } else {
+            typed
+        };
+        div()
+            .flex()
+            .child(preview_key("phone-key-editor-preview", label, cx))
+    }
+
+    /// The draft's presses as one list, a row each in order, the lifted row
+    /// dimmed and the drop slot drawn while a drag moves one, and its box
+    /// recorded for a press to hit-test.
+    fn press_list(&self, editor: &KeyEditor, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let drag = self
+            .reorder_drag
+            .filter(|drag| drag.list == ListId::KeySteps);
+        let rows: Vec<AnyElement> = editor
+            .draft
+            .steps
+            .iter()
+            .enumerate()
+            .flat_map(|(step, press)| {
+                reorder::dragged_row(
+                    Self::press_row(step, press, t, cx),
+                    drag.is_some_and(|drag| drag.from == step),
+                    reorder::slot_of(drag, step),
+                    t,
+                )
+            })
+            .collect();
+        div()
+            .driver_id(|| "phone-key-editor-steps".to_owned())
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(rows)
+            .child(reorder::list_box_canvas(
+                &self.list_boxes,
+                ListId::KeySteps,
+                editor.draft.steps.len(),
+            ))
+    }
+
+    /// One press of the editor on two lines: its key button with the drag
+    /// handle at its right, then its Ctrl, Alt and Shift toggles with its
+    /// Remove at the right.
+    fn press_row(
+        step: usize,
+        press: &DraftStep,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = format!("phone-key-editor-step-{step}");
-        let remove = format!("{id}-remove");
         div()
             .id(SharedString::from(id.clone()))
             .driver_id(|| id.clone())
             .flex()
-            .items_center()
+            .flex_col()
             .gap(px(6.0))
-            .min_h(px(TOUCH_TARGET))
-            .child(Self::modifier_button(
-                &format!("{id}-ctrl"),
-                "Ctrl",
-                press.ctrl,
-                Toggle {
-                    step,
-                    modifier: Modifier::Ctrl,
-                },
-                cx,
-            ))
-            .child(Self::modifier_button(
-                &format!("{id}-alt"),
-                "Alt",
-                press.alt,
-                Toggle {
-                    step,
-                    modifier: Modifier::Alt,
-                },
-                cx,
-            ))
-            .child(Self::modifier_button(
-                &format!("{id}-shift"),
-                "Shift",
-                press.shift,
-                Toggle {
-                    step,
-                    modifier: Modifier::Shift,
-                },
-                cx,
-            ))
-            .child(Self::press_key_button(step, press, cx))
+            .pb(px(6.0))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
             .child(
-                phone_button(&remove, ButtonKind::Outlined, cx)
-                    .min_h(px(TOUCH_TARGET))
-                    .flex_none()
-                    .child(REMOVE_LABEL)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.remove_step(step, cx);
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(Self::press_key_button(step, press, cx))
+                    .child(Self::drag_handle(&id, ListId::KeySteps, step, t, cx)),
             )
+            .child(Self::press_modifiers(&id, step, press, cx))
+    }
+
+    /// A press's second line: its Ctrl, Alt and Shift toggles, then its
+    /// Remove at the line's right.
+    fn press_modifiers(id: &str, step: usize, press: &DraftStep, cx: &mut Context<Self>) -> Div {
+        let toggles = [
+            (Modifier::Ctrl, "ctrl", "Ctrl", press.ctrl),
+            (Modifier::Alt, "alt", "Alt", press.alt),
+            (Modifier::Shift, "shift", "Shift", press.shift),
+        ];
+        let mut line = div().flex().items_center().gap(px(6.0));
+        for (modifier, suffix, label, held) in toggles {
+            let toggle = Toggle { step, modifier };
+            let selector = format!("{id}-{suffix}");
+            line = line.child(Self::modifier_button(&selector, label, held, toggle, cx));
+        }
+        line.child(div().flex_1()).child(
+            phone_button(&format!("{id}-remove"), ButtonKind::Outlined, cx)
+                .min_h(px(TOUCH_TARGET))
+                .flex_none()
+                .child(REMOVE_LABEL)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.remove_step(step, cx);
+                })),
+        )
     }
 
     /// One press's modifier toggle, Primary while the modifier is held.

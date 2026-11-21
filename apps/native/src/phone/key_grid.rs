@@ -249,8 +249,8 @@ pub(crate) struct KeyDraft {
 }
 
 /// One press as the key editor holds it: the modifiers held, and the key
-/// while one is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// while one is chosen. The default is the blank press Add press appends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DraftStep {
     pub(crate) ctrl: bool,
     pub(crate) alt: bool,
@@ -292,6 +292,36 @@ impl KeyDraft {
     /// names nothing leaves them as they are.
     pub(crate) fn move_step(&mut self, from: usize, to: usize, side: Side) {
         self.steps = reorder::reordered(&self.steps, from, to, side);
+    }
+
+    /// Puts `step` at `at`, the presses from there on moving down one; `at`
+    /// may be the end. False, changing nothing, past the end.
+    pub(crate) fn insert_step(&mut self, at: usize, step: DraftStep) -> bool {
+        if at > self.steps.len() {
+            return false;
+        }
+        self.steps.insert(at, step);
+        true
+    }
+
+    /// Drops the press at `at`, even the only one (a save refuses a key
+    /// with none). False, changing nothing, while `at` names no press.
+    pub(crate) fn remove_step(&mut self, at: usize) -> bool {
+        if at >= self.steps.len() {
+            return false;
+        }
+        self.steps.remove(at);
+        true
+    }
+
+    /// Makes the press at `at` into `step`. False, changing nothing, while
+    /// `at` names no press.
+    pub(crate) fn set_step(&mut self, at: usize, step: DraftStep) -> bool {
+        let Some(press) = self.steps.get_mut(at) else {
+            return false;
+        };
+        *press = step;
+        true
     }
 }
 
@@ -1879,6 +1909,101 @@ mod tests {
                 draft_step(false, Some(named_step(NamedKey::Esc))),
             ])
         );
+    }
+
+    /// The draft of one plain press of each named key in `names`.
+    fn named_draft(names: &[NamedKey]) -> KeyDraft {
+        draft(
+            names
+                .iter()
+                .map(|name| draft_step(false, Some(named_step(*name))))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn insert_step_at_the_start_the_middle_and_the_end() {
+        let blank = draft_step(false, None);
+        let mut edited = named_draft(&[NamedKey::Esc, NamedKey::Tab]);
+
+        assert!(edited.insert_step(0, blank), "at the start");
+        assert!(edited.insert_step(2, blank), "in the middle");
+        assert!(edited.insert_step(4, blank), "at the end");
+
+        assert_eq!(
+            edited,
+            draft(vec![
+                blank,
+                draft_step(false, Some(named_step(NamedKey::Esc))),
+                blank,
+                draft_step(false, Some(named_step(NamedKey::Tab))),
+                blank,
+            ])
+        );
+    }
+
+    #[test]
+    fn insert_step_past_the_end_is_refused() {
+        let mut edited = named_draft(&[NamedKey::Esc]);
+
+        assert!(!edited.insert_step(2, draft_step(false, None)));
+        assert_eq!(edited, named_draft(&[NamedKey::Esc]), "nothing changed");
+    }
+
+    #[test]
+    fn remove_step_drops_the_first_the_last_and_the_only_press() {
+        let mut edited = named_draft(&[NamedKey::Esc, NamedKey::Tab, NamedKey::Enter]);
+
+        assert!(edited.remove_step(0), "the first");
+        assert_eq!(edited, named_draft(&[NamedKey::Tab, NamedKey::Enter]));
+        assert!(edited.remove_step(1), "the last");
+        assert_eq!(edited, named_draft(&[NamedKey::Tab]));
+        assert!(edited.remove_step(0), "the only one");
+        assert_eq!(edited, KeyDraft::default(), "an empty draft is left");
+    }
+
+    #[test]
+    fn remove_step_past_the_end_is_refused() {
+        let mut edited = named_draft(&[NamedKey::Esc]);
+
+        assert!(!edited.remove_step(1));
+        assert_eq!(edited, named_draft(&[NamedKey::Esc]), "nothing changed");
+        let mut empty = KeyDraft::default();
+        assert!(!empty.remove_step(0), "an empty draft has nothing to drop");
+    }
+
+    #[test]
+    fn set_step_replaces_one_press() {
+        let mut edited = named_draft(&[NamedKey::Esc, NamedKey::Tab]);
+        let ctrl_c = draft_step(true, Some(char_step('c')));
+
+        assert!(edited.set_step(1, ctrl_c));
+
+        assert_eq!(
+            edited,
+            draft(vec![
+                draft_step(false, Some(named_step(NamedKey::Esc))),
+                ctrl_c
+            ])
+        );
+    }
+
+    #[test]
+    fn set_step_past_the_end_is_refused() {
+        let mut edited = named_draft(&[NamedKey::Esc]);
+
+        assert!(!edited.set_step(1, draft_step(true, None)));
+        assert_eq!(edited, named_draft(&[NamedKey::Esc]), "nothing changed");
+    }
+
+    #[test]
+    fn move_step_past_the_end_leaves_the_presses() {
+        let mut edited = named_draft(&[NamedKey::Esc, NamedKey::Tab]);
+
+        edited.move_step(2, 0, Side::Before);
+        edited.move_step(0, 2, Side::After);
+
+        assert_eq!(edited, named_draft(&[NamedKey::Esc, NamedKey::Tab]));
     }
 
     #[test]

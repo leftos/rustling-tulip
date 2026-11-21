@@ -95,9 +95,10 @@
 //! `phone-settings-keys` shows Settings' Keys page: the key bar's preview,
 //! the hint, a row per key, then Add key and Restore defaults.
 //! `phone-settings-key-edit` shows that page with the Ctrl+C key's editor
-//! open: the header's title `Key` over the label field, the `Presses` label
-//! and the key's one press (Ctrl lit, key `c`, Remove), Add press and Save,
-//! and Remove key.
+//! open: the header's title `Key` over the key's preview as the bar draws
+//! it, the label field, the `Presses` label and the key's one press on two
+//! lines (key `c` with its drag handle, then Ctrl lit, Alt, Shift and
+//! Remove), Add press and Save, and Remove key.
 //! `phone-settings-replies` shows Settings' Quick replies page: each set's
 //! name over a row per group, its title over its reply count and a chevron.
 //! `phone-settings-reply-group` shows the agent set's `common` group open:
