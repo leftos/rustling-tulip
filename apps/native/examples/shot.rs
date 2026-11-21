@@ -449,7 +449,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 74] = [
+    const ALL: [Self; 75] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
