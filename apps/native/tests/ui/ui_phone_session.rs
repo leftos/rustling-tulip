@@ -1946,6 +1946,37 @@ fn the_dock_paste_pastes_into_the_composer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_dock_paste_reads_no_clipboard_where_the_paste_control_pastes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    let board = fake_pasteboard(&mut h, Some((png, ImageFormat::Png)), false);
+    h.set_clipboard("pasted text");
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_control_pastes(true));
+    });
+    h.click_on("phone-composer-keys");
+
+    h.click_on("phone-key-7");
+
+    assert_eq!(
+        board.reads(),
+        0,
+        "the control, not the key, reads the paste"
+    );
+    assert!(uploads(&mut h).is_empty(), "nothing is uploaded");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "no clipboard text goes in"
+    );
+}
+
+#[gpui::test]
 fn the_dock_quick_switches_to_the_quick_dock(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded(cx, &dir, vec![user("u1")]);

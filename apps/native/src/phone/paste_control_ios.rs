@@ -4,20 +4,25 @@
 //! programmatic `UIPasteboard` read outright, while the control's tap pastes
 //! with no prompt.
 //!
-//! The terminal key bar's Paste key takes the same control, for text only:
-//! the composer and the key bar are never on screen together.
+//! Each Paste spot ([`PasteSpot`]) has a control of its own: the composer's
+//! Paste button, the Keys dock's Paste key (both on screen together, both
+//! pasting into the composer) and the terminal key bar's Paste key (text
+//! only, into the terminal).
 //!
-//! The Paste button or key records its bounds each frame
+//! Each Paste button or key records its bounds each frame
 //! ([`record_button`]); at the end of `PhoneRoot`'s frame [`frame_end`]
-//! places the control over them, or hides it when neither was drawn (or
-//! the key is scrolled partly out of its bar) or a sheet covers the page. The control pastes into [`PasteTarget`], a `UIView` whose
-//! `pasteItemProviders:` loads the first item as an image (PNG or JPEG) or
-//! text; the load completes on a queue of the system's choosing, so its
+//! places each drawn spot's control over them, and hides the control of a
+//! spot not drawn (or a key scrolled partly out of its bar), or every
+//! control when a sheet covers the page. Each control pastes into its own
+//! [`PasteTarget`], a `UIView` whose `pasteItemProviders:` loads the first
+//! item as an image (any image type) or text; the paste goes where the
+//! spot whose control fired pastes. The load completes on a queue of the
+//! system's choosing, so its
 //! result goes back through a channel to a task on the GPUI side, which
 //! drops it when the session page it was pasted on is no longer shown.
 //! iOS 15 has no `UIPasteControl` and keeps the GPUI button's own read.
 
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 
 use block2::RcBlock;
 use futures::StreamExt as _;
@@ -40,7 +45,7 @@ use objc2_ui_kit::{
 use super::PhoneRoot;
 use super::pasteboard::{
     ImageSource, PasteKind, PasteSpot, PastedImage, TEXT_TYPES, must_unhide, paste_kind,
-    pasted_name,
+    pasted_name, spots_to_hide,
 };
 use super::photos_ios::{as_jpeg, fitted};
 use crate::buttons::ButtonSize;
@@ -107,12 +112,13 @@ define_class!(
     impl PasteTarget {
         #[unsafe(method(pasteItemProviders:))]
         fn paste_item_providers(&self, providers: &NSArray<NSItemProvider>) {
-            pasted(providers);
+            pasted(self, providers);
         }
     }
 );
 
-/// The control and what it pastes into, made on first use.
+/// One spot's control and what it pastes into, made on the spot's first
+/// placing.
 struct Control {
     view: Retained<UIPasteControl>,
     /// The control holds its target weakly, so this keeps it alive.
@@ -121,26 +127,27 @@ struct Control {
     /// The spot the control was made for, which decides what it accepts
     /// and where its paste goes.
     spot: PasteSpot,
-}
-
-/// The control's one owner, on the main thread.
-#[derive(Default)]
-struct Owner {
-    control: Option<Control>,
-    /// Where a paste's result goes to the GPUI side, once its task runs.
-    sender: Option<UnboundedSender<Pasted>>,
     /// The session whose Paste the control sits over.
     session: Option<String>,
-    /// Whether an image pastes there: the spot is the composer and the
+    /// Whether an image pastes there: the spot takes images and the
     /// session's host takes uploads, as the frame it was placed in found it.
     uploads: bool,
     shown: bool,
 }
 
+/// The controls' one owner, on the main thread: at most one control per
+/// spot.
+#[derive(Default)]
+struct Owner {
+    controls: Vec<Control>,
+    /// Where a paste's result goes to the GPUI side, once its task runs.
+    sender: Option<UnboundedSender<Pasted>>,
+}
+
 thread_local! {
-    /// The Paste drawn in the frame being drawn and its bounds, taken by
-    /// [`frame_end`].
-    static DRAWN: Cell<Option<(PasteSpot, Bounds<Pixels>)>> = const { Cell::new(None) };
+    /// The Paste spots drawn in the frame being drawn and their bounds,
+    /// taken by [`frame_end`].
+    static DRAWN: RefCell<Vec<(PasteSpot, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) };
     static OWNER: RefCell<Owner> = RefCell::new(Owner::default());
     static SUPPORTED: OnceCell<bool> = const { OnceCell::new() };
 }
@@ -163,34 +170,55 @@ pub(super) fn supported() -> bool {
 /// The Paste at `spot` was drawn at `bounds` in this frame, inside the
 /// visible `clip`; one the control may not cover there is not recorded.
 pub(super) fn record_button(spot: PasteSpot, bounds: Bounds<Pixels>, clip: Bounds<Pixels>) {
-    if spot.shown_in(bounds, clip) {
-        DRAWN.with(|drawn| drawn.set(Some((spot, bounds))));
+    if !spot.shown_in(bounds, clip) {
+        return;
     }
+    DRAWN.with(|drawn| {
+        let mut drawn = drawn.borrow_mut();
+        drawn.retain(|(other, _)| *other != spot);
+        drawn.push((spot, bounds));
+    });
 }
 
-/// The end of `PhoneRoot`'s frame: the control goes over the Paste drawn
-/// in it, for the session that spot pastes into, or hides when none was
-/// drawn, that spot has no session or a sheet covered the page.
-pub(super) fn frame_end(frame: PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mut App) {
-    let drawn = DRAWN.with(Cell::take);
+/// The end of `PhoneRoot`'s frame: each Paste drawn in it gets its spot's
+/// control, for the session that spot pastes into; the control of a spot
+/// not drawn, or with no session, hides, and every control hides when a
+/// sheet covered the page.
+pub(super) fn frame_end(frame: &PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mut App) {
+    let drawn = DRAWN.with(RefCell::take);
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let Some((spot, bounds)) = drawn else {
-        hide();
-        return;
+    let kept: Vec<(PasteSpot, Bounds<Pixels>)> = if frame.covered || !supported() {
+        Vec::new()
+    } else {
+        drawn
+            .into_iter()
+            .filter(|(spot, _)| {
+                spot.session(frame.session.clone(), frame.terminal.clone())
+                    .is_some()
+            })
+            .collect()
     };
-    match spot.session(frame.session, frame.terminal) {
-        Some(session) if !frame.covered && supported() => {
-            listen(root, cx);
-            place(mtm, bounds, spot, frame.colors);
-            OWNER.with(|owner| {
-                let mut owner = owner.borrow_mut();
-                owner.session = Some(session);
-                owner.uploads = spot.takes_images(frame.uploads);
-            });
-        }
-        _ => hide(),
+    let kept_spots: Vec<PasteSpot> = kept.iter().map(|(spot, _)| *spot).collect();
+    let up: Vec<PasteSpot> = OWNER.with(|owner| {
+        let owner = owner.borrow();
+        owner
+            .controls
+            .iter()
+            .filter(|control| control.shown)
+            .map(|control| control.spot)
+            .collect()
+    });
+    for spot in spots_to_hide(&up, &kept_spots) {
+        hide(spot);
+    }
+    if kept.is_empty() {
+        return;
+    }
+    listen(root, cx);
+    for (spot, bounds) in kept {
+        place(mtm, spot, bounds, frame);
     }
 }
 
@@ -212,48 +240,61 @@ fn listen(root: WeakEntity<PhoneRoot>, cx: &mut App) {
     .detach();
 }
 
-/// Puts the control over `bounds` at `spot` and shows it, making it on
-/// first use (or anew when the theme's colours or the spot changed).
-fn place(mtm: MainThreadMarker, bounds: Bounds<Pixels>, spot: PasteSpot, colors: PasteColors) {
+/// Puts `spot`'s control over `bounds` and shows it, for the session the
+/// spot pastes into in `frame`, making it on the spot's first placing (or
+/// anew when the theme's colours changed); no other spot's control is
+/// touched.
+fn place(mtm: MainThreadMarker, spot: PasteSpot, bounds: Bounds<Pixels>, frame: &PasteFrame) {
+    let session = spot.session(frame.session.clone(), frame.terminal.clone());
+    let uploads = spot.takes_images(frame.uploads);
+    let colors = frame.colors;
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
-        let stale = owner
-            .control
-            .as_ref()
-            .is_some_and(|control| control.colors != colors || control.spot != spot);
-        if stale && let Some(old) = owner.control.take() {
+        let controls = &mut owner.controls;
+        if let Some(at) = controls
+            .iter()
+            .position(|control| control.spot == spot && control.colors != colors)
+        {
+            let old = controls.swap_remove(at);
             old.view.removeFromSuperview();
             old.target.removeFromSuperview();
         }
-        let remade = owner.control.is_none();
+        let remade = !controls.iter().any(|control| control.spot == spot);
         if remade {
-            owner.control = make(mtm, colors, spot);
+            let Some(made) = make(mtm, colors, spot) else {
+                return;
+            };
+            controls.push(made);
         }
-        let Some(control) = owner.control.as_ref() else {
+        let Some(control) = controls.iter_mut().find(|control| control.spot == spot) else {
             return;
         };
         control.view.setFrame(rect(bounds));
-        if must_unhide(owner.shown, remade) {
+        if must_unhide(control.shown, remade) {
             control.view.setHidden(false);
-            tracing::info!("phone: paste control shown");
+            tracing::info!(spot = ?spot, "phone: paste control shown");
         }
-        owner.shown = true;
+        control.shown = true;
+        control.session = session;
+        control.uploads = uploads;
     });
 }
 
-/// Hides the control, when it is up.
-fn hide() {
+/// Hides `spot`'s control, when it is up.
+fn hide(spot: PasteSpot) {
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
-        if !owner.shown {
+        let Some(control) = owner
+            .controls
+            .iter_mut()
+            .find(|control| control.spot == spot && control.shown)
+        else {
             return;
-        }
-        if let Some(control) = owner.control.as_ref() {
-            control.view.setHidden(true);
-        }
-        owner.shown = false;
-        owner.session = None;
-        tracing::info!("phone: paste control hidden");
+        };
+        control.view.setHidden(true);
+        control.shown = false;
+        control.session = None;
+        tracing::info!(spot = ?spot, "phone: paste control hidden");
     });
 }
 
@@ -313,6 +354,9 @@ fn make(mtm: MainThreadMarker, colors: PasteColors, spot: PasteSpot) -> Option<C
         target,
         colors,
         spot,
+        session: None,
+        uploads: false,
+        shown: false,
     })
 }
 
@@ -331,20 +375,23 @@ fn root_view(mtm: MainThreadMarker) -> Option<Retained<UIView>> {
     window.rootViewController()?.view()
 }
 
-/// The control's tap, on the main thread: the first item is loaded as what
-/// [`paste_kind`] reads it as, and the result sent to the GPUI side for the
-/// session the control sits over.
-fn pasted(providers: &NSArray<NSItemProvider>) {
-    let (session, sender, uploads, spot) = OWNER.with(|owner| {
+/// A control's tap into `target`, on the main thread: the first item is
+/// loaded as what [`paste_kind`] reads it as, and the result sent to the
+/// GPUI side for the session that control sits over, where its spot pastes.
+fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
+    let (fired, sender) = OWNER.with(|owner| {
         let owner = owner.borrow();
-        let spot = owner.control.as_ref().map(|control| control.spot);
-        (
-            owner.session.clone(),
-            owner.sender.clone(),
-            owner.uploads,
-            spot,
-        )
+        let fired = owner
+            .controls
+            .iter()
+            .find(|control| std::ptr::eq(Retained::as_ptr(&control.target), target))
+            .map(|control| (control.spot, control.session.clone(), control.uploads));
+        (fired, owner.sender.clone())
     });
+    let Some((spot, session, uploads)) = fired else {
+        tracing::info!("phone: a control paste came from no known control");
+        return;
+    };
     let (Some(session), Some(sender), Some(provider)) = (session, sender, providers.firstObject())
     else {
         tracing::info!("phone: a control paste had nothing to paste into");
@@ -359,7 +406,7 @@ fn pasted(providers: &NSArray<NSItemProvider>) {
     let conforms =
         |kind: &str| provider.hasItemConformingToTypeIdentifier(&NSString::from_str(kind));
     let kind = paste_kind(&types, conforms, uploads);
-    tracing::info!(types = ?types, kind = ?kind, uploads, "phone: control paste");
+    tracing::info!(types = ?types, kind = ?kind, uploads, spot = ?spot, "phone: control paste");
     let load_as = match kind {
         PasteKind::Image(source) => source.type_id(),
         PasteKind::Text => TEXT_TYPES
@@ -375,7 +422,7 @@ fn pasted(providers: &NSArray<NSItemProvider>) {
             PasteKind::Image(_) => as_jpeg(bytes),
             _ => {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                let pasted = if spot == Some(PasteSpot::Terminal) {
+                let pasted = if spot == PasteSpot::Terminal {
                     Pasted::Terminal { session, text }
                 } else {
                     Pasted::Text { session, text }

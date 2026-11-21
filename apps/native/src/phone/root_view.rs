@@ -192,6 +192,9 @@ pub struct PhoneRoot {
     share: Arc<dyn ShareSheet>,
     /// The platform's pasteboard, whose image the composer's Paste uploads.
     pub(super) pasteboard: Arc<dyn PhonePasteboard>,
+    /// Whether the system paste control, not a GPUI tap, takes the Paste
+    /// buttons' and keys' pastes: on iOS 16 and later.
+    pub(super) control_pastes: bool,
     /// The platform's photo picker, which the composer's Photos opens.
     pub(super) photos: Arc<dyn PhotoPicker>,
     /// The host browser, drawn over the page shown while open, under the
@@ -296,6 +299,7 @@ impl PhoneRoot {
             viewer: None,
             share: Arc::new(LoggingShare),
             pasteboard: Arc::new(LoggingPasteboard),
+            control_pastes: super::session_view::control_pastes(),
             photos: Arc::new(LoggingPhotos),
             browser: None,
             kept_stats: Vec::new(),
@@ -701,6 +705,13 @@ impl PhoneRoot {
     /// Reads images off `pasteboard` from now on.
     pub fn set_pasteboard(&mut self, pasteboard: Arc<dyn PhonePasteboard>) {
         self.pasteboard = pasteboard;
+    }
+
+    /// From now on the system paste control takes the Paste taps when
+    /// `control_pastes`, as on iOS 16 and later, so no GPUI tap reads the
+    /// pasteboard; specs set it to stand in for that iOS.
+    pub fn set_control_pastes(&mut self, control_pastes: bool) {
+        self.control_pastes = control_pastes;
     }
 
     /// The same root picking photos through `photos`; its Photos picks

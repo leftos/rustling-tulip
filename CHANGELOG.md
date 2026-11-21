@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A reload lists sessions in the order they started, so rows on the phone's Home and in the sidebar no longer jump around.
 - The phone's Settings › Hosts buttons are full-size touch targets, and lifting a key by a long press in Settings › Keys' edit mode clears an armed Delete.
 - A plan's title drops its heading's "#" marks on the chat card, the phone's plan sheet and the Needs you row.
+- The phone's Keys dock Paste key pastes through iOS's own paste button, so iOS 16 and later no longer refuse it.
 
 ## v0.18.1-alpha
 

@@ -49,16 +49,16 @@ pub(super) fn takes_uploads(root: &RootView, session_id: &str) -> bool {
         .and_then(|host| root.conn_of(&host))
         .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE))
 }
-/// Whether the system paste control takes the composer's Paste tap: on iOS
-/// 16 and later ([`super::paste_control_ios`]).
+/// Whether the system paste control takes the Paste buttons' and keys'
+/// taps: on iOS 16 and later ([`super::paste_control_ios`]).
 #[cfg(target_os = "ios")]
-fn control_pastes() -> bool {
+pub(super) fn control_pastes() -> bool {
     super::paste_control_ios::supported()
 }
 
 /// Off iOS the Paste button's own tap pastes.
 #[cfg(not(target_os = "ios"))]
-const fn control_pastes() -> bool {
+pub(super) const fn control_pastes() -> bool {
     false
 }
 
@@ -832,7 +832,7 @@ impl PhoneRoot {
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         // On iOS 16 and later the system's paste control
                         // over the button takes the tap.
-                        if !control_pastes() {
+                        if !this.control_pastes {
                             this.paste_into_composer(window, cx);
                         }
                     })),
@@ -893,16 +893,17 @@ impl PhoneRoot {
     }
 
     /// The last element of `PhoneRoot`'s frame on iOS: a zero-size canvas
-    /// whose prepaint, after the page's own, places the system paste control
-    /// over the Paste button drawn in this frame, or hides it when none was
-    /// drawn or a sheet `covered` the page.
+    /// whose prepaint, after the page's own, places a system paste control
+    /// over each Paste button or key drawn in this frame, and hides the
+    /// control of each one not drawn, or every one when a sheet `covered`
+    /// the page.
     #[cfg(target_os = "ios")]
     pub(super) fn paste_frame_end(
         this: &Self,
         covered: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !control_pastes() {
+        if !this.control_pastes {
             return None;
         }
         let session = this.shown.as_ref().map(|(_, id)| id.clone());
@@ -923,7 +924,7 @@ impl PhoneRoot {
         };
         let end = gpui::canvas(
             move |_, _, cx| {
-                super::paste_control_ios::frame_end(frame, root, cx);
+                super::paste_control_ios::frame_end(&frame, root, cx);
             },
             |_, (), _, _| {},
         )
@@ -1096,17 +1097,23 @@ impl PhoneRoot {
                 ButtonKind::Outlined
             };
             let dimmed = key_grid::is_inert(key);
-            dock = dock.child(
-                phone_button(&format!("phone-key-{index}"), kind, cx)
-                    .min_h(px(TOUCH_TARGET))
-                    .child(key.label.clone())
-                    .when(dimmed, |button| {
-                        button.opacity(crate::spawn_view::DISABLED_OPACITY)
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.press_grid_key(index, KeySurface::Dock, window, cx);
-                    })),
-            );
+            let button = phone_button(&format!("phone-key-{index}"), kind, cx)
+                .min_h(px(TOUCH_TARGET))
+                .child(key.label.clone())
+                .when(dimmed, |button| {
+                    button.opacity(crate::spawn_view::DISABLED_OPACITY)
+                })
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.press_grid_key(index, KeySurface::Dock, window, cx);
+                }));
+            // On iOS 16 and later the system's paste control sits over the
+            // dock's Paste key.
+            let button = if key.action == KeyAction::Paste {
+                record_paste_bounds(button, PasteSpot::Dock)
+            } else {
+                button
+            };
+            dock = dock.child(button);
         }
         dock
     }
@@ -1135,10 +1142,10 @@ impl PhoneRoot {
         match &key.action {
             KeyAction::Ctrl => self.key_bar.borrow_mut().toggle_ctrl(),
             KeyAction::Paste => match surface {
-                KeySurface::Dock => self.paste_into_composer(window, cx),
                 // On iOS 16 and later the system's paste control over the
-                // key bar's Paste takes the tap.
-                KeySurface::Terminal if control_pastes() => {}
+                // dock's or the key bar's Paste takes the tap.
+                KeySurface::Dock | KeySurface::Terminal if self.control_pastes => {}
+                KeySurface::Dock => self.paste_into_composer(window, cx),
                 KeySurface::Terminal => {
                     let pane = self.terminal_pane(cx);
                     Self::paste_into_terminal(pane, self.terminal_session(), cx);

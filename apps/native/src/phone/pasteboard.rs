@@ -172,14 +172,16 @@ pub(crate) fn paste_kind(
     }
 }
 
-/// Where the system paste control sits, and so where its paste goes: one
-/// control serves the page, whose composer and terminal key bar are never
-/// on screen together.
+/// Where a system paste control sits, and so where its paste goes: each
+/// spot has a control of its own, so the composer's Paste and the Keys
+/// dock's, on screen together, each have one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PasteSpot {
     /// The composer's Paste button: text in at the caret, or an image
     /// uploaded.
     Composer,
+    /// The Keys dock's Paste key: pastes as the composer's Paste does.
+    Dock,
     /// The terminal key bar's Paste key: text pasted into the terminal.
     Terminal,
 }
@@ -190,35 +192,36 @@ pub(crate) enum PasteSpot {
 )]
 impl PasteSpot {
     /// The type identifiers the control offers to paste here: text and
-    /// images at the composer, text only at the terminal.
+    /// images at the composer and the dock, text only at the terminal.
     pub(crate) const fn accepts(self) -> &'static [&'static str] {
         match self {
-            Self::Composer => &COMPOSER_ACCEPTS,
+            Self::Composer | Self::Dock => &COMPOSER_ACCEPTS,
             Self::Terminal => &TERMINAL_ACCEPTS,
         }
     }
 
-    /// The session a paste here goes to: the shown session's composer, or
-    /// the session the open terminal shows.
+    /// The session a paste here goes to: the shown session's composer (from
+    /// its Paste or the dock's), or the session the open terminal shows.
     pub(crate) fn session(self, shown: Option<String>, terminal: Option<String>) -> Option<String> {
         match self {
-            Self::Composer => shown,
+            Self::Composer | Self::Dock => shown,
             Self::Terminal => terminal,
         }
     }
 
     /// Whether an image pastes here, the host taking uploads when
-    /// `uploads`: only at the composer.
+    /// `uploads`: only into the composer.
     pub(crate) const fn takes_images(self, uploads: bool) -> bool {
-        matches!(self, Self::Composer) && uploads
+        matches!(self, Self::Composer | Self::Dock) && uploads
     }
 
     /// Whether the control goes over this spot drawn at `bounds` inside the
-    /// visible `clip`: the composer's button always, the key bar's key
-    /// only while [`spot_fully_visible`] (its bar scrolls sideways).
+    /// visible `clip`: the composer's button and the dock's key always,
+    /// the key bar's key only while [`spot_fully_visible`] (its bar scrolls
+    /// sideways).
     pub(crate) fn shown_in(self, bounds: Bounds<Pixels>, clip: Bounds<Pixels>) -> bool {
         match self {
-            Self::Composer => true,
+            Self::Composer | Self::Dock => true,
             Self::Terminal => spot_fully_visible(bounds, clip),
         }
     }
@@ -256,7 +259,22 @@ pub(crate) const fn must_unhide(shown: bool, remade: bool) -> bool {
     !shown || remade
 }
 
-/// The type identifiers the composer's control offers to paste.
+/// The spots of `up`, whose control is up, that were not `drawn` (with a
+/// session to paste into) this frame: each hides its control, while every
+/// drawn spot keeps its own.
+#[cfg_attr(
+    not(any(target_os = "ios", test)),
+    expect(dead_code, reason = "only the iOS paste control places itself")
+)]
+pub(crate) fn spots_to_hide(up: &[PasteSpot], drawn: &[PasteSpot]) -> Vec<PasteSpot> {
+    up.iter()
+        .copied()
+        .filter(|spot| !drawn.contains(spot))
+        .collect()
+}
+
+/// The type identifiers the composer's and the dock's controls offer to
+/// paste.
 const COMPOSER_ACCEPTS: [&str; 5] = [
     TEXT_TYPES[0],
     TEXT_TYPES[1],
@@ -283,7 +301,7 @@ mod tests {
 
     use super::{
         IMAGE_TYPE, ImageSource, PasteKind, PasteSpot, must_unhide, paste_kind, pasted_name,
-        spot_fully_visible,
+        spot_fully_visible, spots_to_hide,
     };
 
     /// The image types the tests' items offer, each conforming to
@@ -492,6 +510,57 @@ mod tests {
         assert!(
             must_unhide(true, true),
             "still shown, control remade hidden"
+        );
+    }
+
+    #[test]
+    fn the_dock_spot_pastes_like_the_composer() {
+        let dock = PasteSpot::Dock;
+        let composer = PasteSpot::Composer;
+        assert_eq!(dock.accepts(), composer.accepts());
+        let shown = Some("chat".to_owned());
+        let terminal = Some("term".to_owned());
+        assert_eq!(
+            dock.session(shown.clone(), terminal.clone()),
+            composer.session(shown, terminal)
+        );
+        for uploads in [true, false] {
+            assert_eq!(
+                dock.takes_images(uploads),
+                composer.takes_images(uploads),
+                "{uploads}"
+            );
+        }
+        let clip = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(50.0)));
+        let past_clip = Bounds::new(point(px(-10.0), px(0.0)), size(px(44.0), px(44.0)));
+        assert_eq!(
+            dock.shown_in(past_clip, clip),
+            composer.shown_in(past_clip, clip)
+        );
+    }
+
+    #[test]
+    fn two_spots_drawn_keep_two_controls() {
+        let both = [PasteSpot::Composer, PasteSpot::Dock];
+        assert_eq!(spots_to_hide(&both, &both), Vec::<PasteSpot>::new());
+        assert_eq!(
+            spots_to_hide(&[PasteSpot::Composer], &both),
+            Vec::<PasteSpot>::new(),
+            "a spot drawn anew hides no other"
+        );
+    }
+
+    #[test]
+    fn a_spot_not_drawn_hides_its_control() {
+        let up = [PasteSpot::Composer, PasteSpot::Dock];
+        assert_eq!(
+            spots_to_hide(&up, &[PasteSpot::Composer]),
+            [PasteSpot::Dock]
+        );
+        assert_eq!(
+            spots_to_hide(&up, &[]),
+            up,
+            "nothing drawn hides every control"
         );
     }
 
