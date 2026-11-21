@@ -4,24 +4,33 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.18.2-alpha
+
+### Highlights
+
+- A session waiting on your answer stays under Needs you, on the phone and the desktop, when a finished background task reports in.
+- Paste on the phone's Keys dock and Chat edit bar goes through iOS's own paste button, so iOS 16 and later no longer refuse it.
+- A question card keeps a path or link that wraps past the terminal's width whole, and links a path written in backticks.
+- On the phone, Ctrl then the keyboard's Backspace sends Ctrl+Backspace and releases Ctrl, and Ctrl then a typed C interrupts even over a selection.
+
 ### Changed
 
-- The phone key bar sets Hide and Keyboard apart from the scrolling keys with a divider, and the landscape bar's session status is larger and boxed.
+- The phone key bar sets Hide and Keyboard apart behind a divider, and the landscape bar boxes a larger session status.
 
 ### Fixed
 
-- A reply that quotes a question's review step above an input box holding your draft no longer reads as waiting on you, while a real review in a named session still does.
-- A question card shows a path or link that wraps past the terminal's width whole, so it opens, and a path written in backticks links too.
+- A reply quoting a question's review step above an input box holding your draft no longer reads as waiting on you.
+- A question card keeps a path or link that wraps past the terminal's width whole, and links a path written in backticks.
 - On the phone, Ctrl then the keyboard's Backspace sends Ctrl+Backspace and releases Ctrl, and Ctrl then a typed C interrupts even over a selection.
 - On the phone, Back with the Terminal page's Quick dock open closes the dock first.
 - A session waiting on your answer stays under Needs you, on the phone and the desktop, when a finished background task reports in.
 - Settings › Dashboard's fields take no typing or paste while a newer host locks them, and Apply sends no key for that host.
 - A reload lists sessions in the order they started, so rows on the phone's Home and in the sidebar no longer jump around.
-- The phone's Settings › Hosts buttons are full-size touch targets, and lifting a key by a long press in Settings › Keys' edit mode clears an armed Delete.
+- The phone's Settings › Hosts buttons are full-size touch targets, and a long-press lift in Settings › Keys' edit mode clears an armed Delete.
 - A plan's title drops its heading's "#" marks on the chat card, the phone's plan sheet and the Needs you row.
-- The phone's Keys dock Paste key pastes through iOS's own paste button, so iOS 16 and later no longer refuse it.
-- The phone reads the clipboard once per image paste, and a photo too large to upload is scaled to exactly 2048 pixels on its longer side.
-- The phone Chat box's edit bar Paste pastes through iOS's own paste button, and no paste button sits over the bar's Cut, Copy or Select All.
+- Paste on the phone's Keys dock and Chat edit bar goes through iOS's own paste button, so iOS 16 and later no longer refuse it.
+- The phone reads the clipboard once per image paste, and scales a photo too large to upload to exactly 2048 pixels on its longer side.
+
 
 ## v0.18.1-alpha
 
