@@ -4,17 +4,26 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.18.0-alpha
+
+### Highlights
+
+- Settings › Linear saves a Linear API key on the host, turns issue links on or off, and tests the key.
+- The phone's session list sorts A–Z, needs-you first, or by the desktop's tabs, and names each session's host.
+- The phone's Chat box selects text with an edit bar, pastes images and sends pictures from Photos.
+- A chat's header shows how much of the session's context is used, on the desktop and the phone.
+
 ### Added
 
 - On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.
 - Linear issue chips show on the Dashboard's session titles and on subagent and dispatch-run rows in the Dashboard and the sidebar.
 - Settings › Linear saves a Linear API key on the host instead of an environment variable, turns Linear issue links on or off, and tests the key.
 - The phone's session list can be sorted A–Z, with sessions that need you first, or grouped by the desktop's tabs on that host.
-- The phone's Chat box selects a word on a double tap or long press, with handles to drag and a Cut, Copy, Paste and Select All bar.
+- The phone's Chat box selects a word on a double tap or long press, with drag handles and a Cut, Copy, Paste and Select All bar.
 - The phone's Chat box pastes an image from the clipboard, and its Photos button sends a picture from the photo library.
 - Paths in chat answers and question cards are links that open the file, drawn in their own colour on the desktop and the phone.
 - A chat's header shows how much of the session's context is used, on the desktop and the phone, coloured as the Dashboard colours it.
-- With more than one host, the phone's session rows and Needs you cards name their host, and each host's header stays in view while its sessions scroll.
+- With several hosts, the phone's session rows and Needs you cards name their host, and each host's header stays in view while scrolling.
 
 ### Fixed
 
