@@ -44,6 +44,7 @@
 - [ ] RT-1450 Show Claude's "Make auto mode your default permission mode?" dialog as a Chat card and as needing you
 - [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule
+- [ ] RT-2049 Read a review quoted above a box holding a draft as Idle, not awaiting input
 
 ## Updates and installer
 
@@ -185,6 +186,10 @@
 - [ ] RT-2014 Let fake-tailscale answer a host name the phone accepts
 - [ ] RT-2017 Refuse an rt-driver launch from an install older than the checkout's isolation rules
 - [ ] RT-2025 Gate rt-driver-mcp's Windows-only token constants so the macOS clippy pass runs
+- [ ] RT-2043 Fix the Settings shot drives that Shift+Tab from the tab list into the search box
+- [ ] RT-2044 Give the nine unmapped native files rows in the test map
+- [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
+- [ ] RT-2055 Let clippy lint the phone app's iOS-only code
 
 ## Elevated daemon and security
 
@@ -236,6 +241,8 @@
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
+- [/] RT-2052 Show a session's context use in its Chat view header · release vNext
+- [ ] RT-2057 Keep a wrapped path whole in a question card's text
 
 ## Settings and themes
 
@@ -579,6 +586,12 @@
 - [ ] RT-1978 Fit the Needs you tray card's options in the phone's two-pane list
 - [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up
 - [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain
+- [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
+- [ ] RT-2045 Make rearranging and changing the phone's keys feel like an iOS list editor · release vNext+1
+- [ ] RT-2051 Show each phone session's host on its row and keep the host header in view · release vNext
+- [ ] RT-2053 Keep the phone composer's handles and edit bar clear of its buttons and the keyboard
+- [ ] RT-2054 Stop the phone composer redrawing twice per keystroke with no selection shown
+- [ ] RT-2056 Read the phone pasteboard once per Paste and scale photos by pixels
 
 ## Dashboard, Gates and Linear
 
@@ -635,8 +648,6 @@
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
 - [ ] RT-1951 Read the Linear key from the env-secrets store too
-- [ ] RT-2022 Show Linear chips in the Dashboard and on subagent and dispatch-run rows · release vNext
-- [ ] RT-2024 Add a Settings › Linear page: key, on/off switch, status and Test · release vNext
 
 ## Repos, workspaces and worktrees
 
@@ -834,6 +845,14 @@
 - [ ] RT-1971 Match the Settings › Accounts keyboard order to the drawn row
 - [ ] RT-1986 Deliver a chat send made in the first second of a turn, or report its refusal
 - [ ] RT-1987 Stop reading a command's output record as a user prompt in the chat mirror
+- [ ] RT-2029 Fix the unfulfilled clippy expectation at paths.rs on macOS
+- [ ] RT-2030 Read Keychain error -25308 as an unreachable secret store on a Mac daemon
+- [ ] RT-2031 Stop naming Windows Credential Manager in secret-store messages on a Mac host
+- [ ] RT-2032 Count the issue dot in the Compact agent chip's width estimate
+- [ ] RT-2033 Draw a Compact agent chip's issue identifier in its label's colour, size and weight
+- [ ] RT-2046 Say whether a refused Linear key is saved, and offer Clear only for a saved one
+- [ ] RT-2047 Keep a host's Linear switch across a reconnect until its new status arrives
+- [ ] RT-2048 Lock the Dashboard key field so it takes no focus or paste off this machine
 
 ## Design files
 
@@ -856,6 +875,7 @@
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
+- [phone-text-controls.md](phone-text-controls.md) — RT-2039
 - [push-relay.md](push-relay.md) — RT-1519
 - [remote-access.md](remote-access.md) — Remote hosts and connections
 - [remote-file-manager.md](remote-file-manager.md) — RT-1360, RT-1363, RT-1364, RT-1365, RT-1366, RT-1367
