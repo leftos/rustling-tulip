@@ -330,13 +330,17 @@ fn bash_output_row(record: &Value, text: &str, known: Known<'_>) -> Option<ChatE
 
 /// A user's typed text as its entry: an interrupt notice is the system row
 /// "Interrupted", a slash command its command line as typed (`/clear`
-/// none), other command noise and blank text are nothing.
+/// none), a local command's output a system row, other command noise and
+/// blank text are nothing.
 fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
     if is_interrupt_text(text) {
         return Some(system_row(uuid, "Interrupted".to_owned()));
     }
     if let Some(line) = records::command_line(text) {
         return command_bubble(uuid, line);
+    }
+    if text.trim_start().starts_with("<local-command-stdout>") {
+        return local_output_row(uuid, text);
     }
     if is_command_noise(text) {
         return None;
@@ -355,6 +359,18 @@ fn user_message(uuid: &str, text: &str) -> Option<ChatEntry> {
         text,
         pending: false,
     })
+}
+
+/// A local slash command's output (`/model`'s "Set model to …", `/clear`'s
+/// "cleared") as a system row: the `<local-command-stdout>` element's text
+/// without its SGR escapes, trimmed; none when that is empty, the CLI's
+/// "(no content)" placeholder, or `/compact`'s "Compacted …" output, which
+/// the "Conversation compacted" row already marks.
+fn local_output_row(uuid: &str, text: &str) -> Option<ChatEntry> {
+    let output = strip_sgr(tag_text(text, "local-command-stdout")?);
+    let output = output.trim();
+    let silent = output.is_empty() || output == "(no content)" || output.starts_with("Compacted");
+    (!silent).then(|| system_row(uuid, output.to_owned()))
 }
 
 /// A slash command's command line as the user's bubble; none for `/clear`,
@@ -2517,7 +2533,81 @@ mod tests {
     #[test]
     fn non_message_records_are_dropped() {
         for line in fixture("noise").lines() {
+            if line.contains("<local-command-stdout>cleared") {
+                assert_eq!(
+                    chat_entries(line, &|_| None),
+                    [system("9a", "cleared")],
+                    "a local command's output is a row"
+                );
+                continue;
+            }
             assert_eq!(chat_entries(line, &|_| None), [], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_local_command_stdout_becomes_a_system_row() {
+        let said = "Set model to Haiku 5.5 for this session only with high effort";
+        let record = json!({"type": "user", "uuid": "u", "message": {"role": "user",
+            "content": format!("<local-command-stdout>\u{1b}[1m{said}\u{1b}[22m\n</local-command-stdout>")}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [ChatEntry::System {
+                id: "u".to_owned(),
+                text: said.to_owned()
+            }]
+        );
+        let ticked = json!({"type": "user", "uuid": "v", "message": {"role": "user",
+            "content": "<local-command-stdout>Set model to `Sonnet 5.5`</local-command-stdout>"}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&ticked, &|_| None),
+            [ChatEntry::System {
+                id: "v".to_owned(),
+                text: "Set model to `Sonnet 5.5`".to_owned()
+            }],
+            "backticks kept"
+        );
+    }
+
+    #[test]
+    fn placeholder_and_compact_stdout_are_dropped() {
+        let row = |content: &str| {
+            let record = json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": content}})
+                .to_string();
+            chat_entries(&record, &|_| None)
+        };
+        for content in [
+            "<local-command-stdout>(no content)</local-command-stdout>",
+            "<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m\n\
+             PreCompact [node hooks/fake-precompact.mjs] completed successfully</local-command-stdout>",
+            "<local-command-stdout>Compacted</local-command-stdout>",
+        ] {
+            assert_eq!(row(content), [], "{content}");
+        }
+        for kept in ["Kept model as Sonnet 5.5", "cleared"] {
+            let content = format!("<local-command-stdout>{kept}</local-command-stdout>");
+            assert_eq!(
+                row(&content),
+                [ChatEntry::System {
+                    id: "u".to_owned(),
+                    text: kept.to_owned()
+                }],
+                "{kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_local_command_stdout_is_dropped() {
+        for content in [
+            "<local-command-stdout></local-command-stdout>",
+            "<local-command-stdout> \n </local-command-stdout>",
+        ] {
+            let record = json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": content}})
+                .to_string();
+            assert_eq!(chat_entries(&record, &|_| None), [], "{content}");
         }
     }
 

@@ -508,11 +508,13 @@ pub(crate) fn login_status(login: Option<&Login>) -> Option<String> {
                 "The login failed",
                 LOGIN_FAILED,
                 message.as_deref(),
+                true,
             )),
             AccountLoginState::Cancelled => Some(login_ended(
                 "The login was cancelled",
                 LOGIN_CANCELLED,
                 message.as_deref(),
+                false,
             )),
             AccountLoginState::Started | AccountLoginState::Unknown => None,
         },
@@ -522,15 +524,23 @@ pub(crate) fn login_status(login: Option<&Login>) -> Option<String> {
 /// The page's line for a login that ended: no message reads as `plain`, and
 /// otherwise `message`'s first line is the daemon's reason and the lines
 /// after it are the login's own screen, which reads first so the reason
-/// comes last.
-fn login_ended(outcome: &str, plain: &str, message: Option<&str>) -> String {
+/// comes last. A `failed` login drops the screen lines that say the login
+/// succeeded, so the CLI's success line never reads above the failure.
+fn login_ended(outcome: &str, plain: &str, message: Option<&str>, failed: bool) -> String {
     let Some(message) = message else {
         return plain.to_owned();
     };
-    match message.split_once('\n') {
-        Some((reason, screen)) if !screen.is_empty() => format!("{screen}\n{outcome}: {reason}"),
-        _ => format!("{outcome}: {message}"),
+    let Some((reason, screen)) = message.split_once('\n') else {
+        return format!("{outcome}: {message}");
+    };
+    let screen: Vec<&str> = screen
+        .lines()
+        .filter(|line| !(failed && line.to_lowercase().contains("login successful")))
+        .collect();
+    if screen.is_empty() {
+        return format!("{outcome}: {reason}");
     }
+    format!("{}\n{outcome}: {reason}", screen.join("\n"))
 }
 
 /// How a usage bar and its percentage are coloured.
@@ -1397,7 +1407,10 @@ where
     {
         parts.push(format!("back {}", clock(back, now, tz)));
     }
-    parts.push(format!("{} accounts", verdict.accounts));
+    parts.push(match verdict.accounts {
+        1 => "1 account".to_owned(),
+        n => format!("{n} accounts"),
+    });
     Some(parts.join(" · "))
 }
 
@@ -1873,6 +1886,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_login_drops_the_cli_success_line() {
+        let ended = |state, message: &str| Login::Ended {
+            state,
+            message: Some(message.to_owned()),
+        };
+        let failed = ended(
+            AccountLoginState::Failed,
+            "reason\nOpening the browser to sign in…\nLogin successful.",
+        );
+        assert_eq!(
+            login_status(Some(&failed)).as_deref(),
+            Some("Opening the browser to sign in…\nThe login failed: reason")
+        );
+        let lower = ended(AccountLoginState::Failed, "reason\nlogin successful");
+        assert_eq!(
+            login_status(Some(&lower)).as_deref(),
+            Some("The login failed: reason"),
+            "no screen line left reads as a one-line failure"
+        );
+        let cancelled = ended(AccountLoginState::Cancelled, "stopped\nLogin successful.");
+        assert_eq!(
+            login_status(Some(&cancelled)).as_deref(),
+            Some("Login successful.\nThe login was cancelled: stopped"),
+            "only a failure drops the line"
+        );
+    }
+
+    #[test]
     fn a_one_line_failed_login_reads_as_before() {
         let login = Login::Ended {
             state: AccountLoginState::Failed,
@@ -2021,6 +2062,33 @@ mod tests {
         assert_eq!(
             forecast(Some(&dry), now(), &Utc).as_deref(),
             Some("Runs dry at 18:00 · back 20:00 · 3 accounts")
+        );
+    }
+
+    #[test]
+    fn forecast_says_one_account() {
+        let lasting = |accounts| AutoSwitchState {
+            fleet_verdict: Some(FleetVerdict {
+                window: FleetWindow::FiveHour,
+                members: accounts,
+                accounts,
+                remaining: 10.0,
+                rate: 1.0,
+                rate_window: FleetWindow::FiveHour,
+                runs_dry: false,
+                blocked_at: None,
+                resumes_at: None,
+                first_reset: None,
+            }),
+            ..auto(None)
+        };
+        assert_eq!(
+            forecast(Some(&lasting(1)), now(), &Utc).as_deref(),
+            Some("Rotation lasts the next 7 days · 1 account")
+        );
+        assert_eq!(
+            forecast(Some(&lasting(0)), now(), &Utc).as_deref(),
+            Some("Rotation lasts the next 7 days · 0 accounts")
         );
     }
 

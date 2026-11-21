@@ -3413,12 +3413,22 @@ impl RootView {
     }
 
     /// Arms session `session_id`'s draft Clear, dropping any other
-    /// session's.
-    fn arm_draft_clear(&mut self, session_id: &str) {
+    /// session's, as pressing its Clear does.
+    pub fn arm_draft_clear(&mut self, session_id: &str) {
         self.disarm_draft_clear();
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.clear_armed = true;
         }
+    }
+
+    /// Whether session `session_id`'s draft Clear is armed, its Confirm
+    /// clear and Cancel showing.
+    #[must_use]
+    pub fn draft_clear_armed(&self, session_id: &str) -> bool {
+        self.chat
+            .sessions
+            .get(session_id)
+            .is_some_and(|chat| chat.clear_armed)
     }
 
     /// Drops an armed draft Clear whose composer line no longer offers
@@ -4521,11 +4531,22 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
-        let note =
-            muted_line(offset, line.text(), &t).driver_id(|| "chat-composer-note".to_owned());
         if !line.has_draft_actions() {
-            return note.into_any_element();
+            return muted_line(offset, line.text(), &t)
+                .driver_id(|| "chat-composer-note".to_owned())
+                .into_any_element();
         }
+        // One line beside the buttons, cut with `…` when the row is narrow.
+        let note = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .text_size(ui_px_at(offset, SMALL_TEXT_SIZE))
+            .text_color(gpui::rgb(t.muted))
+            .child(crate::ellipsis::truncating(
+                "chat-composer-note",
+                gpui::StyledText::new(line.text()),
+            ))
+            .driver_id(|| "chat-composer-note".to_owned());
         let shift = crate::fonts::ui_weight_shift(cx);
         let (pull_id, send_id) = (session_id.to_owned(), session_id.to_owned());
         let pull = outlined_button(
@@ -4563,7 +4584,7 @@ impl RootView {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(note.flex_1().min_w(px(0.0)))
+            .child(note)
             .child(pull)
             .child(send)
             .children(clear)

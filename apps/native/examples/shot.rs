@@ -394,6 +394,7 @@ enum View {
     Chat,
     ChatCompact,
     ChatModelPicker,
+    ChatDraftClear,
     Summary,
     Themes,
     ThemesEdit,
@@ -447,7 +448,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 73] = [
+    const ALL: [Self; 74] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -471,6 +472,7 @@ impl View {
         Self::Chat,
         Self::ChatCompact,
         Self::ChatModelPicker,
+        Self::ChatDraftClear,
         Self::Summary,
         Self::Themes,
         Self::ThemesEdit,
@@ -629,6 +631,7 @@ impl View {
             Self::Chat => "chat",
             Self::ChatCompact => "chat-compact",
             Self::ChatModelPicker => "chat-model-picker",
+            Self::ChatDraftClear => "chat-draft-clear",
             Self::Summary => "summary",
             Self::Themes => "themes",
             Self::ThemesEdit => "themes-edit",
@@ -711,7 +714,9 @@ impl View {
             | Self::Summary
             | Self::SettingsClaude
             | Self::SettingsLinear
-            | Self::SettingsAccounts => 2,
+            | Self::SettingsAccounts
+            // The chat opens over the terminal's draft, then its Clear arms.
+            | Self::ChatDraftClear => 2,
             _ => 1,
         }
     }
@@ -723,7 +728,9 @@ impl View {
             Self::Toast => TOAST_WINDOW_SIZE,
             Self::DashboardCompact => DASHBOARD_COMPACT_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
-            Self::Chat | Self::ChatCompact | Self::ChatModelPicker => CHAT_WINDOW_SIZE,
+            Self::Chat | Self::ChatCompact | Self::ChatModelPicker | Self::ChatDraftClear => {
+                CHAT_WINDOW_SIZE
+            }
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             Self::PhoneHome
             | Self::PhoneHomeSorted
@@ -921,6 +928,11 @@ impl View {
                         .chat_card("s-petal")
                         .is_some_and(|(prompt, _)| prompt == MODEL_PICKER_PROMPT)
             }
+            // The chat over a terminal draft, its Clear armed: the note
+            // beside Pull, Send, Confirm clear and Cancel.
+            Self::ChatDraftClear => {
+                root.pane_shows_chat("p1") && root.draft_clear_armed("s-petal")
+            }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
                     && root.summary_line_open("s-petal", SUMMARY_OPEN_LINE)
@@ -1056,6 +1068,7 @@ impl Shot {
             | View::Chat
             | View::ChatCompact
             | View::ChatModelPicker
+            | View::ChatDraftClear
             | View::Summary
             | View::Themes
             | View::ThemesEdit
@@ -2559,6 +2572,41 @@ async fn capture(
     Ok(())
 }
 
+/// The features the fake local daemon lists for `view`.
+fn local_features(view: View) -> Vec<String> {
+    let mut features = vec![
+        protocol::FEATURE_AGENT_COMMANDS.to_owned(),
+        protocol::FEATURE_FILE_TAIL.to_owned(),
+        protocol::FEATURE_DEFAULT_SHELL.to_owned(),
+        protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
+        protocol::FEATURE_ACCOUNTS.to_owned(),
+        protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned(),
+    ];
+    // Only the gates shot lists the gate feature, so the other views keep
+    // no Gates item or footer pill.
+    if view == View::Gates {
+        features.push(protocol::FEATURE_GATE_STATE.to_owned());
+    }
+    // Only the dispatch and subagents shots list runs, so the other views
+    // list none and no run leaf appears under their repos.
+    if matches!(view, View::Dispatch | View::Subagents) {
+        features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
+    }
+    if view == View::SettingsLinear {
+        features.push(protocol::FEATURE_LINEAR_SETTINGS.to_owned());
+    }
+    // Only the perf shot's This PC reports CPU and RAM.
+    if view == View::Perf {
+        features.push(protocol::FEATURE_PERF_MONITOR.to_owned());
+    }
+    // Only the draft shot's host can pull, send and clear a draft.
+    if view == View::ChatDraftClear {
+        features.push(protocol::FEATURE_CHAT_DRAFT.to_owned());
+        features.push(protocol::FEATURE_CHAT_CLEAR_DRAFT.to_owned());
+    }
+    features
+}
+
 /// Switches pane `p1` to its chat, which opens in Compact and follows its
 /// bottom.
 fn open_chat(window: &mut Window, cx: &mut App) -> Result<()> {
@@ -2695,6 +2743,18 @@ fn drive(
         View::SettingsLinear => drive_settings_linear(step, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
         View::ChatCompact | View::ChatModelPicker => open_chat(window, cx),
+        View::ChatDraftClear if step == 0 => open_chat(window, cx),
+        View::ChatDraftClear => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| {
+                root.arm_draft_clear("s-petal");
+                cx.notify();
+            });
+            Ok(())
+        }
         View::Chat => {
             let root = window
                 .root::<RootView>()
@@ -4183,31 +4243,7 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        let mut features = vec![
-            protocol::FEATURE_AGENT_COMMANDS.to_owned(),
-            protocol::FEATURE_FILE_TAIL.to_owned(),
-            protocol::FEATURE_DEFAULT_SHELL.to_owned(),
-            protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
-            protocol::FEATURE_ACCOUNTS.to_owned(),
-            protocol::FEATURE_ACCOUNT_SPEND_CREDITS.to_owned(),
-        ];
-        // Only the gates shot lists the gate feature, so the other views keep
-        // no Gates item or footer pill.
-        if self.view == View::Gates {
-            features.push(protocol::FEATURE_GATE_STATE.to_owned());
-        }
-        // Only the dispatch and subagents shots list runs, so the other views
-        // list none and no run leaf appears under their repos.
-        if matches!(self.view, View::Dispatch | View::Subagents) {
-            features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
-        }
-        if self.view == View::SettingsLinear {
-            features.push(protocol::FEATURE_LINEAR_SETTINGS.to_owned());
-        }
-        // Only the perf shot's This PC reports CPU and RAM.
-        if self.view == View::Perf {
-            features.push(protocol::FEATURE_PERF_MONITOR.to_owned());
-        }
+        let features = local_features(self.view);
         conn.on_welcome(version, features.clone(), None);
         conn.set_build_version(Some(env!("CARGO_PKG_VERSION").to_owned()));
         self.event(NetEvent::State(conn))?;
@@ -4395,6 +4431,10 @@ impl FakeDaemon {
             View::Summary => permission_screen(),
             View::Chat => question_screen(),
             View::ChatModelPicker => model_picker_screen(),
+            View::ChatDraftClear => ChatScreen {
+                composer: ComposerState::Draft,
+                prompt: None,
+            },
             _ => ChatScreen {
                 composer: ComposerState::Working,
                 prompt: None,

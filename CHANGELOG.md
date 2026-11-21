@@ -8,6 +8,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Sessions started at nearly the same moment keep their list order after a reload or restart, and a session still starting never shows a row that vanishes.
 - A question still on screen never reads Idle after a minute, and it returns to Needs you when something other than your answer ends its wait.
+- Settings › Accounts says "1 account" for a single account.
+- A failed account login no longer shows the CLI's "Login successful." line above its failure.
+- With a terminal draft's buttons showing, the composer's note stays on one line.
+- A slash command's result, such as /model's "Set model to …", shows in the chat instead of a bare command bubble.
 
 ## v0.18.2-alpha
 
