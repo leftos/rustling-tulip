@@ -48,7 +48,7 @@ foreach ($name in $names) {
 
 # Names only on the gate's command line; the gate reads each value from this process's environment.
 $gateArguments = @('run', '--cd', $root.Replace('\', '/'), '--log', '.tmp/pack-macos.log', '--timeout', '3600', '--slot', 'heavy',
-  '--builder', $macBuilder)
+  '--builder', $macBuilder, '--lock', 'mac-signing')
 foreach ($name in $names) { $gateArguments += '--env', $name }
 $gateArguments += '--', 'pwsh', '-NoProfile', '-File', 'tools/installer/pack-macos.ps1', '-Sign'
 

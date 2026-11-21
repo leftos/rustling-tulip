@@ -147,7 +147,7 @@ From the repo root on this PC:
 pwsh -NoProfile -File tools/installer/pack-macos-signed.ps1
 ```
 
-It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/installer/pack-macos.ps1 -Sign`, logging to `.tmp/pack-macos.log`; the gate brings the three assets back into `target/installer`. The variables cross to the Mac as bare `--env NAME` gate flags, so no value is in a log or in a file in the repo, and none is on a command line except the `.p12` password, which `pack-macos.ps1` passes to `security import -P` on the Mac.
+It reads the signing set into its own process environment, then starts one pinned heavy gate run on `builder@mac-mini` of `pwsh -NoProfile -File tools/installer/pack-macos.ps1 -Sign`, logging to `.tmp/pack-macos.log`. The run holds the builder's `mac-signing` lock (`--lock mac-signing`), which yaat's macOS signing takes too, so two signing runs never overlap on the Mac; the gate brings the three assets back into `target/installer`. The variables cross to the Mac as bare `--env NAME` gate flags, so no value is in a log or in a file in the repo, and none is on a command line except the `.p12` password, which `pack-macos.ps1` passes to `security import -P` on the Mac.
 
 `pack-macos.ps1 -Sign` needs these variables, yaat's names (its `release-macos.yml` secrets), and fails naming the first one missing:
 
