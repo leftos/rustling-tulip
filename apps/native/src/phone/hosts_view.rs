@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use super::PhoneRoot;
+use super::home_view::TOUCH_TARGET;
 use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
@@ -627,6 +628,7 @@ impl PhoneRoot {
         } else {
             div().child(
                 phone_button("phone-host-add-another", ButtonKind::Outlined, cx)
+                    .min_h(px(TOUCH_TARGET))
                     .child(ADD_TITLE)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.show_add_form(window, cx);
@@ -678,6 +680,7 @@ impl PhoneRoot {
                 ButtonKind::Primary,
                 cx,
             )
+            .min_h(px(TOUCH_TARGET))
             .child(PAIR_LABEL)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.pair(&key, window, cx);
@@ -718,12 +721,14 @@ impl PhoneRoot {
         let trusted = key.clone();
         let cancelled = key.clone();
         let trust = phone_button(&trust_id, ButtonKind::Primary, cx)
+            .min_h(px(TOUCH_TARGET))
             .child(TRUST_LABEL)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.root
                     .update(cx, |root, cx| root.trust_host_key(&trusted, window, cx));
             }));
         let cancel = phone_button(&cancel_id, ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
             .child(CANCEL_LABEL)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.root
@@ -767,6 +772,7 @@ impl PhoneRoot {
             ButtonKind::Outlined,
             cx,
         )
+        .min_h(px(TOUCH_TARGET))
         .child(RETRY_LABEL)
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.retry(&key, cx);
@@ -880,6 +886,7 @@ impl PhoneRoot {
         let block = match key {
             Ok(line) => {
                 let copy = phone_button("phone-host-copy-key", ButtonKind::Outlined, cx)
+                    .min_h(px(TOUCH_TARGET))
                     .child(COPY_LABEL)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_phone_key(cx)));
                 block
@@ -907,6 +914,7 @@ impl PhoneRoot {
     fn add_row(cx: &mut Context<Self>) -> Div {
         div().flex().justify_end().child(
             phone_button("phone-host-add", ButtonKind::Primary, cx)
+                .min_h(px(TOUCH_TARGET))
                 .child(ADD_LABEL)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.add_typed_host(window, cx);

@@ -285,6 +285,9 @@ impl PhoneRoot {
         let Some((from, _)) = hit.slot(at) else {
             return;
         };
+        if hit.id == ListId::KeyList {
+            self.disarm_keys();
+        }
         self.reorder_drag = Some(ReorderDrag {
             list: hit.id,
             from,

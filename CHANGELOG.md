@@ -17,6 +17,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A session waiting on your answer stays under Needs you, on the phone and the desktop, when a finished background task reports in.
 - Settings › Dashboard's fields take no typing or paste while a newer host locks them, and Apply sends no key for that host.
 - A reload lists sessions in the order they started, so rows on the phone's Home and in the sidebar no longer jump around.
+- The phone's Settings › Hosts buttons are full-size touch targets, and lifting a key by a long press in Settings › Keys' edit mode clears an armed Delete.
 
 ## v0.18.1-alpha
 

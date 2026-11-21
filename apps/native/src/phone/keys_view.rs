@@ -264,11 +264,17 @@ impl PhoneRoot {
         }
     }
 
+    /// No Keys row stays armed: a lift of any row, by its handle or by a
+    /// long press on the list, puts the armed row back to its minus.
+    pub(super) fn disarm_keys(&mut self) {
+        self.keys_edit = self.keys_edit.disarmed();
+    }
+
     /// A touch on the drag handle of the row at `index` of `list`: the row
     /// lifts at once, and on the Keys list no row stays armed.
     fn lift_by_handle(&mut self, list: ListId, index: usize, cx: &mut Context<Self>) {
         if list == ListId::KeyList {
-            self.keys_edit = self.keys_edit.disarmed();
+            self.disarm_keys();
         }
         self.reorder_lift(list, index, cx);
     }

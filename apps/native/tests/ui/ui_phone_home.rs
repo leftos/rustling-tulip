@@ -176,6 +176,21 @@ fn home_draws_every_row_at_least_44_high(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn add_a_host_is_a_44_point_target(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-hosts");
+
+    assert!(
+        drawn(&mut h, "phone-host-add-another"),
+        "Settings' Hosts page draws it"
+    );
+    let height = h.bounds("phone-host-add-another").size.height;
+    assert!(height >= touch_target(), "Add a host is {height:?} high");
+}
+
+#[gpui::test]
 fn rows_do_not_move_when_a_session_starts_needing_you(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = open_phone(cx, &dir);
@@ -258,6 +273,43 @@ fn back_returns_to_home(cx: &mut TestAppContext) {
             ] if session_id == "a"
         ),
         "Back sends its chat's unload and ends the Dashboard watch: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn back_from_a_session_keeps_homes_scroll_offset(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    scroll_list(&mut h, px(200.0));
+    let list = h.bounds("phone-home");
+    let id = filler_ids()
+        .into_iter()
+        .find(|id| {
+            let bounds = h.bounds(&row(&saved_remote(), id));
+            bounds.size.width > px(0.0)
+                && bounds.top() >= list.top()
+                && bounds.bottom() <= list.bottom()
+        })
+        .expect("a filler row sits inside the list after the pan");
+    let opened = row(&saved_remote(), &id);
+    let scrolled = h.bounds(&opened);
+    assert_eq!(
+        pinned(&mut h),
+        Some(wire(&saved_remote())),
+        "the pan scrolled the list past the first host's header"
+    );
+
+    h.click_on(&opened);
+    assert!(drawn(&mut h, "phone-session"), "a tap shows the session");
+
+    h.click_on("phone-session-back");
+
+    assert!(drawn(&mut h, "phone-home"), "Home shows again");
+    assert_eq!(h.bounds(&opened), scrolled, "the row keeps its place");
+    assert_eq!(
+        pinned(&mut h),
+        Some(wire(&saved_remote())),
+        "and the first host's header is still pinned"
     );
 }
 

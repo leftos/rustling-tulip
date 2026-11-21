@@ -247,6 +247,36 @@ fn the_header_shows_back_label_and_status(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_title_keeps_back_on_one_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    let single = h.bounds("phone-session-back");
+    assert!(
+        single.size.height >= touch_target(),
+        "Back is a 44 pt target"
+    );
+
+    // A title far wider than the header: the label gives way, Back does not.
+    let title = "Release plan check across every saved host, ".repeat(3);
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label(&title)
+        .in_repo("r1")
+        .status("working")
+        .build();
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+
+    assert_eq!(shown(&mut h).as_deref(), Some("a"), "the page stays");
+    assert_eq!(
+        h.bounds("phone-session-back"),
+        single,
+        "Back keeps its one line beside the long title"
+    );
+}
+
+#[gpui::test]
 fn the_terminal_toggle_shows_for_a_live_session_with_a_mirrored_chat(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir, "a");

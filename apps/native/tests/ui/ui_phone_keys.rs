@@ -1586,6 +1586,40 @@ fn a_handle_drag_reorders_without_a_long_press(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_press_lift_disarms_the_armed_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_saved(cx, &dir, &three_keys());
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+    h.click_on("phone-keys-row-0-minus");
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-delete"),
+        "the minus arms the row"
+    );
+
+    let at = h.center("phone-keys-row-1");
+    lift(&mut h, "phone-keys-row-1");
+
+    assert!(drawn(&mut h, "phone-drag-lifted"), "the held row lifts");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "a lift on the list disarms the armed row"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-minus"),
+        "and its minus comes back"
+    );
+
+    h.touch(TouchPhase::Ended, at);
+
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "a release with no move keeps it disarmed"
+    );
+    assert_eq!(saved_ids(&dir).len(), 3, "nothing was removed");
+}
+
+#[gpui::test]
 fn done_and_leaving_the_page_turn_edit_mode_off(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone_saved(cx, &dir, &three_keys());
