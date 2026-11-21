@@ -1933,96 +1933,158 @@ async fn capture_phone_home(
     failure: &Mutex<Option<anyhow::Error>>,
 ) -> Result<()> {
     cx.background_executor().timer(LOAD_WAIT).await;
+    check_phone_home(shot.view, handle, cx)?;
+    check_phone_home_view(shot.view, handle, cx).await?;
+    let layout = handle.update(cx, |phone, _, _| phone.layout())?;
+    check_phone_layout(shot.view, layout)?;
+    open_phone_screen(shot.view, handle, cx).await?;
+    open_phone_file_page(shot, handle, cx).await?;
+    check_phone_session_sheet(shot.view, handle, cx)?;
+    check_daemon(failure)?;
+    capture(shot.out.clone(), address, failure).await
+}
+
+/// Checks the `view`'s Home lists the rows its fixture docks — the shot's
+/// four sessions, plus "lab"'s when the view pages its hosts — and that its
+/// tray shows the first of its two cards.
+fn check_phone_home(view: View, handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
     let rows = handle.update(cx, |phone, _, cx| phone.home_row_count(cx))?;
-    let want = if shot.view == View::PhoneHomeHosts {
+    let want = if view == View::PhoneHomeHosts {
         PHONE_HOME_ROWS + LAB_SESSIONS.len()
     } else {
         PHONE_HOME_ROWS
     };
     if rows != want {
-        bail!(
-            "the {} view lists {rows} rows, not {want}",
-            shot.view.name()
-        );
+        bail!("the {} view lists {rows} rows, not {want}", view.name());
     }
     let header = handle.update(cx, |phone, _, cx| phone.tray_header(cx))?;
     if header.as_deref() != Some("Needs you · 1 of 2") {
         bail!("the phone-home view's tray reads {header:?}, not the first of two cards");
     }
-    if shot.view == View::PhoneHomeHosts {
+    Ok(())
+}
+
+/// Runs the preconditions the `view`'s Home adds to the tray's: the paged
+/// hosts' pin, the sorted groups, the sheet, and the session it opens.
+async fn check_phone_home_view(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if view == View::PhoneHomeHosts {
         pin_lab_header(handle, cx).await?;
     }
-    if shot.view == View::PhoneHomeSorted {
-        let groups = handle.update(cx, |phone, _, cx| phone.home_group_names(cx))?;
-        if groups != PHONE_SORTED_GROUPS {
-            bail!(
-                "the phone-home-sorted view's groups are {groups:?}, not {PHONE_SORTED_GROUPS:?}"
-            );
-        }
+    if view == View::PhoneHomeSorted {
+        check_phone_home_sorted(handle, cx)?;
     }
-    if shot.view == View::PhoneSheet {
-        let opened = handle.update(cx, |phone, _, cx| {
-            phone.open_sheet_on(PHONE_SHEET_SESSION, cx)
-        })?;
-        if !opened {
-            bail!("the phone-sheet view's Home does not list {PHONE_SHEET_SESSION}");
-        }
+    if view == View::PhoneSheet {
+        open_phone_sheet(handle, cx).await?;
+    }
+    if view.opens_session() {
+        open_phone_session(view, handle, cx).await?;
+    }
+    Ok(())
+}
+
+/// Checks the `phone-home-sorted` view's Home groups its rows as the shot's
+/// fixture sorts them.
+fn check_phone_home_sorted(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let groups = handle.update(cx, |phone, _, cx| phone.home_group_names(cx))?;
+    if groups != PHONE_SORTED_GROUPS {
+        bail!("the phone-home-sorted view's groups are {groups:?}, not {PHONE_SORTED_GROUPS:?}");
+    }
+    Ok(())
+}
+
+/// Opens the `phone-sheet` view's sheet on [`PHONE_SHEET_SESSION`], and
+/// checks the sheet shows that session.
+async fn open_phone_sheet(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let opened = handle.update(cx, |phone, _, cx| {
+        phone.open_sheet_on(PHONE_SHEET_SESSION, cx)
+    })?;
+    if !opened {
+        bail!("the phone-sheet view's Home does not list {PHONE_SHEET_SESSION}");
+    }
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    let open = handle.update(cx, |phone, _, _| phone.sheet_session().map(str::to_owned))?;
+    if open.as_deref() != Some(PHONE_SHEET_SESSION) {
+        bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
+    }
+    Ok(())
+}
+
+/// Opens the fixture's working session the `view` shows over Home, checks
+/// its Chat page draws the fixture's rows, and drives the composer the
+/// view's own shot edits.
+async fn open_phone_session(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let opened = handle.update(cx, |phone, _, cx| {
+        phone.open_session_on(PHONE_SHEET_SESSION, cx)
+    })?;
+    if !opened {
+        bail!("the phone-session view's Home does not list {PHONE_SHEET_SESSION}");
+    }
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
+    if toggle != Some("Terminal") {
+        bail!("the phone-session view's toggle reads {toggle:?}, not Terminal");
+    }
+    let rows = handle.update(cx, |phone, _, cx| {
+        phone
+            .root()
+            .read(cx)
+            .phone_chat_display_rows(PHONE_SHEET_SESSION)
+            .len()
+    })?;
+    if rows != PHONE_SESSION_ROWS {
+        bail!("the phone-session view's chat draws {rows} rows, not {PHONE_SESSION_ROWS}");
+    }
+    // The sheet's view opens no dock: the sheet covers the composer.
+    if view == View::PhoneSession {
+        handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
         cx.background_executor().timer(DRIVE_WAIT).await;
-        let open = handle.update(cx, |phone, _, _| phone.sheet_session().map(str::to_owned))?;
-        if open.as_deref() != Some(PHONE_SHEET_SESSION) {
-            bail!("the phone-sheet view's sheet is {open:?}, not {PHONE_SHEET_SESSION}'s");
-        }
     }
-    if shot.view.opens_session() {
-        let opened = handle.update(cx, |phone, _, cx| {
-            phone.open_session_on(PHONE_SHEET_SESSION, cx)
-        })?;
-        if !opened {
-            bail!("the phone-session view's Home does not list {PHONE_SHEET_SESSION}");
-        }
-        cx.background_executor().timer(DRIVE_WAIT).await;
-        let toggle = handle.update(cx, |phone, _, cx| phone.session_toggle(cx))?;
-        if toggle != Some("Terminal") {
-            bail!("the phone-session view's toggle reads {toggle:?}, not Terminal");
-        }
-        let rows = handle.update(cx, |phone, _, cx| {
-            phone
-                .root()
-                .read(cx)
-                .phone_chat_display_rows(PHONE_SHEET_SESSION)
-                .len()
-        })?;
-        if rows != PHONE_SESSION_ROWS {
-            bail!("the phone-session view's chat draws {rows} rows, not {PHONE_SESSION_ROWS}");
-        }
-        // The sheet's view opens no dock: the sheet covers the composer.
-        if shot.view == View::PhoneSession {
-            handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
-            cx.background_executor().timer(DRIVE_WAIT).await;
-        }
-        if shot.view == View::PhoneComposerEdit {
-            edit_phone_composer(handle, cx).await?;
-        }
+    if view == View::PhoneComposerEdit {
+        edit_phone_composer(handle, cx).await?;
     }
-    let layout = handle.update(cx, |phone, _, _| phone.layout())?;
-    check_phone_layout(shot.view, layout)?;
-    open_phone_screen(shot.view, handle, cx).await?;
+    Ok(())
+}
+
+/// Opens the page past Home a phone view shows a file on: the viewer's
+/// page, the browser's folder.
+async fn open_phone_file_page(
+    shot: &Shot,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
     if matches!(shot.view, View::PhoneViewer | View::PhoneViewerMd) {
         open_phone_viewer(shot, handle, cx).await?;
     }
     if shot.view == View::PhoneBrowser {
         open_phone_browser(handle, cx).await?;
     }
-    if shot.view == View::PhoneSessionSheet {
-        let card = handle.update(cx, |phone, _, cx| {
-            phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
-        })?;
-        if card.as_ref().map(|(id, _)| id.as_str()) != Some(PHONE_SHEET_PROMPT) {
-            bail!("the phone-session-sheet view's card is {card:?}, not {PHONE_SHEET_PROMPT}");
-        }
+    Ok(())
+}
+
+/// Checks the `phone-session-sheet` view's sheet shows its prompt's card.
+fn check_phone_session_sheet(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if view != View::PhoneSessionSheet {
+        return Ok(());
     }
-    check_daemon(failure)?;
-    capture(shot.out.clone(), address, failure).await
+    let card = handle.update(cx, |phone, _, cx| {
+        phone.root().read(cx).chat_card(PHONE_SHEET_SESSION)
+    })?;
+    if card.as_ref().map(|(id, _)| id.as_str()) != Some(PHONE_SHEET_PROMPT) {
+        bail!("the phone-session-sheet view's card is {card:?}, not {PHONE_SHEET_PROMPT}");
+    }
+    Ok(())
 }
 
 /// Scrolls the `phone-home-hosts` shot's Home to its end, which takes
