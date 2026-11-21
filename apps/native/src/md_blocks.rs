@@ -412,6 +412,217 @@ pub(crate) enum SoftBreaks {
     Line,
 }
 
+/// The extensions [`parse`] reads a source as Markdown with.
+fn parse_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+}
+
+/// `source` with every backslash in a Windows path's plain text doubled, so
+/// `CommonMark`'s escape rule keeps it: an agent answer writes `X:\dev\.tmp`
+/// meaning that backslash, where the parser reads `\.` as an escaped dot.
+///
+/// Code spans, code blocks, links, images and HTML are copied as written,
+/// since there a `\.` is the author's escape; only a chat answer's text, which
+/// is prose a model wrote rather than a Markdown file, goes through this. A
+/// leading byte-order mark is dropped, as [`parse`] drops it, so both read the
+/// same source.
+#[must_use]
+pub(crate) fn keep_path_backslashes(source: &str) -> String {
+    let source = source.strip_prefix('\u{FEFF}').unwrap_or(source);
+    let mut out = String::with_capacity(source.len());
+    let mut at = 0;
+    for skipped in skipped_ranges(source) {
+        if at < skipped.start {
+            out.push_str(&escape_windows_paths(&source[at..skipped.start]));
+        }
+        out.push_str(&source[skipped.start..skipped.end]);
+        at = skipped.end;
+    }
+    if at < source.len() {
+        out.push_str(&escape_windows_paths(&source[at..]));
+    }
+    out
+}
+
+/// `text` with every backslash of each Windows path token doubled, and
+/// everything else as written. A token starts at a drive (`X:\`) or a UNC
+/// (`\\server`) root that begins a word, and runs to the next white space.
+fn escape_windows_paths(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut at = 0;
+    let mut prev: Option<char> = None;
+    while let Some(ch) = text[at..].chars().next() {
+        if path_starts_at(prev, &text[at..]) {
+            let end = token_end(text, at);
+            out.push_str(&text[copied..at]);
+            out.push_str(&escape_path_token(&text[at..end]));
+            copied = end;
+            prev = text[at..end].chars().next_back();
+            at = end;
+        } else {
+            prev = Some(ch);
+            at += ch.len_utf8();
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// `token`, a Windows path, with its backslashes escaped for `CommonMark`: one
+/// before an ASCII punctuation character becomes `\\\`, a literal backslash
+/// followed by that character's own escape, so the punctuation stays literal
+/// and does not open Markdown; every other one is doubled.
+fn escape_path_token(token: &str) -> String {
+    let mut out = String::with_capacity(token.len() * 2);
+    let mut chars = token.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let escapes_markdown = chars
+            .peek()
+            .is_some_and(|next| next.is_ascii_punctuation() && *next != '\\');
+        if ch == '\\' && escapes_markdown {
+            out.push_str("\\\\\\");
+            continue;
+        }
+        if ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Whether a Windows path token starts at the beginning of `rest`, whose
+/// previous character is `prev`: a drive path (`X:\`) or a UNC path (`\\server`),
+/// each at the start of a word.
+fn path_starts_at(prev: Option<char>, rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => {
+            chars.next() == Some('\\') && prev.is_none_or(|before| !before.is_alphanumeric())
+        }
+        (Some('\\'), Some('\\')) => {
+            let server = chars
+                .next()
+                .is_some_and(|after| !after.is_whitespace() && after != '\\');
+            server && prev.is_none_or(|before| !before.is_alphanumeric() && before != '\\')
+        }
+        _ => false,
+    }
+}
+
+/// The end of the token that starts at byte `start` of `text`: the next white
+/// space, or the text's end.
+fn token_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |offset| start + offset)
+}
+
+/// The byte ranges of `source` [`keep_path_backslashes`] copies as written:
+/// inline code, code blocks, links with their destination, images and HTML.
+fn skipped_ranges(source: &str) -> Vec<Range<usize>> {
+    let mut skips = Skips::default();
+    let mut events = Parser::new_ext(source, parse_options()).into_offset_iter();
+    for (event, range) in events.by_ref() {
+        match event {
+            Event::Start(tag) => skips.start(&tag, range),
+            Event::End(tag) => skips.end(tag, range),
+            Event::Code(_) | Event::Html(_) | Event::InlineHtml(_) => skips.ranges.push(range),
+            _ => {}
+        }
+    }
+    let definitions = events
+        .reference_definitions()
+        .iter()
+        .map(|(_, definition)| definition.span.clone());
+    skips.ranges.extend(definitions);
+    merge_ranges(skips.ranges)
+}
+
+/// The ranges [`skipped_ranges`] collects, and the construct each open one
+/// began, waiting for its end.
+#[derive(Default)]
+struct Skips {
+    ranges: Vec<Range<usize>>,
+    block: Option<Range<usize>>,
+    link: Nest,
+    image: Nest,
+}
+
+impl Skips {
+    /// Begins an open construct when `tag` starts one to copy as written.
+    fn start(&mut self, tag: &Tag<'_>, range: Range<usize>) {
+        match tag {
+            Tag::CodeBlock(_) | Tag::HtmlBlock => self.block = Some(range),
+            Tag::Link { .. } => self.link.enter(range),
+            Tag::Image { .. } => self.image.enter(range),
+            _ => {}
+        }
+    }
+
+    /// Closes the open construct `tag` ends, recording its whole range when it
+    /// is the outermost one still open.
+    fn end(&mut self, tag: TagEnd, range: Range<usize>) {
+        let whole = match tag {
+            TagEnd::CodeBlock | TagEnd::HtmlBlock => self
+                .block
+                .take()
+                .map(|open| open.start.min(range.start)..open.end.max(range.end)),
+            TagEnd::Link => self.link.leave(range),
+            TagEnd::Image => self.image.leave(range),
+            _ => None,
+        };
+        if let Some(whole) = whole {
+            self.ranges.push(whole);
+        }
+    }
+}
+
+/// A construct that may nest, such as an image inside an image: how many are
+/// open, and where the outermost one began.
+#[derive(Default)]
+struct Nest {
+    depth: usize,
+    open: Option<Range<usize>>,
+}
+
+impl Nest {
+    /// Enters the construct at `range`, recording the range only at the
+    /// outermost depth.
+    fn enter(&mut self, range: Range<usize>) {
+        self.depth += 1;
+        if self.depth == 1 {
+            self.open = Some(range);
+        }
+    }
+
+    /// Leaves the construct at `range`, giving the whole construct's range
+    /// once the outermost one closes.
+    fn leave(&mut self, range: Range<usize>) -> Option<Range<usize>> {
+        self.depth = self.depth.saturating_sub(1);
+        if self.depth > 0 {
+            return None;
+        }
+        let open = self.open.take()?;
+        Some(open.start.min(range.start)..open.end.max(range.end))
+    }
+}
+
+/// `ranges` in order, each one that touches or overlaps the one before it
+/// joined into it.
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut out: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => out.push(range),
+        }
+    }
+    out
+}
+
 /// Parses `text`, a Markdown file's contents, into its blocks.
 ///
 /// `file_dir` is the folder the file was read from: a relative link's path is
@@ -420,10 +631,8 @@ pub(crate) enum SoftBreaks {
 #[must_use]
 pub(crate) fn parse(text: &str, file_dir: &Path, soft_breaks: SoftBreaks) -> Document {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut builder = Builder::new(file_dir, soft_breaks);
-    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, parse_options()).into_offset_iter() {
         builder.event(event, range);
     }
     builder.finish()
@@ -1788,7 +1997,8 @@ mod tests {
     /// parsed with line breaks, its stretches lifted and its paths linked.
     fn answer_doc(text: &str) -> Document {
         let composed = stretchtext::compose(text, &std::collections::BTreeSet::new(), false);
-        let mut doc = parse(&composed.source, Path::new(""), SoftBreaks::Line);
+        let source = keep_path_backslashes(&composed.source);
+        let mut doc = parse(&source, Path::new(""), SoftBreaks::Line);
         lift_stretchtext(&mut doc, &composed.keys);
         link_paths(&mut doc);
         doc
@@ -1873,6 +2083,147 @@ mod tests {
                 "{path} links"
             );
         }
+    }
+
+    #[test]
+    fn a_windows_path_in_prose_keeps_its_backslashes_and_links() {
+        let path = r"X:\dev\.tmp\a.rs";
+        let doc = answer_doc(&format!("see {path} now"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), format!("see {path} now"));
+        assert_eq!(linked(spans), [(path.to_owned(), false, file(path))]);
+    }
+
+    #[test]
+    fn a_windows_path_with_an_underscore_folder_keeps_its_backslash() {
+        let path = r"C:\Users\x\_notes";
+        let doc = answer_doc(path);
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), path);
+        assert_eq!(linked(spans), [(path.to_owned(), false, file(path))]);
+    }
+
+    #[test]
+    fn a_unc_windows_path_keeps_its_backslashes_and_is_not_linked() {
+        let path = r"\\server\share\.git\x";
+        let doc = answer_doc(path);
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), path);
+        assert_eq!(linked(spans), []);
+    }
+
+    #[test]
+    fn a_windows_path_in_a_code_span_is_drawn_as_written() {
+        let path = r"X:\dev\.tmp\a.rs";
+        let doc = answer_doc(&format!("Open `{path}` to see"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), format!("Open {path} to see"));
+        assert_eq!(linked(spans), [(path.to_owned(), true, file(path))]);
+    }
+
+    #[test]
+    fn a_windows_path_in_a_fenced_block_is_drawn_as_written() {
+        let doc = answer_doc("```\nX:\\dev\\.tmp\\a.rs\n```\n");
+        assert_eq!(
+            code_at(&doc.blocks, 0),
+            (None, r"X:\dev\.tmp\a.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_markdown_escape_outside_a_windows_path_still_escapes() {
+        let doc = answer_doc(r"a \* star and \_ under");
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), "a * star and _ under");
+        assert_eq!(linked(spans), []);
+    }
+
+    #[test]
+    fn a_trailing_dot_after_a_windows_path_is_outside_its_link() {
+        let path = r"X:\dev\.tmp\a.rs";
+        let doc = answer_doc(&format!("open {path}."));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), format!("open {path}."));
+        assert_eq!(linked(spans), [(path.to_owned(), false, file(path))]);
+    }
+
+    #[test]
+    fn a_windows_path_in_link_text_keeps_commonmarks_reading() {
+        let doc = answer_doc(r"[X:\dev\.tmp\a.rs](https://example.com)");
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), r"X:\dev.tmp\a.rs");
+        let target = LinkTarget::Url("https://example.com".to_owned());
+        assert!(
+            spans.iter().all(|span| span.link == Some(target.clone())),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn a_bold_windows_path_keeps_its_backslashes_and_links() {
+        let path = r"X:\dev\.tmp\a.rs";
+        let doc = answer_doc(&format!("**{path}**"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), path);
+        assert!(spans.iter().all(|span| span.strong), "{spans:?}");
+        assert_eq!(linked(spans), [(path.to_owned(), false, file(path))]);
+    }
+
+    #[test]
+    fn a_windows_path_with_forward_slashes_is_drawn_as_written() {
+        let path = "X:/dev/.tmp/a.rs";
+        let doc = answer_doc(&format!("see {path}"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), format!("see {path}"));
+        assert_eq!(linked(spans), [(path.to_owned(), false, file(path))]);
+    }
+
+    #[test]
+    fn a_windows_path_with_a_star_keeps_its_star_literal() {
+        let first = r"X:\dev\.tmp\*.log";
+        let second = r"X:\dev\.tmp\*.json";
+        let doc = answer_doc(&format!("Deleted {first} and {second}"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), format!("Deleted {first} and {second}"));
+        assert!(
+            spans.iter().all(|span| !span.emphasis && !span.strong),
+            "{spans:?}"
+        );
+        assert_eq!(
+            linked(spans),
+            [
+                (first.to_owned(), false, file(first)),
+                (second.to_owned(), false, file(second)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_windows_path_in_a_fenced_block_after_a_bom_is_drawn_as_written() {
+        let doc = answer_doc("\u{FEFF}```\nX:\\dev\\.tmp\\a.rs\n```\n");
+        assert_eq!(
+            code_at(&doc.blocks, 0),
+            (None, r"X:\dev\.tmp\a.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_windows_path_in_a_nested_image_destination_is_left_as_written() {
+        let source = r"![a ![b](x.png)](X:\dev\.tmp\c.png)";
+        assert_eq!(keep_path_backslashes(source), source);
+    }
+
+    #[test]
+    fn a_windows_path_in_a_reference_definition_is_left_as_written() {
+        let source = "See [the log][1].\n\n[1]: X:\\dev\\.tmp\\run.log";
+        assert_eq!(keep_path_backslashes(source), source);
+    }
+
+    #[test]
+    fn a_lone_double_backslash_is_not_a_windows_path_start() {
+        let doc = answer_doc(r"Windows uses \\ as the separator");
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), r"Windows uses \ as the separator");
     }
 
     #[test]

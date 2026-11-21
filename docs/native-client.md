@@ -1001,6 +1001,8 @@ A pane showing an interactive agent session that offers a chat has three views: 
 
   Desktop Chat answers draw a single line break as a line break (`md_blocks::SoftBreaks::Line`); the file viewer and the release notes keep it as a space, and image alt text always does.
 
+  A desktop Chat answer's Windows paths keep their backslashes: a drive path outside a code span or fence draws as written (`X:\dev\.tmp\a.rs` keeps both) and links, and a UNC path draws with its backslashes but stays unlinked (`md_blocks::keep_path_backslashes`, run by `prepare_answer`). Markdown escapes outside a path, a link's text and target, and code spans and fences are unchanged; every Markdown file in the viewer and the release notes keeps CommonMark's `\.` escape.
+
   User bubbles sit on the right (a pending one dimmed until its transcript record arrives).
 
   Answers are Markdown, composed by `stretchtext.rs` (stretchtext drawn as its short form, a faded-underline link that opens its long form in place, one level at a time, with a muted `‹` that closes it and its nested ones; open state per session and answer, in memory, carried from a live answer to its transcript answer).

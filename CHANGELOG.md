@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A Windows path in a chat answer, such as one through a `.tmp` folder, keeps every backslash where it is drawn and where its link opens.
+
 ## v0.18.0-alpha
 
 ### Highlights

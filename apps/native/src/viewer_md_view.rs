@@ -441,10 +441,12 @@ pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc
 /// A chat answer as [`crate::stretchtext::compose`] wrote it, parsed into rows
 /// with its stretches lifted into stretchtext links and the paths in its
 /// prose and inline code made file links, its code coloured as [`prepare`]
-/// colours it.
+/// colours it. A Windows path keeps its backslashes, since an answer's `\.`
+/// means the backslash and not `CommonMark`'s escape; a Markdown file, which
+/// [`prepare`] reads, keeps `CommonMark`'s reading.
 pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc {
-    let mut document =
-        md_blocks::parse(&composed.source, Path::new(""), md_blocks::SoftBreaks::Line);
+    let source = md_blocks::keep_path_backslashes(&composed.source);
+    let mut document = md_blocks::parse(&source, Path::new(""), md_blocks::SoftBreaks::Line);
     md_blocks::lift_stretchtext(&mut document, &composed.keys);
     md_blocks::link_paths(&mut document);
     flatten(document, cancel)
@@ -1714,5 +1716,26 @@ mod tests {
             "1 2 3",
             "a file viewer keeps the space"
         );
+    }
+
+    #[test]
+    fn a_chat_answer_keeps_the_backslash_before_a_dot_in_a_windows_path() {
+        let answer = prepare_answer(
+            &Composed {
+                source: r"Open X:\dev\.tmp\repo\src\main.rs now".to_owned(),
+                keys: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            answer.drawn_text(),
+            r"Open X:\dev\.tmp\repo\src\main.rs now"
+        );
+    }
+
+    #[test]
+    fn a_markdown_file_keeps_commonmark_escapes_in_a_windows_path() {
+        let viewer = prepare(r"X:\dev\.tmp", Path::new(""), &AtomicBool::new(false));
+        assert_eq!(viewer.drawn_text(), r"X:\dev.tmp");
     }
 }
