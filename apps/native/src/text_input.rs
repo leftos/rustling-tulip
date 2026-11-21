@@ -274,10 +274,6 @@ const TOUCH_TARGET: f32 = 44.0;
 const HANDLE_STEM: f32 = 2.0;
 /// A selection handle's knob diameter, in px, as the phone chat's.
 const HANDLE_KNOB: f32 = 10.0;
-/// How far the end handle's touch area reaches under the input's box, in
-/// px: the phone composer's Paste row starts 15 under it (the field's 6 of
-/// padding, its 1 of border and the composer's 8 of gap).
-const HANDLE_REACH_BELOW: f32 = 14.0;
 /// The edit bar's padding around its buttons, and the gap between them, in px.
 const BAR_PAD: f32 = 4.0;
 /// The edit bar's corner radius, in px.
@@ -1724,7 +1720,12 @@ impl TextInput {
             inner + px(2.0 * BAR_PAD + 2.0),
             px(TOUCH_TARGET + 2.0 * BAR_PAD + 2.0),
         );
-        let origin = bar_origin(spots.selection_box(), bar, window.viewport_size());
+        let origin = bar_origin(
+            spots.selection_box(),
+            bar,
+            window.viewport_size(),
+            window.insets().ime.bottom,
+        );
         if let Some(touch) = self.touch.as_mut() {
             touch.bar = Some(Bounds::new(origin, bar));
         }
@@ -1827,25 +1828,31 @@ fn handle_knob(side: HandleSide, spots: TouchSpots) -> Point<Pixels> {
 }
 
 /// The `side` handle's touch area: a touch-target square centred on its
-/// knob, except that the end's stops [`HANDLE_REACH_BELOW`] under the
-/// input's box, clear of what sits below the field (the phone composer's
-/// Paste row), though never so short that the knob leaves it (as when the
-/// end's row runs below the box).
+/// knob, kept inside the input's own box so a touch on what sits outside
+/// it (the phone composer's Paste row) reaches that, though never so
+/// short that the knob leaves it (as when the row runs past the box).
 fn handle_hit(side: HandleSide, spots: TouchSpots) -> Bounds<Pixels> {
+    let unit = px(1.0);
     let knob = handle_knob(side, spots);
-    let half = px(TOUCH_TARGET / 2.0);
-    let origin = point(knob.x - half, knob.y - half);
-    let mut height = px(TOUCH_TARGET);
-    let reach = spots.field.bottom() + px(HANDLE_REACH_BELOW) - origin.y;
-    let to_knob_bottom = half + px(HANDLE_KNOB / 2.0);
-    if side == HandleSide::End && reach < height {
-        height = if reach < to_knob_bottom {
-            to_knob_bottom
-        } else {
-            reach
-        };
+    let (half, knob_half) = (TOUCH_TARGET / 2.0, HANDLE_KNOB / 2.0);
+    let field = spots.field;
+    let left = (knob.x / unit - half).max(field.left() / unit);
+    let right = (knob.x / unit + half).min(field.right() / unit);
+    let mut top = (knob.y / unit - half).max(field.top() / unit);
+    let mut bottom = (knob.y / unit + half).min(field.bottom() / unit);
+    match side {
+        HandleSide::Start => top = top.min(knob.y / unit - knob_half),
+        HandleSide::End => bottom = bottom.max(knob.y / unit + knob_half),
     }
-    Bounds::new(origin, size(px(TOUCH_TARGET), height))
+    let area = size(px((right - left).max(0.0)), px((bottom - top).max(0.0)));
+    Bounds::new(point(px(left), px(top)), area)
+}
+
+/// Whether a touch redraw is wanted: a focused field draws something that
+/// follows its text (a selection's handles or an open edit bar) after the
+/// frame, so only then is another frame asked for.
+fn wants_touch_redraw(focused: bool, selection_empty: bool, bar_open: bool) -> bool {
+    focused && (!selection_empty || bar_open)
 }
 
 /// The `side` handle of the selection at `spots`, as the phone chat's
@@ -2842,10 +2849,11 @@ impl Element for TextElement {
         let moved = self.input.update(cx, |input, _| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
-            input
-                .touch
-                .as_ref()
-                .is_some_and(|touch| touch.drawn != input.touch_spots())
+            let Some(touch) = input.touch.as_ref() else {
+                return false;
+            };
+            wants_touch_redraw(focused, input.selected_range.is_empty(), touch.bar_open)
+                && touch.drawn != input.touch_spots()
         });
         if moved {
             // The handles and the bar drew from the frame before: draw again
@@ -2872,7 +2880,7 @@ mod tests {
         CompletionEvent, HandleSide, PlatformReport, TextChanged, TextInput, TextInputEvent, Token,
         TouchSpots, bind_keys, caret_scroll_x, clipboard_image_entry, handle_hit,
         marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary,
-        single_line,
+        single_line, wants_touch_redraw,
     };
 
     /// `input` with touch editing on and its edit bar open.
@@ -2977,25 +2985,69 @@ mod tests {
             field,
         };
         let end = handle_hit(HandleSide::End, on_last);
-        // The knob sits 5 below the row's bottom (225), the square 22 above it.
+        // The knob sits 5 below the row's bottom (225), its bottom 10 under it.
         assert_eq!(end.origin, point(px(79.0), px(203.0)));
         assert_eq!(end.size.width, px(44.0));
         assert_eq!(
             end.bottom(),
-            px(234.0),
-            "14 under the last row, short of Paste at 15"
+            px(230.0),
+            "the knob's own bottom, short of Paste at 15"
         );
         let start = handle_hit(HandleSide::Start, on_last);
-        assert_eq!(start.origin, point(px(29.0), px(153.0)));
-        assert_eq!(start.size, size(px(44.0), px(44.0)));
-        // An end on the upper row keeps its whole square inside the reach.
+        // The box's top leaves the square from the knob's top (170) down.
+        assert_eq!(start.origin, point(px(29.0), px(170.0)));
+        assert_eq!(start.size, size(px(44.0), px(27.0)));
+        // An end on the upper row keeps its square inside the box.
         let on_upper = TouchSpots {
             end: point(px(100.0), px(180.0)),
             ..on_last
         };
         let upper = handle_hit(HandleSide::End, on_upper);
         assert_eq!(upper.origin, point(px(79.0), px(183.0)));
-        assert_eq!(upper.size, size(px(44.0), px(44.0)));
+        assert_eq!(upper.size, size(px(44.0), px(37.0)));
+    }
+
+    #[test]
+    fn no_redraw_request_without_handles_or_bar() {
+        // Only a focused field whose selection or open edit bar follows its
+        // text asks for the redraw after a change; a plain caret asks none.
+        assert!(!wants_touch_redraw(true, true, false), "a caret alone");
+        assert!(wants_touch_redraw(true, false, false), "a selection");
+        assert!(wants_touch_redraw(true, true, true), "an open bar");
+        assert!(wants_touch_redraw(true, false, true), "both");
+        assert!(
+            !wants_touch_redraw(false, false, true),
+            "a bar without the keyboard"
+        );
+        assert!(
+            !wants_touch_redraw(false, true, false),
+            "nothing drawn at all"
+        );
+    }
+
+    #[test]
+    fn a_handle_hit_area_stays_inside_the_field() {
+        use gpui::{Bounds, size};
+
+        // A field whose last row's bottom sits 10 above its box's bottom.
+        let field = Bounds::new(point(px(0.0), px(180.0)), size(px(300.0), px(60.0)));
+        let spots = TouchSpots {
+            start: point(px(50.0), px(180.0)),
+            end: point(px(100.0), px(210.0)),
+            line_height: px(20.0),
+            field,
+        };
+        let hit = handle_hit(HandleSide::End, spots);
+        assert!(
+            !hit.contains(&point(px(100.0), px(252.0))),
+            "12 under the field's box is no handle: {hit:?}"
+        );
+        let knob = spots.end.y + spots.line_height + px(super::HANDLE_KNOB / 2.0);
+        assert!(
+            hit.contains(&point(px(100.0), knob)),
+            "the knob is: {hit:?}"
+        );
+        assert!(hit.bottom() <= field.bottom(), "inside the box: {hit:?}");
     }
 
     #[test]

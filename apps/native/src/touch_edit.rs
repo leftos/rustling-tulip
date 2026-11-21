@@ -144,26 +144,36 @@ pub(crate) struct SelectionBox {
 }
 
 /// The top-left of an edit bar of size `bar` in a window of size `window`
-/// serving `selection`: [`BAR_GAP`] above its top row when the bar fits
-/// there inside the window, else [`BAR_GAP`] below its bottom row, its top
-/// never past where the bar still fits above the window's bottom (nor
-/// above the window's top); centred on its x and kept inside the window's
+/// whose keyboard covers its bottom `keyboard` px, serving `selection`:
+/// [`BAR_GAP`] above its top row when the bar fits there clear of the
+/// keyboard, else [`BAR_GAP`] below its bottom row, its top never past
+/// where the bar still fits above the keyboard (nor above the window's
+/// top); with no room below the selection above the keyboard the bar goes
+/// above the selection; centred on its x and kept inside the window's
 /// width.
 pub(crate) fn bar_origin(
     selection: SelectionBox,
     bar: Size<Pixels>,
     window: Size<Pixels>,
+    keyboard: Pixels,
 ) -> Point<Pixels> {
     let unit = px(1.0);
     let (width, height) = (bar.width / unit, bar.height / unit);
     let right = (window.width / unit - width).max(0.0);
     let x = (selection.x / unit - width / 2.0).clamp(0.0, right);
+    // The lowest top the bar takes while clear of the keyboard.
+    let lowest = (window.height / unit - keyboard / unit - height).max(0.0);
     let above = selection.top / unit - BAR_GAP - height;
-    let y = if above >= 0.0 {
+    let below = selection.bottom / unit + BAR_GAP;
+    let y = if above >= 0.0 && above <= lowest {
+        above
+    } else if below <= lowest {
+        below
+    } else if above >= 0.0 {
+        // The keyboard leaves no room below the selection: go above it.
         above
     } else {
-        let lowest = (window.height / unit - height).max(0.0);
-        (selection.bottom / unit + BAR_GAP).min(lowest)
+        lowest
     };
     point(px(x), px(y))
 }
@@ -359,6 +369,7 @@ mod tests {
             sel(300.0, 320.0, 200.0),
             size(px(100.0), px(50.0)),
             size(px(400.0), px(800.0)),
+            px(0.0),
         );
         assert_eq!(origin, point(px(150.0), px(300.0 - BAR_GAP - 50.0)));
     }
@@ -369,28 +380,52 @@ mod tests {
             sel(30.0, 50.0, 200.0),
             size(px(100.0), px(50.0)),
             size(px(400.0), px(800.0)),
+            px(0.0),
         );
         assert_eq!(origin, point(px(150.0), px(50.0 + BAR_GAP)));
         let low = bar_origin(
             sel(30.0, 790.0, 200.0),
             size(px(100.0), px(50.0)),
             size(px(400.0), px(800.0)),
+            px(0.0),
         );
         assert_eq!(low.y, px(750.0), "kept above the window's bottom");
+    }
+
+    #[test]
+    fn the_edit_bar_stays_above_the_keyboard() {
+        let window = size(px(400.0), px(800.0));
+        let bar = size(px(100.0), px(50.0));
+        // A selection low in the window whose bar has no room above it, and
+        // no room below it above a keyboard covering the window's bottom 300.
+        let origin = bar_origin(sel(20.0, 760.0, 200.0), bar, window, px(300.0));
+        assert!(
+            origin.y + bar.height <= px(500.0),
+            "clear of the keyboard: {origin:?}"
+        );
+        // Room below the selection above the keyboard: there.
+        let below = bar_origin(sel(20.0, 40.0, 200.0), bar, window, px(300.0));
+        assert_eq!(below.y, px(40.0 + BAR_GAP));
+        // No keyboard: the window's bottom bounds the bar, as ever.
+        let low = bar_origin(sel(30.0, 790.0, 200.0), bar, window, px(0.0));
+        assert_eq!(low.y, px(750.0));
     }
 
     #[test]
     fn the_bar_is_clamped_inside_the_window_width() {
         let window = size(px(400.0), px(800.0));
         let bar = size(px(200.0), px(50.0));
-        assert_eq!(bar_origin(sel(300.0, 320.0, 10.0), bar, window).x, px(0.0));
         assert_eq!(
-            bar_origin(sel(300.0, 320.0, 390.0), bar, window).x,
+            bar_origin(sel(300.0, 320.0, 10.0), bar, window, px(0.0)).x,
+            px(0.0)
+        );
+        assert_eq!(
+            bar_origin(sel(300.0, 320.0, 390.0), bar, window, px(0.0)).x,
             px(200.0)
         );
         let wide = size(px(500.0), px(50.0));
         assert_eq!(
-            bar_origin(sel(300.0, 320.0, 200.0), wide, window).x,
+            bar_origin(sel(300.0, 320.0, 200.0), wide, window, px(0.0)).x,
             px(0.0),
             "a bar wider than the window starts at its left"
         );
