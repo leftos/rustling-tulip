@@ -102,6 +102,7 @@ mod layout_chooser_view;
 mod layout_picker;
 mod linear_card;
 mod linear_card_view;
+mod linear_settings;
 mod link_menu;
 mod link_menu_view;
 mod links;
@@ -1635,6 +1636,10 @@ pub struct RootView {
     /// Each host's Dashboard summarizer status, its Test and its refused
     /// cap, as the Settings Dashboard tab reads them.
     summarizer_settings: summarizer_settings::SummarizerSettingsState,
+    /// Each host's Linear status, its Test and its refused key, as the
+    /// Settings Linear tab reads them; its switch also turns the host's
+    /// issue links off.
+    linear_settings: linear_settings::LinearSettingsState,
     /// The Settings Dashboard tab's key, variable and cap fields, kept per
     /// host once its tab was shown, while Settings is open.
     dashboard_settings_tabs: HashMap<HostKey, settings_view::DashboardSettingsTab>,
@@ -2158,6 +2163,7 @@ impl RootView {
             cwd_workspace_scans: HashMap::new(),
             worktrees_tabs: HashMap::new(),
             summarizer_settings: summarizer_settings::SummarizerSettingsState::default(),
+            linear_settings: linear_settings::LinearSettingsState::default(),
             dashboard_settings_tabs: HashMap::new(),
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
@@ -5573,7 +5579,8 @@ impl RootView {
                 key_configured,
             } => {
                 let context =
-                    links::IssueContext::new(team_keys, workspace.as_deref(), *key_configured);
+                    links::IssueContext::new(team_keys, workspace.as_deref(), *key_configured)
+                        .with_enabled(self.linear_enabled(host));
                 self.linear_contexts.insert(host.clone(), context.clone());
                 self.linear_issues.set_key_configured(host, *key_configured);
                 for view in self.pane_views_on(host) {
@@ -5586,6 +5593,60 @@ impl RootView {
                 self.refresh_linear_card(host, cx);
             }
             _ => {}
+        }
+    }
+
+    /// Folds what `msg` from `host` says about its Linear settings; when it
+    /// turns the host's Linear on or off, its panes read their links
+    /// again, and off closes its open card.
+    fn on_linear_settings_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let was = self.linear_enabled(host);
+        if !self.linear_settings.fold(host, msg) {
+            return;
+        }
+        if self.linear_enabled(host) != was {
+            self.follow_linear_switch(host, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether `host` has Linear on: its daemon's last `LinearStatus` says,
+    /// and a daemon that sent none (one without `linear_settings`) is on.
+    pub(crate) fn linear_enabled(&self, host: &HostKey) -> bool {
+        self.linear_settings.enabled(host).unwrap_or(true)
+    }
+
+    /// `host`'s Linear went on or off: its context and its panes' follow,
+    /// and off closes the card a pane of `host` shows.
+    fn follow_linear_switch(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let enabled = self.linear_enabled(host);
+        tracing::info!(
+            ?host,
+            enabled,
+            "linear: the host's issue links follow its switch"
+        );
+        if let Some(context) = self.linear_contexts.remove(host) {
+            self.linear_contexts
+                .insert(host.clone(), context.with_enabled(enabled));
+        }
+        let context = self.issue_context_of(host);
+        for view in self.pane_views_on(host) {
+            view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
+        }
+        if enabled {
+            return;
+        }
+        let Some(anchor) = self.linear_card.take_if(|anchor| anchor.host == *host) else {
+            return;
+        };
+        if let Some(slot) = self.panes.get(&anchor.pane_id) {
+            let view = slot.view().clone();
+            view.update(cx, term_view::TerminalPane::drop_linear_card);
         }
     }
 
@@ -5608,7 +5669,7 @@ impl RootView {
                     web_url,
                 },
                 Some(host),
-            ) => {
+            ) if self.linear_enabled(&host) => {
                 let anchor = linear_card::CardAnchor {
                     host,
                     pane_id: slot_id.to_owned(),
@@ -5686,9 +5747,14 @@ impl RootView {
     }
 
     /// The Linear context `host`'s panes read issue links against: its last
-    /// one, or none, which links only issue URLs.
+    /// one, or none, which links only issue URLs; with Linear off on
+    /// `host`, none at all.
     pub(crate) fn issue_context_of(&self, host: &HostKey) -> links::IssueContext {
-        self.linear_contexts.get(host).cloned().unwrap_or_default()
+        self.linear_contexts
+            .get(host)
+            .cloned()
+            .unwrap_or_default()
+            .with_enabled(self.linear_enabled(host))
     }
 
     /// What this render's session title chips read: each host's Linear
@@ -5783,6 +5849,7 @@ impl RootView {
         // counts as not focused.
         self.notify_on(host, &msg, finished, window.is_window_active(), cx);
         self.on_summarizer_message(host, &msg, cx);
+        self.on_linear_settings_message(host, &msg, cx);
         self.on_accounts_message(host, &msg, cx);
         self.on_gates_message(host, &msg, cx);
         self.on_perf_message(host, &msg, cx);
@@ -6077,6 +6144,7 @@ impl RootView {
                 self.on_agent_setting_refused(host, id, &message, cx);
                 self.on_default_shell_refused(host, id, &message, cx)
                     || self.on_summarizer_refused(host, id, &message, cx)
+                    || self.on_linear_refused(host, id, code, &message, cx)
                     || self.on_accounts_refused(host, id, &message, cx)
                     || self.on_gates_refused(host, id, &message, cx)
                     || self.on_agent_command_error(host, id, code, &message, cx)

@@ -166,6 +166,11 @@ pub(crate) fn drawn(entries: Vec<Entry>, tabs: &[DrawnTab]) -> Vec<Entry> {
 /// guards cannot see them, that are no settings row of their own, with why:
 /// the UI spec that walks every tab's ring applies them beside [`EXEMPT`].
 pub(crate) const RING_EXEMPT: &[(&str, &str)] = &[
+    ("settings-linear-key-save", "a button of the Linear Key row"),
+    (
+        "settings-linear-key-clear",
+        "a button of the Linear Key row",
+    ),
     (
         "settings-needs-you-sound-play",
         "the Needs you sound row's Play button",
@@ -341,6 +346,7 @@ fn fixed_entries() -> Vec<Entry> {
     let mut entries = general_entries();
     entries.extend(notifications_entries());
     entries.extend(dashboard_entries());
+    entries.extend(linear_entries());
     entries.extend(worktrees_entries());
     entries.extend(remote_access_entries());
     entries.extend(accounts_entries());
@@ -657,6 +663,39 @@ fn dashboard_entries() -> Vec<Entry> {
         entry(
             SettingsTab::Dashboard,
             "settings-dashboard-test",
+            "Test",
+            "Test",
+            Gate::Always,
+        ),
+    ]
+}
+
+/// The Linear tab's rows: the switch, the API key and Test.
+fn linear_entries() -> Vec<Entry> {
+    vec![
+        Entry {
+            aliases: &["issue links", "chips"],
+            ..entry(
+                SettingsTab::Linear,
+                "settings-linear-enabled",
+                "Show Linear issue links",
+                "Linear issue links",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["API key", "token", "LINEAR_API_KEY"],
+            ..entry(
+                SettingsTab::Linear,
+                "settings-linear-key",
+                "Key",
+                "API key",
+                Gate::Always,
+            )
+        },
+        entry(
+            SettingsTab::Linear,
+            "settings-linear-test",
             "Test",
             "Test",
             Gate::Always,

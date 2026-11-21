@@ -14,7 +14,8 @@ use crate::links::{IssueContext, LinkKind, tip_text, title_issue};
 use crate::target::HostKey;
 
 /// The no-key notice.
-pub(crate) const NO_KEY: &str = "Set LINEAR_API_KEY to see this issue's details.";
+pub(crate) const NO_KEY: &str =
+    "Add a Linear API key in Settings › Linear to see this issue's details.";
 /// The loading notice.
 pub(crate) const LOADING: &str = "Fetching from Linear";
 /// What the card's button says, and what it does.
@@ -145,9 +146,13 @@ pub(crate) struct TitleChips<'a> {
 
 impl TitleChips<'_> {
     /// The chip of `host`'s session titled `title`; `None` when the title
-    /// names no identifier of the host's teams, as on a host with no context.
+    /// names no identifier of the host's teams, as on a host with no context
+    /// or with Linear off.
     pub(crate) fn chip(&self, host: &HostKey, title: &str) -> Option<TitleChip> {
-        let context = self.contexts.get(host)?;
+        let context = self
+            .contexts
+            .get(host)
+            .filter(|context| context.is_enabled())?;
         let (identifier, rest) = title_issue(title, context)?;
         let web_url = context.bare_address(&identifier)?;
         let card = self.issues.card(host, &identifier, &web_url, self.now);
@@ -440,7 +445,7 @@ mod tests {
             card.lines(),
             [
                 "RT-12",
-                "Set LINEAR_API_KEY to see this issue's details.",
+                "Add a Linear API key in Settings › Linear to see this issue's details.",
                 "Open in Linear",
                 "Ctrl+click to open"
             ]

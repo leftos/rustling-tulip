@@ -23,7 +23,9 @@
 //! dialog over those hosts, its Target dropdown closed), `settings-hosts`
 //! (Settings on the Claude page over those hosts, the host selector showing
 //! This PC), `settings-dashboard` (Settings on the Dashboard tab with a keyed
-//! provider chosen, its key stored, some spend and a Test result), `menu`
+//! provider chosen, its key stored, some spend and a Test result), `settings-linear`
+//! (Settings on the Linear tab: on, a saved key, the workspace and its teams
+//! and a passing Test), `menu`
 //! (the sessions panel's ⋯
 //! menu open over the repo rows, with a toast over the panes), `chat` (the
 //! Petal pane switched to its chat, a row of each kind, an answer with one
@@ -267,6 +269,12 @@ const DRIVE_WAIT: Duration = Duration::from_millis(1000);
 const CLAUDE_TAB_DOWNS: usize = 8;
 /// How many Downs on the Settings tab list reach the Dashboard tab.
 const DASHBOARD_TAB_DOWNS: usize = 2;
+/// How many Downs on the Settings tab list reach the Linear tab, right after
+/// Dashboard.
+const LINEAR_TAB_DOWNS: usize = 3;
+/// How many Tabs from the tab list reach the Linear tab's Test: past the
+/// switch, the key field and Clear, which a saved key offers.
+const LINEAR_TEST_TABS: usize = 4;
 /// The port and pid the fake handshake reports.
 const FAKE_PORT: u16 = 4242;
 const FAKE_PID: u32 = 1;
@@ -381,6 +389,7 @@ enum View {
     SpawnHosts,
     SettingsHosts,
     SettingsDashboard,
+    SettingsLinear,
     SettingsAccounts,
     SettingsAccountsRows,
     Toast,
@@ -423,7 +432,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 69] = [
+    const ALL: [Self; 70] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -454,6 +463,7 @@ impl View {
         Self::SpawnHosts,
         Self::SettingsHosts,
         Self::SettingsDashboard,
+        Self::SettingsLinear,
         Self::SettingsAccounts,
         Self::SettingsAccountsRows,
         Self::SettingsSounds,
@@ -602,6 +612,7 @@ impl View {
             Self::SpawnHosts => "spawn-hosts",
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
+            Self::SettingsLinear => "settings-linear",
             Self::SettingsAccounts => "settings-accounts",
             Self::SettingsAccountsRows => "settings-accounts-rows",
             Self::SettingsSounds => "settings-sounds",
@@ -672,6 +683,7 @@ impl View {
             | Self::UpdateNotes
             | Self::Summary
             | Self::SettingsClaude
+            | Self::SettingsLinear
             | Self::SettingsAccounts => 2,
             _ => 1,
         }
@@ -908,6 +920,13 @@ impl View {
                         .dashboard_test_result()
                         .is_some_and(|result| result.contains(" ms "))
             }
+            Self::SettingsLinear => {
+                root.settings_open()
+                    && root.settings_tab() == "Linear"
+                    && root
+                        .linear_test_result()
+                        .is_some_and(|result| result.starts_with("Reached"))
+            }
             Self::Themes => root.themes_modal_open(),
             Self::ThemesEdit => root
                 .themes_editor()
@@ -1011,6 +1030,7 @@ impl Shot {
             | View::SpawnHosts
             | View::SettingsHosts
             | View::SettingsDashboard
+            | View::SettingsLinear
             | View::SettingsAccounts
             | View::SettingsAccountsRows
             | View::SettingsSounds
@@ -2358,6 +2378,7 @@ fn drive(
         View::Update => drive_update(step, address, window, cx),
         View::UpdateNotes => drive_update_notes(step, window, cx),
         View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
+        View::SettingsLinear => drive_settings_linear(step, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
         View::ChatCompact | View::ChatModelPicker => open_chat(window, cx),
         View::Chat => {
@@ -2559,6 +2580,55 @@ fn shot_summary_test(request_id: Option<String>) -> DaemonMessage {
         },
         latency_ms: 840,
         cost_usd: 0.0004,
+        request_id,
+    }
+}
+
+/// Opens Settings and walks the tab list down to the Linear tab; once it is
+/// drawn, Tab from the list walks its stops (the switch, the key field and
+/// Clear) to Test, and Enter presses it.
+fn drive_settings_linear(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    if step == 0 {
+        press("ctrl-,", window, cx)?;
+        for _ in 0..LINEAR_TAB_DOWNS {
+            press("down", window, cx)?;
+        }
+        return Ok(());
+    }
+    for _ in 0..LINEAR_TEST_TABS {
+        press("tab", window, cx)?;
+    }
+    press("enter", window, cx)
+}
+
+/// The status a Settings shot's daemon sends first: the summarizer's for
+/// `settings-dashboard`, Linear's for `settings-linear`.
+fn shot_settings_status(view: View) -> Option<DaemonMessage> {
+    match view {
+        View::SettingsDashboard => Some(shot_summarizer_status()),
+        View::SettingsLinear => Some(shot_linear_status()),
+        _ => None,
+    }
+}
+
+/// The `settings-linear` shot's status: Linear on, a saved key, the
+/// workspace Leftos and its teams RT and YAAT.
+fn shot_linear_status() -> DaemonMessage {
+    DaemonMessage::LinearStatus {
+        enabled: true,
+        key: protocol::LinearKeyState::Stored,
+        workspace_name: Some("Leftos".to_owned()),
+        team_keys: vec!["RT".to_owned(), "YAAT".to_owned()],
+        last_error: None,
+    }
+}
+
+/// The `settings-linear` shot's Test reply, answering `request_id`.
+fn shot_linear_test(request_id: Option<String>) -> DaemonMessage {
+    DaemonMessage::LinearTest {
+        workspace_name: Some("Leftos".to_owned()),
+        team_keys: vec!["RT".to_owned(), "YAAT".to_owned()],
+        error: None,
         request_id,
     }
 }
@@ -3765,6 +3835,9 @@ impl FakeDaemon {
         if matches!(self.view, View::Dispatch | View::Subagents) {
             features.push(protocol::FEATURE_DISPATCH_RUNS.to_owned());
         }
+        if self.view == View::SettingsLinear {
+            features.push(protocol::FEATURE_LINEAR_SETTINGS.to_owned());
+        }
         // Only the perf shot's This PC reports CPU and RAM.
         if self.view == View::Perf {
             features.push(protocol::FEATURE_PERF_MONITOR.to_owned());
@@ -3821,8 +3894,8 @@ impl FakeDaemon {
             id: "pwsh".to_owned(),
             command: None,
         })?;
-        if self.view == View::SettingsDashboard {
-            self.send(shot_summarizer_status())?;
+        if let Some(status) = shot_settings_status(self.view) {
+            self.send(status)?;
         }
         if self.view == View::Gates {
             self.send(DaemonMessage::GateState {
@@ -4031,6 +4104,7 @@ impl FakeDaemon {
                 ]);
             }
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
+            ClientMessage::TestLinear { request_id } => shot_linear_test(request_id.clone()),
             ClientMessage::ListShellChoices => shot_shell_choices(),
             ClientMessage::GetHostInfo { id } => shot_host_info(id),
             ClientMessage::ListDir { id, cursor, .. } => {

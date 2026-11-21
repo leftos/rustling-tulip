@@ -1012,10 +1012,17 @@
     },
     {
       "paths": [
+        "apps/native/src/linear_settings.rs",
+        "apps/native/tests/ui/ui_settings_linear.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(linear_settings|settings_view|settings_search)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_links|ui_settings|ui_settings_linear|ui_settings_search)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/settings_view.rs",
         "apps/native/src/summarizer_settings.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^(settings_view|summarizer_settings|settings_search)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_settings_search|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(settings_view|summarizer_settings|settings_search)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_settings_linear|ui_settings_search|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
     },
     {
       "paths": [

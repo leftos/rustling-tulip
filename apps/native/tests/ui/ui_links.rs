@@ -552,7 +552,7 @@ fn no_key_offers_open_in_linear_which_opens_the_issue(cx: &mut TestAppContext) {
         card_says(
             &mut h,
             "p1",
-            "Set LINEAR_API_KEY to see this issue's details."
+            "Add a Linear API key in Settings › Linear to see this issue's details."
         ),
         "{:?}",
         h.linear_card("p1")
@@ -562,6 +562,50 @@ fn no_key_offers_open_in_linear_which_opens_the_issue(cx: &mut TestAppContext) {
     h.hover(open.center(), Modifiers::none());
     h.click(open.center(), Modifiers::none());
     assert_eq!(h.opened(), [Opened::Url(url.to_owned())]);
+}
+
+/// The `LinearStatus` of a host with Linear `enabled` or off.
+fn linear_status(enabled: bool) -> DaemonMessage {
+    DaemonMessage::LinearStatus {
+        enabled,
+        key: protocol::LinearKeyState::Stored,
+        workspace_name: Some("Acme".to_owned()),
+        team_keys: vec!["RT".to_owned()],
+        last_error: None,
+    }
+}
+
+#[gpui::test]
+fn linear_off_closes_the_open_card_and_an_issue_url_shows_no_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.send(linear(&["RT"], true));
+    let url = "https://linear.app/acme/issue/RT-12/slug";
+    h.pty("s1", format!("see {url} now").as_bytes());
+    let on = h.cell_center("p1", 10, 0);
+    h.hover(on, ctrl());
+    assert!(h.linear_card("p1").is_some(), "Ctrl shows the URL's card");
+
+    h.send(linear_status(false));
+    assert_eq!(h.linear_card("p1"), None, "Linear off closes the open card");
+    let off = h.cell_center("p1", 0, 0);
+    h.hover(off, Modifiers::none());
+    h.hover(on, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    assert_eq!(h.linear_card("p1"), None, "a rest shows no card");
+    h.hover(on, ctrl());
+    assert_eq!(h.linear_card("p1"), None, "nor does Ctrl");
+    h.click(on, ctrl());
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(url.to_owned())],
+        "the URL is the ordinary web link"
+    );
+
+    h.send(linear_status(true));
+    h.hover(off, Modifiers::none());
+    h.hover(on, ctrl());
+    assert!(h.linear_card("p1").is_some(), "on again, the card is back");
 }
 
 /// Turns the wheel over `at` by `by` px; a positive `by` scrolls back into

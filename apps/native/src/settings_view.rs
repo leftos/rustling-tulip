@@ -20,9 +20,9 @@ use gpui::{
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, AutoSwitchStrategy, ClientMessage, DaemonMessage,
     FEATURE_AGENT_COMMANDS, FEATURE_AGENT_USER_HOOKS, FEATURE_DEFAULT_SHELL,
-    FEATURE_DETAILED_LOGGING, FEATURE_SUBAGENT_LISTING, FieldKind, KeepAwakeMode, KeyState,
-    OptionValue, RemoteState, Secret, SubagentListing, SummarizerKeySource, SummarizerSettings,
-    SummarySource, UserHooksWire, error_codes,
+    FEATURE_DETAILED_LOGGING, FEATURE_LINEAR_SETTINGS, FEATURE_SUBAGENT_LISTING, FieldKind,
+    KeepAwakeMode, KeyState, LinearKeyState, OptionValue, RemoteState, Secret, SubagentListing,
+    SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
 };
 
 use crate::accounts_settings::{AccountsControl, AliasFields, RemoveConfirm};
@@ -34,7 +34,9 @@ use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
 use crate::buttons::{Layer, field_frame, focus_ring};
 use crate::chat::ChatMode;
 use crate::combobox::list_placement;
+use crate::dashboard_rows::DASH;
 use crate::driver_id::DriverId as _;
+use crate::linear_settings::{self, LinearStatus};
 use crate::mouse::{ClickThrough, CopyOnSelect};
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::open::OpenJob;
@@ -265,6 +267,9 @@ pub(crate) enum SettingsTab {
     General,
     Notifications,
     Dashboard,
+    /// The shown host's Linear issue links: the switch, the key, the
+    /// status and Test.
+    Linear,
     Worktrees,
     RemoteAccess,
     /// This PC's saved agent accounts and the auto-switch rules.
@@ -278,10 +283,11 @@ pub(crate) enum SettingsTab {
 
 impl SettingsTab {
     /// The tabs shown before the agents' pages, in the list's order.
-    pub(crate) const FIXED: [Self; 8] = [
+    pub(crate) const FIXED: [Self; 9] = [
         Self::General,
         Self::Notifications,
         Self::Dashboard,
+        Self::Linear,
         Self::Worktrees,
         Self::RemoteAccess,
         Self::Accounts,
@@ -296,6 +302,7 @@ impl SettingsTab {
             Self::General => "General",
             Self::Notifications => "Notifications",
             Self::Dashboard => "Dashboard",
+            Self::Linear => "Linear",
             Self::Worktrees => "Worktrees",
             Self::RemoteAccess => "Remote access",
             Self::Accounts => "Accounts",
@@ -312,6 +319,7 @@ impl SettingsTab {
             Self::General => "settings-tab-general",
             Self::Notifications => "settings-tab-notifications",
             Self::Dashboard => "settings-tab-dashboard",
+            Self::Linear => "settings-tab-linear",
             Self::Worktrees => "settings-tab-worktrees",
             Self::RemoteAccess => "settings-tab-remote-access",
             Self::Accounts => "settings-tab-accounts",
@@ -368,14 +376,21 @@ fn agent_descriptor<'a>(agents: &'a [AgentDescriptor], id: &str) -> Option<&'a A
 }
 
 /// The tab list's rows in order: the fixed tabs (Remote access only when
-/// `remote`, Accounts only when `accounts`), then, while `agents` lists
-/// any, the Agents group row and one page per agent in the daemon's order.
-/// A group row is drawn between the tabs and never reached by the keyboard.
-fn tab_rows(agents: &[AgentDescriptor], remote: bool, accounts: bool) -> Vec<SettingsRow> {
+/// `remote`, Accounts only when `accounts`, Linear only when `linear`),
+/// then, while `agents` lists any, the Agents group row and one page per
+/// agent in the daemon's order. A group row is drawn between the tabs and
+/// never reached by the keyboard.
+fn tab_rows(
+    agents: &[AgentDescriptor],
+    remote: bool,
+    accounts: bool,
+    linear: bool,
+) -> Vec<SettingsRow> {
     let fixed = SettingsTab::FIXED
         .into_iter()
         .filter(|tab| remote || *tab != SettingsTab::RemoteAccess)
         .filter(|tab| accounts || *tab != SettingsTab::Accounts)
+        .filter(|tab| linear || *tab != SettingsTab::Linear)
         .map(SettingsRow::Tab);
     let group = (!agents.is_empty()).then_some(SettingsRow::Group(AGENTS_GROUP));
     let pages = agents
@@ -678,6 +693,16 @@ pub(crate) enum SettingsControl {
     DashboardEnvVariable,
     DashboardCap,
     DashboardTest,
+    /// The Linear tab's Show Linear issue links switch, held until Apply.
+    LinearEnabled,
+    /// The Linear tab's masked API key field.
+    LinearKey,
+    /// The Linear tab's Save, which sends the typed key at once.
+    LinearKeySave,
+    /// The Linear tab's Clear, which deletes the saved key at once.
+    LinearKeyClear,
+    /// The Linear tab's Test, an immediate action.
+    LinearTest,
     /// A control of the Accounts page; `selector` is its
     /// [`AccountsControl::selector_text`], interned.
     Accounts {
@@ -828,6 +853,11 @@ impl SettingsControl {
             Self::DashboardEnvVariable => "settings-dashboard-env-variable",
             Self::DashboardCap => "settings-dashboard-cap",
             Self::DashboardTest => "settings-dashboard-test",
+            Self::LinearEnabled => "settings-linear-enabled",
+            Self::LinearKey => "settings-linear-key",
+            Self::LinearKeySave => "settings-linear-key-save",
+            Self::LinearKeyClear => "settings-linear-key-clear",
+            Self::LinearTest => "settings-linear-test",
             Self::FooterOk => "settings-ok",
             Self::FooterApply => "settings-apply",
             Self::FooterCancel => "settings-cancel",
@@ -1469,6 +1499,9 @@ impl RootView {
             if self.settings_tab == SettingsTab::Dashboard {
                 self.hold_dashboard_tab(window, cx);
             }
+            if self.settings_tab == SettingsTab::Linear {
+                self.hold_linear_tab(window, cx);
+            }
             if self.settings_tab == SettingsTab::Accounts {
                 self.on_accounts_tab_selected(window, cx);
             }
@@ -1489,6 +1522,7 @@ impl RootView {
             self.agent_tabs.drop_host(host);
             self.worktrees_tabs.remove(host);
             self.dashboard_settings_tabs.remove(host);
+            self.settings_pending.linear_keys.remove(host);
             self.settings_pending.take_host(host);
         }
         // OK no longer hears the closed host's echoes: Settings stays open,
@@ -1943,13 +1977,15 @@ impl RootView {
     /// The rows the tab list draws for the host Settings shows, in order:
     /// Remote access configures this PC's daemon, so it is offered only
     /// where the client manages it, Accounts there too and only while its
-    /// daemon lists the accounts feature, and an agent's page only while
+    /// daemon lists the accounts feature, Linear while the shown host's
+    /// daemon lists its settings feature, and an agent's page only while
     /// the daemon lists it.
     fn settings_rows(&self) -> Vec<SettingsRow> {
         tab_rows(
             self.agents(),
             self.capabilities_of(&self.settings_host).manages_daemon(),
             self.accounts_tab_offered(),
+            self.linear_tab_offered(),
         )
     }
 
@@ -2384,6 +2420,7 @@ impl RootView {
                 .collect(),
             SettingsTab::Notifications => self.notifications_controls(),
             SettingsTab::Dashboard => self.dashboard_controls(false),
+            SettingsTab::Linear => self.linear_controls(false),
             SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![SettingsControl::WorktreesPath];
@@ -2438,6 +2475,7 @@ impl RootView {
                 controls
             }
             SettingsTab::Dashboard => self.dashboard_controls(true),
+            SettingsTab::Linear => self.linear_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications => self.tab_controls_of(tab, cx),
             SettingsTab::Agent(_) => {
                 let Some(agent) = tab.agent() else {
@@ -2959,6 +2997,7 @@ impl RootView {
                         | HostPending::AutoSwitchEnabled(_)
                         | HostPending::AutoSwitchThreshold(_)
                         | HostPending::AutoRule(_)
+                        | HostPending::LinearEnabled(_)
                 )
             })
             .count();
@@ -3117,6 +3156,7 @@ impl RootView {
                 HostPending::UserHooks { agent, enabled } => {
                     self.apply_user_hooks(host, agent, enabled);
                 }
+                HostPending::LinearEnabled(enabled) => self.apply_linear_switch(host, enabled),
                 value @ (HostPending::AccountOrder(_)
                 | HostPending::AutoSwitchEnabled(_)
                 | HostPending::AutoSwitchThreshold(_)
@@ -3467,6 +3507,7 @@ impl RootView {
                             .settings_field_focus(*control)
                             .is_some_and(|focus| focus.is_focused(window))
                 }
+                SettingsControl::LinearKey => self.linear_key_focused(window),
                 _ => self.appearance_focus.is_focused(window),
             };
             has_keyboard && controls.contains(control)
@@ -3545,6 +3586,10 @@ impl RootView {
             SettingsControl::DashboardCap => {
                 self.shown_dashboard_tab().map(|tab| tab.cap_focus.clone())
             }
+            SettingsControl::LinearKey => self
+                .shown_linear_key()
+                .filter(|_| !self.linear_key_locked())
+                .map(|field| field.focus.clone()),
             SettingsControl::Accounts {
                 control: AccountsControl::Alias(number),
                 ..
@@ -3718,6 +3763,11 @@ impl RootView {
         cx.notify();
     }
 
+    /// The Play button of `kind`'s sound row: its chosen sound, played.
+    fn preview_sound_of(&self, kind: NotifyKind, cx: &App) {
+        self.preview_sound(self.sound_of(kind), kind, cx);
+    }
+
     /// A click on `control`, or Space or Enter while it has the keyboard.
     pub(crate) fn press_settings_control(
         &mut self,
@@ -3742,23 +3792,11 @@ impl RootView {
             SettingsControl::NeedsYouSoundField => {
                 self.toggle_sound_list(NotifyKind::NeedsYou, cx);
             }
-            SettingsControl::NeedsYouSoundPlay => {
-                self.preview_sound(
-                    self.sound_of(NotifyKind::NeedsYou),
-                    NotifyKind::NeedsYou,
-                    cx,
-                );
-            }
+            SettingsControl::NeedsYouSoundPlay => self.preview_sound_of(NotifyKind::NeedsYou, cx),
             SettingsControl::FinishedSoundField => {
                 self.toggle_sound_list(NotifyKind::Finished, cx);
             }
-            SettingsControl::FinishedSoundPlay => {
-                self.preview_sound(
-                    self.sound_of(NotifyKind::Finished),
-                    NotifyKind::Finished,
-                    cx,
-                );
-            }
+            SettingsControl::FinishedSoundPlay => self.preview_sound_of(NotifyKind::Finished, cx),
             SettingsControl::DefaultShell => self.toggle_shell_list(cx),
             SettingsControl::ToastAnchorTest => self.show_staged_test_toast(cx),
             SettingsControl::AgentChoice {
@@ -3781,6 +3819,7 @@ impl RootView {
             | SettingsControl::DashboardKey
             | SettingsControl::DashboardEnvVariable
             | SettingsControl::DashboardCap
+            | SettingsControl::LinearKey
             | SettingsControl::SidebarView(_)
             | SettingsControl::LeafDensity(_)
             | SettingsControl::ShowFinishedSubagents(_)
@@ -3809,6 +3848,10 @@ impl RootView {
             SettingsControl::DashboardKeySource(choice) => self.choose_key_source(choice),
             SettingsControl::DashboardKeyClear => self.clear_summarizer_key(cx),
             SettingsControl::DashboardTest => self.run_summary_test(),
+            SettingsControl::LinearEnabled => self.toggle_linear_enabled(),
+            SettingsControl::LinearKeySave => self.save_linear_key(cx),
+            SettingsControl::LinearKeyClear => self.clear_linear_key(),
+            SettingsControl::LinearTest => self.run_linear_test(),
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
             SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
@@ -4543,6 +4586,9 @@ impl RootView {
         if tab == SettingsTab::Dashboard {
             self.hold_dashboard_tab(window, cx);
         }
+        if tab == SettingsTab::Linear {
+            self.hold_linear_tab(window, cx);
+        }
         if tab == SettingsTab::Accounts {
             self.on_accounts_tab_selected(window, cx);
         }
@@ -5187,6 +5233,7 @@ impl RootView {
             || self.launch_args_focused(window)
             || self.agent_texts_focused(window)
             || self.dashboard_fields_focused(window)
+            || self.linear_key_focused(window)
             || self.account_alias_focused(window)
             || self.appearance_field_focused(window, cx)
     }
@@ -5882,6 +5929,7 @@ impl RootView {
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::Dashboard => self.dashboard_tab_content(focused, cx),
+            SettingsTab::Linear => self.linear_tab_content(focused, cx),
             SettingsTab::Agent(_) => self.agent_page_content(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
             SettingsTab::RemoteAccess => self.remote_access_tab_content(focused, cx),
@@ -8840,6 +8888,421 @@ impl RootView {
     }
 }
 
+impl RootView {
+    /// Whether Settings offers the Linear tab: while the connection to the
+    /// host Settings shows lists the Linear settings feature.
+    pub(crate) fn linear_tab_offered(&self) -> bool {
+        self.conn_of(&self.settings_host)
+            .is_some_and(|conn| conn.supports(FEATURE_LINEAR_SETTINGS))
+    }
+
+    /// Whether the key field, Save and Clear are locked: the key is set on
+    /// the host's own PC, as account administration is.
+    fn linear_key_locked(&self) -> bool {
+        self.accounts_admin_locked()
+    }
+
+    fn shown_linear(&self) -> Option<&LinearStatus> {
+        self.linear_settings.status(&self.settings_host)
+    }
+
+    fn shown_linear_key(&self) -> Option<&LinearKeyField> {
+        self.settings_pending.linear_keys.get(&self.settings_host)
+    }
+
+    /// Whether the shown host's Linear key field has the keyboard.
+    fn linear_key_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::Linear
+            && !self.linear_key_locked()
+            && self
+                .shown_linear_key()
+                .is_some_and(|field| field.focus.is_focused(window))
+    }
+
+    /// Whether Save takes a press: the key is not locked and the field
+    /// holds one.
+    fn linear_save_enabled(&self) -> bool {
+        !self.linear_key_locked()
+            && self
+                .shown_linear_key()
+                .is_some_and(|field| !field.draft.trim().is_empty())
+    }
+
+    /// Whether Clear takes a press: the key is not locked and the daemon
+    /// holds a saved key, accepted or refused.
+    fn linear_clear_enabled(&self) -> bool {
+        !self.linear_key_locked()
+            && self.shown_linear().is_some_and(|status| {
+                matches!(
+                    status.key,
+                    LinearKeyState::Stored | LinearKeyState::Rejected
+                )
+            })
+    }
+
+    /// Whether the switch shows Linear on: pending, else the daemon's.
+    fn shown_linear_enabled(&self, status: &LinearStatus) -> bool {
+        self.settings_pending
+            .host(&self.settings_host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::LinearEnabled(on) => Some(*on),
+                _ => None,
+            })
+            .unwrap_or(status.enabled)
+    }
+
+    /// The Linear tab's stops in drawing order, once the daemon reported
+    /// its status; with `every`, each stop whether it takes a press now or
+    /// not.
+    fn linear_controls(&self, every: bool) -> Vec<SettingsControl> {
+        if self.shown_linear().is_none() {
+            return Vec::new();
+        }
+        let mut controls = vec![SettingsControl::LinearEnabled];
+        if every || !self.linear_key_locked() {
+            controls.push(SettingsControl::LinearKey);
+        }
+        if every || self.linear_save_enabled() {
+            controls.push(SettingsControl::LinearKeySave);
+        }
+        if every || self.linear_clear_enabled() {
+            controls.push(SettingsControl::LinearKeyClear);
+        }
+        controls.push(SettingsControl::LinearTest);
+        controls
+    }
+
+    /// The shown host's key field, built empty and masked unless held:
+    /// held, it keeps its text until Settings closes.
+    fn hold_linear_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        if self.settings_pending.linear_keys.contains_key(&host) {
+            return;
+        }
+        let input = cx.new(|cx| TextInput::new(String::new(), "Paste the key".to_owned(), cx));
+        input.update(cx, |input, cx| input.set_masked(true, cx));
+        // Enter sends nothing: the key goes with Save. Esc is Cancel.
+        let keys = Self::subscribe_in_window(
+            window,
+            cx,
+            &input,
+            move |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
+                }
+            },
+        );
+        let edited = host.clone();
+        let edits = cx.subscribe(&input, move |this, input, _: &TextChanged, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(field) = this.settings_pending.linear_keys.get_mut(&edited) {
+                field.draft = text;
+            }
+            cx.notify();
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        let field = LinearKeyField {
+            input,
+            focus,
+            draft: String::new(),
+            _subscriptions: vec![keys, edits],
+        };
+        self.settings_pending.linear_keys.insert(host, field);
+    }
+
+    fn toggle_linear_enabled(&mut self) {
+        let Some(status) = self.shown_linear() else {
+            return;
+        };
+        let (on, saved) = (self.shown_linear_enabled(status), status.enabled);
+        let host = self.settings_host.clone();
+        self.settings_pending.set_host(
+            &host,
+            HostPending::LinearEnabled(!on),
+            Some(&HostPending::LinearEnabled(saved)),
+        );
+    }
+
+    /// Apply reaching `host`'s held Linear switch.
+    fn apply_linear_switch(&mut self, host: &HostKey, enabled: bool) {
+        tracing::info!(?host, enabled, "settings: applying the Linear switch");
+        self.send_setting(
+            host,
+            ClientMessage::SetLinearEnabled {
+                enabled,
+                request_id: Some(crate::new_request_id()),
+            },
+        );
+    }
+
+    /// Save: the typed key, trimmed, to the shown host at once, the field
+    /// emptied.
+    fn save_linear_key(&mut self, cx: &mut Context<Self>) {
+        if !self.linear_save_enabled() {
+            return;
+        }
+        let host = self.settings_host.clone();
+        let Some(field) = self.settings_pending.linear_keys.get_mut(&host) else {
+            return;
+        };
+        let key = field.draft.trim().to_owned();
+        field.draft.clear();
+        field.input.update(cx, |input, cx| input.set_text("", cx));
+        tracing::info!(?host, "settings: saving the Linear key");
+        self.send_linear_key(&host, Some(Secret(key)));
+    }
+
+    /// Clear: the shown host's saved key deleted at once.
+    fn clear_linear_key(&mut self) {
+        if !self.linear_clear_enabled() {
+            return;
+        }
+        let host = self.settings_host.clone();
+        tracing::info!(?host, "settings: clearing the Linear key");
+        self.send_linear_key(&host, None);
+    }
+
+    /// `key` to `host`, `None` deleting the saved one; its refusal shows
+    /// under the key field.
+    fn send_linear_key(&mut self, host: &HostKey, key: Option<Secret>) {
+        let request_id = crate::new_request_id();
+        self.send_setting(
+            host,
+            ClientMessage::SetLinearKey {
+                key,
+                request_id: Some(request_id.clone()),
+            },
+        );
+        self.linear_settings.sent_key(host, request_id);
+    }
+
+    fn run_linear_test(&mut self) {
+        if self.shown_linear().is_none() {
+            return;
+        }
+        let request_id = crate::new_request_id();
+        tracing::info!("settings: testing Linear");
+        self.send_to(
+            &self.settings_host,
+            ClientMessage::TestLinear {
+                request_id: Some(request_id.clone()),
+            },
+        );
+        self.linear_settings
+            .start_test(&self.settings_host, request_id);
+    }
+
+    /// A daemon refusal from `host` carrying `request_id` and `code`: a
+    /// `linear_refused` answering the Linear tab's key send or Test shows
+    /// on the tab. Returns whether it did.
+    pub(crate) fn on_linear_refused(
+        &mut self,
+        host: &HostKey,
+        request_id: &str,
+        code: Option<&str>,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if code != Some(error_codes::LINEAR_REFUSED) {
+            return false;
+        }
+        let answered = self.linear_settings.refused(host, request_id, message);
+        if answered {
+            tracing::info!(?host, "settings: the daemon refused a Linear request");
+            cx.notify();
+        }
+        answered
+    }
+
+    /// The Linear key field's text on the shown host, once its tab was
+    /// shown.
+    #[must_use]
+    pub fn linear_key_draft(&self, cx: &App) -> Option<String> {
+        self.shown_linear_key()
+            .map(|field| field.input.read(cx).text().to_owned())
+    }
+
+    /// The Linear Test result line's text on the shown host.
+    #[must_use]
+    pub fn linear_test_result(&self) -> Option<String> {
+        self.linear_settings
+            .test(&self.settings_host)
+            .map(linear_settings::test_text)
+    }
+
+    /// The note under a locked Linear key field.
+    #[must_use]
+    pub fn linear_key_note(&self) -> Option<String> {
+        self.linear_key_locked().then(|| {
+            format!(
+                "Set the key on {} itself.",
+                self.host_name(&self.settings_host)
+            )
+        })
+    }
+
+    /// The Linear tab: the switch, the key with its state, the status and
+    /// Test.
+    fn linear_tab_content(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let links = section(size, shift, "Linear issue links");
+        let (Some(status), Some(field)) = (self.shown_linear(), self.shown_linear_key()) else {
+            let line = div().text_color(gpui::rgb(t.text_2)).child(NOT_CONNECTED);
+            return vec![links.child(line).into_any_element()];
+        };
+        let switch = toggle(
+            SettingsControl::LinearEnabled,
+            ToggleState {
+                checked: self.shown_linear_enabled(status),
+                enabled: true,
+            },
+            "Show Linear issue links",
+            focused,
+            cx,
+        );
+        vec![
+            links.child(switch).into_any_element(),
+            self.linear_key_section(status, field, focused, cx)
+                .into_any_element(),
+            linear_status_section(status, cx).into_any_element(),
+            self.linear_test_section(focused, cx).into_any_element(),
+        ]
+    }
+
+    /// The key field with Save, Clear and the key's state beside it, and
+    /// under it the lock's note and the last refusal.
+    fn linear_key_section(
+        &self,
+        status: &LinearStatus,
+        field: &LinearKeyField,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let input = self.linear_key_field(field, focused, cx);
+        let save = settings_button(
+            SettingsControl::LinearKeySave,
+            "Save",
+            self.linear_save_enabled(),
+            focused,
+            cx,
+        );
+        let clear = settings_button(
+            SettingsControl::LinearKeyClear,
+            "Clear",
+            self.linear_clear_enabled(),
+            focused,
+            cx,
+        );
+        let quiet = |selector: &'static str, text: String| {
+            crate::tagged_text(selector, text).text_color(gpui::rgb(t.text_2))
+        };
+        let state = quiet(
+            "settings-linear-key-state",
+            linear_settings::key_state_words(status.key).to_owned(),
+        );
+        let note = self
+            .linear_key_note()
+            .map(|note| quiet("settings-linear-key-locked", note));
+        let error = self
+            .linear_settings
+            .key_error(&self.settings_host)
+            .map(|error| quiet("settings-linear-key-error", error.to_owned()));
+        section(size, shift, "API key")
+            .child(
+                labelled_row("Key", input)
+                    .child(save)
+                    .child(clear)
+                    .child(state),
+            )
+            .children(note)
+            .children(error)
+    }
+
+    /// The masked key field, ringed while it has the keyboard; a press
+    /// gives it the keyboard. While the key is locked it is a dimmed empty
+    /// frame with no input in it, so nothing can focus it or type or paste
+    /// into it.
+    fn linear_key_field(
+        &self,
+        field: &LinearKeyField,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let control = SettingsControl::LinearKey;
+        let frame = field_frame(focused == Some(control), Layer::Floating, &theme(cx))
+            .driver_id(move || control.selector().to_owned())
+            .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
+            .w(px(KEY_FIELD_WIDTH));
+        if self.linear_key_locked() {
+            // A no-break space keeps the frame a field's height.
+            return frame.opacity(DISABLED_OPACITY).child("\u{a0}");
+        }
+        frame.child(field.input.clone()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.press_settings_control(control, window, cx);
+            }),
+        )
+    }
+
+    /// Test, open whatever the switch, and its result line.
+    fn linear_test_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let button = settings_button(SettingsControl::LinearTest, "Test", true, focused, cx);
+        let result = self.linear_test_result().map(|text| {
+            crate::tagged_text("settings-linear-test-result", text).text_color(gpui::rgb(t.text_2))
+        });
+        section(size, shift, "Test")
+            .child(div().flex().child(button))
+            .children(result)
+    }
+}
+
+/// The Linear tab's status rows: the workspace, its teams and the last
+/// error, each a dash while the daemon names none.
+fn linear_status_section(status: &LinearStatus, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let size = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let quiet = |selector: &'static str, text: String| {
+        crate::tagged_text(selector, text).text_color(gpui::rgb(t.text_2))
+    };
+    let workspace = status
+        .workspace_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| DASH.to_owned());
+    let teams = if status.team_keys.is_empty() {
+        DASH.to_owned()
+    } else {
+        status.team_keys.join(", ")
+    };
+    let last_error = status
+        .last_error
+        .clone()
+        .map(|error| labelled_row("Last error", quiet("settings-linear-last-error", error)));
+    section(size, shift, "Status")
+        .child(labelled_row(
+            "Workspace",
+            quiet("settings-linear-workspace", workspace),
+        ))
+        .child(labelled_row("Teams", quiet("settings-linear-teams", teams)))
+        .children(last_error)
+}
+
 /// `label` with `field` beside it.
 fn labelled_row(label: &'static str, field: Div) -> Div {
     div()
@@ -9383,6 +9846,8 @@ pub(crate) enum HostPending {
     AutoSwitchThreshold(f64),
     /// One of the Accounts page's auto-switch rules.
     AutoRule(AutoRule),
+    /// The Linear tab's Show Linear issue links switch.
+    LinearEnabled(bool),
 }
 
 /// An auto-switch rule the Accounts page holds for Apply, which sends every
@@ -9543,6 +10008,8 @@ enum EchoKind {
     UserHooks,
     /// An Accounts page write: alias, order or auto-switch.
     Accounts,
+    /// A Linear switch or key write.
+    Linear,
 }
 
 /// A send of Apply to `host`, owing its echo; a refusal of it carries
@@ -9587,6 +10054,10 @@ impl OwedEcho {
             | ClientMessage::SetSummarizerKey { request_id, .. } => {
                 (EchoKind::Summarizer, request_id.clone())
             }
+            ClientMessage::SetLinearEnabled { request_id, .. }
+            | ClientMessage::SetLinearKey { request_id, .. } => {
+                (EchoKind::Linear, request_id.clone())
+            }
             _ => return None,
         };
         Some(Self {
@@ -9622,6 +10093,7 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
         DaemonMessage::SummarizerStatus { .. } => EchoKind::Summarizer,
+        DaemonMessage::LinearStatus { .. } => EchoKind::Linear,
         // A refused account write comes back as an `Error`.
         DaemonMessage::Accounts { .. } => EchoKind::Accounts,
         // A failed write comes back in the answer itself, not as an error.
@@ -9744,6 +10216,25 @@ pub(crate) struct PendingSettings {
     pub(crate) account_aliases: AliasFields,
     /// The Accounts page's open Remove confirm, for the account it names.
     pub(crate) remove_confirm: Option<RemoveConfirm>,
+    /// The Linear tab's key field, per host it was shown for: a typed key
+    /// goes with Settings.
+    pub(crate) linear_keys: HashMap<HostKey, LinearKeyField>,
+}
+
+/// The Linear tab's masked API key field of one host and its text.
+pub(crate) struct LinearKeyField {
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The field's text, kept as it changes.
+    draft: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl std::fmt::Debug for LinearKeyField {
+    /// Never the typed key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearKeyField").finish_non_exhaustive()
+    }
 }
 
 /// The General tab's Maximum chat width field and its draft.
@@ -10944,14 +11435,14 @@ mod tests {
     }
 
     fn labels(agents: &[AgentDescriptor], remote: bool) -> Vec<&'static str> {
-        tab_rows(agents, remote, false)
+        tab_rows(agents, remote, false, false)
             .into_iter()
             .map(|row| row.label(agents))
             .collect()
     }
 
     fn agent_selectors(agents: &[AgentDescriptor]) -> Vec<&'static str> {
-        row_tabs(&tab_rows(agents, true, false))
+        row_tabs(&tab_rows(agents, true, false, false))
             .into_iter()
             .filter(|tab| matches!(tab, SettingsTab::Agent(_)))
             .map(|tab| tab.selector(agents))
@@ -10989,7 +11480,7 @@ mod tests {
             "Remote access only where the client manages the daemon"
         );
         assert!(
-            !row_tabs(&tab_rows(&agents, true, false))
+            !row_tabs(&tab_rows(&agents, true, false, false))
                 .iter()
                 .any(|tab| tab.label(&agents) == "Agents"),
             "the group row is no tab"
@@ -11083,28 +11574,34 @@ mod tests {
     fn a_shown_agent_page_falls_back_to_general_when_its_agent_leaves() {
         let shown = SettingsTab::Agent(intern("test-agent".to_owned()));
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[claude(), test_agent()], true, false)),
+            tab_kept(
+                shown,
+                &tab_rows(&[claude(), test_agent()], true, false, false)
+            ),
             shown
         );
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[claude()], true, false)),
+            tab_kept(shown, &tab_rows(&[claude()], true, false, false)),
             SettingsTab::General,
             "the daemon no longer lists the agent"
         );
         assert_eq!(
-            tab_kept(shown, &tab_rows(&[], true, false)),
+            tab_kept(shown, &tab_rows(&[], true, false, false)),
             SettingsTab::General,
             "a disconnected client lists no agent"
         );
         assert_eq!(
             tab_kept(
                 SettingsTab::RemoteAccess,
-                &tab_rows(&[claude()], false, false)
+                &tab_rows(&[claude()], false, false, false)
             ),
             SettingsTab::General
         );
         assert_eq!(
-            tab_kept(SettingsTab::Accounts, &tab_rows(&[claude()], true, false)),
+            tab_kept(
+                SettingsTab::Accounts,
+                &tab_rows(&[claude()], true, false, false)
+            ),
             SettingsTab::General,
             "the daemon no longer lists the accounts feature"
         );
@@ -11114,14 +11611,14 @@ mod tests {
     fn accounts_follows_remote_access_only_where_offered() {
         let mut want = FIXED.to_vec();
         want.insert(5, "Accounts");
-        let shown: Vec<&str> = tab_rows(&[], true, true)
+        let shown: Vec<&str> = tab_rows(&[], true, true, false)
             .into_iter()
             .map(|row| row.label(&[]))
             .collect();
         assert_eq!(shown, want, "right after Remote access");
         assert_eq!(labels(&[], true), FIXED, "not offered: absent");
         assert_eq!(
-            tab_kept(SettingsTab::Accounts, &tab_rows(&[], true, true)),
+            tab_kept(SettingsTab::Accounts, &tab_rows(&[], true, true, false)),
             SettingsTab::Accounts
         );
     }

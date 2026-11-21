@@ -8,7 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.
 - Linear issue chips show on the Dashboard's session titles and on subagent and dispatch-run rows in the Dashboard and the sidebar.
-- A Linear API key can be saved on the host instead of set as an environment variable, and Linear issue links can be turned off.
+- Settings › Linear saves a Linear API key on the host instead of an environment variable, turns Linear issue links on or off, and tests the key.
 
 ## v0.17.1-alpha
 

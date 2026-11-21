@@ -388,11 +388,26 @@ fn shares_a_cell(a: &TerminalLink, b: &TerminalLink) -> bool {
 /// The Linear context issue links are read against: the team keys a bare
 /// identifier must carry and the workspace its web address is built from.
 /// A bare identifier counts only when the host has a key configured and
-/// knows its workspace; a `linear.app` issue URL counts whatever the context.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// knows its workspace; a `linear.app` issue URL counts whatever the keys.
+/// While Linear is off on the host nothing is an issue link: an issue URL
+/// is only the web link every URL is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueContext {
     team_keys: Vec<String>,
     workspace: Option<String>,
+    enabled: bool,
+}
+
+impl Default for IssueContext {
+    /// No teams and no workspace, on: an older daemon never says Linear is
+    /// off.
+    fn default() -> Self {
+        Self {
+            team_keys: Vec::new(),
+            workspace: None,
+            enabled: true,
+        }
+    }
 }
 
 impl IssueContext {
@@ -410,13 +425,30 @@ impl IssueContext {
         Self {
             team_keys,
             workspace,
+            enabled: true,
         }
     }
 
+    /// The context with Linear on (`enabled`) or off on its host.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Whether Linear is on on the context's host.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// The web address bare `identifier` opens, when its team is one of the
-    /// context's.
+    /// context's and Linear is on.
     #[must_use]
     pub fn bare_address(&self, identifier: &str) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
         let key = team_key(identifier)?;
         let workspace = self.workspace.as_deref()?;
         self.team_keys
@@ -577,8 +609,11 @@ pub fn merge_issue_links(
 }
 
 /// The issue links of one logical line: its `linear.app` issue URLs, then
-/// the bare identifiers outside them.
+/// the bare identifiers outside them; none while Linear is off.
 fn issue_segment_links(segments: &[Segment], context: &IssueContext) -> Vec<TerminalLink> {
+    if !context.is_enabled() {
+        return Vec::new();
+    }
     let text: String = segments
         .iter()
         .map(|segment| segment.text.as_str())
@@ -3334,6 +3369,36 @@ mod tests {
         assert_eq!(issues_in("see RT-12 now", &no_workspace), []);
         let no_key = IssueContext::new(&keys, Some("acme"), false);
         assert_eq!(issues_in("see RT-12 now", &no_key), []);
+    }
+
+    #[test]
+    fn a_disabled_context_reads_no_issue_link() {
+        let url = "https://linear.app/x/issue/RT-1";
+        let on = teams(&["RT"]);
+        assert!(on.is_enabled());
+        assert!(IssueContext::default().is_enabled(), "on by default");
+        assert_eq!(
+            issues_in("see RT-1 now", &on),
+            opens(&[("RT-1", "https://linear.app/acme/issue/RT-1")])
+        );
+        assert_eq!(issues_in(&format!("see {url} now"), &on).len(), 1);
+
+        let off = teams(&["RT"]).with_enabled(false);
+        assert!(!off.is_enabled());
+        assert_eq!(issues_in("see RT-1 now", &off), [], "bare is plain text");
+        assert_eq!(issues_in(&format!("see {url} now"), &off), []);
+        let text = format!("see {url}");
+        let cols = text.chars().count() + 4;
+        let kinds: Vec<LinkKind> = merged(&[row(&text, cols, false)], cols, &off)
+            .into_iter()
+            .map(|link| link.kind)
+            .collect();
+        assert_eq!(kinds, [LinkKind::Url], "only the ordinary web link");
+        assert_eq!(
+            crate::links::title_issue("RT-1 x", &off),
+            None,
+            "and no title chip"
+        );
     }
 
     #[test]

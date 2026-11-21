@@ -134,6 +134,7 @@ The views:
 - `main-compact`: the sidebar's Compact leaves.
 - `main-narrow`: the tulip tab split three ways, its narrow pane headers collapsed to the ⋯ overflow button.
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
+- `settings-linear`: Settings on its Linear tab with Linear on, a saved key, a workspace and its teams, and a Test result.
 - `spawn`: the spawn dialog with its Target list open.
 - `jump`: the jump palette open over the main window with an empty query.
 - `connections`: the host manager with This PC connected, the saved tailnet host "box" showing "Needs pairing" with its `Pair` and `Reconnect now` buttons, and a saved SSH host switched Off; This PC's row shows its version.

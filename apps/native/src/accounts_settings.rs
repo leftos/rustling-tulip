@@ -336,7 +336,7 @@ impl RootView {
     /// Whether the admin controls are disabled: on any host but this
     /// machine (the Local key on a local target), and on this machine when
     /// its daemon calls this connection remote.
-    fn accounts_admin_locked(&self) -> bool {
+    pub(crate) fn accounts_admin_locked(&self) -> bool {
         !self.is_this_machine(&self.settings_host)
             || self
                 .conn_of(&self.settings_host)
