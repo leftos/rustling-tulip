@@ -8,8 +8,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight,
-    Keystroke, Stateful, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, Autocapitalize, ClickEvent, Context, Div, Entity, FocusHandle, Focusable as _,
+    FontWeight, KeyboardKind, Keystroke, Stateful, Subscription, Task, TextInputConfiguration,
+    Window, div, prelude::*, px,
 };
 use protocol::DaemonMessage;
 
@@ -212,6 +213,14 @@ impl RootView {
         Some(dialog.code_input.read(cx).text().to_owned())
     }
 
+    /// The soft keyboard the dialog's code field asks the platform for,
+    /// while the dialog is open.
+    #[must_use]
+    pub fn device_pairing_code_configuration(&self, cx: &App) -> Option<TextInputConfiguration> {
+        let dialog = self.device_pairing.dialog.as_ref()?;
+        Some(dialog.code_input.read(cx).input_configuration().clone())
+    }
+
     fn device_pairing_model(&self) -> Option<&DevicePairing> {
         self.device_pairing
             .dialog
@@ -300,7 +309,11 @@ impl RootView {
             "device pairing: the dialog opens"
         );
         self.close_flyout();
-        let code_input = cx.new(|cx| TextInput::new(String::new(), CODE_PLACEHOLDER, cx));
+        let code_input = cx.new(|cx| {
+            let mut input = TextInput::new(String::new(), CODE_PLACEHOLDER, cx);
+            input.set_text_input_configuration(code_field_configuration(), cx);
+            input
+        });
         let subscriptions = Self::watch_device_code_field(&code_input, window, cx);
         self.device_pairing.dialog = Some(DevicePairingDialog {
             host: host.clone(),
@@ -838,6 +851,19 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
+/// The soft keyboard the code field asks for: a number pad, with
+/// autocorrect, word suggestions and capitalization off, since a pairing
+/// code is six digits.
+fn code_field_configuration() -> TextInputConfiguration {
+    TextInputConfiguration {
+        autocorrect: false,
+        suggestions: false,
+        autocapitalize: Autocapitalize::None,
+        keyboard: KeyboardKind::Number,
+        ..TextInputConfiguration::default()
+    }
+}
+
 /// The code field in its box, outlined brighter while it has the focus.
 fn code_box(dialog: &DevicePairingDialog, t: &UiTheme) -> Div {
     let focused = dialog.control == Some(DeviceControl::Field);
@@ -888,4 +914,21 @@ fn device_button(
     drawn.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_device_button(pressed, window, cx);
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_code_field_asks_for_a_number_pad() {
+        let config = code_field_configuration();
+        assert_eq!(
+            config.keyboard,
+            KeyboardKind::Number,
+            "a pairing code is digits, so the field raises the number pad"
+        );
+        assert!(!config.autocorrect, "no autocorrect on a code");
+        assert!(!config.suggestions, "no word suggestions on a code");
+    }
 }

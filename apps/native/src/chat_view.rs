@@ -21,8 +21,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Autocapitalize, Bounds, ClickEvent, Context, Div, ElementId, Entity,
-    Focusable, Hsla, KeyDownEvent, Keystroke, MouseUpEvent, Pixels, Point, ScrollEvent,
-    ScrollHandle, SharedString, Size, Stateful, Subscription, Task, TextInputAction,
+    Focusable, Hsla, KeyDownEvent, KeyboardKind, Keystroke, MouseUpEvent, Pixels, Point,
+    ScrollEvent, ScrollHandle, SharedString, Size, Stateful, Subscription, Task, TextInputAction,
     TextInputConfiguration, Window, WindowId, canvas, div, point, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
@@ -4734,6 +4734,7 @@ fn phone_composer_configuration() -> TextInputConfiguration {
         suggestions: false,
         autocapitalize: Autocapitalize::Sentences,
         input_action: TextInputAction::Send,
+        keyboard: KeyboardKind::Text,
     }
 }
 

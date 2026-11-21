@@ -707,6 +707,11 @@ impl TextInput {
         cx.notify();
     }
 
+    /// The soft keyboard configuration this input asks the platform for.
+    pub(crate) fn input_configuration(&self) -> &TextInputConfiguration {
+        &self.input_config
+    }
+
     /// Masks the input, or shows its text again. A masked input draws a `•`
     /// for each character (a line break stays one), with the caret and the
     /// selection where the hidden text puts them; copy and cut do nothing

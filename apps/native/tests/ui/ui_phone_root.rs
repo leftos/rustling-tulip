@@ -5,7 +5,7 @@
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{Edges, TestAppContext, WindowInsets, point, px};
+use gpui::{Edges, KeyboardKind, TestAppContext, WindowInsets, point, px};
 use protocol::{
     ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome, FEATURE_CLIENT_PRESENCE,
     FEATURE_RELAY_PUSH,
@@ -330,6 +330,29 @@ fn a_host_with_no_token_offers_pair_and_opens_the_dialog(cx: &mut TestAppContext
         })
         .collect();
     assert_eq!(redeemed, ["123456"]);
+}
+
+#[gpui::test]
+fn the_pairing_code_field_raises_the_number_pad(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_pairing_open(cx, &dir);
+    h.click_on("device-pairing-ask");
+    h.host(&saved_remote())
+        .send(DaemonMessage::DevicePairPending {
+            request_id: "r1".to_owned(),
+            expires_in_secs: 300,
+        });
+    h.click_on("device-pairing-have-code");
+
+    assert!(drawn(&mut h, "device-pairing-code"), "the code field shows");
+    let config = h
+        .root(RootView::device_pairing_code_configuration)
+        .expect("the code field asks for a keyboard while the dialog is open");
+    assert_eq!(
+        config.keyboard,
+        KeyboardKind::Number,
+        "a six-digit code raises the number pad"
+    );
 }
 
 /// A phone whose one saved host has no token, with its Pair dialog open.
