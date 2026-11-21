@@ -4,15 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
-### Fixed
-
-- The chat shows Submit and Cancel at a question's review step with current Claude Code, and answering one of several questions keeps the session waiting for you.
-
 ### Added
 
 - On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.
 - Linear issue chips show on the Dashboard's session titles and on subagent and dispatch-run rows in the Dashboard and the sidebar.
 - Settings › Linear saves a Linear API key on the host instead of an environment variable, turns Linear issue links on or off, and tests the key.
+
+### Fixed
+
+- The chat shows Submit and Cancel at a question's review step with current Claude Code, and answering one of several questions keeps the session waiting for you.
 
 ## v0.17.1-alpha
 
