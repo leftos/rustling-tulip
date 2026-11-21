@@ -1785,6 +1785,11 @@ impl RootView {
         self.sync_chat_loads(cx);
     }
 
+    /// The host's session the phone shows, while it shows one.
+    pub(crate) fn phone_chat_shown(&self) -> Option<&(HostKey, String)> {
+        self.chat.phone.as_ref()
+    }
+
     /// The note the phone shows in place of its session's chat since the
     /// daemon refused to load it, while it does.
     #[must_use]

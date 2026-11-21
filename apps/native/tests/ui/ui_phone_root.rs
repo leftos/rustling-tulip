@@ -244,9 +244,12 @@ fn a_saved_host_with_a_token_lists_its_sessions_at_window_width(cx: &mut TestApp
     assert!(
         matches!(
             sent.as_slice(),
-            [protocol::ClientMessage::LoadChat { session_id, .. }] if session_id == "s1"
+            [
+                protocol::ClientMessage::LoadChat { session_id, .. },
+                protocol::ClientMessage::WatchDashboard { on: true },
+            ] if session_id == "s1"
         ),
-        "a tap sends only its chat's load: {sent:?}"
+        "a tap sends its chat's load and the context label's Dashboard watch: {sent:?}"
     );
     assert!(
         h.host(&saved_remote()).commands().is_empty(),

@@ -34,7 +34,7 @@ use rustling_tulip_native::completion::CompletionItem;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
 use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey};
-use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
+use support::{Fixture, Harness, Opened, TestDir, facts, facts_message, pane, repo, session, tab};
 
 const TO_TERMINAL: &str = "pane-view-terminal-p1";
 const TO_CHAT: &str = "pane-view-chat-p1";
@@ -5110,5 +5110,55 @@ fn a_wheel_over_a_tail_box_leaves_the_chat_still(cx: &mut TestAppContext) {
         h.root(|root, _| root.chat_scroll_offset("p1")),
         chat_before,
         "the chat keeps its place"
+    );
+}
+
+/// Whether `sent` holds a `WatchDashboard` turning the watch `on`.
+fn watch_sent(sent: &[ClientMessage], on: bool) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::WatchDashboard { on: was } if *was == on))
+}
+
+#[gpui::test]
+fn a_shown_chat_watches_its_hosts_facts_and_hiding_it_unwatches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    assert!(
+        !watch_sent(&h.sent(), true),
+        "a terminal pane watches nothing"
+    );
+
+    h.click_on(TO_CHAT);
+    assert!(
+        watch_sent(&h.sent(), true),
+        "the chat's host is watched with no Dashboard tab"
+    );
+
+    h.click_on(TO_TERMINAL);
+    assert!(
+        watch_sent(&h.sent(), false),
+        "hiding the chat ends the watch"
+    );
+}
+
+#[gpui::test]
+fn a_chat_pane_header_shows_its_context_and_a_terminal_pane_none(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &split_with("s1"))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.simulate_resize(gpui::size(px(1920.0), px(1200.0)));
+    h.answer_scrollback("s1", b"");
+    h.click_on(TO_CHAT);
+    h.send(facts_message(vec![facts("s1").context(41).build()]));
+
+    assert!(painted(&mut h, "pane-p1-context=ctx 41%"));
+    assert!(!painted(&mut h, "pane-p1-context-hot"), "41% is not hot");
+    assert!(
+        !painted(&mut h, "pane-p2-context"),
+        "a pane drawing its terminal draws no label"
     );
 }

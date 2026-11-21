@@ -1,7 +1,8 @@
 //! The Dashboard tab on the root view: the rail button's open or focus, the
 //! `OpenDashboardTab` requests out and the tab one of them waits to
 //! activate, and the `WatchDashboard` the client keeps in step with whether
-//! the active tab is the Dashboard; and the drawers opened under By status
+//! the active tab is the Dashboard or a shown chat reads its session's
+//! facts; and the drawers opened under By status
 //! rows, their `GetSessionDetail`s, throttled per drawer, and the replies
 //! they draw.
 
@@ -19,7 +20,9 @@ use crate::RootView;
 use crate::connection::Connection;
 use crate::dashboard::{self, GroupKind};
 use crate::dashboard_facts::HeldTracks;
-use crate::dashboard_rows::{DrawerCells, DrawerDetail, diff_target, drawer_cells};
+use crate::dashboard_rows::{
+    ContextLabel, DrawerCells, DrawerDetail, context_label, diff_target, drawer_cells,
+};
 use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::notices::ToastKind;
 use crate::source_control::ScKey;
@@ -709,23 +712,53 @@ impl RootView {
     /// session's would stay held for good.
     fn prune_dashboard_facts(&mut self, host: &HostKey) {
         let model = dashboard::model(&self.sidebar, &self.dashboard_facts.facts());
+        // A shown chat's context label still reads its session's facts.
         let listed: Vec<String> = GroupKind::ALL
             .into_iter()
             .flat_map(|kind| model.rows(kind))
             .map(|row| row.session_id.clone())
+            .chain(self.chat_fact_sessions().into_iter().map(|(_, id)| id))
             .collect();
         self.dashboard_facts
             .prune(host, listed.iter().map(String::as_str));
     }
 
-    /// Sends `WatchDashboard` to each host where whether the active tab is
-    /// a Dashboard differs from the last one sent on that host's
-    /// connection: This PC always, a remote host while it is connected.
+    /// Session `session_id`'s context label, from its host's Dashboard
+    /// facts: a chat header's `ctx 41%`.
+    pub(crate) fn context_label_of(&self, session_id: &str) -> Option<ContextLabel> {
+        context_label(self.dashboard_facts.facts_for(session_id))
+    }
+
+    /// The sessions whose shown chat reads their context figure, with their
+    /// hosts: each pane of the active tab or a popped-out tab that draws its
+    /// chat, and the session the phone's session page shows.
+    pub(crate) fn chat_fact_sessions(&self) -> Vec<(HostKey, String)> {
+        let active = self.tabs.active_id();
+        let mut shown: Vec<(HostKey, String)> = self
+            .tabs
+            .tabs()
+            .iter()
+            .filter(|tab| active == Some(tab.id.as_str()) || self.is_tab_popped(&tab.id))
+            .filter_map(|tab| tab.grid())
+            .flat_map(crate::tabs::collect_panes)
+            .filter(|pane| self.pane_shows_chat(pane.id))
+            .filter_map(|pane| Some((pane.host, pane.session?.to_owned())))
+            .collect();
+        shown.extend(self.phone_chat_shown().cloned());
+        shown
+    }
+
+    /// Sends `WatchDashboard` to each host where whether its facts are
+    /// wanted ([`watch_wanted`]) differs from the last one sent on that
+    /// host's connection: This PC always, a remote host while it is
+    /// connected. Nothing goes out while that stays the same.
     pub(crate) fn sync_dashboard_watch(&mut self) {
-        let on = self.dashboard_active();
+        let dashboard = self.dashboard_active();
+        let chats = self.chat_fact_sessions();
         for host in self.hosts.keys() {
             let reachable =
                 host == HostKey::Local || self.conn_of(&host).is_some_and(Connection::is_open);
+            let on = watch_wanted(dashboard, &chats, &host);
             if !reachable || on == self.dashboard_watch.contains(&host) {
                 continue;
             }
@@ -756,10 +789,33 @@ impl RootView {
     }
 }
 
+/// Whether `host`'s Dashboard facts are wanted: while a Dashboard tab is
+/// active (`dashboard`), or while one of `chats`, the shown chats' sessions
+/// with their hosts, is `host`'s.
+fn watch_wanted(dashboard: bool, chats: &[(HostKey, String)], host: &HostKey) -> bool {
+    dashboard || chats.iter().any(|(of, _)| of == host)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ANSWERS_CAP, DashboardAnswers, is_drawer_request};
+    use super::{ANSWERS_CAP, DashboardAnswers, is_drawer_request, watch_wanted};
     use crate::target::HostKey;
+
+    #[test]
+    fn a_shown_chat_wants_its_hosts_facts_without_a_dashboard() {
+        let remote = HostKey::Remote("box".to_owned());
+        let chats = [(HostKey::Local, "s1".to_owned())];
+        assert!(watch_wanted(false, &chats, &HostKey::Local));
+        assert!(
+            !watch_wanted(false, &chats, &remote),
+            "another host's chat wants nothing of this one"
+        );
+        assert!(!watch_wanted(false, &[], &HostKey::Local), "no chat shown");
+        assert!(
+            watch_wanted(true, &[], &remote),
+            "the Dashboard wants every host"
+        );
+    }
 
     #[test]
     fn only_a_drawers_own_request_ids_are_claimed() {

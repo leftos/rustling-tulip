@@ -23,6 +23,7 @@ use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
 use crate::chat_view::{HandleAreas, HandleEnd, chat_available, composer_line_disables};
+use crate::dashboard_rows::ContextLabel;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
@@ -144,20 +145,18 @@ impl PhoneRoot {
     /// The shown session's header, while a session is shown.
     pub(super) fn session_header(&self, cx: &App) -> Option<Header> {
         let (host, session_id) = self.shown.as_ref()?;
-        let ended = self
-            .root
-            .read(cx)
+        let root = self.root.read(cx);
+        let ended = root
             .sidebar
             .session_on(host, session_id)
             .is_some_and(home::ended);
+        let context = root.context_label_of(session_id);
         let mirrored = self.chat_mirrored(host, session_id, cx);
         let home = self.home(cx);
-        Some(Header::new(
-            session_id,
-            home.row_of(host, session_id),
-            ended,
-            mirrored,
-        ))
+        Some(
+            Header::new(session_id, home.row_of(host, session_id), ended, mirrored)
+                .with_context(context),
+        )
     }
 
     /// The page the shown session draws while its chat is mirrored or not
@@ -1150,10 +1149,22 @@ impl PhoneRoot {
                             .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                             .child(header.label.clone()),
                     )
-                    .children(
-                        header
-                            .status
-                            .map(|(word, tone)| status_line(word, tone, t, cx)),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .children(
+                                header
+                                    .status
+                                    .map(|(word, tone)| status_line(word, tone, t, cx)),
+                            )
+                            .children(
+                                header
+                                    .context
+                                    .as_ref()
+                                    .map(|label| context_line(label, t, cx)),
+                            ),
                     ),
             )
             .children(toggle)
@@ -1203,6 +1214,26 @@ pub(super) fn status_line(word: &'static str, tone: Tone, t: &UiTheme, cx: &App)
         .text_size(ui_px(cx, STATUS_TEXT_SIZE))
         .text_color(gpui::rgb(tone_color(tone, t)))
         .child(word)
+}
+
+/// The session's context label beside its status word, tagged
+/// `phone-session-context`, its text `phone-session-context={text}`, and
+/// `phone-session-context-hot` past 80%.
+fn context_line(label: &ContextLabel, t: &UiTheme, cx: &App) -> Div {
+    let text = label.text.clone();
+    let tag = format!("phone-session-context={text}");
+    div()
+        .driver_id(|| "phone-session-context".to_owned())
+        .flex_none()
+        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+        .text_color(gpui::rgb(label.colour(t)))
+        .child(
+            div()
+                .when(label.hot, |hot| {
+                    hot.driver_id(|| "phone-session-context-hot".to_owned())
+                })
+                .child(div().driver_id(move || tag).child(text)),
+        )
 }
 
 #[cfg(test)]

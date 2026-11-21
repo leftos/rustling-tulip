@@ -32,7 +32,10 @@ use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
+use support::{
+    Fixture, Harness, REMOTE, TestDir, facts, facts_message, repo, saved_remote, saved_ui, seed_ui,
+    session,
+};
 
 /// The least height of a row or a target.
 fn touch_target() -> Pixels {
@@ -315,9 +318,12 @@ fn the_back_button_returns_to_home(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMessage::UnloadChat { session_id }] if session_id == "a"
+            [
+                ClientMessage::UnloadChat { session_id },
+                ClientMessage::WatchDashboard { on: false },
+            ] if session_id == "a"
         ),
-        "Back sends only its chat's unload: {sent:?}"
+        "Back sends only its chat's unload and the end of the watch its context label read: {sent:?}"
     );
 }
 
@@ -4434,4 +4440,49 @@ fn a_finger_in_the_middle_does_not_scroll(cx: &mut TestAppContext) {
 
     assert_eq!(chat_offset(&mut h), before, "no scroll away from the edges");
     h.touch(TouchPhase::Ended, point(from.x, from.y + px(12.0)));
+}
+
+/// Whether `sent` holds a `WatchDashboard` turning the watch `on`.
+fn watch_sent(sent: &[ClientMessage], on: bool) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::WatchDashboard { on: was } if *was == on))
+}
+
+#[gpui::test]
+fn the_header_shows_a_hot_context_label_beside_the_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    {
+        let mut host = h.host(&saved_remote());
+        assert!(
+            watch_sent(&host.sent(), true),
+            "the page's host is watched with no Dashboard tab"
+        );
+        host.send(facts_message(vec![facts("a").context(91).build()]));
+    }
+
+    assert!(drawn(&mut h, "phone-session-context=ctx 91%"));
+    assert!(drawn(&mut h, "phone-session-context-hot"), "91% is hot");
+    assert!(
+        h.bounds("phone-session-context").origin.x > h.bounds("phone-session-status").origin.x,
+        "the label sits right of the status word"
+    );
+
+    h.click_on("phone-session-back");
+    let mut host = h.host(&saved_remote());
+    assert!(
+        watch_sent(&host.sent(), false),
+        "leaving the page ends the watch"
+    );
+}
+
+#[gpui::test]
+fn a_session_without_a_context_figure_draws_no_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir, "a");
+    h.host(&saved_remote())
+        .send(facts_message(vec![facts("a").build()]));
+
+    assert!(drawn(&mut h, "phone-session-status"));
+    assert!(!drawn(&mut h, "phone-session-context"));
 }

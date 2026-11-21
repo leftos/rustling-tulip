@@ -5,6 +5,7 @@
 use gpui::BackGesturePhase;
 
 use super::home::{HomeRow, Tone};
+use crate::dashboard_rows::ContextLabel;
 
 /// The toggle's label on the Chat page.
 pub(crate) const TERMINAL_LABEL: &str = "Terminal";
@@ -22,6 +23,8 @@ pub(crate) struct Header {
     pub(crate) toggle: bool,
     /// Whether the session's chat is mirrored now.
     pub(crate) chat_mirrored: bool,
+    /// The session's context label, while its host's facts give a figure.
+    pub(crate) context: Option<ContextLabel>,
 }
 
 impl Header {
@@ -38,7 +41,13 @@ impl Header {
             status: row.map(|row| (row.status, row.tone)),
             toggle: toggle_shown(ended, chat_mirrored),
             chat_mirrored,
+            context: None,
         }
+    }
+
+    /// The header showing `context` as its context label.
+    pub(crate) fn with_context(self, context: Option<ContextLabel>) -> Self {
+        Self { context, ..self }
     }
 }
 
@@ -223,6 +232,7 @@ mod tests {
                 status: Some(("Working", Tone::Working)),
                 toggle: true,
                 chat_mirrored: true,
+                context: None,
             }
         );
     }

@@ -15,14 +15,16 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px, relative, svg,
 };
 use protocol::{
-    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, PaneFollow, RepoEntry, SessionMember,
-    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
+    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, PaneFollow, RepoEntry, SessionFacts,
+    SessionMember, SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
+    TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
 use crate::assets::SIDEBAR_MORE_ICON;
 use crate::chat::PaneView;
 use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
+use crate::dashboard_rows::{ContextLabel, context_label};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::dispatch_view::{RunHeader, RunShown, run_header};
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
@@ -835,10 +837,13 @@ impl RootView {
     }
 
     /// Before a frame is built: settles which pane header tip shows, and
-    /// lets the panes no longer drawn forget their hover.
+    /// lets the panes no longer drawn forget their hover. A pane that
+    /// switched to or from its chat moves the Dashboard watch its header's
+    /// context label reads, which sends only when a host's watch changes.
     pub(crate) fn settle_panes_for_frame(&mut self, cx: &mut Context<Self>) {
         self.settle_header_tips(cx);
         self.forget_undrawn_hovers(cx);
+        self.sync_dashboard_watch();
     }
 
     /// Each pane the last frame drew that is not drawn now forgets its
@@ -2609,6 +2614,7 @@ impl RootView {
         let drag_session = session_id.map(str::to_owned);
         let (controls, buttons) = self.header_right(target, cx);
         let floors = self.chip_floors_fit(target, cx);
+        let context = self.header_context(target, cx);
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
@@ -2666,6 +2672,7 @@ impl RootView {
             })
             .children(header_title(pane_id, named, at, floors, cx))
             .child(div().flex_1())
+            .children(context.map(|label| header_context_label(pane_id, &label, &t)))
             .children(controls)
             .children(buttons)
             // After every element of the row is built: it reads what they
@@ -3253,9 +3260,36 @@ impl RootView {
             follow: self.tabs.pane_follow(tab_id, pane_id),
             run: self.pane_run_shown(tab_id, pane_id),
             run_stop: self.run_stop_labels(tab_id, pane_id),
+            context: session_id
+                .filter(|_| self.pane_shows_chat(pane_id))
+                .and_then(|id| self.dashboard_facts.facts_for(id)),
             at,
             here,
         }
+    }
+
+    /// The context label `target`'s header draws between its spacer and
+    /// its controls: only for a pane drawing its chat, while its session's
+    /// facts give a figure, and only while the header holds it with the
+    /// title at its least width and the chips at their floor; it is the
+    /// first thing a narrowing header drops, before its cluster moves into
+    /// ⋯. Once the cluster has moved, the label shows again where the row
+    /// holds it beside ⋯.
+    fn header_context(&self, target: &HeaderTarget<'_>, cx: &App) -> Option<ContextLabel> {
+        let label = context_label(target.context)?;
+        let Some(card) = self.pane_card(target.tab_id, target.pane_id, target.here) else {
+            return Some(label);
+        };
+        let cluster = self.header_cluster(target.tab_id, target.pane_id, target.session_id, cx);
+        let mut fit = header_fit(card, target, &cluster, cx);
+        if pane_header_fit::collapses(&fit) {
+            // The row draws ⋯ in the cluster's place.
+            fit.cluster = vec![HEADER_BUTTON_SIZE];
+        }
+        fit.fixed.push(HeaderText { cx }.ui(&label.text));
+        let fits = !pane_header_fit::collapses(&fit)
+            && pane_header_fit::floors_fit(&fit, CHIP_MIN_WIDTH, HEADER_BUTTON_SIZE);
+        fits.then_some(label)
     }
 
     /// Pane `pane_id`'s card as window `here` last laid its grid out, in
@@ -4537,6 +4571,9 @@ struct HeaderTarget<'a> {
     /// The labels of the followed run's Stop, which stays in the row
     /// however narrow the header.
     run_stop: &'static [&'static str],
+    /// The Dashboard facts of the session whose chat the pane draws, for
+    /// its context label; `None` for a pane drawing its terminal.
+    context: Option<&'a SessionFacts>,
     at: TipAt,
     here: WindowId,
 }
@@ -4588,6 +4625,25 @@ fn follow_label(follow: &PaneFollow) -> &'static str {
         PaneFollow::Subagent { .. } | PaneFollow::RunSubagent { .. } => "Subagent",
         PaneFollow::Unknown => "Unknown pane",
     }
+}
+
+/// A chat pane header's context label in the row's text size, tagged
+/// `pane-{pane_id}-context`, its text `pane-{pane_id}-context={text}`, and
+/// `pane-{pane_id}-context-hot` past 80%.
+fn header_context_label(pane_id: &str, label: &ContextLabel, t: &UiTheme) -> Div {
+    let selector = format!("pane-{pane_id}-context");
+    let hot = format!("{selector}-hot");
+    let tag = format!("{selector}={}", label.text);
+    div()
+        .driver_id(move || selector)
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(gpui::rgb(label.colour(t)))
+        .child(
+            div()
+                .when(label.hot, |row| row.driver_id(move || hot))
+                .child(div().driver_id(move || tag).child(label.text.clone())),
+        )
 }
 
 /// What a pane header's cluster, Pop out to the prompt arrows, holds.

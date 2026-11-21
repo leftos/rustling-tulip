@@ -210,6 +210,9 @@ pub(crate) struct ContextFigure {
     pub(crate) hot: bool,
 }
 
+/// The context use past which a figure reads hot, in percent.
+const CONTEXT_HOT_ABOVE: u8 = 80;
+
 /// The context column: a percentage that reads hot past 80, else `—`.
 pub(crate) fn context(percent: Option<u8>) -> ContextFigure {
     percent.map_or_else(
@@ -219,9 +222,36 @@ pub(crate) fn context(percent: Option<u8>) -> ContextFigure {
         },
         |percent| ContextFigure {
             text: format!("{percent}%"),
-            hot: percent > 80,
+            hot: percent > CONTEXT_HOT_ABOVE,
         },
     )
+}
+
+/// A chat header's context label: `ctx 41%` and whether it reads hot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextLabel {
+    /// `ctx {n}%`, the figure as the daemon sent it, over 100 included.
+    pub(crate) text: String,
+    /// True past 80 percent, as the Dashboard's context column.
+    pub(crate) hot: bool,
+}
+
+impl ContextLabel {
+    /// The colour it draws in: the danger colour while hot, else the
+    /// secondary text's, as the Dashboard's context figure.
+    pub(crate) fn colour(&self, t: &UiTheme) -> u32 {
+        if self.hot { t.context_hot } else { t.text_2 }
+    }
+}
+
+/// The context label of a session with `facts`: `None` before its facts
+/// arrive or before its first assistant record gives a figure.
+pub(crate) fn context_label(facts: Option<&SessionFacts>) -> Option<ContextLabel> {
+    let percent = facts?.context_percent?;
+    Some(ContextLabel {
+        text: format!("ctx {percent}%"),
+        hot: percent > CONTEXT_HOT_ABOVE,
+    })
 }
 
 /// A row's ten-minute bars: their heights and whether the session is quiet.
@@ -1846,6 +1876,45 @@ mod tests {
         assert!(!context(Some(80)).hot);
         assert_eq!(context(Some(81)).text, "81%");
         assert!(context(Some(81)).hot);
+    }
+
+    fn with_context(percent: Option<u8>) -> SessionFacts {
+        SessionFacts {
+            context_percent: percent,
+            ..facts("s1")
+        }
+    }
+
+    #[test]
+    fn context_label_is_none_without_facts_or_a_figure() {
+        assert_eq!(context_label(None), None, "no facts yet");
+        assert_eq!(
+            context_label(Some(&with_context(None))),
+            None,
+            "no assistant record yet"
+        );
+    }
+
+    #[test]
+    fn context_label_reads_ctx_and_is_hot_only_above_80() {
+        let label = |percent| context_label(Some(&with_context(Some(percent))));
+        assert_eq!(
+            label(41),
+            Some(ContextLabel {
+                text: "ctx 41%".to_owned(),
+                hot: false
+            })
+        );
+        assert_eq!(label(80).map(|l| l.hot), Some(false));
+        assert_eq!(label(81).map(|l| l.hot), Some(true));
+        assert_eq!(
+            label(120),
+            Some(ContextLabel {
+                text: "ctx 120%".to_owned(),
+                hot: true
+            }),
+            "a figure over 100 shows as given"
+        );
     }
 
     #[test]

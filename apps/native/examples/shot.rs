@@ -4198,6 +4198,16 @@ impl FakeDaemon {
     }
 
     /// The replies to `msg`; requests the views do not need go unanswered.
+    /// The Dashboard watch's replies. The phone's session page reads its
+    /// session's context figure; the `chat` shot's s-petal already has one.
+    fn watch_replies(&self) -> Result<Vec<DaemonMessage>> {
+        let mut replies = vec![dashboard_facts(self.now)?, dashboard_tracks(self.now)?];
+        if self.view.is_phone() {
+            replies.push(phone_session_facts()?);
+        }
+        Ok(replies)
+    }
+
     fn answer(&self, msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
         let reply = match msg {
             ClientMessage::LoadScrollback {
@@ -4252,12 +4262,7 @@ impl FakeDaemon {
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
             ClientMessage::OpenDashboardTab { id } => return dashboard_opened(id),
-            ClientMessage::WatchDashboard { on: true } => {
-                return Ok(vec![
-                    dashboard_facts(self.now)?,
-                    dashboard_tracks(self.now)?,
-                ]);
-            }
+            ClientMessage::WatchDashboard { on: true } => return self.watch_replies(),
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::TestLinear { request_id } => shot_linear_test(request_id.clone()),
             ClientMessage::ListShellChoices => shot_shell_choices(),
@@ -5818,6 +5823,22 @@ fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
         "linear_synced_at": null,
     });
     parse_message(with_compact_facts(message, now)).context("the Dashboard facts")
+}
+
+/// The facts the phone shots' watch is sent besides the Dashboard's: the
+/// page's session reads 91% of its context, hot.
+fn phone_session_facts() -> Result<DaemonMessage> {
+    parse_message(json!({
+        "type": "dashboard_facts",
+        "facts": [{
+            "session_id": PHONE_SHEET_SESSION,
+            "now": { "kind": "unknown", "text": "" },
+            "context_percent": 91,
+        }],
+        "totals": {},
+        "linear_synced_at": null,
+    }))
+    .context("the phone session's facts")
 }
 
 /// `message` with `compact_facts` added to its facts.

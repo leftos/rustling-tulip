@@ -227,9 +227,12 @@ fn a_tap_shows_the_session_page_and_loads_its_chat(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMessage::LoadChat { session_id, .. }] if session_id == "b"
+            [
+                ClientMessage::LoadChat { session_id, .. },
+                ClientMessage::WatchDashboard { on: true },
+            ] if session_id == "b"
         ),
-        "a tap sends only its chat's load: {sent:?}"
+        "a tap sends its chat's load and the context label's Dashboard watch: {sent:?}"
     );
 }
 
@@ -249,9 +252,12 @@ fn back_returns_to_home(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMessage::UnloadChat { session_id }] if session_id == "a"
+            [
+                ClientMessage::UnloadChat { session_id },
+                ClientMessage::WatchDashboard { on: false },
+            ] if session_id == "a"
         ),
-        "Back sends only its chat's unload: {sent:?}"
+        "Back sends its chat's unload and ends the Dashboard watch: {sent:?}"
     );
 }
 
@@ -745,9 +751,12 @@ fn open_shows_the_session_and_loads_its_chat(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMessage::LoadChat { session_id, .. }] if session_id == "b"
+            [
+                ClientMessage::LoadChat { session_id, .. },
+                ClientMessage::WatchDashboard { on: true },
+            ] if session_id == "b"
         ),
-        "Open sends only its chat's load: {sent:?}"
+        "Open sends its chat's load and the context label's Dashboard watch: {sent:?}"
     );
 }
 
