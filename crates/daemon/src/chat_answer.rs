@@ -7,7 +7,8 @@
 //!
 //! An answer is not an owner key: it bumps no owner epoch. Once the screen
 //! shows the answered prompt gone it clears the record's pending prompt, but
-//! only a pending prompt of the kind it answered.
+//! only a pending prompt of the kind it answered, and not while a question's
+//! card has moved on to its next question or its review.
 //! "No, and tell the agent this" denies with the recipe, then sends the text
 //! as a chat send does, under the same turn.
 
@@ -382,6 +383,19 @@ fn answers(kind: &ChatPromptKind, pending: &PendingInput) -> bool {
     )
 }
 
+/// Whether `now` is the same question card at its next step — its next
+/// question or its review — which the record still waits on when `answered`
+/// is a question.
+fn keeps_pending(answered: &ChatPromptKind, now: &ChatScreen) -> bool {
+    *answered == ChatPromptKind::Question
+        && now.prompt.as_ref().is_some_and(|prompt| {
+            matches!(
+                prompt.kind,
+                ChatPromptKind::Question | ChatPromptKind::Review
+            )
+        })
+}
+
 /// Whether `now`, typed on `before`, holds `step`'s expectation; `gone` is
 /// whether it shows the answered prompt gone.
 fn step_holds(
@@ -489,7 +503,7 @@ impl Answerer<'_> {
             let gone = self.gone(&now);
             if gone {
                 self.progress.gone = true;
-                self.clear_once();
+                self.clear_once(&now);
             }
             if box_ready && gone && now.prompt.is_some() {
                 debug!(session_id = %self.target.session_id, "chat answer: another prompt came up after the denial");
@@ -528,9 +542,11 @@ impl Answerer<'_> {
 
     /// The first time the prompt is seen gone, clear the record's pending
     /// prompt, when it is of the answered prompt's kind and is still the one
-    /// pending before the first key, or came while none was.
-    fn clear_once(&mut self) {
-        if self.cleared {
+    /// pending before the first key, or came while none was. A question's
+    /// card moving to its next question or its review is that same question
+    /// still pending, so it clears nothing ([`keeps_pending`]).
+    fn clear_once(&mut self, now: &ChatScreen) {
+        if self.cleared || keeps_pending(&self.answered.kind, now) {
             return;
         }
         self.cleared = true;

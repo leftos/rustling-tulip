@@ -1075,7 +1075,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 71] = [
+        let cases: [(&str, &str, Verdict); 78] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1230,6 +1230,41 @@ mod tests {
             (
                 "v42-ask-review-cursor-on-cancel--synthesized",
                 include_str!("fixtures/v42-ask-review-cursor-on-cancel--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-review-w54",
+                include_str!("fixtures/claude--v2330-ask-review-w54.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-review-w120",
+                include_str!("fixtures/claude--v2330-ask-review-w120.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-review-gutter-w54--synthesized",
+                include_str!("fixtures/claude--v2330-ask-review-gutter-w54--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-review-quoted-with-bar--synthesized",
+                include_str!("fixtures/claude--v2330-review-quoted-with-bar--synthesized.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2330-review-under-quoted-ready--synthesized",
+                include_str!("fixtures/claude--v2330-review-under-quoted-ready--synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v03-ready-quoting-review--synthesized",
+                include_str!("fixtures/v03-ready-quoting-review--synthesized.txt"),
+                State(Idle),
+            ),
+            (
+                "v03-ready-draft-under-review-quote--synthesized",
+                include_str!("fixtures/v03-ready-draft-under-review-quote--synthesized.txt"),
                 State(AwaitingInput),
             ),
             (
@@ -1733,6 +1768,51 @@ mod tests {
         let reading = read_claude(&screen_from(capture));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::AwaitingInput));
         assert_eq!(reading.rule.as_deref(), Some("dialog_question_review"));
+    }
+
+    /// A review quoted in a reply above the idle box is transcript: the box's
+    /// own prompt row vetoes the dialog rule.
+    #[test]
+    fn a_review_quoted_above_the_box_reads_idle() {
+        let capture =
+            include_str!("fixtures/claude--v2330-review-quoted-with-bar--synthesized.txt");
+        let reading = read_claude(&screen_from(capture));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// A live review, which draws no input box under its options, reads as a
+    /// dialog with or without the `Ready to submit your answers?` row.
+    #[test]
+    fn a_live_review_reads_as_a_dialog() {
+        let cases = [
+            ("v42", include_str!("fixtures/v42-ask-review.txt")),
+            (
+                "w54",
+                include_str!("fixtures/claude--v2330-ask-review-w54.txt"),
+            ),
+            (
+                "w120",
+                include_str!("fixtures/claude--v2330-ask-review-w120.txt"),
+            ),
+            (
+                "gutter",
+                include_str!("fixtures/claude--v2330-ask-review-gutter-w54--synthesized.txt"),
+            ),
+        ];
+        for (name, capture) in cases {
+            let reading = read_claude(&screen_from(capture));
+            assert_eq!(
+                reading.verdict,
+                Verdict::State(ScreenState::AwaitingInput),
+                "{name}"
+            );
+            assert_eq!(
+                reading.rule.as_deref(),
+                Some("dialog_question_review"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

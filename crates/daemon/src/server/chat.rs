@@ -4413,6 +4413,7 @@ mod tests {
             const V32: &str = include_str!("../screen/fixtures/v32-ask-q2.txt");
             const V33: &str = include_str!("../screen/fixtures/v33-ask-q2-toggled.txt");
             const V38: &str = include_str!("../screen/fixtures/v38-ask-q3.txt");
+            const V42: &str = include_str!("../screen/fixtures/v42-ask-review.txt");
             const V51: &str = include_str!("../screen/fixtures/v51-plan-dialog.txt");
             const V52: &str = include_str!("../screen/fixtures/v52-plan-feedback-open.txt");
             const V152: &str = include_str!("../screen/fixtures/v152-heads-up-collapsed.txt");
@@ -4851,6 +4852,46 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn a_question_answer_moving_to_the_next_question_keeps_it_pending() {
+                let pending = question_prompt("colour");
+                let mut a = answer_question_pending("answer-next-question", &pending).await;
+                a.term.show(V32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(pending)),
+                    "the next question is the same card's next step"
+                );
+            }
+
+            #[tokio::test]
+            async fn a_question_answer_moving_to_the_review_keeps_it_pending() {
+                let pending = question_prompt("colour");
+                let mut a = answer_question_pending("answer-next-review", &pending).await;
+                a.term.show(V42).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(pending)),
+                    "the review is the same card's last step"
+                );
+            }
+
+            #[tokio::test]
+            async fn a_question_answer_with_the_dialog_gone_clears_it() {
+                let mut a =
+                    answer_question_pending("answer-question-gone", &question_prompt("colour"))
+                        .await;
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::Idle, None),
+                    "no prompt and no dialog is the question answered"
+                );
+            }
+
+            #[tokio::test]
             async fn a_heads_up_answer_leaves_mains_pending_prompt() {
                 let pending = bash_prompt("python -c");
                 let (fx, term) = Fixture::with_terminal("answer-heads-up-pending", None, V152);
@@ -5115,6 +5156,20 @@ mod tests {
                 assert!(a.term.typed_now().is_empty(), "no second group");
             }
 
+            /// A question prompt the record waits on, with one question.
+            fn question_prompt(header: &str) -> PendingInput {
+                PendingInput::Question {
+                    questions: vec![protocol::PendingQuestion {
+                        question: format!("Which {header}?"),
+                        header: header.to_owned(),
+                        options: vec!["Red".to_owned(), "Blue".to_owned()],
+                        option_descriptions: Vec::new(),
+                        multi_select: false,
+                        preview: false,
+                    }],
+                }
+            }
+
             fn bash_prompt(summary: &str) -> PendingInput {
                 PendingInput::Permission {
                     tool_name: "Bash".to_owned(),
@@ -5133,6 +5188,31 @@ mod tests {
             /// record holds `pending`, up to its digit.
             async fn answer_pending(tag: &str, pending: &PendingInput) -> Answering {
                 let (fx, term) = Fixture::with_terminal(tag, None, PERMISSION);
+                fx.hub.sessions.update("s1", |record| {
+                    record.hook_driven = true;
+                    record.status = SessionStatus::AwaitingInput;
+                    record.pending_input = Some(pending.clone());
+                });
+                let (prompt_id, loader) = loaded(&fx).await;
+                let (s_tx, s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                let mut a = Answering {
+                    fx,
+                    term,
+                    prompt_id,
+                    loader,
+                    s_tx,
+                    s_rx,
+                };
+                a.typed(b"1", "the digit").await;
+                a.waits("the digit");
+                a
+            }
+
+            /// Answer a question step of a hook-driven `s1` whose record
+            /// holds `pending`, up to its digit.
+            async fn answer_question_pending(tag: &str, pending: &PendingInput) -> Answering {
+                let (fx, term) = Fixture::with_terminal(tag, None, QUESTION);
                 fx.hub.sessions.update("s1", |record| {
                     record.hook_driven = true;
                     record.status = SessionStatus::AwaitingInput;

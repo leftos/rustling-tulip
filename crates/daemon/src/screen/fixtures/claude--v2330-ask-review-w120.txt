@@ -1,0 +1,32 @@
+
+⚠ Code Mode (experimental) is on · this session can be resumed only with Code Mode on
+
+❯ Use the AskUserQuestion tool to ask me two questions in one call: favourite colour (options red/blue) and favourite
+  number (options 1/2). Do nothing else.
+
+● Answered Claude's questions:
+  ⎿  · What is your favourite colour? → Red
+     · What is your favourite number? → 2
+
+● You picked red as your favourite colour and 2 as your favourite number.
+
+✻ Cogitated for 5s · done 5:15 PM                                                                              ⧉ Reply
+
+❯ Again: use the AskUserQuestion tool to ask me two questions in one call: favourite fruit (options apple/pear) and
+  favourite day (options Monday/Friday). Do nothing else.
+
+● Working · 9s…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Fruit  ☒ Day  ✔ Submit  →
+
+Review your answers
+
+ ● What is your favourite fruit?
+   → Apple
+ ● What is your favourite day?
+   → Friday
+
+❯ 1. Submit answers
+  2. Cancel
+

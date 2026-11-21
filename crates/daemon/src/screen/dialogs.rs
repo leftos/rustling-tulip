@@ -437,6 +437,20 @@ mod tests {
         Which tests should be written? -> add, edge cases, fuzz tests\n\
         Which code style should the functions use? -> Plain";
 
+    /// The review step's answers in the 2.1.330 captures, which draw no
+    /// `Ready to submit your answers?` row above their options.
+    const V2330_REVIEW_BODY: &str =
+        "What is your favourite colour? -> Red\nWhat is your favourite number? -> 2";
+
+    const V2330_WIDE_REVIEW_BODY: &str =
+        "What is your favourite fruit? -> Apple\nWhat is your favourite day? -> Friday";
+
+    /// The same step with its long first question wrapped behind a `│`
+    /// gutter, one on each of the question's rows.
+    const V2330_GUTTER_REVIEW_BODY: &str = "Audio: where does music play? (Bible draft: \
+        X:\\dev\\example\\docs\\design\\audio-direction.md) -> Continuous\n\
+        Audio: which music palette? -> Small acoustic (Rec.)";
+
     const FILE_OPTIONS: [(u32, &str); 3] = [
         (1, "Yes"),
         (
@@ -503,6 +517,78 @@ mod tests {
             .collect();
         assert_eq!(labels, ["Pick a branch"]);
         assert_eq!(prompt.subject, WRAPPED_RULE_QUESTION);
+    }
+
+    /// Claude Code 2.1.330 draws no `Ready to submit your answers?` row: the
+    /// options follow the answers directly.
+    #[test]
+    fn a_review_without_its_ready_row_reads_as_the_review() {
+        let prompt = prompt_of(include_str!("fixtures/claude--v2330-ask-review-w54.txt"));
+        assert_eq!(prompt.kind, ChatPromptKind::Review);
+        assert_eq!(prompt.subject, "Review your answers");
+        assert_eq!(prompt.body, V2330_REVIEW_BODY);
+        let options: Vec<(u32, &str)> = prompt
+            .options
+            .iter()
+            .map(|option| (option.number, option.label.as_str()))
+            .collect();
+        assert_eq!(options, [(1, "Submit answers"), (2, "Cancel")]);
+    }
+
+    #[test]
+    fn a_wide_review_without_its_ready_row_reads_as_the_review() {
+        let prompt = prompt_of(include_str!("fixtures/claude--v2330-ask-review-w120.txt"));
+        assert_eq!(prompt.kind, ChatPromptKind::Review);
+        assert_eq!(prompt.subject, "Review your answers");
+        assert_eq!(prompt.body, V2330_WIDE_REVIEW_BODY);
+        let options: Vec<(u32, &str)> = prompt
+            .options
+            .iter()
+            .map(|option| (option.number, option.label.as_str()))
+            .collect();
+        assert_eq!(options, [(1, "Submit answers"), (2, "Cancel")]);
+    }
+
+    #[test]
+    fn a_review_question_behind_a_gutter_reads_whole() {
+        let prompt = prompt_of(include_str!(
+            "fixtures/claude--v2330-ask-review-gutter-w54--synthesized.txt"
+        ));
+        assert_eq!(prompt.kind, ChatPromptKind::Review);
+        assert_eq!(prompt.body, V2330_GUTTER_REVIEW_BODY);
+    }
+
+    /// A reply quoting the review step whole, its tab bar included, is
+    /// transcript: the quoted options do not end the screen.
+    #[test]
+    fn a_quoted_review_with_its_bar_is_no_dialog() {
+        let screen = read_capture(include_str!(
+            "fixtures/claude--v2330-review-quoted-with-bar--synthesized.txt"
+        ));
+        assert!(
+            screen.prompt.is_none(),
+            "{:?}",
+            screen.prompt.map(|p| p.subject)
+        );
+        assert_eq!(screen.composer, ComposerState::Ready);
+    }
+
+    /// A quoted `Ready to submit your answers?` row above the live review
+    /// does not hide it.
+    #[test]
+    fn a_review_under_a_quoted_ready_row_reads_as_the_review() {
+        let prompt = prompt_of(include_str!(
+            "fixtures/claude--v2330-review-under-quoted-ready--synthesized.txt"
+        ));
+        assert_eq!(prompt.kind, ChatPromptKind::Review);
+        assert_eq!(prompt.subject, "Review your answers");
+        assert_eq!(prompt.body, V2330_WIDE_REVIEW_BODY);
+        let options: Vec<(u32, &str)> = prompt
+            .options
+            .iter()
+            .map(|option| (option.number, option.label.as_str()))
+            .collect();
+        assert_eq!(options, [(1, "Submit answers"), (2, "Cancel")]);
     }
 
     /// The model rows of the 2.1.329 `/model` picker captures.
@@ -575,6 +661,16 @@ mod tests {
             (2, "Chat in main session"),
             (0, "Dismiss"),
         ];
+        let v2330 = |tabs: Vec<(&'static str, bool, bool)>, body: &'static str| Expected {
+            tabs,
+            body: Some(body),
+            ..dialog(
+                Review,
+                "Review your answers",
+                &[(1, "Submit answers"), (2, "Cancel")],
+                Some(1),
+            )
+        };
         let cases: Vec<(&str, &str, Expected)> = vec![
             (
                 "v21-perm-bash",
@@ -1137,6 +1233,40 @@ mod tests {
                         Some(1),
                     )
                 },
+            ),
+            (
+                "claude--v2330-ask-review-w54",
+                include_str!("fixtures/claude--v2330-ask-review-w54.txt"),
+                v2330(
+                    vec![("Colour", true, false), ("Number", true, false)],
+                    V2330_REVIEW_BODY,
+                ),
+            ),
+            (
+                "claude--v2330-ask-review-w120",
+                include_str!("fixtures/claude--v2330-ask-review-w120.txt"),
+                v2330(
+                    vec![("Fruit", true, false), ("Day", true, false)],
+                    V2330_WIDE_REVIEW_BODY,
+                ),
+            ),
+            (
+                "claude--v2330-ask-review-gutter-w54--synthesized",
+                include_str!("fixtures/claude--v2330-ask-review-gutter-w54--synthesized.txt"),
+                v2330(
+                    vec![("Audio", true, false), ("Palette", true, false)],
+                    V2330_GUTTER_REVIEW_BODY,
+                ),
+            ),
+            (
+                "claude--v2330-review-quoted-with-bar--synthesized",
+                include_str!("fixtures/claude--v2330-review-quoted-with-bar--synthesized.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2330-review-under-quoted-ready--synthesized",
+                include_str!("fixtures/claude--v2330-review-under-quoted-ready--synthesized.txt"),
+                v2330(Vec::new(), V2330_WIDE_REVIEW_BODY),
             ),
             (
                 "v167-agent-view-ask",

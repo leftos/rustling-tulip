@@ -151,7 +151,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   An answer is a recipe the plugin gives per dialog and answer, as data pinned by fixture tests: the keys that work were measured per dialog and differ from the hook's suggestions (a permission option is its digit with no Enter, a multi-select toggles by digit and submits from its Next row, folder trust moves the cursor with Up and Down because digits do nothing).
 
-  The runner types it group by group with a screen check after each, stops when the screen does not move, a check fails or the owner types, and never sends Esc Esc (it opens Rewind) or ctrl+c. An answer clears a hook-driven record's pending prompt only once the screen shows that prompt gone and its kind matches, and is never an owner key.
+  The runner types it group by group with a screen check after each, stops when the screen does not move, a check fails or the owner types, and never sends Esc Esc (it opens Rewind) or ctrl+c. An answer clears a hook-driven record's pending prompt only once the screen shows that prompt gone and its kind matches (a question card's next question or its review does not count as gone), and is never an owner key.
 
   The agent in view is Claude Code's terminal showing one subagent's transcript in place of the main conversation, where the prompt's next Enter would go to that subagent.
 

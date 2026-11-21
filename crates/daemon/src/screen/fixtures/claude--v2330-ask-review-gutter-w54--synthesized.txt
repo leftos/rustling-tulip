@@ -1,0 +1,30 @@
+
+           Claude Code v2.1.330
+ ▐▛███▛█   Opus 5.5 with high effort
+▝▜██████▀  Claude Ultra
+ ▝▝   ▝▝   X:\dev\example-repo.wt\sample-branch-n…
+
+⚠ Code Mode (experimental) is on · this session can be
+  resumed only with Code Mode on
+
+❯ Use the AskUserQuestion tool to ask me two
+  questions in one call: audio: where does music
+  play (options continuous/ambient) and palette
+  (options small acoustic/rich). Do nothing else.
+
+  Working · 1m 24s…
+
+──────────────────────────────────────────────────────
+
+←  ☒ Audio  ☒ Palette  ✔ Submit  →
+
+Review your answers
+
+ │ ● Audio: where does music play? (Bible draft:
+ │   X:\dev\example\docs\design\audio-direction.md)
+   → Continuous
+ ● Audio: which music palette?
+   → Small acoustic (Rec.)
+
+❯ 1. Submit answers
+  2. Cancel

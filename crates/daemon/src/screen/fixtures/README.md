@@ -49,6 +49,12 @@ What the captures measured about the box, which the draft reader and the clear r
 
 `claude--v2.1.329-model-*.txt` and `claude--v2.1.329-effort-status.txt` are Claude Code 2.1.329 screens (120 columns) taken for RT-1984: the `/model` picker and its session-only `s` paths, the effort row moved, the `Switch model?` dialog and its two answers, `More models`, an Esc close, and the picker opened over a running turn (`docs/spikes/composer-commands.md`, "The picker's session-only paths on 2.1.329").
 
+`claude--v2330-ask-review-w54.txt` and `claude--v2330-ask-review-w120.txt` are Claude Code 2.1.330 screens (54 and 120 columns) taken for RT-2035: the review step of a two-question `AskUserQuestion` with both questions answered, which 2.1.330 draws with no `Ready to submit your answers?` row, its options following the answers directly. The working folder in their banner is a neutral path of the same length in place of the worktree they were taken in.
+
+`claude--v2330-ask-review-gutter-w54--synthesized.txt` is the 54-column capture above with its dialog replaced by one from a transcription of the owner's screen, whose long first question wraps behind a `│` gutter: each of the question's rows carries the gutter, which is stripped so the question reads whole. Its bar's two tab labels and its prompt are invented.
+
+`claude--v2330-review-quoted-with-bar--synthesized.txt` is a reply quoting that 2.1.330 review step whole, its tab bar included, above the idle box: a quoted review is transcript, not a dialog. `claude--v2330-review-under-quoted-ready--synthesized.txt` is a reply quoting a 2.1.307 review's `Ready to submit your answers?` row and options above a live 2.1.330 review whose bar has scrolled off the top: the quoted row is not the live step's own, and the live review reads as the dialog.
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.

@@ -158,7 +158,12 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             // No footer, and its matched row sits above the cursor on `2. Cancel`.
             region: ScreenRegion::BottomNonEmpty { rows: 24 },
             matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$".to_string()),
-            not: Vec::new(),
+            // An input box's own prompt row above the matched one: the review
+            // was quoted in a reply above the box, not drawn by a dialog. A
+            // transcript's user prompt starts with `❯` too, and carries text.
+            not: vec![LineMatcher::Regex(
+                r#"^\s*❯\s*(?:Try "[^"]*")?\s*$"#.to_string(),
+            )],
             verdict: ScreenVerdict::AwaitingInput,
         },
         ScreenRule {

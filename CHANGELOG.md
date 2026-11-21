@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- The chat shows Submit and Cancel at a question's review step with current Claude Code, and answering one of several questions keeps the session waiting for you.
+
 ### Added
 
 - On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.

@@ -1,0 +1,24 @@
+
+           Claude Code v2.1.330
+ ▐▛███▛█   Opus 5.5 with high effort
+▝▜██████▀  Claude Ultra
+ ▝▝   ▝▝   X:\dev\example-repo.wt\sample-branch-n…
+
+❯ What does the review step end with?
+
+● The review step ends with:
+
+  Ready to submit your answers?
+
+  ❯ 1. Submit answers
+    2. Cancel
+
+Review your answers
+
+ ● What is your favourite fruit?
+   → Apple
+ ● What is your favourite day?
+   → Friday
+
+❯ 1. Submit answers
+  2. Cancel

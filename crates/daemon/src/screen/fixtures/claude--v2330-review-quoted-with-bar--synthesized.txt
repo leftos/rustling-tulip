@@ -1,0 +1,32 @@
+
+           Claude Code v2.1.330
+ ▐▛███▛█   Opus 5.5 with high effort
+▝▜██████▀  Claude Ultra
+ ▝▝   ▝▝   X:\dev\example-repo.wt\sample-branch-n…
+
+⚠ Code Mode (experimental) is on · this session can be
+  resumed only with Code Mode on
+
+❯ What does the review step look like?
+
+● The review step ends with:
+
+──────────────────────────────────────────────────────
+←  ☒ Colour  ☒ Number  ✔ Submit  →
+
+Review your answers
+
+ ● What is your favourite colour?
+   → Red
+ ● What is your favourite number?
+   → 2
+
+❯ 1. Submit answers
+  2. Cancel
+
+● high · /effort
+──────────────────────────────────────────────────────
+❯ Try "fix typecheck errors"
+──────────────────────────────────────────────────────
+  sub: 5h  33% (4h07m) · 7d  84% / F   0% (5d16h)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents

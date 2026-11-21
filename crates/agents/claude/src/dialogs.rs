@@ -18,6 +18,7 @@
 //! under a permission dialog, the screen's last row.
 
 use std::cmp::Ordering;
+use std::ops::Range;
 
 use agent_api::{
     AnswerRecipe, AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect,
@@ -919,7 +920,7 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     if let Some(title) = title
         && rows[title].trim() == REVIEW_TITLE
     {
-        return Some(parse_review(rows, title, tabs));
+        return parse_review(rows, title, tabs);
     }
     let Some(footer) = find(rows, bar + 1, |row| question_footer_body(row).is_some()) else {
         return Some(Parsed::HalfDrawn);
@@ -1218,30 +1219,55 @@ fn checkbox(label: &str) -> (Option<bool>, &str) {
     (None, label)
 }
 
-/// The last `Ready to submit your answers?` row drawn as the review step's
-/// own: `Submit answers` is the first non-blank row after it, at most two
-/// rows below, its options end at the first blank row, and nothing under
-/// them but blank rows, rules and a footer's wrapped tail
-/// ([`footer_is_last`]). A reply quoting the step has the input box's `❯`
-/// row or a numbered list under the quoted options instead.
-fn review_ready(rows: &[String]) -> Option<usize> {
+/// Where a barless review's questions and answers end and its options start:
+/// the last `Ready to submit your answers?` row drawn as the review step's
+/// own and the row under it ([`ready_bounds`]), when one shows, else the row
+/// of its own `1. Submit answers` option, which Claude Code 2.1.330 draws
+/// with no ready row above it. A ready row quoted in a reply above the live
+/// step fails its bounds, and the option row below it is the one read.
+///
+/// The option row is the step's own under the same end check
+/// ([`options_are_last`]), with `→` answer rows above it.
+fn review_ready(rows: &[String]) -> Option<(usize, usize)> {
     let ready = (0..rows.len())
         .rev()
-        .find(|&index| rows[index].trim() == REVIEW_READY)?;
-    let first =
-        find(rows, ready + 1, |row| !row.trim().is_empty()).filter(|&index| index <= ready + 2)?;
+        .find(|&index| rows[index].trim() == REVIEW_READY);
+    if let Some(bounds) = ready.and_then(|ready| ready_bounds(rows, ready)) {
+        return Some(bounds);
+    }
+    let option = (0..rows.len()).rev().find(|&index| {
+        numbered(&rows[index]).is_some_and(|row| row.number == 1 && row.label == SUBMIT_ANSWERS)
+    })?;
+    let answered = rows[..option].iter().any(|row| row.trim().starts_with('→'));
+    (answered && options_are_last(rows, option)).then_some((option, option))
+}
+
+/// The bounds a review anchored on its own `Ready to submit your answers?`
+/// row at `ready` reads as: that row and the row under it, when `Submit
+/// answers` is the first non-blank row after it, at most two rows below, and
+/// its options end the screen. A row quoted in a reply has the input box's
+/// `❯` row or a numbered list under its options instead.
+fn ready_bounds(rows: &[String], ready: usize) -> Option<(usize, usize)> {
+    let first = find(rows, ready + 1, |row| !row.trim().is_empty()).filter(|&i| i <= ready + 2)?;
     if numbered(&rows[first])?.label != SUBMIT_ANSWERS {
         return None;
     }
+    options_are_last(rows, first).then_some((ready, ready + 1))
+}
+
+/// Whether the options starting at `first` end with nothing under them but
+/// blank rows, rules and a footer's wrapped tail.
+fn options_are_last(rows: &[String], first: usize) -> bool {
     let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
-    footer_is_last(rows, end - 1).then_some(ready)
+    footer_is_last(rows, end - 1)
 }
 
 /// The review step read with no readable tab bar, from the row its questions
 /// and answers start on ([`review_start`]) down to its options, with no tabs.
 fn review_without_bar(rows: &[String]) -> Option<Parsed> {
-    let ready = review_ready(rows)?;
-    Some(review(rows, review_start(rows, ready), ready, Vec::new()))
+    let (body_end, options_start) = review_ready(rows)?;
+    let start = review_start(rows, body_end);
+    Some(review(rows, start..body_end, options_start, Vec::new()))
 }
 
 /// Where a barless review's questions and answers start: the row under the
@@ -1263,21 +1289,43 @@ fn review_start(rows: &[String], ready: usize) -> usize {
 }
 
 /// The review step read with its tab bar: the questions and answers under
-/// `title`, then the `Ready to submit your answers?` row and its options.
-fn parse_review(rows: &[String], title: usize, tabs: Vec<ChatQuestionTab>) -> Parsed {
-    let Some(ready) = find(rows, title + 1, |row| row.trim() == REVIEW_READY) else {
-        return Parsed::HalfDrawn;
+/// `title`, then its options, which Claude Code 2.1.307 heads with a
+/// `Ready to submit your answers?` row and 2.1.330 draws directly under the
+/// answers. `None` for a step quoted in a reply, its options not ending the
+/// screen: `HalfDrawn` is a live frame whose options are not drawn yet.
+fn parse_review(rows: &[String], title: usize, tabs: Vec<ChatQuestionTab>) -> Option<Parsed> {
+    let body_start = title + 1;
+    let bounds = find(rows, body_start, |row| row.trim() == REVIEW_READY)
+        .and_then(|ready| ready_bounds(rows, ready))
+        .or_else(|| submit_option(rows, body_start).map(|option| (option, option)));
+    let Some((body_end, options_start)) = bounds else {
+        let numbered_below = find(rows, body_start, |row| numbered(row).is_some()).is_some();
+        return (!numbered_below).then_some(Parsed::HalfDrawn);
     };
-    review(rows, title + 1, ready, tabs)
+    Some(review(rows, body_start..body_end, options_start, tabs))
 }
 
-/// The review step's prompt: the questions and answers in
-/// `rows[body_start..ready]`, the `Ready to submit your answers?` row at
-/// `ready`, and its numbered options, which end at the first blank row.
-/// `body_start` is the row under the title for a review read with its bar,
-/// and [`review_start`]'s for one read without it.
-fn review(rows: &[String], body_start: usize, ready: usize, tabs: Vec<ChatQuestionTab>) -> Parsed {
-    let Some(first) = find(rows, ready + 1, |row| numbered(row).is_some()) else {
+/// The row of the review's `Submit answers` option at or after `from` whose
+/// options end the screen: the lowest one, so a reply above the live step
+/// quoting another does not answer for it.
+fn submit_option(rows: &[String], from: usize) -> Option<usize> {
+    (from..rows.len()).rev().find(|&index| {
+        numbered(&rows[index]).is_some_and(|option| option.label == SUBMIT_ANSWERS)
+            && options_are_last(rows, index)
+    })
+}
+
+/// The review step's prompt: the questions and answers in `rows[body]`, then
+/// its numbered options from `options_start` on, which end at the first
+/// blank row. `body` starts at the row under the title for a review read
+/// with its bar, and at [`review_start`]'s for one read without it.
+fn review(
+    rows: &[String],
+    body: Range<usize>,
+    options_start: usize,
+    tabs: Vec<ChatQuestionTab>,
+) -> Parsed {
+    let Some(first) = find(rows, options_start, |row| numbered(row).is_some()) else {
         return Parsed::HalfDrawn;
     };
     let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
@@ -1287,7 +1335,7 @@ fn review(rows: &[String], body_start: usize, ready: usize, tabs: Vec<ChatQuesti
         ..prompt(
             ChatPromptKind::Review,
             REVIEW_TITLE.to_owned(),
-            review_body(&rows[body_start..ready]),
+            review_body(&rows[body]),
             options,
         )
     })
@@ -1295,11 +1343,13 @@ fn review(rows: &[String], body_start: usize, ready: usize, tabs: Vec<ChatQuesti
 
 /// The review's pairs as lines `<question> -> <answer>`: a `●` row starts
 /// a question, a `→` row holds its answer, and any other row continues the
-/// one before it.
+/// one before it. A long question's rows carry a `│` gutter, taken off as
+/// [`question_text`] takes it.
 fn review_body(rows: &[String]) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for row in rows {
         let text = row.trim();
+        let text = text.strip_prefix('│').map_or(text, str::trim_start);
         if let Some(question) = text.strip_prefix('●') {
             pairs.push((question.trim().to_owned(), String::new()));
             continue;
