@@ -215,6 +215,55 @@ fn assert_full(h: &mut Harness<'_>) {
     );
 }
 
+#[gpui::test]
+fn the_landscape_status_has_room_to_read(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = upright(cx, &dir);
+    h.click_on(&row("a"));
+    turn_on_side(&mut h);
+    assert_full(&mut h);
+
+    let status = h.bounds("phone-session-status");
+    let back = h.bounds("phone-bar-back");
+    let scroll = h.bounds("phone-key-bar-scroll");
+    assert!(
+        status.size.width >= px(56.0),
+        "the status is at least 56 pt wide: {status:?}"
+    );
+    assert!(
+        status.left() >= back.right(),
+        "the status clears Back: {status:?}, Back {back:?}"
+    );
+    assert!(
+        scroll.left() >= status.right(),
+        "the status clears the keys: {status:?}, the row {scroll:?}"
+    );
+}
+
+#[gpui::test]
+fn landscape_bar_back_with_the_quick_dock_open_closes_the_dock(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = upright(cx, &dir);
+    h.click_on(&row("a"));
+    h.click_on("phone-session-toggle");
+    turn_on_side(&mut h);
+    assert_full(&mut h);
+    h.click_on("phone-bar-quick");
+    assert!(drawn(&mut h, "phone-terminal-quick"), "the dock opens");
+
+    h.click_on("phone-bar-back");
+
+    assert!(
+        !drawn(&mut h, "phone-terminal-quick"),
+        "Back closes the dock"
+    );
+    assert_full(&mut h);
+
+    h.click_on("phone-bar-back");
+
+    assert_panes_on_chat(&mut h);
+}
+
 /// Asserts the two panes show with the selected session on its Chat page.
 fn assert_panes_on_chat(h: &mut Harness<'_>) {
     assert!(drawn(h, "phone-list-pane"), "the list pane shows");

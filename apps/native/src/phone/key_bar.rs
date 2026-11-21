@@ -54,12 +54,14 @@ impl KeyBar {
 }
 
 /// The gpui key name for a typed character: the name gpui gives the
-/// whitespace keys, else the character itself in lower case.
+/// whitespace keys and Backspace (DEL, as the soft keyboard's Backspace
+/// reaches the filter), else the character itself in lower case.
 fn typed_name(typed: char) -> String {
     match typed {
         ' ' => "space".to_owned(),
         '\n' | '\r' => "enter".to_owned(),
         '\t' => "tab".to_owned(),
+        '\u{7f}' => "backspace".to_owned(),
         typed => typed.to_ascii_lowercase().to_string(),
     }
 }
@@ -222,6 +224,48 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_armed_ctrl_turns_backspace_into_ctrl_backspace() {
+        let mut bar = KeyBar::new();
+        assert_eq!(bar.typed("\u{7f}"), None, "an unarmed Backspace is left");
+        bar.toggle_ctrl();
+        let keystroke = bar
+            .typed("\u{7f}")
+            .expect("Ctrl turns the Backspace into a keystroke");
+        assert_eq!(keystroke, stroke("backspace", true));
+        assert!(!bar.armed(), "Ctrl disarms after the Backspace");
+        assert_eq!(
+            key_action(
+                &keystroke,
+                false,
+                false,
+                ShiftEnter::BackslashCr,
+                CopyKeys::Ctrl
+            ),
+            Some(KeyAction::Send(vec![0x08]))
+        );
+    }
+
+    #[test]
+    fn a_typed_ctrl_c_over_a_selection_interrupts_where_cmd_copies() {
+        let mut bar = KeyBar::new();
+        bar.toggle_ctrl();
+        let keystroke = bar
+            .typed("c")
+            .expect("Ctrl turns the letter into a keystroke");
+        assert_eq!(
+            key_action(
+                &keystroke,
+                false,
+                true,
+                ShiftEnter::BackslashCr,
+                CopyKeys::Cmd
+            ),
+            Some(KeyAction::Send(vec![0x03])),
+            "with text selected, Ctrl+C still interrupts"
+        );
     }
 
     #[test]

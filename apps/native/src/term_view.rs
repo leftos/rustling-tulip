@@ -2963,6 +2963,24 @@ fn flush_dead_key() {
 #[cfg(not(windows))]
 fn flush_dead_key() {}
 
+impl TerminalPane {
+    /// The soft keyboard's Backspace: asked of the typed filter first as
+    /// DEL, so an armed Ctrl on the phone's key bar makes it Ctrl+Backspace
+    /// and disarms; else DEL is sent as it is.
+    fn soft_backspace(&mut self, cx: &mut Context<Self>) {
+        let backspace = char::from(BACKSPACE).to_string();
+        if let Some(filter) = self.typed_filter.as_mut()
+            && let Some(keystroke) = filter(&backspace, cx)
+        {
+            self.press(&keystroke, cx);
+            return;
+        }
+        self.note_input();
+        self.term.clear_selection();
+        self.send_input(&[BACKSPACE]);
+    }
+}
+
 /// Text from the platform: typed characters and the IME. Only committed
 /// text is sent; the composition before it is held and drawn at the cursor.
 impl EntityInputHandler for TerminalPane {
@@ -3035,9 +3053,7 @@ impl EntityInputHandler for TerminalPane {
                 // nothing: a Backspace, which the terminal deletes. The
                 // phantom stays, so the next one deletes again.
                 (None, Some(range)) if range == (0..phantom_len()) => {
-                    self.note_input();
-                    self.term.clear_selection();
-                    self.send_input(&[BACKSPACE]);
+                    self.soft_backspace(cx);
                 }
                 // A range of the composition: the marked text loses it and no
                 // program sees the edit.

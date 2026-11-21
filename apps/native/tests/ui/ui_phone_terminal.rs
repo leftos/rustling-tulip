@@ -7,8 +7,8 @@ use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    Edges, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase,
-    WindowInsets, WindowOptions, point, px,
+    Edges, InputHandler as _, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext,
+    TouchPhase, WindowInsets, WindowOptions, point, px,
 };
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
@@ -730,6 +730,44 @@ fn the_key_bar_keeps_hide_pinned_at_its_right_end(cx: &mut TestAppContext) {
     );
 }
 
+/// Asserts the pinned key tagged `pinned` is a touch target wide and stands
+/// at least 8 pt off the scroll row's right edge, at `width` points wide.
+fn assert_set_off_from_the_scroll_row(h: &mut Harness<'_>, pinned: &str, width: f32) {
+    let key = h.bounds(pinned);
+    assert!(
+        key.size.width >= touch_target(),
+        "{pinned} is a touch target wide at {width} pt: {key:?}"
+    );
+    let scroll = h.bounds("phone-key-bar-scroll");
+    assert!(
+        key.left() - scroll.right() >= px(8.0),
+        "{pinned} stands 8 pt off the scroll row at {width} pt: {key:?}, the row {scroll:?}"
+    );
+}
+
+#[gpui::test]
+fn hide_is_44_wide_and_set_off_from_the_scroll_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    for (width, height) in [(390.0, 844.0), (375.0, 812.0)] {
+        h.cx.simulate_resize(gpui::size(px(width), px(height)));
+        draw_keyboard(&mut h, true);
+        assert_set_off_from_the_scroll_row(&mut h, "phone-bar-hide", width);
+    }
+}
+
+#[gpui::test]
+fn keyboard_is_44_wide_and_set_off_from_the_scroll_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    program_reports_the_mouse(&mut h);
+    for (width, height) in [(390.0, 844.0), (375.0, 812.0)] {
+        h.cx.simulate_resize(gpui::size(px(width), px(height)));
+        draw_keyboard(&mut h, false);
+        assert_set_off_from_the_scroll_row(&mut h, "phone-bar-keyboard", width);
+    }
+}
+
 /// The point `dx` points past the centre of cell (`col`, 0) of the terminal
 /// `pane` holds, as the desktop's own selection specs take theirs.
 fn cell_edge(h: &mut Harness<'_>, pane: &str, col: usize, dx: f32) -> Point<Pixels> {
@@ -845,6 +883,37 @@ fn ctrl_then_a_typed_c_sends_etx(cx: &mut TestAppContext) {
         h.host(&saved_remote()).sent_input("n"),
         b"c",
         "Ctrl is no longer armed"
+    );
+}
+
+#[gpui::test]
+fn ctrl_then_the_soft_keyboards_backspace_sends_ctrl_h_and_disarms(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    let slot = slot_id("n");
+
+    h.click_on("phone-bar-ctrl");
+    // The soft keyboard's Backspace: the platform replaces the phantom
+    // document's one unit with nothing.
+    h.root_update(|root, window, cx| {
+        let mut handler = root
+            .pane_input_handler(&slot)
+            .expect("the phone's terminal has an input handler");
+        handler.replace_text_in_range(Some(0..1), "", window, cx);
+    });
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        [0x08],
+        "Ctrl+Backspace sends ^H"
+    );
+    // An armed Ctrl would make the letter ^C.
+    h.commit(&slot, "c");
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("n"),
+        b"c",
+        "Ctrl is no longer armed: the next letter is plain"
     );
 }
 
@@ -1079,6 +1148,32 @@ fn quick_types_into_the_terminal(cx: &mut TestAppContext) {
 
     assert_eq!(h.host(&saved_remote()).sent_input("n"), b"y\r");
     assert!(!drawn(&mut h, "phone-terminal-quick"), "the dock closes");
+}
+
+#[gpui::test]
+fn back_with_the_quick_dock_open_closes_the_dock(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    h.click_on("phone-bar-quick");
+    assert!(drawn(&mut h, "phone-terminal-quick"), "the dock opens");
+
+    h.click_on("phone-session-back");
+
+    assert!(
+        !drawn(&mut h, "phone-terminal-quick"),
+        "Back closes the dock"
+    );
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "and the Terminal page stays"
+    );
+
+    h.click_on("phone-session-back");
+
+    assert!(
+        !drawn(&mut h, "phone-session-terminal"),
+        "a second Back leaves the page"
+    );
 }
 
 #[gpui::test]

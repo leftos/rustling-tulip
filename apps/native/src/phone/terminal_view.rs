@@ -37,6 +37,26 @@ const BAR_KEY_PAD: f32 = 6.0;
 /// The widest a bar key draws, so a long label truncates rather than runs on.
 const BAR_KEY_MAX: f32 = 96.0;
 
+/// The landscape bar's status box: its least width, side padding and text
+/// size, the keys' own size so the word reads beside them.
+const BAR_STATUS_MIN: f32 = 56.0;
+const BAR_STATUS_PAD: f32 = 8.0;
+const BAR_STATUS_TEXT_SIZE: f32 = 13.0;
+
+/// A pinned key set off from the bar's scroll row: the bar's gap, a 1 px
+/// divider in the bar's line colour, then this much more room before the
+/// key, so the scroll's cut edge reads as a scroll edge.
+fn set_off(key: Stateful<Div>, line: u32) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .pl(px(BAR_GAP))
+        .border_l_1()
+        .border_color(gpui::rgb(line))
+        .child(key.flex_none().min_w(px(TOUCH_TARGET)))
+}
+
 /// Where a row of bar keys draws, which decides what its keys do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BarKeys {
@@ -390,27 +410,28 @@ impl PhoneRoot {
     /// the screen.
     fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         let scroll = self.bar_keys_row(BarKeys::Terminal, cx).flex_1().min_w_0();
+        let line = theme(cx).line;
         let hide = keyboard_up.then(|| {
-            phone_button("phone-bar-hide", ButtonKind::Outlined, cx)
-                .flex_none()
+            let key = phone_button("phone-bar-hide", ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))
                 .px(px(BAR_KEY_PAD))
                 .child(HIDE_LABEL)
                 .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
                     crate::keyboard::lower(window);
                     cx.notify();
-                }))
+                }));
+            set_off(key, line)
         });
         let raise = (!keyboard_up && self.terminal_tap == TerminalTap::Clicks).then(|| {
-            phone_button("phone-bar-keyboard", ButtonKind::Outlined, cx)
-                .flex_none()
+            let key = phone_button("phone-bar-keyboard", ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))
                 .px(px(BAR_KEY_PAD))
                 .child(KEYBOARD_LABEL)
                 .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
                     crate::keyboard::raise(window);
                     cx.notify();
-                }))
+                }));
+            set_off(key, line)
         });
         div()
             .driver_id(|| "phone-key-bar".to_owned())
@@ -504,9 +525,22 @@ impl PhoneRoot {
             .px(px(BAR_KEY_PAD))
             .child(BACK_LABEL)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx)));
-        let status = header
-            .status
-            .map(|(word, tone)| status_line(word, tone, &t, cx));
+        // The header's status word in a box of its own, at the keys' size,
+        // a divider between it and the keys.
+        let status = header.status.map(|(word, tone)| {
+            status_line(word, tone, &t, cx)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_w(px(BAR_STATUS_MIN))
+                .min_h(px(TOUCH_TARGET))
+                .px(px(BAR_STATUS_PAD))
+                .text_size(crate::fonts::ui_px(cx, BAR_STATUS_TEXT_SIZE))
+                .whitespace_nowrap()
+                .border_r_1()
+                .border_color(gpui::rgb(t.line))
+        });
         Some(
             div()
                 .flex_none()

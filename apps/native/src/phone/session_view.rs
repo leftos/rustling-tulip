@@ -258,10 +258,12 @@ impl PhoneRoot {
             (header.chat_mirrored, header.toggle)
         });
         let sheet_up = self.prompt_sheet_up(cx);
-        let drawn = self
-            .shown
-            .as_ref()
-            .is_some_and(|(_, id)| self.dock_drawn(id, self.shown_page(mirrored), cx));
+        // The Terminal page's Quick dock closes on Back as the composer's
+        // dock does; `dock_drawn` stays the composer's, which it draws from.
+        let drawn = self.shown.as_ref().is_some_and(|(_, id)| {
+            let page = self.shown_page(mirrored);
+            self.dock_drawn(id, page, cx) || (page == Page::Terminal && self.terminal_quick)
+        });
         let step = match self.page.as_mut() {
             Some(page) => {
                 let over = session::Over {
@@ -276,6 +278,7 @@ impl PhoneRoot {
             BackStep::DismissSheet => self.put_prompt_sheet_away(cx),
             BackStep::CloseDock => {
                 self.composer_dock = Dock::None;
+                self.terminal_quick = false;
                 cx.notify();
             }
             BackStep::ToChat => {

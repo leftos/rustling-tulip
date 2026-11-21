@@ -4,10 +4,16 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Changed
+
+- The phone key bar sets Hide and Keyboard apart from the scrolling keys with a divider, and the landscape bar's session status is larger and boxed.
+
 ### Fixed
 
 - A reply that quotes a question's review step above an input box holding your draft no longer reads as waiting on you, while a real review in a named session still does.
 - A question card shows a path or link that wraps past the terminal's width whole, so it opens, and a path written in backticks links too.
+- On the phone, Ctrl then the keyboard's Backspace sends Ctrl+Backspace and releases Ctrl, and Ctrl then a typed C interrupts even over a selection.
+- On the phone, Back with the Terminal page's Quick dock open closes the dock first.
 
 ## v0.18.1-alpha
 

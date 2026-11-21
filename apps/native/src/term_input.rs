@@ -82,7 +82,8 @@ pub enum KeyAction {
 }
 
 /// Which keys copy and paste in the terminal pane: Ctrl on Windows and
-/// Linux, Cmd on macOS.
+/// Linux, Cmd on macOS and iOS, so a Ctrl key typed on the phone always
+/// sends its own control byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyKeys {
     Ctrl,
@@ -92,10 +93,15 @@ pub enum CopyKeys {
 impl CopyKeys {
     /// The shortcut modifier the platform uses for copy and paste.
     pub fn current() -> Self {
-        if cfg!(target_os = "macos") {
-            Self::Cmd
-        } else {
-            Self::Ctrl
+        Self::for_os(std::env::consts::OS)
+    }
+
+    /// The shortcut modifier for copy and paste on `os`, a
+    /// `std::env::consts::OS` name.
+    pub fn for_os(os: &str) -> Self {
+        match os {
+            "macos" | "ios" => Self::Cmd,
+            _ => Self::Ctrl,
         }
     }
 }
@@ -564,10 +570,22 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[test]
     fn the_current_copy_keys_are_ctrl_off_macos() {
         assert_eq!(CopyKeys::current(), CopyKeys::Ctrl);
+    }
+
+    #[test]
+    fn ios_copies_with_cmd() {
+        assert_eq!(CopyKeys::for_os("ios"), CopyKeys::Cmd);
+    }
+
+    #[test]
+    fn macos_windows_and_linux_copy_keys_are_unchanged() {
+        assert_eq!(CopyKeys::for_os("macos"), CopyKeys::Cmd);
+        assert_eq!(CopyKeys::for_os("windows"), CopyKeys::Ctrl);
+        assert_eq!(CopyKeys::for_os("linux"), CopyKeys::Ctrl);
     }
 
     #[test]
