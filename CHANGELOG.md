@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings › Linear saves a Linear API key on the host instead of an environment variable, turns Linear issue links on or off, and tests the key.
 - The phone's session list can be sorted A–Z, with sessions that need you first, or grouped by the desktop's tabs on that host.
 - The phone's Chat box selects a word on a double tap or long press, with handles to drag and a Cut, Copy, Paste and Select All bar.
+- The phone's Chat box pastes an image from the clipboard, and its Photos button sends a picture from the photo library.
 
 ### Fixed
 
