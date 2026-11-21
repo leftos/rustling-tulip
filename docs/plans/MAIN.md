@@ -44,8 +44,8 @@
 - [ ] RT-1450 Show Claude's "Make auto mode your default permission mode?" dialog as a Chat card and as needing you
 - [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule
-- [ ] RT-2090 Never read a session Idle while its question card is still on screen · release vNext
-- [ ] RT-2093 Count Claude Code's other delivered prompts as deliveries, not answers · release vNext
+- [ ] RT-2099 Read a question review above a truncated task panel as awaiting input
+- [ ] RT-2100 Slice the model picker's description column on a character boundary
 
 ## Updates and installer
 
@@ -61,7 +61,6 @@
 - [ ] RT-718 Let Tab reach Settings' Restart to update button
 - [ ] RT-719 Keep Check now and its status line consistent with a ready update, and keep unconfirmed Settings edits on a restart quit
 - [ ] RT-840 Sign the installer's uninstaller too
-- [ ] RT-1028 macOS signing: keep a cleanup failure from hiding the real error, and make the temp folder inside the try · release vNext
 - [ ] RT-1033 macOS updates: unpack the update in the background download step, not on Restart
 - [ ] RT-1034 macOS updates: serialize update starts with a lock the client and apply-update both take
 - [ ] RT-1035 macOS updates: tell a standard user in /Applications what can work, not to move the app
@@ -87,7 +86,6 @@
 - [ ] RT-1432 Start the new daemon after an update even if the relaunched app crashes
 - [ ] RT-1456 Stop apply-update logging a failed .staging removal on every update
 - [ ] RT-1599 Show one toast when a manual update check meets the end of a remote-update countdown
-- [ ] RT-1694 Harden the macOS and iOS signing scripts against killed and overlapping runs · release vNext
 
 ## Session lifecycle and daemon CLI
 
@@ -116,8 +114,7 @@
 - [ ] RT-1457 Check rustling-tulipd's output and exit code when a script runs it on Windows
 - [ ] RT-1462 Keep session labels across auto-resume at daemon start
 - [ ] RT-1463 Report a send that never reached the agent from rustling-tulipd send
-- [ ] RT-2094 Order the session list by when clients first heard of each session · release vNext
-- [ ] RT-2095 Never list a session whose spawn is still pending, or tell clients when it is discarded · release vNext
+- [ ] RT-2096 Hold back attention and follow-up events for a session still pending
 
 ## Build, test and driver tooling
 
@@ -185,15 +182,11 @@
 - [ ] RT-1932 Map the follow-tab and tab-close files in the test map
 - [ ] RT-1943 Map the follow-tab and tab-close files in the test map
 - [ ] RT-1960 Map the follow-tab and tab-close files in tools/test-map.json
-- [ ] RT-1961 Make clippy pass for the iOS simulator target · release vNext
 - [ ] RT-2014 Let fake-tailscale answer a host name the phone accepts
 - [ ] RT-2017 Refuse an rt-driver launch from an install older than the checkout's isolation rules
-- [ ] RT-2025 Gate rt-driver-mcp's Windows-only token constants so the macOS clippy pass runs · release vNext
 - [ ] RT-2043 Fix the Settings shot drives that Shift+Tab from the tab list into the search box
 - [ ] RT-2044 Give the nine unmapped native files rows in the test map
 - [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
-- [ ] RT-2055 Let clippy lint the phone app's iOS-only code · release vNext
-- [ ] RT-2079 Clear the daemon's Mac clippy error at the items_after_test_module expectation in paths.rs · release vNext
 
 ## Elevated daemon and security
 
@@ -310,24 +303,10 @@
 - [ ] RT-1762 Follow Markdown links and stretches in a popped-out pane window
 - [ ] RT-1929 Keep the daemon troubleshooting flyout on screen in a short window
 - [ ] RT-1991 Polish found by the v0.17.0-alpha smoke run · release vNext
-  - [ ] RT-1992 Say "1 account", not "1 accounts", in the Accounts forecast · release vNext
-  - [ ] RT-1993 Keep a failed account login from reading as a success · release vNext
-  - [ ] RT-1994 Keep a terminal draft's note on one line while Clear is armed · release vNext
-  - [ ] RT-1995 Show the Fable row's whole description in the model picker card · release vNext
-  - [ ] RT-1996 Show a /model switch's result in the chat · release vNext
   - [ ] RT-1997 Keep the Quick replies row on one line at a 640 px pane · release vNext
   - [ ] RT-1998 Open a Linear chip's card beside the chip, not over it · release vNext
   - [ ] RT-1999 Show a Linear card's Updated age in days past a day · release vNext
   - [ ] RT-2000 Draw the Linear chip in a lone shell's renamed folder heading too · release vNext
-  - [ ] RT-2001 Name the phone or iPad, not "this PC", in the phone's pairing dialog · release vNext
-  - [ ] RT-2002 Drop the leading space before "Have a code?" on the phone · release vNext
-  - [ ] RT-2003 Dim the status bar and bottom strip under the phone's pairing dialog · release vNext
-  - [ ] RT-2004 Raise the number pad for the phone's pairing code field · release vNext
-  - [ ] RT-2007 Inset the phone viewer's line-number gutter from the screen edge · release vNext
-  - [ ] RT-2008 Keep two-digit line numbers on one line in the phone viewer · release vNext
-  - [ ] RT-2009 Keep the phone browser's rows still when a fetch finishes · release vNext
-  - [ ] RT-2010 Remove the empty folders Storage's Clear leaves in the phone's Documents · release vNext
-  - [ ] RT-2011 Keep a Needs you card's options inside their boxes in the phone's narrow list column · release vNext
 
 ## Terminal, panes and links
 
@@ -581,10 +560,8 @@
 - [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up
 - [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
-- [ ] RT-2053 Keep the phone composer's handles and edit bar clear of its buttons and the keyboard · release vNext
-- [ ] RT-2054 Stop the phone composer redrawing twice per keystroke with no selection shown · release vNext
-- [ ] RT-2085 Leave the drag slot line out of the phone list's row pitch so a drop at a row's centre lands after it · release vNext
-- [ ] RT-2091 Show phone Home as refreshing until the fresh session list arrives after a foreground · release vNext
+- [ ] RT-2097 Keep a phone fetch from failing when Storage's Clear prunes its new folder
+- [ ] RT-2098 Keep the phone edit bar off the keyboard when both placements reach under it
 
 ## Dashboard, Gates and Linear
 
@@ -640,7 +617,6 @@
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
-- [ ] RT-2092 Send none of a locked Dashboard's held changes on Apply · release vNext
 
 ## Repos, workspaces and worktrees
 
@@ -749,10 +725,6 @@
 - [ ] RT-1571 Fix the missing reboot-resume design link in RT-277 and RT-725
 - [ ] RT-1767 Define the phone's key bar, composer, Quick dock and Keys tray in the glossary, and index the phone screens
 - [ ] RT-1839 Make the TailFile docs say a link to a network or device path is followed, not refused
-- [ ] RT-1976 Name every variable an isolated experiment daemon must set or clear · release vNext
-- [ ] RT-2015 Correct native-client.md: a model picker switch keeps the stepped effort · release vNext
-- [ ] RT-2016 Correct testing.md: the real CLI's folder-trust dialog needs Down then Enter · release vNext
-- [ ] RT-2086 Correct mobile-app.md: the phone's Paste goes through the system paste control · release vNext
 
 ## Backlog
 
@@ -838,15 +810,12 @@
 - [ ] RT-1971 Match the Settings › Accounts keyboard order to the drawn row
 - [ ] RT-1986 Deliver a chat send made in the first second of a turn, or report its refusal
 - [ ] RT-1987 Stop reading a command's output record as a user prompt in the chat mirror
-- [ ] RT-2029 Fix the unfulfilled clippy expectation at paths.rs on macOS · release vNext
 - [ ] RT-2031 Stop naming Windows Credential Manager in secret-store messages on a Mac host
 - [ ] RT-2032 Count the issue dot in the Compact agent chip's width estimate
 - [ ] RT-2033 Draw a Compact agent chip's issue identifier in its label's colour, size and weight
 - [ ] RT-2047 Keep a host's Linear switch across a reconnect until its new status arrives
 - [ ] RT-2077 Check whether the phone shell's chat drops the backslash before a dot in a Windows path
 - [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
-- [ ] RT-2088 Read a cui-layout review with a task panel under it as awaiting input · release vNext
-- [ ] RT-2089 Keep the space after a full-width question row ending in a word with a slash · release vNext
 
 ## Design files
 
@@ -864,7 +833,7 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, RT-2086, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
