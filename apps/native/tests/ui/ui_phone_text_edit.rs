@@ -12,6 +12,7 @@ use protocol::{
     ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot,
 };
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
+use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::HostKey;
 use serde_json::json;
 use support::{Fixture, Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
@@ -244,6 +245,34 @@ fn copy_then_paste_round_trips_through_the_clipboard(cx: &mut TestAppContext) {
     h.click_on("text-edit-paste");
     assert_eq!(text(&mut h), "hello worldhello");
     assert!(!drawn(&mut h, "text-edit-bar"), "Paste closes the bar");
+}
+
+#[gpui::test]
+fn the_edit_bar_paste_reads_no_clipboard_where_the_paste_control_pastes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = typed(cx, &dir, "hello world");
+    h.set_clipboard("pasted");
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_control_pastes(true));
+    });
+    let end = past_the_end(&mut h);
+    h.long_press_at(end);
+
+    h.click_on("text-edit-paste");
+
+    assert_eq!(
+        text(&mut h),
+        "hello world",
+        "the control, not the bar's item, reads the paste"
+    );
+    assert!(
+        drawn(&mut h, "text-edit-bar"),
+        "the bar stays open for the control's own tap"
+    );
 }
 
 #[gpui::test]

@@ -248,6 +248,24 @@ pub struct TextInput {
     /// Touch editing's state while it is on ([`Self::with_touch_editing`]);
     /// none keeps the input as a desktop one.
     touch: Option<TouchEditing>,
+    /// The system paste hook a phone owner sets ([`Self::set_system_paste`]);
+    /// the default keeps the edit bar's Paste reading the clipboard.
+    system_paste: SystemPaste,
+}
+
+/// How a system paste control over the edit bar's Paste item works with
+/// it, as the phone's owner sets it (iOS 16 and later lay one there).
+/// Each hook is told, in window px, each frame touch editing renders.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SystemPaste {
+    /// Whether the system's control takes the bar's Paste tap, so the GPUI
+    /// tap reads no clipboard.
+    pub(crate) takes_tap: bool,
+    /// Told where the edit bar's Paste item draws.
+    pub(crate) paste_drawn: Option<fn(Bounds<Pixels>)>,
+    /// Told each area touch editing draws over the window: the edit bar,
+    /// and each selection handle's touch square.
+    pub(crate) cover_drawn: Option<fn(Bounds<Pixels>)>,
 }
 
 /// The side of a hit area that takes a finger, in px.
@@ -496,6 +514,7 @@ impl TextInput {
             completion: CompletionHook::default(),
             image_paste: ImagePaste::Text,
             touch: None,
+            system_paste: SystemPaste::default(),
         }
     }
 
@@ -1286,6 +1305,63 @@ impl TextInput {
         self.touch.as_ref().is_some_and(|touch| touch.bar_open)
     }
 
+    /// From now on the edit bar's Paste works with the system paste control
+    /// as `hook` says; set by the phone's owner each frame, read by the
+    /// next render.
+    pub(crate) fn set_system_paste(&mut self, hook: SystemPaste) {
+        self.system_paste = hook;
+    }
+
+    /// A system paste control's paste from the edit bar's Paste item, as
+    /// the bar's own Paste pastes: the IME composition is committed first,
+    /// then non-empty `text` replaces the selection (newlines normalized in
+    /// a multi-line input, one line in a single-line one; a read-only input
+    /// takes none), and the bar closes whatever was pasted.
+    #[cfg_attr(
+        not(any(target_os = "ios", test)),
+        expect(
+            dead_code,
+            reason = "only the iOS paste control pastes from the edit bar"
+        )
+    )]
+    pub(crate) fn paste_from_control(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.commit_composition(cx);
+        if !text.is_empty() && !self.read_only {
+            let text = if self.mode.is_multi_line() {
+                normalize_newlines(text)
+            } else {
+                single_line(text)
+            };
+            self.replace_from_app(&text, cx);
+        }
+        self.set_bar_open(false, cx);
+        cx.notify();
+    }
+
+    /// A system paste control's tap on the edit bar's Paste item, before
+    /// anything it pasted arrives: the IME composition is committed, so an
+    /// image upload or a later text paste never acts on the marked range,
+    /// and the bar closes, whatever the paste yields.
+    #[cfg_attr(
+        not(any(target_os = "ios", test)),
+        expect(
+            dead_code,
+            reason = "only the iOS paste control pastes from the edit bar"
+        )
+    )]
+    pub(crate) fn control_paste_began(&mut self, cx: &mut Context<Self>) {
+        self.commit_composition(cx);
+        self.set_bar_open(false, cx);
+    }
+
+    /// Tells the system paste hook, when set, an area touch editing draws
+    /// over the window.
+    fn report_cover(&self, cover: Bounds<Pixels>) {
+        if let Some(report) = self.system_paste.cover_drawn {
+            report(cover);
+        }
+    }
+
     /// Opens or closes the edit bar and draws again.
     fn set_bar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if let Some(touch) = self.touch.as_mut()
@@ -1553,8 +1629,13 @@ impl TextInput {
 
     /// Runs the edit bar's `item` through the input's own Cut, Copy, Paste
     /// and Select All; every item but Select All closes the bar, which
-    /// stays open without its Select All.
+    /// stays open without its Select All. Where the system paste control
+    /// takes the Paste tap ([`SystemPaste::takes_tap`]), the GPUI tap on
+    /// Paste does nothing, the bar staying open for the control.
     fn bar_action(&mut self, item: BarItem, window: &mut Window, cx: &mut Context<Self>) {
+        if item == BarItem::Paste && self.system_paste.takes_tap {
+            return;
+        }
         self.commit_composition(cx);
         match item {
             BarItem::Cut => self.cut(&Cut, window, cx),
@@ -1602,6 +1683,7 @@ impl TextInput {
             let input = cx.entity().downgrade();
             for side in [HandleSide::Start, HandleSide::End] {
                 if spots.shows(spots.of(side)) {
+                    self.report_cover(handle_hit(side, spots));
                     overlay.push(handle_element(side, spots, color, input.clone()));
                 }
             }
@@ -1646,6 +1728,13 @@ impl TextInput {
         if let Some(touch) = self.touch.as_mut() {
             touch.bar = Some(Bounds::new(origin, bar));
         }
+        self.report_cover(Bounds::new(origin, bar));
+        if let (Some(report), Some(paste)) = (
+            self.system_paste.paste_drawn,
+            paste_item_bounds(origin, &items, &widths),
+        ) {
+            report(paste);
+        }
         let local = origin - spots.field.origin;
         let buttons = items.into_iter().zip(widths).map(|(item, width)| {
             button(item.selector(), look)
@@ -1680,6 +1769,29 @@ impl TextInput {
         )
         .into_any_element()
     }
+}
+
+/// Where the edit bar drawn at window point `origin` draws its Paste item,
+/// its `items` being `widths` wide: inside the bar's 1 px border and
+/// [`BAR_PAD`] padding, after the items before it and their gaps, a touch
+/// target tall; the box inside the item's own 1 px border, as the other
+/// Paste spots record theirs. None when the bar offers no Paste.
+fn paste_item_bounds(
+    origin: Point<Pixels>,
+    items: &[BarItem],
+    widths: &[Pixels],
+) -> Option<Bounds<Pixels>> {
+    let at = items.iter().position(|item| *item == BarItem::Paste)?;
+    let before = widths
+        .iter()
+        .take(at)
+        .fold(px(0.), |sum, width| sum + *width + px(BAR_PAD));
+    // The bar's border and padding, then the item's own border.
+    let inset = px(1.0 + BAR_PAD + 1.0);
+    Some(Bounds::new(
+        point(origin.x + inset + before, origin.y + inset),
+        size(*widths.get(at)? - px(2.0), px(TOUCH_TARGET - 2.0)),
+    ))
 }
 
 /// The width of `label` at `text_size` in the UI font; a face without one
@@ -2762,6 +2874,95 @@ mod tests {
         marked_after_replace, next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary,
         single_line,
     };
+
+    /// `input` with touch editing on and its edit bar open.
+    fn with_bar_open(input: &mut TextInput) {
+        input.touch = Some(super::TouchEditing {
+            bar_open: true,
+            ..Default::default()
+        });
+    }
+
+    #[gpui::test]
+    fn a_control_paste_from_the_edit_bar_commits_the_composition_first(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "hello ");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                with_bar_open(input);
+                input.replace_and_mark_text_in_range(None, "wor", None, window, cx);
+                input.paste_from_control("X", cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "hello worX", "the composed text stays");
+        let (marked, bar_open) = cx.update(|_, cx| {
+            let input = input.read(cx);
+            (input.marked_range.clone(), input.bar_open())
+        });
+        assert_eq!(marked, None, "the composition is committed");
+        assert!(!bar_open, "the paste closes the bar");
+    }
+
+    #[gpui::test]
+    fn an_empty_control_paste_from_the_edit_bar_keeps_the_selection(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "hello world");
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| {
+                with_bar_open(input);
+                input.selected_range = 0..5;
+                input.paste_from_control("", cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "hello world", "nothing is deleted");
+        let (selected, bar_open) = cx.update(|_, cx| {
+            let input = input.read(cx);
+            (input.selected_range.clone(), input.bar_open())
+        });
+        assert_eq!(selected, 0..5);
+        assert!(!bar_open, "the bar still closes");
+    }
+
+    #[gpui::test]
+    fn a_control_paste_beginning_at_the_edit_bar_commits_and_closes_it(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "hello ");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                with_bar_open(input);
+                input.replace_and_mark_text_in_range(None, "wor", None, window, cx);
+                input.control_paste_began(cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "hello wor");
+        let (marked, bar_open) = cx.update(|_, cx| {
+            let input = input.read(cx);
+            (input.marked_range.clone(), input.bar_open())
+        });
+        assert_eq!(marked, None, "the composition is committed");
+        assert!(!bar_open, "the bar closes before anything arrives");
+    }
+
+    #[test]
+    fn the_edit_bar_reports_its_paste_item_inside_its_border() {
+        use super::{BAR_PAD, BarItem, TOUCH_TARGET, paste_item_bounds};
+        use gpui::{Bounds, size};
+
+        let origin = point(px(10.0), px(100.0));
+        let items = [BarItem::Cut, BarItem::Copy, BarItem::Paste];
+        let widths = [px(40.0), px(50.0), px(60.0)];
+        // The item's own box: inside the bar's border and padding, after
+        // Cut and Copy and their gaps.
+        let left = 10.0 + 1.0 + BAR_PAD + 40.0 + BAR_PAD + 50.0 + BAR_PAD;
+        let top = 100.0 + 1.0 + BAR_PAD;
+        let inner = Bounds::new(
+            point(px(left + 1.0), px(top + 1.0)),
+            size(px(60.0 - 2.0), px(TOUCH_TARGET - 2.0)),
+        );
+        assert_eq!(paste_item_bounds(origin, &items, &widths), Some(inner));
+        assert_eq!(
+            paste_item_bounds(origin, &[BarItem::Cut], &[px(40.0)]),
+            None,
+            "a bar with no Paste reports none"
+        );
+    }
 
     #[test]
     fn the_end_handle_stops_short_of_the_paste_row() {

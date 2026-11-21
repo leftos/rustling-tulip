@@ -5,9 +5,12 @@
 //! with no prompt.
 //!
 //! Each Paste spot ([`PasteSpot`]) has a control of its own: the composer's
-//! Paste button, the Keys dock's Paste key (both on screen together, both
-//! pasting into the composer) and the terminal key bar's Paste key (text
-//! only, into the terminal).
+//! Paste button, the Keys dock's Paste key and the composer's edit bar's
+//! Paste item (on screen together, all pasting into the composer; the
+//! bar's closes it) and the terminal key bar's Paste key (text only, into
+//! the terminal). The edit bar and the selection's handles draw over the
+//! window, so a control under them hides while they are drawn: a native
+//! control sits above every GPUI view and would take their taps.
 //!
 //! Each Paste button or key records its bounds each frame
 //! ([`record_button`]); at the end of `PhoneRoot`'s frame [`frame_end`]
@@ -44,8 +47,8 @@ use objc2_ui_kit::{
 
 use super::PhoneRoot;
 use super::pasteboard::{
-    ImageSource, PasteKind, PasteSpot, PastedImage, TEXT_TYPES, must_unhide, paste_kind,
-    pasted_name, spots_to_hide,
+    ImageSource, PasteKind, PasteSpot, PastedImage, TEXT_TYPES, covered_spots, must_unhide,
+    paste_kind, pasted_name, spots_to_hide,
 };
 use super::photos_ios::{as_jpeg, fitted};
 use crate::buttons::ButtonSize;
@@ -56,8 +59,17 @@ const FIRST_MAJOR: isize = 16;
 
 /// What a control paste loaded, for the session page it was pasted on.
 enum Pasted {
-    /// Text, to go in at the composer's caret.
-    Text { session: String, text: String },
+    /// The edit bar's control was tapped, before anything it loads
+    /// arrives: the composer commits its composition and closes the bar,
+    /// whatever the paste yields.
+    BarTapped { session: String },
+    /// Text, to go in at the composer's caret; `from_bar` when the edit
+    /// bar's control pasted it, which pastes as the bar's own Paste does.
+    Text {
+        session: String,
+        text: String,
+        from_bar: bool,
+    },
     /// An image, to upload as the clipboard's image paste does.
     Image { session: String, image: PastedImage },
     /// Text, to paste into the session's open terminal.
@@ -68,7 +80,8 @@ impl Pasted {
     /// The session whose page the paste was made on.
     fn session(&self) -> &str {
         match self {
-            Self::Text { session, .. }
+            Self::BarTapped { session }
+            | Self::Text { session, .. }
             | Self::Image { session, .. }
             | Self::Terminal { session, .. } => session,
         }
@@ -95,8 +108,22 @@ pub(super) struct PasteFrame {
     /// Whether the shown session's host takes uploads, so an image pastes
     /// at the composer.
     pub(super) uploads: bool,
-    /// The control's colours.
+    /// The colours of a control on the page: its Paste buttons and keys.
     pub(super) colors: PasteColors,
+    /// The colours of a control on a popover: the edit bar's Paste item
+    /// ([`PasteSpot::on_popover`]).
+    pub(super) popover: PasteColors,
+}
+
+impl PasteFrame {
+    /// The colours `spot`'s control takes in this frame.
+    const fn colors_of(&self, spot: PasteSpot) -> PasteColors {
+        if spot.on_popover() {
+            self.popover
+        } else {
+            self.colors
+        }
+    }
 }
 
 // SAFETY:
@@ -148,6 +175,10 @@ thread_local! {
     /// The Paste spots drawn in the frame being drawn and their bounds,
     /// taken by [`frame_end`].
     static DRAWN: RefCell<Vec<(PasteSpot, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) };
+    /// The areas touch editing drew over the window in the frame being
+    /// drawn (the edit bar, the selection's handles), taken by
+    /// [`frame_end`]: a control under one hides.
+    static COVERS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
     static OWNER: RefCell<Owner> = RefCell::new(Owner::default());
     static SUPPORTED: OnceCell<bool> = const { OnceCell::new() };
 }
@@ -180,16 +211,32 @@ pub(super) fn record_button(spot: PasteSpot, bounds: Bounds<Pixels>, clip: Bound
     });
 }
 
+/// The composer's edit bar drew its Paste item at `bounds` in this frame,
+/// told by its render (`TextInput`'s system paste hook); the bar draws over
+/// everything, so nothing clips it.
+pub(super) fn record_edit_bar_paste(bounds: Bounds<Pixels>) {
+    record_button(PasteSpot::EditBar, bounds, bounds);
+}
+
+/// The composer's touch editing drew `cover` over the window in this frame
+/// (the edit bar, or a selection handle's touch square), told by its
+/// render: a control under it hides for the frame.
+pub(super) fn record_touch_cover(cover: Bounds<Pixels>) {
+    COVERS.with(|covers| covers.borrow_mut().push(cover));
+}
+
 /// The end of `PhoneRoot`'s frame: each Paste drawn in it gets its spot's
 /// control, for the session that spot pastes into; the control of a spot
-/// not drawn, or with no session, hides, and every control hides when a
-/// sheet covered the page.
+/// not drawn, with no session or under what touch editing drew over the
+/// window ([`covered_spots`]), hides, and every control hides when a sheet
+/// covered the page.
 pub(super) fn frame_end(frame: &PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mut App) {
     let drawn = DRAWN.with(RefCell::take);
+    let covers = COVERS.with(RefCell::take);
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let kept: Vec<(PasteSpot, Bounds<Pixels>)> = if frame.covered || !supported() {
+    let mut kept: Vec<(PasteSpot, Bounds<Pixels>)> = if frame.covered || !supported() {
         Vec::new()
     } else {
         drawn
@@ -200,6 +247,8 @@ pub(super) fn frame_end(frame: &PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mu
             })
             .collect()
     };
+    let under_touch = covered_spots(&kept, &covers);
+    kept.retain(|(spot, _)| !under_touch.contains(spot));
     let kept_spots: Vec<PasteSpot> = kept.iter().map(|(spot, _)| *spot).collect();
     let up: Vec<PasteSpot> = OWNER.with(|owner| {
         let owner = owner.borrow();
@@ -247,7 +296,7 @@ fn listen(root: WeakEntity<PhoneRoot>, cx: &mut App) {
 fn place(mtm: MainThreadMarker, spot: PasteSpot, bounds: Bounds<Pixels>, frame: &PasteFrame) {
     let session = spot.session(frame.session.clone(), frame.terminal.clone());
     let uploads = spot.takes_images(frame.uploads);
-    let colors = frame.colors;
+    let colors = frame.colors_of(spot);
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         let controls = &mut owner.controls;
@@ -392,9 +441,18 @@ fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
         tracing::info!("phone: a control paste came from no known control");
         return;
     };
-    let (Some(session), Some(sender), Some(provider)) = (session, sender, providers.firstObject())
-    else {
+    let (Some(session), Some(sender)) = (session, sender) else {
         tracing::info!("phone: a control paste had nothing to paste into");
+        return;
+    };
+    // The edit bar's Paste closes the bar whatever the paste yields, as the
+    // bar's own Paste did, and commits the composition before any of it.
+    if spot.closes_edit_bar() {
+        let session = session.clone();
+        send(&sender, Pasted::BarTapped { session });
+    }
+    let Some(provider) = providers.firstObject() else {
+        tracing::info!("phone: a control paste had no item");
         return;
     };
     let offered: Vec<String> = provider
@@ -415,6 +473,7 @@ fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
             .unwrap_or(TEXT_TYPES[0]),
         PasteKind::Nothing => return,
     };
+    let from_bar = spot.closes_edit_bar();
     load(&provider, load_as, move |bytes| {
         let session = session.clone();
         let image = match kind {
@@ -425,7 +484,11 @@ fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
                 let pasted = if spot == PasteSpot::Terminal {
                     Pasted::Terminal { session, text }
                 } else {
-                    Pasted::Text { session, text }
+                    Pasted::Text {
+                        session,
+                        text,
+                        from_bar,
+                    }
                 };
                 send(&sender, pasted);
                 return;
@@ -469,6 +532,27 @@ fn send(sender: &UnboundedSender<Pasted>, pasted: Pasted) {
     }
 }
 
+/// Puts a control's pasted `text` into `session`'s composer: from the edit
+/// bar as the bar's own Paste pastes (composition committed, empty text
+/// changing nothing, the bar closed), else at the caret.
+fn apply_text(
+    this: &PhoneRoot,
+    session: &str,
+    text: &str,
+    from_bar: bool,
+    cx: &mut Context<PhoneRoot>,
+) {
+    let Some(input) = this.root.read(cx).phone_composer_input(session) else {
+        return;
+    };
+    if from_bar {
+        input.update(cx, |input, cx| input.paste_from_control(text, cx));
+    } else {
+        let text = normalize_newlines(text);
+        input.update(cx, |input, cx| input.replace_from_app(&text, cx));
+    }
+}
+
 /// Applies a control paste on the GPUI side, while its session's page (or
 /// open terminal) is still the one shown: text goes in at the composer's
 /// caret or into the terminal as its Paste key pastes, an image uploads as
@@ -492,13 +576,16 @@ fn apply(this: &mut PhoneRoot, pasted: Pasted, cx: &mut Context<PhoneRoot>) {
                 pane.update(cx, |pane, cx| pane.paste_text(&text, &session, cx));
             }
         }
-        Pasted::Text { session, text } => {
-            let Some(input) = this.root.read(cx).phone_composer_input(&session) else {
-                return;
-            };
-            let text = normalize_newlines(&text);
-            input.update(cx, |input, cx| input.replace_from_app(&text, cx));
+        Pasted::BarTapped { session } => {
+            if let Some(input) = this.root.read(cx).phone_composer_input(&session) {
+                input.update(cx, crate::text_input::TextInput::control_paste_began);
+            }
         }
+        Pasted::Text {
+            session,
+            text,
+            from_bar,
+        } => apply_text(this, &session, &text, from_bar, cx),
         Pasted::Image {
             session,
             image: (bytes, format),

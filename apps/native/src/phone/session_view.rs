@@ -29,6 +29,7 @@ use crate::fonts::ui_px;
 use crate::keyboard;
 use crate::target::HostKey;
 use crate::term_input;
+use crate::text_input::SystemPaste;
 use crate::ui_theme::{UiTheme, theme};
 use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 
@@ -85,6 +86,31 @@ pub(super) fn record_paste_bounds(button: Stateful<Div>, spot: PasteSpot) -> Sta
 #[cfg(not(target_os = "ios"))]
 pub(super) fn record_paste_bounds(button: Stateful<Div>, _: PasteSpot) -> Stateful<Div> {
     button
+}
+
+/// The composer field's system paste hook: where the control takes the
+/// Paste taps (`control_pastes`), the edit bar's Paste tap reads no
+/// clipboard and, on iOS, touch editing tells the control layer where its
+/// Paste item and the areas it draws over the window are.
+#[cfg(target_os = "ios")]
+fn edit_bar_paste(control_pastes: bool) -> SystemPaste {
+    use super::paste_control_ios::{record_edit_bar_paste, record_touch_cover};
+    SystemPaste {
+        takes_tap: control_pastes,
+        paste_drawn: control_pastes.then_some(record_edit_bar_paste as fn(gpui::Bounds<Pixels>)),
+        cover_drawn: control_pastes.then_some(record_touch_cover as fn(gpui::Bounds<Pixels>)),
+    }
+}
+
+/// Off iOS no control lies over the bar; specs set `control_pastes` to
+/// stand in for iOS 16 and later, so the bar's Paste tap reads nothing.
+#[cfg(not(target_os = "ios"))]
+fn edit_bar_paste(control_pastes: bool) -> SystemPaste {
+    SystemPaste {
+        takes_tap: control_pastes,
+        paste_drawn: None,
+        cover_drawn: None,
+    }
 }
 
 /// What the Quick dock says while its set has no groups.
@@ -514,6 +540,8 @@ impl PhoneRoot {
                 root.chat_composer_error(session_id),
             )
         };
+        let hook = edit_bar_paste(self.control_pastes);
+        input.update(cx, |input, _| input.set_system_paste(hook));
         let photos = takes_uploads(self.root.read(cx), session_id);
         let chip_live = !composer_line_disables(line.as_ref());
         let note = line.map(|line| self.composer_note_row(session_id, &line, cx));
@@ -920,6 +948,12 @@ impl PhoneRoot {
             colors: super::paste_control_ios::PasteColors {
                 text: t.text,
                 ground: t.ground,
+            },
+            // The edit bar's items are outlined buttons in the theme's
+            // text on the bar's popover fill.
+            popover: super::paste_control_ios::PasteColors {
+                text: t.text,
+                ground: t.popover,
             },
         };
         let end = gpui::canvas(

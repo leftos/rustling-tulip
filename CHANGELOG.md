@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A plan's title drops its heading's "#" marks on the chat card, the phone's plan sheet and the Needs you row.
 - The phone's Keys dock Paste key pastes through iOS's own paste button, so iOS 16 and later no longer refuse it.
 - The phone reads the clipboard once per image paste, and a photo too large to upload is scaled to exactly 2048 pixels on its longer side.
+- The phone Chat box's edit bar Paste pastes through iOS's own paste button, and no paste button sits over the bar's Cut, Copy or Select All.
 
 ## v0.18.1-alpha
 

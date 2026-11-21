@@ -206,6 +206,13 @@ pub(crate) enum PasteSpot {
     Composer,
     /// The Keys dock's Paste key: pastes as the composer's Paste does.
     Dock,
+    /// The composer's edit bar's Paste item: pastes as the composer's
+    /// Paste does, over the selection, and closes the bar.
+    #[cfg_attr(
+        not(any(target_os = "ios", test)),
+        expect(dead_code, reason = "only the iOS paste control places itself")
+    )]
+    EditBar,
     /// The terminal key bar's Paste key: text pasted into the terminal.
     Terminal,
 }
@@ -216,19 +223,21 @@ pub(crate) enum PasteSpot {
 )]
 impl PasteSpot {
     /// The type identifiers the control offers to paste here: text and
-    /// images at the composer and the dock, text only at the terminal.
+    /// images at the composer, the dock and the edit bar, text only at the
+    /// terminal.
     pub(crate) const fn accepts(self) -> &'static [&'static str] {
         match self {
-            Self::Composer | Self::Dock => &COMPOSER_ACCEPTS,
+            Self::Composer | Self::Dock | Self::EditBar => &COMPOSER_ACCEPTS,
             Self::Terminal => &TERMINAL_ACCEPTS,
         }
     }
 
     /// The session a paste here goes to: the shown session's composer (from
-    /// its Paste or the dock's), or the session the open terminal shows.
+    /// its Paste, the dock's or its edit bar's), or the session the open
+    /// terminal shows.
     pub(crate) fn session(self, shown: Option<String>, terminal: Option<String>) -> Option<String> {
         match self {
-            Self::Composer | Self::Dock => shown,
+            Self::Composer | Self::Dock | Self::EditBar => shown,
             Self::Terminal => terminal,
         }
     }
@@ -236,18 +245,30 @@ impl PasteSpot {
     /// Whether an image pastes here, the host taking uploads when
     /// `uploads`: only into the composer.
     pub(crate) const fn takes_images(self, uploads: bool) -> bool {
-        matches!(self, Self::Composer | Self::Dock) && uploads
+        matches!(self, Self::Composer | Self::Dock | Self::EditBar) && uploads
     }
 
     /// Whether the control goes over this spot drawn at `bounds` inside the
-    /// visible `clip`: the composer's button and the dock's key always,
-    /// the key bar's key only while [`spot_fully_visible`] (its bar scrolls
-    /// sideways).
+    /// visible `clip`: the composer's button, the dock's key and the edit
+    /// bar's item always, the key bar's key only while
+    /// [`spot_fully_visible`] (its bar scrolls sideways).
     pub(crate) fn shown_in(self, bounds: Bounds<Pixels>, clip: Bounds<Pixels>) -> bool {
         match self {
-            Self::Composer | Self::Dock => true,
+            Self::Composer | Self::Dock | Self::EditBar => true,
             Self::Terminal => spot_fully_visible(bounds, clip),
         }
+    }
+
+    /// Whether a paste here closes the composer's edit bar, as the bar's own
+    /// Paste does: only from the bar.
+    pub(crate) const fn closes_edit_bar(self) -> bool {
+        matches!(self, Self::EditBar)
+    }
+
+    /// Whether the control here takes the popover's colours, as the edit
+    /// bar it sits in draws on one; every other spot takes the page's.
+    pub(crate) const fn on_popover(self) -> bool {
+        matches!(self, Self::EditBar)
     }
 }
 
@@ -297,6 +318,35 @@ pub(crate) fn spots_to_hide(up: &[PasteSpot], drawn: &[PasteSpot]) -> Vec<PasteS
         .collect()
 }
 
+/// The spots of `controls`, each placed at its bounds, whose control lies
+/// under one of `covers`, the areas touch editing draws over the window
+/// (the edit bar and each selection handle's touch square): the native
+/// control sits above every GPUI view and would take the cover's taps, so
+/// each hides for the frame. The edit bar's own control, over its Paste
+/// item, is never hidden; edges that only touch do not cover.
+#[cfg_attr(
+    not(any(target_os = "ios", test)),
+    expect(dead_code, reason = "only the iOS paste control places itself")
+)]
+pub(crate) fn covered_spots(
+    controls: &[(PasteSpot, Bounds<Pixels>)],
+    covers: &[Bounds<Pixels>],
+) -> Vec<PasteSpot> {
+    let overlaps = |a: &Bounds<Pixels>, b: &Bounds<Pixels>| {
+        a.origin.x < b.right()
+            && b.origin.x < a.right()
+            && a.origin.y < b.bottom()
+            && b.origin.y < a.bottom()
+    };
+    controls
+        .iter()
+        .filter(|(spot, bounds)| {
+            *spot != PasteSpot::EditBar && covers.iter().any(|cover| overlaps(bounds, cover))
+        })
+        .map(|(spot, _)| *spot)
+        .collect()
+}
+
 /// The type identifiers the composer's and the dock's controls offer to
 /// paste.
 const COMPOSER_ACCEPTS: [&str; 5] = [
@@ -324,8 +374,8 @@ mod tests {
     use gpui::{Bounds, ImageFormat, Pixels, point, px, size};
 
     use super::{
-        IMAGE_TYPE, ImageSource, PasteKind, PasteSpot, image_source, must_unhide, paste_kind,
-        pasted_name, source_from_types, spot_fully_visible, spots_to_hide,
+        IMAGE_TYPE, ImageSource, PasteKind, PasteSpot, covered_spots, image_source, must_unhide,
+        paste_kind, pasted_name, source_from_types, spot_fully_visible, spots_to_hide,
     };
 
     /// The image types the tests' items offer, each conforming to
@@ -639,6 +689,107 @@ mod tests {
             spots_to_hide(&up, &[]),
             up,
             "nothing drawn hides every control"
+        );
+    }
+
+    #[test]
+    fn the_edit_bar_spot_pastes_like_the_composer() {
+        let bar = PasteSpot::EditBar;
+        let composer = PasteSpot::Composer;
+        assert_eq!(bar.accepts(), composer.accepts());
+        let shown = Some("chat".to_owned());
+        let terminal = Some("term".to_owned());
+        assert_eq!(
+            bar.session(shown.clone(), terminal.clone()),
+            composer.session(shown, terminal)
+        );
+        for uploads in [true, false] {
+            assert_eq!(
+                bar.takes_images(uploads),
+                composer.takes_images(uploads),
+                "{uploads}"
+            );
+        }
+        let clip = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(50.0)));
+        let past_clip = Bounds::new(point(px(-10.0), px(0.0)), size(px(44.0), px(44.0)));
+        assert!(
+            bar.shown_in(past_clip, clip),
+            "the bar draws over every clip"
+        );
+        assert!(bar.closes_edit_bar(), "a paste from the bar closes it");
+        for other in [PasteSpot::Composer, PasteSpot::Dock, PasteSpot::Terminal] {
+            assert!(!other.closes_edit_bar(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_edit_bar_control_takes_the_popover_colours() {
+        assert!(
+            PasteSpot::EditBar.on_popover(),
+            "the bar draws on a popover"
+        );
+        for page in [PasteSpot::Composer, PasteSpot::Dock, PasteSpot::Terminal] {
+            assert!(!page.on_popover(), "{page:?} keeps the page's ground");
+        }
+    }
+
+    /// A rectangle at `x`, `y` of `width` by `height`, in px.
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+    }
+
+    /// The edit bar, drawn over the dock's last row in these cases.
+    fn edit_bar() -> Bounds<Pixels> {
+        rect(40.0, 500.0, 300.0, 54.0)
+    }
+
+    /// The start handle's touch square.
+    fn start_handle() -> Bounds<Pixels> {
+        rect(100.0, 580.0, 44.0, 44.0)
+    }
+
+    #[test]
+    fn a_dock_control_under_the_edit_bar_is_hidden() {
+        let controls = [(PasteSpot::Dock, rect(250.0, 520.0, 80.0, 44.0))];
+        assert_eq!(
+            covered_spots(&controls, &[edit_bar(), start_handle()]),
+            [PasteSpot::Dock]
+        );
+    }
+
+    #[test]
+    fn a_dock_control_under_a_handle_is_hidden() {
+        let controls = [(PasteSpot::Dock, rect(60.0, 590.0, 80.0, 44.0))];
+        assert_eq!(
+            covered_spots(&controls, &[edit_bar(), start_handle()]),
+            [PasteSpot::Dock]
+        );
+    }
+
+    #[test]
+    fn a_control_clear_of_the_bar_stays() {
+        let controls = [
+            (PasteSpot::Dock, rect(250.0, 400.0, 80.0, 44.0)),
+            // The composer's Paste, below the field, touching the bar's
+            // bottom edge only.
+            (PasteSpot::Composer, rect(16.0, 700.0, 80.0, 44.0)),
+            (PasteSpot::Terminal, rect(40.0, 554.0, 80.0, 20.0)),
+        ];
+        assert_eq!(
+            covered_spots(&controls, &[edit_bar(), start_handle()]),
+            Vec::<PasteSpot>::new()
+        );
+    }
+
+    #[test]
+    fn the_edit_bar_control_is_never_hidden_by_its_own_bar() {
+        let controls = [
+            (PasteSpot::EditBar, rect(200.0, 505.0, 60.0, 44.0)),
+            (PasteSpot::Composer, rect(16.0, 700.0, 80.0, 44.0)),
+        ];
+        assert_eq!(
+            covered_spots(&controls, &[edit_bar(), start_handle()]),
+            Vec::<PasteSpot>::new()
         );
     }
 
