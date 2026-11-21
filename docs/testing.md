@@ -222,7 +222,7 @@ Each `screenshot` writes `<the run's config dir>/driver-shots/<pid>-<n>.png`, th
 
 Recording a real Claude Code screen with its SGR (for a screen fixture) needs `FORCE_COLOR=3` from an agent shell, which otherwise gets no colour. A prompt suggestion appears only from a session's second turn, and `--prompt-suggestions` works only with `--print`, so turn them on in an interactive session with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true`. For a local Rust build, Git Bash's `link.exe` shadows MSVC's, so build from PowerShell.
 
-Run the CLI for a capture with `--safe-mode`, in a scratch folder inside an already-trusted tree: a fresh git root asks for folder trust, which only Enter accepts. A capture harness that feeds the output to pyte drops `CSI > … m` and `CSI ? u` first, since pyte reads Claude Code's keyboard-mode request `CSI > 4 m` as underline.
+Run the CLI for a capture with `--safe-mode`, in a scratch folder inside an already-trusted tree: a fresh git root asks for folder trust, whose default is "No, exit": a bare Enter quits, so a driven run sends Down, then Enter. A capture harness that feeds the output to pyte drops `CSI > … m` and `CSI ? u` first, since pyte reads Claude Code's keyboard-mode request `CSI > 4 m` as underline.
 
 ## iPhone Simulator on the Mac mini
 
