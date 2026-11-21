@@ -1238,12 +1238,15 @@ impl PhoneRoot {
     }
 
     /// What Home lists now: every host's groups in the order the owner
-    /// picked, Manual unless another is saved.
+    /// picked, Manual unless another is saved, its waiting sessions gathered
+    /// first while the switch is on.
     pub(super) fn home(&self, cx: &App) -> home::Home {
         let root = self.root.read(cx);
+        let ui = root.sidebar.ui_state();
         super::order::apply(
             home::from_sidebar(&root.sidebar),
-            root.sidebar.ui_state().phone_order,
+            ui.phone_order,
+            ui.phone_needs_you_first,
             &root.phone_layouts,
         )
     }

@@ -234,9 +234,6 @@ pub enum RepoSort {
 pub enum PhoneOrder {
     /// Groups and sessions by name, case-insensitive; Detached stays last.
     Alphabetical,
-    /// A "Needs you" group first, holding every session waiting on the
-    /// owner, then the groups without them.
-    NeedsYouFirst,
     /// One group per tab of the desktop's own layout on the host, then the
     /// sessions in no tab.
     DesktopTabs,
@@ -627,6 +624,14 @@ pub struct UiState {
     /// a value that names no order, loads as Manual.
     #[serde(default)]
     pub phone_order: PhoneOrder,
+    /// Whether the phone's Home gathers each host's sessions waiting on the
+    /// owner into a "Needs you" group at its top, after the saved order.
+    /// v0.18.0-alpha saved that as the order itself
+    /// (`"phone_order": "needs_you_first"`), which loads as Manual with this
+    /// on (`migrate_needs_you_first_order`); a file with neither loads as
+    /// Manual with this off.
+    #[serde(default)]
+    pub phone_needs_you_first: bool,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -1569,6 +1574,7 @@ impl Default for UiState {
             phone_shell_replies: None,
             phone_keys: None,
             phone_order: PhoneOrder::Manual,
+            phone_needs_you_first: false,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -2881,6 +2887,12 @@ impl SidebarModel {
     /// Saves how the phone's Home orders its sessions.
     pub fn set_phone_order(&mut self, order: PhoneOrder) {
         self.ui.phone_order = order;
+    }
+
+    /// Saves whether the phone's Home gathers the sessions waiting on the
+    /// owner at each host's top.
+    pub fn set_phone_needs_you_first(&mut self, on: bool) {
+        self.ui.phone_needs_you_first = on;
     }
 
     /// The look the interface draws in now: the six appearance fields.
@@ -4961,6 +4973,26 @@ fn is_noisy_shell_title(title: &str) -> bool {
     )
 }
 
+/// Moves v0.18.0-alpha's "Needs you first" order, saved as the order itself,
+/// to Manual with the switch on; a file that already saved the switch keeps
+/// its value.
+fn migrate_needs_you_first_order(file: &mut serde_json::Map<String, serde_json::Value>) {
+    let saved = file.get("phone_order").and_then(serde_json::Value::as_str);
+    if saved != Some("needs_you_first") {
+        return;
+    }
+    file.insert(
+        "phone_order".to_owned(),
+        serde_json::Value::String("manual".to_owned()),
+    );
+    if !file.contains_key("phone_needs_you_first") {
+        file.insert(
+            "phone_needs_you_first".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+    }
+}
+
 /// The persisted layout in `dir`; the defaults when the file is missing or
 /// unreadable. A file that does not parse keeps a copy beside it and what still
 /// reads, and the salvaged state is saved back.
@@ -4987,11 +5019,24 @@ pub fn load_ui_state(dir: &Path) -> UiState {
             return keep_and_salvage(dir, &String::from_utf8_lossy(err.as_bytes()));
         }
     };
-    serde_json::from_str(&text).unwrap_or_else(|err| {
+    let mut parsed = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(
+                "{} is not valid at line {}; keeping a copy and what still reads",
+                path.display(),
+                err.line()
+            );
+            return keep_and_salvage(dir, &text);
+        }
+    };
+    if let Some(file) = parsed.as_object_mut() {
+        migrate_needs_you_first_order(file);
+    }
+    serde_json::from_value(parsed).unwrap_or_else(|err| {
         tracing::warn!(
-            "{} is not valid at line {}; keeping a copy and what still reads",
-            path.display(),
-            err.line()
+            "{} does not read ({err}); keeping a copy and what still reads",
+            path.display()
         );
         keep_and_salvage(dir, &text)
     })
@@ -5021,10 +5066,11 @@ fn keep_and_salvage(dir: &Path, text: &str) -> UiState {
 /// Every top-level field of `text` that still parses, the others at their
 /// defaults. A field that fails is named in the log, its value never is.
 fn salvage_ui_state(text: &str) -> UiState {
-    let Ok(serde_json::Value::Object(file)) = serde_json::from_str::<serde_json::Value>(text)
+    let Ok(serde_json::Value::Object(mut file)) = serde_json::from_str::<serde_json::Value>(text)
     else {
         return UiState::default();
     };
+    migrate_needs_you_first_order(&mut file);
     let mut kept = serde_json::Map::new();
     for (key, value) in file {
         kept.insert(key.clone(), value);
@@ -7401,6 +7447,7 @@ pub(crate) mod tests {
             phone_shell_replies: None,
             phone_keys: None,
             phone_order: PhoneOrder::Manual,
+            phone_needs_you_first: false,
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),
@@ -9097,7 +9144,7 @@ pub(crate) mod tests {
     #[test]
     fn phone_order_round_trips_and_loads_manual_when_missing_or_unknown() {
         let dir = TestDir::new("phone-order");
-        // Every released shape has no `phone_order`.
+        // A file from before the order was saved has no `phone_order`.
         std::fs::write(
             dir.0.join(UI_FILE),
             r#"{ "sidebar_collapsed": true, "saved_hosts": [] }"#,
@@ -9122,7 +9169,6 @@ pub(crate) mod tests {
         );
         for (order, saved) in [
             (PhoneOrder::Alphabetical, "alphabetical"),
-            (PhoneOrder::NeedsYouFirst, "needs_you_first"),
             (PhoneOrder::DesktopTabs, "desktop_tabs"),
             (PhoneOrder::Manual, "manual"),
         ] {
@@ -9133,6 +9179,86 @@ pub(crate) mod tests {
             assert_eq!(written["phone_order"], saved);
             assert_eq!(load_ui_state(&dir.0).phone_order, order, "{saved}");
         }
+    }
+
+    #[test]
+    fn a_v0_18_needs_you_first_order_loads_as_manual_with_the_switch_on() {
+        let dir = TestDir::new("needs-you-v018");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "phone_order": "needs_you_first" }"#,
+        )
+        .expect("write");
+
+        let loaded = load_ui_state(&dir.0);
+
+        assert_eq!(
+            loaded.phone_order,
+            PhoneOrder::Manual,
+            "the order is Manual"
+        );
+        assert!(
+            loaded.phone_needs_you_first,
+            "the old order is the switch now"
+        );
+    }
+
+    #[test]
+    fn an_explicit_needs_you_switch_wins_over_the_old_order() {
+        let dir = TestDir::new("needs-you-explicit");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "phone_order": "needs_you_first", "phone_needs_you_first": false }"#,
+        )
+        .expect("write");
+
+        let loaded = load_ui_state(&dir.0);
+
+        assert_eq!(loaded.phone_order, PhoneOrder::Manual);
+        assert!(!loaded.phone_needs_you_first, "the saved switch wins");
+    }
+
+    #[test]
+    fn the_needs_you_switch_round_trips() {
+        let dir = TestDir::new("needs-you-round-trip");
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(
+            !model.ui_state().phone_needs_you_first,
+            "off unless saved on"
+        );
+
+        model.set_phone_needs_you_first(true);
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        assert!(
+            text.contains(r#""phone_needs_you_first": true"#),
+            "saved on: {text}"
+        );
+        assert!(
+            !text.contains(r#""needs_you_first""#),
+            "no order is named that: {text}"
+        );
+        assert!(load_ui_state(&dir.0).phone_needs_you_first, "and loads on");
+    }
+
+    #[test]
+    fn a_salvaged_v0_18_file_keeps_the_switch_and_the_order() {
+        let dir = TestDir::new("needs-you-salvage");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            json!({ "phone_order": "needs_you_first", "sidebar_width": "wide" }).to_string(),
+        )
+        .expect("write");
+
+        let loaded = load_ui_state(&dir.0);
+
+        assert_eq!(loaded.phone_order, PhoneOrder::Manual);
+        assert!(
+            loaded.phone_needs_you_first,
+            "the migration runs before the salvage"
+        );
+        assert_eq!(kept_ui_copies(&dir).len(), 1, "the file was salvaged");
     }
 
     #[test]

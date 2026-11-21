@@ -3406,6 +3406,14 @@ impl RootView {
         cx.notify();
     }
 
+    /// Saves whether the phone's Home gathers the sessions waiting on the
+    /// owner at each host's top; Home redraws.
+    pub fn set_phone_needs_you_first(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.sidebar.set_phone_needs_you_first(on);
+        self.save_ui();
+        cx.notify();
+    }
+
     /// While the phone's order is Desktop tabs, asks `host` for its layouts
     /// when its connection is open and lists `host_layouts`; the reply is
     /// matched to the request.

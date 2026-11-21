@@ -59,12 +59,14 @@ const TRAY_CARD_HEIGHT: f32 = 356.0;
 const OPEN_LABEL: &str = "Open";
 /// Home's header button that opens the sort sheet, and the sheet's title.
 const SORT_LABEL: &str = "Sort";
+/// The sort sheet's switch that gathers the sessions waiting on the owner
+/// first, whatever the order.
+const NEEDS_YOU_LABEL: &str = "Needs you first";
 /// The orders the sort sheet offers, in its order: each with the tail of
 /// its row's selector and its label.
-const ORDERS: [(PhoneOrder, &str, &str); 4] = [
+const ORDERS: [(PhoneOrder, &str, &str); 3] = [
     (PhoneOrder::Manual, "manual", "Manual"),
     (PhoneOrder::Alphabetical, "alphabetical", "A–Z"),
-    (PhoneOrder::NeedsYouFirst, "needs-you", "Needs you first"),
     (PhoneOrder::DesktopTabs, "desktop-tabs", "Desktop tabs"),
 ];
 
@@ -863,15 +865,27 @@ impl PhoneRoot {
         cx.notify();
     }
 
+    /// Flips whether Home gathers the sessions waiting on the owner first:
+    /// saved, and the sheet stays open.
+    fn toggle_needs_you_first(&mut self, cx: &mut Context<Self>) {
+        let on = !self.root.read(cx).sidebar.ui_state().phone_needs_you_first;
+        tracing::debug!(on, "phone: Home's Needs you first switched");
+        self.root
+            .update(cx, |root, cx| root.set_phone_needs_you_first(on, cx));
+        cx.notify();
+    }
+
     /// The sort sheet over a scrim, as the long-press sheet draws: its
-    /// title, a row per order with the current one checked, then Cancel,
-    /// its bottom clear of `bottom`'s home indicator. `None` while closed.
+    /// title, a row per order with the current one checked, the Needs you
+    /// first switch, then Cancel, its bottom clear of `bottom`'s home
+    /// indicator. `None` while closed.
     pub(super) fn sort_sheet_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
         if !self.sort_menu {
             return None;
         }
         let t = theme(cx);
         let current = self.root.read(cx).sidebar.ui_state().phone_order;
+        let needs_you_on = self.root.read(cx).sidebar.ui_state().phone_needs_you_first;
         let close = |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
             this.sort_menu = false;
             cx.notify();
@@ -890,6 +904,18 @@ impl PhoneRoot {
             .iter()
             .map(|&entry| Self::sort_row(entry, entry.0 == current, &t, cx))
             .collect();
+        let toggle = crate::spawn_view::checkbox_row(
+            ui_text_size(cx),
+            ui_weight_shift(cx),
+            "phone-home-sort-needs-you",
+            needs_you_on,
+            false,
+            NEEDS_YOU_LABEL,
+            &t,
+        )
+        .min_h(px(TOUCH_TARGET))
+        .items_center()
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_needs_you_first(cx)));
         let panel = div()
             .id("phone-home-sort-sheet")
             .driver_id(|| "phone-home-sort-sheet".to_owned())
@@ -914,6 +940,7 @@ impl PhoneRoot {
                     .child(SORT_LABEL),
             )
             .child(div().flex().flex_col().children(rows))
+            .child(toggle)
             .child(
                 Self::sheet_button("phone-home-sort-cancel", ButtonKind::Outlined, cx)
                     .child(CANCEL_LABEL)

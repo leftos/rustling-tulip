@@ -1644,7 +1644,7 @@ fn sorting_a_to_z_reorders_the_list_and_saves_the_choice(cx: &mut TestAppContext
         drawn(&mut h, "phone-home-sort-sheet"),
         "the sort sheet opens"
     );
-    for choice in ["manual", "alphabetical", "needs-you", "desktop-tabs"] {
+    for choice in ["manual", "alphabetical", "desktop-tabs"] {
         let selector = format!("phone-home-sort-{choice}");
         assert!(drawn(&mut h, &selector), "{selector} is drawn");
         let height = h.bounds(&selector).size.height;
@@ -1672,6 +1672,62 @@ fn sorting_a_to_z_reorders_the_list_and_saves_the_choice(cx: &mut TestAppContext
     );
     h.click_on("phone-home-sort");
     assert!(drawn(&mut h, "phone-home-sort-alphabetical-check"));
+}
+
+#[gpui::test]
+fn the_needs_you_switch_keeps_the_sort_sheet_open_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    let remote = saved_remote();
+    h.host(&remote).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("a")
+                .label("Alpha")
+                .in_repo("r1")
+                .status("working")
+                .build(),
+            session("b")
+                .label("Bravo")
+                .in_repo("r2")
+                .status("working")
+                .build(),
+            session_c(true),
+        ],
+    });
+    h.cx.run_until_parked();
+
+    h.click_on("phone-home-sort");
+    assert!(
+        drawn(&mut h, "phone-home-sort-needs-you"),
+        "the switch sits under the orders"
+    );
+    assert!(
+        !drawn(&mut h, "phone-home-sort-needs-you-tick"),
+        "off at first"
+    );
+    h.click_on("phone-home-sort-needs-you");
+
+    assert!(
+        drawn(&mut h, "phone-home-sort-sheet"),
+        "the switch leaves the sheet open"
+    );
+    assert!(
+        drawn(&mut h, "phone-home-sort-needs-you-tick"),
+        "the switch is on"
+    );
+    assert_eq!(
+        saved_ui(&dir)["phone_needs_you_first"],
+        true,
+        "and saves it"
+    );
+    let group = format!("phone-home-group-needs-you-{}", wire(&remote));
+    let tops = ["c", "a", "b"].map(|id| row_top(&mut h, &remote, id));
+    assert!(drawn(&mut h, &group), "a Needs you group heads the host");
+    assert!(h.bounds(&group).origin.y < tops[0], "above the waiting row");
+    assert!(
+        tops[0] < tops[1] && tops[1] < tops[2],
+        "the waiting session first, the rest in Home's order"
+    );
 }
 
 /// Opens `target` as [`open_host`] does, its `Welcome` listing `extra`

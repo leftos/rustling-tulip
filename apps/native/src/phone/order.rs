@@ -1,9 +1,11 @@
 //! The orders the phone's Home can list its sessions in ([`PhoneOrder`]),
 //! each applied inside every host, the hosts keeping their order: Manual
 //! leaves Home as it is; A–Z sorts the groups and their rows by name;
-//! Needs you first gathers the sessions waiting on the owner into one group
-//! at the host's top; Desktop tabs mirrors the tabs of the desktop's own
-//! layout on the host, as its last `HostLayouts` reply had them.
+//! Desktop tabs mirrors the tabs of the desktop's own layout on the host, as
+//! its last `HostLayouts` reply had them.
+//!
+//! With the "Needs you first" switch on, the order runs first and each host's
+//! sessions waiting on the owner are then gathered into one group at its top.
 //!
 //! Plain Rust over [`Home`], so each order is unit-testable without GPUI.
 
@@ -96,9 +98,15 @@ pub(crate) fn own_layout<'a>(
     }
 }
 
-/// `home` in `order`, each host's own layout read from `layouts`.
-pub(crate) fn apply(home: Home, order: PhoneOrder, layouts: &PhoneLayouts) -> Home {
-    if order == PhoneOrder::Manual {
+/// `home` in `order`, each host's own layout read from `layouts`, its
+/// sessions waiting on the owner gathered first while `needs_you_first`.
+pub(crate) fn apply(
+    home: Home,
+    order: PhoneOrder,
+    needs_you_first: bool,
+    layouts: &PhoneLayouts,
+) -> Home {
+    if order == PhoneOrder::Manual && !needs_you_first {
         return home;
     }
     Home {
@@ -106,18 +114,23 @@ pub(crate) fn apply(home: Home, order: PhoneOrder, layouts: &PhoneLayouts) -> Ho
         hosts: home
             .hosts
             .into_iter()
-            .map(|host| order_host(host, order, layouts))
+            .map(|host| order_host(host, order, needs_you_first, layouts))
             .collect(),
     }
 }
 
-/// `host`'s groups in `order`.
-fn order_host(mut host: HomeHost, order: PhoneOrder, layouts: &PhoneLayouts) -> HomeHost {
+/// `host`'s groups in `order`, then its waiting sessions gathered first
+/// while `needs_you_first`.
+fn order_host(
+    mut host: HomeHost,
+    order: PhoneOrder,
+    needs_you_first: bool,
+    layouts: &PhoneLayouts,
+) -> HomeHost {
     let groups = std::mem::take(&mut host.groups);
-    host.groups = match order {
+    let ordered = match order {
         PhoneOrder::Manual => groups,
         PhoneOrder::Alphabetical => alphabetical(groups),
-        PhoneOrder::NeedsYouFirst => needs_you_first(&host.host, groups),
         PhoneOrder::DesktopTabs => {
             if let Some(layout) = layouts.own(&host.host) {
                 desktop_tabs(&host.host, groups, layout)
@@ -126,6 +139,11 @@ fn order_host(mut host: HomeHost, order: PhoneOrder, layouts: &PhoneLayouts) -> 
                 groups
             }
         }
+    };
+    host.groups = if needs_you_first {
+        gather_needs_you(&host.host, ordered)
+    } else {
+        ordered
     };
     host
 }
@@ -158,10 +176,10 @@ fn alphabetical(mut groups: Vec<HomeGroup>) -> Vec<HomeGroup> {
     groups
 }
 
-/// A "Needs you" group of every waiting session, in manual order, then
-/// the groups without them; a group left with no row goes. With no session
-/// waiting, the groups as they are.
-fn needs_you_first(host: &HostKey, groups: Vec<HomeGroup>) -> Vec<HomeGroup> {
+/// A "Needs you" group of every waiting session, in the order the groups
+/// now sit, then the groups without them; a group left with no row goes.
+/// With no session waiting, the groups as they are.
+fn gather_needs_you(host: &HostKey, groups: Vec<HomeGroup>) -> Vec<HomeGroup> {
     let waiting: Vec<HomeRow> = groups
         .iter()
         .flat_map(|group| &group.rows)
@@ -376,13 +394,23 @@ mod tests {
 
     #[test]
     fn manual_leaves_home_as_it_is() {
-        let ordered = apply(manual(), PhoneOrder::Manual, &PhoneLayouts::default());
+        let ordered = apply(
+            manual(),
+            PhoneOrder::Manual,
+            false,
+            &PhoneLayouts::default(),
+        );
         assert_eq!(ordered, manual());
     }
 
     #[test]
     fn a_to_z_sorts_groups_and_rows_case_insensitively_with_detached_last() {
-        let ordered = apply(manual(), PhoneOrder::Alphabetical, &PhoneLayouts::default());
+        let ordered = apply(
+            manual(),
+            PhoneOrder::Alphabetical,
+            false,
+            &PhoneLayouts::default(),
+        );
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -400,11 +428,7 @@ mod tests {
 
     #[test]
     fn needs_you_first_gathers_the_waiting_sessions_into_one_group() {
-        let ordered = apply(
-            manual(),
-            PhoneOrder::NeedsYouFirst,
-            &PhoneLayouts::default(),
-        );
+        let ordered = apply(manual(), PhoneOrder::Manual, true, &PhoneLayouts::default());
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -427,10 +451,78 @@ mod tests {
         ]);
         let ordered = apply(
             calm.clone(),
-            PhoneOrder::NeedsYouFirst,
+            PhoneOrder::Manual,
+            true,
             &PhoneLayouts::default(),
         );
         assert_eq!(ordered, calm);
+    }
+
+    #[test]
+    fn the_needs_you_switch_gathers_after_a_to_z() {
+        let ordered = apply(
+            manual(),
+            PhoneOrder::Alphabetical,
+            true,
+            &PhoneLayouts::default(),
+        );
+        assert_eq!(
+            shape(&ordered),
+            names(&[
+                ("Needs you", &["w1", "d1"]),
+                ("api", &["a1", "a2"]),
+                ("web", &["w2"]),
+            ]),
+            "the order runs first: web's w1 before Detached's d1; Detached, emptied, goes"
+        );
+        let groups = &ordered.hosts[0].groups;
+        assert_eq!(groups[0].needs_you, 2, "the group's mark counts them");
+    }
+
+    #[test]
+    fn the_needs_you_switch_gathers_after_desktop_tabs() {
+        let own = layout(
+            Some("box"),
+            vec![
+                tab(
+                    "t1",
+                    "Build",
+                    grid(split(
+                        pane("p1", Some("a2"), None),
+                        pane("p2", Some("w2"), None),
+                    )),
+                ),
+                tab("t2", "", grid(pane("p3", Some("d1"), None))),
+            ],
+        );
+        let ordered = apply(manual(), PhoneOrder::DesktopTabs, true, &layouts_with(own));
+        assert_eq!(
+            shape(&ordered),
+            names(&[
+                ("Needs you", &["d1", "w1"]),
+                ("Build", &["a2", "w2"]),
+                ("Not in a tab", &["a1"]),
+            ]),
+            "the tabs order first; Tab 2, emptied, goes"
+        );
+    }
+
+    #[test]
+    fn the_needs_you_switch_off_leaves_the_order_alone() {
+        let ordered = apply(
+            manual(),
+            PhoneOrder::Alphabetical,
+            false,
+            &PhoneLayouts::default(),
+        );
+        assert_eq!(
+            shape(&ordered),
+            names(&[
+                ("api", &["a1", "a2"]),
+                ("web", &["w1", "w2"]),
+                ("Detached", &["d1"]),
+            ])
+        );
     }
 
     #[test]
@@ -449,7 +541,7 @@ mod tests {
                 tab("t2", "", grid(pane("p3", Some("d1"), None))),
             ],
         );
-        let ordered = apply(manual(), PhoneOrder::DesktopTabs, &layouts_with(own));
+        let ordered = apply(manual(), PhoneOrder::DesktopTabs, false, &layouts_with(own));
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -490,7 +582,7 @@ mod tests {
                 ),
             ],
         );
-        let ordered = apply(manual(), PhoneOrder::DesktopTabs, &layouts_with(own));
+        let ordered = apply(manual(), PhoneOrder::DesktopTabs, false, &layouts_with(own));
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -512,7 +604,7 @@ mod tests {
                 tab("t4", "Work", grid(pane("p3", Some("w1"), None))),
             ],
         );
-        let ordered = apply(manual(), PhoneOrder::DesktopTabs, &layouts_with(own));
+        let ordered = apply(manual(), PhoneOrder::DesktopTabs, false, &layouts_with(own));
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -535,7 +627,7 @@ mod tests {
                 )),
             )],
         );
-        let ordered = apply(manual(), PhoneOrder::DesktopTabs, &layouts_with(own));
+        let ordered = apply(manual(), PhoneOrder::DesktopTabs, false, &layouts_with(own));
         assert_eq!(
             shape(&ordered),
             names(&[
@@ -553,13 +645,18 @@ mod tests {
             None,
             vec![tab("t1", "Work", grid(pane("p1", Some("w1"), None)))],
         );
-        let ordered = apply(calm, PhoneOrder::DesktopTabs, &layouts_with(own));
+        let ordered = apply(calm, PhoneOrder::DesktopTabs, false, &layouts_with(own));
         assert_eq!(shape(&ordered), names(&[("Work", &["w1"])]));
     }
 
     #[test]
     fn no_layout_keeps_the_manual_order_with_the_note() {
-        let ordered = apply(manual(), PhoneOrder::DesktopTabs, &PhoneLayouts::default());
+        let ordered = apply(
+            manual(),
+            PhoneOrder::DesktopTabs,
+            false,
+            &PhoneLayouts::default(),
+        );
         assert_eq!(shape(&ordered), shape(&manual()));
         assert_eq!(ordered.hosts[0].note, Some(NO_LAYOUT_NOTE));
         assert_eq!(NO_LAYOUT_NOTE, "No desktop layout on this host");

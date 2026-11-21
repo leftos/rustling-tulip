@@ -104,7 +104,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   A value that is not a list loads as absent, and a group that does not decode is dropped with a warning; a loaded list is normalised: titles trimmed, a blank title named "Group", a repeated title numbered " 2", " 3" and so on, and a reply that is blank or holds a line break dropped.
 
-  It holds how the phone's Home orders its sessions (`phone_order`): `"manual"`, `"alphabetical"`, `"needs_you_first"` or `"desktop_tabs"`; absent, or a value that names none of them, loads as `"manual"`.
+  It holds how the phone's Home orders its sessions (`phone_order`): `"manual"`, `"alphabetical"` or `"desktop_tabs"`; absent, or a value that names none of them, loads as `"manual"`. Beside it, `phone_needs_you_first` (a boolean, absent means off) is the Sort sheet's "Needs you first" switch, which gathers each host's waiting sessions into a group at its top after the order runs. A v0.18.0-alpha file wrote `"phone_order": "needs_you_first"` as an order: it loads as Manual with the switch on and is saved that way, unless the file holds `phone_needs_you_first`, which wins.
 
   It holds the phone's key grid (`phone_keys`), in grid order: a list of `{"id", "label", "action"}` keys.
 
