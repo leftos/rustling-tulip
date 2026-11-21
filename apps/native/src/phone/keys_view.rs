@@ -13,7 +13,10 @@ use gpui::{
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::{field_box, phone_button};
-use super::key_grid::{self, DraftStep, GridKey, KeyAction, KeyDraft, KeyEdit, NamedKey, StepKey};
+use super::key_grid::{
+    self, DraftStep, GridKey, KeyAction, KeyDraft, KeyEdit, KeysEditMode, NamedKey, StepKey,
+};
+use super::long_press::touch_drag_area_ending;
 use super::reorder::{self, ListId};
 use super::settings::{Page, Settings, SubPage};
 use super::settings_view::{CHEVRON, section_label};
@@ -27,6 +30,20 @@ use crate::ui_theme::UiTheme;
 
 /// The line over the keys, naming the two gestures the page answers.
 const HINT: &str = "Long-press a key to move it; tap one to change it.";
+/// The line over the keys in edit mode.
+const EDIT_HINT: &str = "Drag a handle to move a key; tap a minus to remove it.";
+/// The button at the hint's right that turns edit mode on.
+const EDIT_LABEL: &str = "Edit";
+/// The same button while edit mode is on, which turns it off.
+const DONE_LABEL: &str = "Done";
+/// The armed row's button that removes its key.
+const DELETE_LABEL: &str = "Delete";
+/// What a removable row's minus disc draws in edit mode.
+const MINUS: &str = "\u{2212}";
+/// What a row's drag handle draws in edit mode.
+const HANDLE: &str = "\u{2261}";
+/// The minus disc's diameter, in points.
+const MINUS_DISC: f32 = 22.0;
 /// The Restore defaults button's label.
 const RESTORE_ROW_LABEL: &str = "Restore defaults";
 /// The confirm row's Restore.
@@ -78,6 +95,32 @@ enum Modifier {
     Ctrl,
     Alt,
     Shift,
+}
+
+/// What a key's row draws at its right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowEnd {
+    /// Nothing: a protected key outside edit mode.
+    Nothing,
+    /// The chevron of a key whose tap opens its editor.
+    Chevron,
+    /// The armed row's Delete.
+    Delete,
+    /// The drag handle every other row shows in edit mode.
+    Handle,
+}
+
+impl RowEnd {
+    /// The end of the row at `index`, whose key is `protected` or not, while
+    /// the page is in `mode`.
+    fn of(index: usize, protected: bool, mode: KeysEditMode) -> Self {
+        match mode {
+            KeysEditMode::Off if protected => Self::Nothing,
+            KeysEditMode::Off => Self::Chevron,
+            KeysEditMode::On { .. } if mode.armed() == Some(index) => Self::Delete,
+            KeysEditMode::On { .. } => Self::Handle,
+        }
+    }
 }
 
 /// The press and modifier one modifier button turns on or off.
@@ -169,9 +212,9 @@ impl PhoneRoot {
         self.open_key_editor(key, window, cx);
     }
 
-    /// Keeps the Keys page's Restore confirm only while that page tops
-    /// Settings: leaving the page, opening anything over it or closing
-    /// Settings drops it.
+    /// Keeps the Keys page's Restore confirm and its edit mode only while
+    /// that page tops Settings: leaving the page, opening anything over it or
+    /// closing Settings drops both.
     pub(super) fn keep_keys_restore_confirm(&mut self) {
         let on_page = self
             .settings
@@ -179,7 +222,50 @@ impl PhoneRoot {
             .is_some_and(|settings| settings.top().is_none() && settings.page == Some(Page::Keys));
         if !on_page {
             self.keys_restore = KeysRestore::Idle;
+            self.keys_edit = KeysEditMode::Off;
         }
+    }
+
+    /// A tap on Edit or Done: edit mode turns on with no row armed, or off.
+    fn toggle_keys_edit(&mut self, cx: &mut Context<Self>) {
+        self.keys_edit = self.keys_edit.toggled();
+        cx.notify();
+    }
+
+    /// A tap on the minus disc of the row at `index`: arms that row, or
+    /// disarms it while it is the armed one.
+    fn tap_key_minus(&mut self, index: usize, cx: &mut Context<Self>) {
+        let keys = self.resolved_keys(cx);
+        self.keys_edit = self.keys_edit.tap_minus(index, &keys);
+        cx.notify();
+    }
+
+    /// A tap on the armed row's Delete: its key leaves the list, which saves.
+    fn delete_armed_key(&mut self, cx: &mut Context<Self>) {
+        let (edit, next) = self.keys_edit.confirm_delete();
+        self.keys_edit = next;
+        if let Some(edit) = edit {
+            self.write_keys(edit, cx);
+        }
+        cx.notify();
+    }
+
+    /// A tap on the row at `index`: in edit mode it only disarms the armed
+    /// row; otherwise it opens the key's editor.
+    fn tap_key_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keys_edit.is_on() {
+            self.keys_edit = self.keys_edit.disarmed();
+            cx.notify();
+        } else {
+            self.open_key_editor(Some(index), window, cx);
+        }
+    }
+
+    /// A touch on the drag handle of the row at `index`: the row lifts at
+    /// once, and no row stays armed.
+    fn lift_key_by_handle(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.keys_edit = self.keys_edit.disarmed();
+        self.reorder_lift(ListId::KeyList, index, cx);
     }
 
     /// Drops the editor once its sub-page left the stack or Settings closed,
@@ -239,6 +325,7 @@ impl PhoneRoot {
     /// keys.
     fn restore_keys_defaults(&mut self, cx: &mut Context<Self>) {
         self.keys_restore = KeysRestore::Idle;
+        self.keys_edit = self.keys_edit.disarmed();
         self.root
             .update(cx, |root, cx| root.set_phone_keys(None, cx));
         cx.notify();
@@ -346,8 +433,9 @@ impl PhoneRoot {
     }
 
     /// Writes the whole grid with `edit` made; false, writing nothing, while
-    /// an index names nothing.
+    /// an index names nothing. No row stays armed, since the indices move.
     fn write_keys(&mut self, edit: KeyEdit, cx: &mut Context<Self>) -> bool {
+        self.keys_edit = self.keys_edit.disarmed();
         let keys = self.resolved_keys(cx);
         let Some(next) = key_grid::apply_key_edit(&keys, edit) else {
             return false;
@@ -359,8 +447,9 @@ impl PhoneRoot {
 
     /// A drag's lift on the grid: saves the grid with the key at `from`
     /// moved to `side` of the one at `to`; a move that changes nothing
-    /// writes nothing.
+    /// writes nothing. No row stays armed, since the indices move.
     pub(super) fn move_key(&mut self, from: usize, to: usize, side: Side, cx: &mut Context<Self>) {
+        self.keys_edit = self.keys_edit.disarmed();
         let keys = self.resolved_keys(cx);
         let Some(next) = key_grid::apply_key_edit(&keys, KeyEdit::Move { from, to, side }) else {
             return;
@@ -565,16 +654,39 @@ impl PhoneRoot {
             .gap(px(12.0))
             .p(px(SIDE_PADDING))
             .child(self.bar_keys_row(BarKeys::Preview, cx))
-            .child(
-                div()
-                    .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
-                    .text_color(gpui::rgb(t.muted))
-                    .child(HINT),
-            )
+            .child(self.keys_hint_row(t, cx))
             .child(self.keys_list(&keys, t, cx))
             .child(Self::add_key_row(cx))
             .child(self.keys_restore_row(t, cx))
             .child(reorder::reorder_area(&self.list_boxes, cx))
+    }
+
+    /// The muted hint, with Edit (Done in edit mode) at its right.
+    fn keys_hint_row(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let (hint, label) = if self.keys_edit.is_on() {
+            (EDIT_HINT, DONE_LABEL)
+        } else {
+            (HINT, EDIT_LABEL)
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+                    .text_color(gpui::rgb(t.muted))
+                    .child(hint),
+            )
+            .child(
+                phone_button("phone-keys-edit", ButtonKind::Outlined, cx)
+                    .min_h(px(TOUCH_TARGET))
+                    .flex_none()
+                    .child(label)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_keys_edit(cx))),
+            )
     }
 
     /// The row that opens a new key's editor.
@@ -594,12 +706,13 @@ impl PhoneRoot {
         let drag = self
             .reorder_drag
             .filter(|drag| drag.list == ListId::KeyList);
+        let mode = self.keys_edit;
         let rows: Vec<AnyElement> = keys
             .iter()
             .enumerate()
             .flat_map(|(index, key)| {
                 reorder::dragged_row(
-                    Self::key_row(index, key, t, cx),
+                    Self::key_row(index, key, mode, t, cx),
                     drag.is_some_and(|drag| drag.from == index),
                     reorder::slot_of(drag, index),
                     t,
@@ -619,12 +732,23 @@ impl PhoneRoot {
             ))
     }
 
-    /// One key's row: its label, truncated, then what it sends in muted
-    /// text, one line so every row is one height, dimmed while the key does
-    /// nothing. A send or inert key's row ends in a chevron and a tap opens
-    /// its editor; Ctrl, Paste and Quick draw no chevron and take no tap.
-    fn key_row(index: usize, key: &GridKey, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One key's row: in edit mode its minus disc (a blank slot for Ctrl,
+    /// Paste and Quick), its label, truncated, then what it sends in muted
+    /// text when that differs from the label, one line so every row is one
+    /// height, dimmed while the key does nothing, and its end
+    /// ([`Self::key_row_end`]). Outside edit mode a tap opens a removable
+    /// key's editor; in edit mode a tap only disarms the armed row.
+    fn key_row(
+        index: usize,
+        key: &GridKey,
+        mode: KeysEditMode,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = format!("phone-keys-row-{index}");
+        let protected = key_grid::is_protected(key);
+        let summary = key_grid::row_summary(key);
+        let summary = (summary != key.label).then_some(summary);
         let row = div()
             .id(SharedString::from(id.clone()))
             .driver_id(|| id.clone())
@@ -636,31 +760,144 @@ impl PhoneRoot {
             .border_b_1()
             .border_color(gpui::rgb(t.line))
             .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+            .when(mode.is_on(), |row| {
+                row.child(Self::minus_slot(&id, index, protected, t, cx))
+            })
             .child(div().flex_1().min_w_0().truncate().child(key.label.clone()))
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(SUMMARY_MAX))
-                    .truncate()
-                    .text_color(gpui::rgb(t.muted))
-                    .child(key_grid::row_summary(key)),
-            )
+            .when_some(summary, |row, summary| {
+                row.child(
+                    div()
+                        .driver_id(|| format!("{id}-summary"))
+                        .flex_none()
+                        .max_w(px(SUMMARY_MAX))
+                        .truncate()
+                        .text_color(gpui::rgb(t.muted))
+                        .child(summary),
+                )
+            })
             .when(key_grid::is_inert(key), |row| {
                 row.opacity(crate::spawn_view::DISABLED_OPACITY)
-            });
-        if key_grid::is_protected(key) {
+            })
+            .children(Self::key_row_end(
+                &id,
+                index,
+                RowEnd::of(index, protected, mode),
+                t,
+                cx,
+            ));
+        if protected && !mode.is_on() {
             return row;
         }
-        row.child(
-            div()
-                .driver_id(|| format!("{id}-chevron"))
-                .flex_none()
-                .text_color(gpui::rgb(t.muted))
-                .child(CHEVRON),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.open_key_editor(Some(index), window, cx);
+        row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.tap_key_row(index, window, cx);
         }))
+    }
+
+    /// A row's end: outside edit mode a chevron on a removable key and
+    /// nothing on Ctrl, Paste and Quick; in edit mode the drag handle, or
+    /// Delete on the armed row.
+    fn key_row_end(
+        id: &str,
+        index: usize,
+        end: RowEnd,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match end {
+            RowEnd::Nothing => None,
+            RowEnd::Chevron => Some(
+                div()
+                    .driver_id(|| format!("{id}-chevron"))
+                    .flex_none()
+                    .text_color(gpui::rgb(t.muted))
+                    .child(CHEVRON)
+                    .into_any_element(),
+            ),
+            RowEnd::Delete => Some(
+                phone_button(&format!("{id}-delete"), ButtonKind::Danger, cx)
+                    .min_h(px(TOUCH_TARGET))
+                    .flex_none()
+                    .child(DELETE_LABEL)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.delete_armed_key(cx);
+                    }))
+                    .into_any_element(),
+            ),
+            RowEnd::Handle => Some(Self::key_handle(id, index, t, cx).into_any_element()),
+        }
+    }
+
+    /// A row's leading slot in edit mode, a touch target wide: the minus
+    /// disc on a removable key, whose tap arms or disarms the row, or a
+    /// blank slot on Ctrl, Paste and Quick, so the labels line up.
+    fn minus_slot(
+        id: &str,
+        index: usize,
+        protected: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let slot = div().flex_none().size(px(TOUCH_TARGET));
+        if protected {
+            return slot.into_any_element();
+        }
+        let minus = format!("{id}-minus");
+        slot.id(SharedString::from(minus.clone()))
+            .driver_id(|| minus.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(MINUS_DISC))
+                    .rounded_full()
+                    .bg(gpui::rgba(t.danger_wash))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(gpui::rgb(t.danger))
+                    .child(MINUS),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.tap_key_minus(index, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// A row's drag handle in edit mode, a touch target square: a touch that
+    /// starts on it lifts the row at once, its moves pick the drop slot, and
+    /// its lift drops the row there through the page's reorder path.
+    fn key_handle(id: &str, index: usize, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let handle = format!("{id}-handle");
+        let (lift, moved, end) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
+        // Each update fails only when the phone's root is gone.
+        let area = touch_drag_area_ending(
+            "phone-keys-handle",
+            move |_, _, cx| {
+                lift.update(cx, |this, cx| this.lift_key_by_handle(index, cx))
+                    .ok();
+            },
+            move |at, _, cx| {
+                moved.update(cx, |this, cx| this.reorder_move(at, cx)).ok();
+            },
+            move |ended, _, cx| {
+                end.update(cx, |this, cx| this.reorder_end(ended, cx)).ok();
+            },
+        );
+        div()
+            .id(SharedString::from(handle.clone()))
+            .driver_id(|| handle.clone())
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(TOUCH_TARGET))
+            .text_color(gpui::rgb(t.muted))
+            .child(HANDLE)
+            .child(area)
     }
 
     /// Restore defaults: the button, or the row that asks first. It is dimmed

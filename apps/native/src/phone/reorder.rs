@@ -273,8 +273,19 @@ impl PhoneRoot {
         cx.notify();
     }
 
+    /// A drag that lifts the row at `from` of `list` at once, as a row's drag
+    /// handle does.
+    pub(super) fn reorder_lift(&mut self, list: ListId, from: usize, cx: &mut Context<Self>) {
+        self.reorder_drag = Some(ReorderDrag {
+            list,
+            from,
+            over: None,
+        });
+        cx.notify();
+    }
+
     /// The held finger moved: the slot it is over now.
-    fn reorder_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(super) fn reorder_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(mut drag) = self.reorder_drag else {
             return;
         };
@@ -293,7 +304,7 @@ impl PhoneRoot {
     /// The held finger lifted: the row drops where it is over, and
     /// the list saves once. A cancelled touch drops the drag and saves
     /// nothing.
-    fn reorder_end(&mut self, ended: bool, cx: &mut Context<Self>) {
+    pub(super) fn reorder_end(&mut self, ended: bool, cx: &mut Context<Self>) {
         let Some(drag) = self.reorder_drag.take() else {
             return;
         };

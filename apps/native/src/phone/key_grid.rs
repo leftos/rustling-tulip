@@ -416,6 +416,81 @@ pub(crate) fn apply_key_edit(keys: &[GridKey], edit: KeyEdit) -> Option<Vec<Grid
     Some(keys)
 }
 
+/// Whether the Keys page is in edit mode, and the one row whose Delete
+/// shows. Never saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum KeysEditMode {
+    /// Rows open their editor on a tap and end in a chevron.
+    #[default]
+    Off,
+    /// Rows show their minus disc and drag handle; `armed` is the row whose
+    /// Delete shows in place of its handle.
+    On { armed: Option<usize> },
+}
+
+impl KeysEditMode {
+    /// Edit or Done: Off turns on with no row armed, On turns off.
+    #[must_use]
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Off => Self::On { armed: None },
+            Self::On { .. } => Self::Off,
+        }
+    }
+
+    /// Whether edit mode is on.
+    pub(crate) fn is_on(self) -> bool {
+        matches!(self, Self::On { .. })
+    }
+
+    /// The row whose Delete shows, if any.
+    pub(crate) fn armed(self) -> Option<usize> {
+        match self {
+            Self::On { armed } => armed,
+            Self::Off => None,
+        }
+    }
+
+    /// A tap on the minus disc of the row at `index` of `keys`: it arms that
+    /// row, or disarms it while it is the armed one. A protected key, an
+    /// index that names nothing and edit mode being off change nothing.
+    #[must_use]
+    pub(crate) fn tap_minus(self, index: usize, keys: &[GridKey]) -> Self {
+        let Self::On { armed } = self else {
+            return self;
+        };
+        if keys.get(index).is_none_or(is_protected) {
+            return self;
+        }
+        if armed == Some(index) {
+            Self::On { armed: None }
+        } else {
+            Self::On { armed: Some(index) }
+        }
+    }
+
+    /// A tap on the armed row's Delete: the edit that removes its key, and
+    /// the mode after it, with no row armed. No row armed makes no edit.
+    #[must_use]
+    pub(crate) fn confirm_delete(self) -> (Option<KeyEdit>, Self) {
+        match self {
+            Self::On { armed: Some(index) } => {
+                (Some(KeyEdit::Remove(index)), Self::On { armed: None })
+            }
+            other => (None, other),
+        }
+    }
+
+    /// Any other row tap or a drag's start: no row stays armed.
+    #[must_use]
+    pub(crate) fn disarmed(self) -> Self {
+        match self {
+            Self::On { .. } => Self::On { armed: None },
+            Self::Off => Self::Off,
+        }
+    }
+}
+
 /// The name a press's key button draws: the character itself (its upper
 /// case while Shift is held), a named key's label, or nothing while it is
 /// a key this build does not know.
@@ -1348,6 +1423,109 @@ mod tests {
         }
         assert!(!is_protected(&key_of("esc")), "a send key");
         assert!(!is_protected(&unknown_key()), "an Unknown action");
+    }
+
+    /// Edit mode on with the row at `index` armed, or none.
+    fn on(armed: Option<usize>) -> KeysEditMode {
+        KeysEditMode::On { armed }
+    }
+
+    #[test]
+    fn edit_mode_toggles_on_with_no_row_armed_and_back_off() {
+        assert_eq!(KeysEditMode::default(), KeysEditMode::Off);
+        assert_eq!(KeysEditMode::Off.toggled(), on(None), "Edit");
+        assert_eq!(on(None).toggled(), KeysEditMode::Off, "Done");
+        assert_eq!(on(Some(3)).toggled(), KeysEditMode::Off, "Done disarms too");
+        assert!(on(None).is_on());
+        assert!(!KeysEditMode::Off.is_on());
+    }
+
+    #[test]
+    fn a_minus_tap_arms_its_row_and_a_second_disarms_it() {
+        let keys = defaults();
+        let armed = on(None).tap_minus(0, &keys);
+        assert_eq!(armed, on(Some(0)), "Esc's minus arms Esc");
+        assert_eq!(armed.armed(), Some(0));
+        assert_eq!(
+            armed.tap_minus(0, &keys),
+            on(None),
+            "the second tap disarms"
+        );
+    }
+
+    #[test]
+    fn a_minus_tap_on_another_row_moves_the_arm() {
+        let keys = defaults();
+        assert_eq!(
+            on(Some(0)).tap_minus(1, &keys),
+            on(Some(1)),
+            "one row is armed at a time"
+        );
+    }
+
+    #[test]
+    fn a_minus_tap_on_a_protected_key_is_ignored() {
+        let keys = defaults();
+        for id in ["ctrl", "paste", "quick"] {
+            let index = keys
+                .iter()
+                .position(|key| key.id == id)
+                .expect("the default grid holds the key");
+            assert_eq!(on(None).tap_minus(index, &keys), on(None), "{id}");
+            assert_eq!(
+                on(Some(0)).tap_minus(index, &keys),
+                on(Some(0)),
+                "{id} keeps the arm"
+            );
+        }
+    }
+
+    #[test]
+    fn a_minus_tap_is_ignored_while_off_or_past_the_keys() {
+        let keys = defaults();
+        assert_eq!(KeysEditMode::Off.tap_minus(0, &keys), KeysEditMode::Off);
+        assert_eq!(KeysEditMode::Off.armed(), None);
+        assert_eq!(on(None).tap_minus(keys.len(), &keys), on(None));
+    }
+
+    #[test]
+    fn confirm_delete_removes_the_armed_key_and_disarms() {
+        assert_eq!(
+            on(Some(4)).confirm_delete(),
+            (Some(KeyEdit::Remove(4)), on(None))
+        );
+    }
+
+    #[test]
+    fn confirm_delete_with_no_row_armed_makes_no_edit() {
+        assert_eq!(on(None).confirm_delete(), (None, on(None)));
+        assert_eq!(
+            KeysEditMode::Off.confirm_delete(),
+            (None, KeysEditMode::Off)
+        );
+    }
+
+    #[test]
+    fn a_confirmed_delete_of_a_protected_key_is_refused_by_the_edit() {
+        let keys = defaults();
+        let ctrl = keys
+            .iter()
+            .position(is_protected)
+            .expect("the default grid holds a protected key");
+        let (edit, _) = on(Some(ctrl)).confirm_delete();
+        let edit = edit.expect("an armed row makes an edit");
+        assert_eq!(
+            apply_key_edit(&keys, edit),
+            None,
+            "apply_key_edit refuses it"
+        );
+    }
+
+    #[test]
+    fn a_row_tap_or_drag_start_disarms_and_keeps_edit_mode() {
+        assert_eq!(on(Some(2)).disarmed(), on(None));
+        assert_eq!(on(None).disarmed(), on(None));
+        assert_eq!(KeysEditMode::Off.disarmed(), KeysEditMode::Off);
     }
 
     #[test]

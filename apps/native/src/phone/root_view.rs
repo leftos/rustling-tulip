@@ -136,6 +136,9 @@ pub struct PhoneRoot {
     pub(super) restore_confirm: Option<ReplySet>,
     /// What the Keys page's Restore defaults draws.
     pub(super) keys_restore: super::keys_view::KeysRestore,
+    /// The Keys page's edit mode and its armed row, never saved; off once
+    /// the page no longer tops Settings.
+    pub(super) keys_edit: super::key_grid::KeysEditMode,
     /// The session whose composer draft's Clear asks for confirmation.
     pub(super) draft_clear_asking: Option<String>,
     /// The drag reordering a Settings list, while a long press holds one.
@@ -272,6 +275,7 @@ impl PhoneRoot {
             key_editor: None,
             restore_confirm: None,
             keys_restore: super::keys_view::KeysRestore::Idle,
+            keys_edit: super::key_grid::KeysEditMode::Off,
             draft_clear_asking: None,
             reorder_drag: None,
             list_boxes: super::reorder::ListBoxes::default(),

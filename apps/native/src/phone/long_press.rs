@@ -246,6 +246,19 @@ pub(crate) fn touch_drag_area(
     on_move: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
     on_end: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    touch_drag_area_ending(key, on_start, on_move, move |_, window, cx| {
+        on_end(window, cx);
+    })
+}
+
+/// [`touch_drag_area`] whose `on_end` also learns whether the touch ended
+/// (`true`) or was cancelled (`false`), so a drop can save only on a lift.
+pub(crate) fn touch_drag_area_ending(
+    key: &'static str,
+    on_start: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
+    on_move: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
+    on_end: impl Fn(bool, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     canvas(
         move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             let state = window.use_keyed_state(key, cx, |_, _| Rc::new(TouchDrag::default()));
@@ -280,7 +293,7 @@ pub(crate) fn touch_drag_area(
                         }
                     }
                     Hold::Done => {
-                        on_end(window, cx);
+                        on_end(event.phase == TouchPhase::Ended, window, cx);
                         if state.was_tap(event, cx.background_executor().now(), &tuning) {
                             replay_tap(event.position, window, cx);
                         }

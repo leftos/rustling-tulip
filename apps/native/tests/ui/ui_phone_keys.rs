@@ -1107,3 +1107,269 @@ fn a_sideways_swipe_on_the_preview_leaves_the_page_where_it_was(cx: &mut TestApp
         "while the preview scrolls sideways"
     );
 }
+
+/// The keys `esc`, `tab` and `enter`, saved; Ctrl, Paste and Quick follow
+/// them once loaded.
+fn three_keys() -> Value {
+    json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        named_key("tab", "Tab", "tab"),
+        named_key("enter", "Enter", "enter"),
+    ] })
+}
+
+/// The ids of the saved keys, in order.
+fn saved_ids(dir: &TestDir) -> Vec<String> {
+    saved_ui(dir)["phone_keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| key["id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[gpui::test]
+fn edit_shows_minus_on_removable_keys_and_none_on_protected_ones(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-minus"),
+        "no minus before Edit"
+    );
+    assert!(!drawn(&mut h, "phone-keys-row-0-handle"), "nor a handle");
+
+    h.click_on("phone-keys-edit");
+
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-minus"),
+        "Esc shows its minus"
+    );
+    assert!(drawn(&mut h, "phone-keys-row-0-handle"), "and its handle");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-chevron"),
+        "the handle takes the chevron's place"
+    );
+    assert!(
+        h.bounds("phone-keys-row-0-minus").size.height >= touch_target(),
+        "the minus is a touch target"
+    );
+    assert!(
+        h.bounds("phone-keys-row-0-handle").size.height >= touch_target(),
+        "and so is the handle"
+    );
+    for index in [2, 7, 8] {
+        assert!(
+            !drawn(&mut h, &format!("phone-keys-row-{index}-minus")),
+            "row {index} (Ctrl, Paste or Quick) cannot be removed, so shows no minus"
+        );
+        assert!(
+            drawn(&mut h, &format!("phone-keys-row-{index}-handle")),
+            "row {index} still moves, so shows its handle"
+        );
+    }
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "Edit saves nothing"
+    );
+}
+
+#[gpui::test]
+fn minus_then_delete_removes_the_key_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_saved(cx, &dir, &three_keys());
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+
+    h.click_on("phone-keys-row-1-minus");
+
+    assert!(
+        drawn(&mut h, "phone-keys-row-1-delete"),
+        "the armed row shows Delete"
+    );
+    assert!(
+        !drawn(&mut h, "phone-keys-row-1-handle"),
+        "in its handle's place"
+    );
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "only the armed row shows Delete"
+    );
+
+    h.click_on("phone-keys-row-1-delete");
+
+    let ids = saved_ids(&dir);
+    assert_eq!(ids.len(), 5, "one key fewer: {ids:?}");
+    assert!(!ids.iter().any(|id| id == "tab"), "Tab is gone: {ids:?}");
+    assert_eq!(ids[0], "esc", "the keys beside it stay");
+    assert_eq!(ids[1], "enter");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-1-delete"),
+        "no row is armed after the delete"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-minus"),
+        "edit mode stays on"
+    );
+}
+
+#[gpui::test]
+fn a_second_minus_tap_disarms_the_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_saved(cx, &dir, &three_keys());
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+
+    h.click_on("phone-keys-row-0-minus");
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-delete"),
+        "the first tap arms"
+    );
+    h.click_on("phone-keys-row-0-minus");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "the second tap disarms"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-handle"),
+        "and the handle comes back"
+    );
+
+    h.click_on("phone-keys-row-0-minus");
+    h.click_on("phone-keys-row-1-minus");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "arming another row disarms the first"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-row-1-delete"),
+        "one row at a time"
+    );
+
+    h.click_on("phone-keys-row-0");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-1-delete"),
+        "a tap on another row disarms"
+    );
+    assert_eq!(saved_ids(&dir).len(), 3, "nothing was removed");
+}
+
+#[gpui::test]
+fn a_handle_drag_reorders_without_a_long_press(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+
+    let from = h.center("phone-keys-row-3-handle");
+    let to = before(&mut h, "phone-keys-row-0");
+    h.touch(TouchPhase::Started, from);
+    h.touch(TouchPhase::Moved, to);
+    assert!(
+        drawn(&mut h, "phone-drag-lifted"),
+        "the row lifts with no wait"
+    );
+    h.touch(TouchPhase::Ended, to);
+
+    let ids = saved_ids(&dir);
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("up"),
+        "the lifted key lands first: {ids:?}"
+    );
+    assert_eq!(
+        ids.get(1).map(String::as_str),
+        Some("esc"),
+        "Esc follows it"
+    );
+    assert!(
+        !drawn(&mut h, "phone-drag-lifted"),
+        "the drop ends the lift"
+    );
+}
+
+#[gpui::test]
+fn done_and_leaving_the_page_turn_edit_mode_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_saved(cx, &dir, &three_keys());
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+    h.click_on("phone-keys-row-0-minus");
+
+    h.click_on("phone-keys-edit");
+
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-minus"),
+        "Done hides the minus"
+    );
+    assert!(!drawn(&mut h, "phone-keys-row-0-delete"), "and Delete");
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-chevron"),
+        "the chevron comes back"
+    );
+
+    h.click_on("phone-keys-edit");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-delete"),
+        "Edit again arms no row"
+    );
+    h.click_on("phone-settings-back");
+    h.click_on("phone-settings-row-keys");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-minus"),
+        "leaving the page turned edit mode off"
+    );
+
+    h.click_on("phone-keys-edit");
+    close_settings(&mut h);
+    open_keys(&mut h);
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-minus"),
+        "closing Settings turned it off too"
+    );
+    assert_eq!(saved_ids(&dir).len(), 3, "edit mode saved nothing");
+}
+
+#[gpui::test]
+fn a_row_tap_in_edit_mode_opens_no_editor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+    h.click_on("phone-keys-edit");
+
+    h.click_on("phone-keys-row-0");
+
+    assert!(
+        !drawn(&mut h, "phone-key-editor-label"),
+        "a row tap opens no editor in edit mode"
+    );
+    assert!(drawn(&mut h, "phone-keys-row-0-minus"), "the page stays");
+}
+
+#[gpui::test]
+fn a_key_whose_summary_matches_its_label_draws_no_summary(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copy = grid_key(
+        "copy",
+        "Copy",
+        &json!({
+            "kind": "send",
+            "steps": [{ "ctrl": true, "alt": false, "shift": false, "key": { "kind": "char", "value": "c" } }],
+        }),
+    );
+    let ui = json!({ "phone_keys": [named_key("esc", "Esc", "esc"), copy] });
+    let mut h = phone_saved(cx, &dir, &ui);
+    open_keys(&mut h);
+
+    assert!(drawn(&mut h, "phone-keys-row-0"), "Esc's row draws");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-0-summary"),
+        "Esc sends Esc, so it does not say so twice"
+    );
+    assert!(
+        drawn(&mut h, "phone-keys-row-1-summary"),
+        "Copy draws what it sends, Ctrl+C"
+    );
+}
