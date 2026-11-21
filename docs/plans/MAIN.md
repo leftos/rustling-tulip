@@ -190,9 +190,7 @@
 - [ ] RT-2044 Give the nine unmapped native files rows in the test map
 - [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
 - [ ] RT-2055 Let clippy lint the phone app's iOS-only code
-- [ ] RT-2060 Split shot.rs capture_phone_home under the complexity and line limits · release vNext
-- [ ] RT-2062 Run the Mac Keychain round-trip test inside the builder's desktop session · release vNext
-- [ ] RT-2069 Clear the iOS clippy warnings Rust 1.99 raises in the phone's iOS modules and autostart · release vNext
+- [ ] RT-2079 Clear the daemon's Mac clippy error at the items_after_test_module expectation in paths.rs
 
 ## Elevated daemon and security
 
@@ -245,7 +243,6 @@
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
 - [ ] RT-2057 Keep a wrapped path whole in a question card's text
-- [ ] RT-2064 Keep the backslash before a dot in a Windows path written in a chat answer's plain text · release vNext
 
 ## Settings and themes
 
@@ -574,7 +571,6 @@
 - [ ] RT-1797 Hit-test a wrapped right- or centre-aligned Chat table cell by its own line's offset
 - [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone
 - [ ] RT-1879 Copy a phone Terminal selection to the clipboard
-- [ ] RT-1880 Show the lifted key and drop line while dragging in phone Settings › Keys
 - [ ] RT-1881 Flush a pending dead key before a phone grid key sends
 - [ ] RT-1909 Take a hardware keyboard and pointer on the iPad
 - [ ] RT-1910 Send photos and files from the phone into a session
@@ -590,17 +586,13 @@
 - [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up
 - [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
-- [ ] RT-2045 Make rearranging and changing the phone's keys feel like an iOS list editor · release vNext
 - [ ] RT-2053 Keep the phone composer's handles and edit bar clear of its buttons and the keyboard
 - [ ] RT-2054 Stop the phone composer redrawing twice per keystroke with no selection shown
 - [ ] RT-2056 Read the phone pasteboard once per Paste and scale photos by pixels
-- [ ] RT-2059 Re-check the phone's pinned host header after the Home list changes without a scroll · release vNext
-- [ ] RT-2067 Keep the phone Chat box's Hide keyboard button inside the row while the keyboard is up · release vNext
-- [ ] RT-2068 Make the phone terminal key bar's Paste read the pasteboard through a system paste control · release vNext
-- [ ] RT-2070 Paste any image type through the phone's paste control, and text when the host takes no uploads · release vNext
-- [ ] RT-2071 Keep the phone's paste control shown on iPad while a sheet covers only the list pane · release vNext
-- [ ] RT-2072 Show a remade phone paste control when its colours change while it is shown · release vNext
-- [ ] RT-2073 Keep the composer's end selection handle clear of the phone's paste control · release vNext
+- [ ] RT-2074 Route the phone Keys dock's Paste key through a system paste control
+- [ ] RT-2075 Measure whether iOS refuses Command-V and the phone edit bar's Paste, and route them through system paste UI
+- [ ] RT-2084 Disarm the phone Keys page's Delete when a long-press drag starts in edit mode
+- [ ] RT-2085 Leave the drag slot line out of the phone list's row pitch so a drop at a row's centre lands after it
 
 ## Dashboard, Gates and Linear
 
@@ -721,7 +713,6 @@
 - [ ] RT-1550 Reap the opener and browser processes the client starts on macOS and Linux
 - [ ] RT-1551 Read a leading // as a local path when building a page URL off Windows
 - [ ] RT-1672 Bind the viewer and font-size shortcuts to Cmd on macOS
-- [ ] RT-2061 Report a Mac daemon's locked login Keychain (-25308) as the secret store being out of reach · release vNext
 
 ## Dictation
 
@@ -856,14 +847,13 @@
 - [ ] RT-1986 Deliver a chat send made in the first second of a turn, or report its refusal
 - [ ] RT-1987 Stop reading a command's output record as a user prompt in the chat mirror
 - [ ] RT-2029 Fix the unfulfilled clippy expectation at paths.rs on macOS
-- [ ] RT-2030 Read Keychain error -25308 as an unreachable secret store on a Mac daemon
 - [ ] RT-2031 Stop naming Windows Credential Manager in secret-store messages on a Mac host
 - [ ] RT-2032 Count the issue dot in the Compact agent chip's width estimate
 - [ ] RT-2033 Draw a Compact agent chip's issue identifier in its label's colour, size and weight
-- [ ] RT-2046 Say whether a refused Linear key is saved, and offer Clear only for a saved one · release vNext
 - [ ] RT-2047 Keep a host's Linear switch across a reconnect until its new status arrives
 - [ ] RT-2048 Lock the Dashboard key field so it takes no focus or paste off this machine
-- [ ] RT-2058 Count an armed Stop's inline buttons when fitting the chat context label in a collapsed pane header · release vNext
+- [ ] RT-2077 Check whether the phone shell's chat drops the backslash before a dot in a Windows path
+- [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
 
 ## Design files
 
