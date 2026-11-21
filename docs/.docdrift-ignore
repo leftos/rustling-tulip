@@ -68,3 +68,4 @@ crates/gpui_ios/src/ios/application.rs
 window.rs
 # The phone's index of its fetched copies, in its Documents folder
 fetched.json
+b.rs
