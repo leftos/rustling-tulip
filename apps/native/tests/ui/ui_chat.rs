@@ -5162,3 +5162,93 @@ fn a_chat_pane_header_shows_its_context_and_a_terminal_pane_none(cx: &mut TestAp
         "a pane drawing its terminal draws no label"
     );
 }
+
+/// The least width a pane header leaves the session name, as
+/// `pane_header_fit::TITLE_MIN` has it.
+const TITLE_MIN: f32 = 120.0;
+/// A header button's width, as `grid_view::HEADER_BUTTON_SIZE` has it.
+const HEADER_BUTTON: f32 = 26.0;
+/// The header row's padding, its left and right sides together.
+const HEADER_PAD: f32 = 20.0;
+/// The gap a header row puts between two of its items.
+const HEADER_GAP: f32 = 8.0;
+
+/// The width the element `selector` tags was painted at.
+fn width_of(h: &mut Harness<'_>, selector: &str) -> f32 {
+    h.bounds(selector).size.width / px(1.0)
+}
+
+#[gpui::test]
+fn an_armed_stop_hides_the_context_label_in_a_collapsed_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &split_with("s1"))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.cx.simulate_resize(gpui::size(px(1920.0), px(1200.0)));
+    h.answer_scrollback("s1", b"");
+    h.click_on(TO_CHAT);
+    h.send(facts_message(vec![facts("s1").context(41).build()]));
+
+    // The collapsed row's width with Stop unarmed, as `header_fit` measures
+    // it: the pads, the status glyph, the title at its least width, the
+    // runtime chip, the context label, ⋯ and Close, a gap between each two.
+    let unarmed = HEADER_PAD
+        + width_of(&mut h, "pane-glyph-p1")
+        + TITLE_MIN
+        + width_of(&mut h, "pane-chip-p1-runtime")
+        + width_of(&mut h, "pane-p1-context")
+        + 2.0 * HEADER_BUTTON
+        + 6.0 * HEADER_GAP;
+    // Armed, Confirm stop and Cancel stay drawn beside ⋯: two more items and
+    // their gaps.
+    h.click_on("pane-stop-p1");
+    let armed_extra = width_of(&mut h, "pane-stop-confirm-p1")
+        + width_of(&mut h, "pane-stop-cancel-p1")
+        + 2.0 * HEADER_GAP;
+    h.click_on("pane-stop-cancel-p1");
+
+    // A card between the two widths: the label fits beside ⋯ alone, and not
+    // beside the armed Stop's buttons too.
+    let wanted = unarmed + armed_extra / 2.0;
+    let wide = width_of(&mut h, "pane-frame-p1");
+    let (window, height) = (h.window_width(), h.window_height());
+    h.cx.simulate_resize(gpui::size(px(window - 2.0 * (wide - wanted)), px(height)));
+    h.cx.run_until_parked();
+
+    let card = width_of(&mut h, "pane-frame-p1");
+    assert!(
+        (card - wanted).abs() < 3.0,
+        "the window narrows p1's card to about {wanted} px: {card}"
+    );
+    assert!(
+        h.root(|root, cx| root.pane_header_collapsed("p1", cx)),
+        "a {card} px card moves p1's buttons into ⋯"
+    );
+    let frame = h.bounds("pane-frame-p1");
+    let label = h.bounds("pane-p1-context");
+    assert!(
+        label.size.height > px(0.0)
+            && label.left() >= frame.left()
+            && label.right() <= frame.right() + px(0.5),
+        "with Stop unarmed the collapsed header paints the label in its card: label {label:?}, card {frame:?}"
+    );
+
+    h.click_on("pane-overflow-p1");
+    h.click_on("pane-overflow-p1-stop");
+
+    assert!(
+        h.in_model("pane-stop-confirm-p1"),
+        "the Stop row arms the stop"
+    );
+    assert!(
+        h.root(|root, cx| root.pane_header_collapsed("p1", cx)),
+        "the header stays collapsed"
+    );
+    assert!(
+        !painted(&mut h, "pane-p1-context"),
+        "Confirm stop and Cancel take the label's room, so the header drops it"
+    );
+}

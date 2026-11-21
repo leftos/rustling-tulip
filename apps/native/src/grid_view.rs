@@ -3283,8 +3283,14 @@ impl RootView {
         let cluster = self.header_cluster(target.tab_id, target.pane_id, target.session_id, cx);
         let mut fit = header_fit(card, target, &cluster, cx);
         if pane_header_fit::collapses(&fit) {
-            // The row draws ⋯ in the cluster's place.
+            // The row draws ⋯ in the cluster's place, keeping what
+            // `header_right` keeps beside it: an armed Stop's buttons or a
+            // stopped session's exit code.
             fit.cluster = vec![HEADER_BUTTON_SIZE];
+            fit.fixed.extend(collapsed_stop_widths(
+                cluster.stop.as_ref(),
+                &HeaderText { cx },
+            ));
         }
         fit.fixed.push(HeaderText { cx }.ui(&label.text));
         let fits = !pane_header_fit::collapses(&fit)
@@ -4748,6 +4754,18 @@ fn stop_width(stop: &StopSlot, text: &HeaderText<'_>) -> f32 {
     })
 }
 
+/// The widths of what a collapsed header keeps drawn beside ⋯, as
+/// `header_right` draws them: an armed Stop's Confirm stop and Cancel, or a
+/// stopped session's exit code; nothing for Stop, which moves into the menu
+/// with the rest of the cluster.
+fn collapsed_stop_widths(stop: Option<&StopSlot>, text: &HeaderText<'_>) -> Vec<f32> {
+    match stop {
+        Some(StopSlot::Armed) => vec![text.button("Confirm stop"), text.button("Cancel")],
+        Some(StopSlot::ExitCode(label)) => vec![text.button(label)],
+        Some(StopSlot::Stop) | None => Vec::new(),
+    }
+}
+
 /// The width of a session's Terminal / Chat / Summary switch: its three
 /// segments and the gaps between them.
 fn view_segments_width(text: &HeaderText<'_>) -> f32 {
@@ -5036,14 +5054,15 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
 )]
 mod tests {
     use super::{
-        HeaderChip, HeaderChipKind, RetryGate, drawn_ratio, frame_band, header_fade_colors,
-        header_fade_stops, header_parts, status_label,
+        HeaderChip, HeaderChipKind, HeaderText, RetryGate, StopSlot, collapsed_stop_widths,
+        drawn_ratio, frame_band, header_fade_colors, header_fade_stops, header_parts, status_label,
     };
     use crate::appearance::term_rgb;
     use crate::runtime_icon::RuntimeIcon;
     use crate::tabs::SessionRef;
     use crate::target::HostKey;
     use crate::theme::mix;
+    use gpui::TestAppContext;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
@@ -5273,5 +5292,39 @@ mod tests {
                 .with_icon(Some(RuntimeIcon::Pwsh))],
             "a plain shell says no provider and wears its shell's icon"
         );
+    }
+
+    /// A collapsed header keeps an armed Stop's two text buttons or a
+    /// stopped session's exit code beside ⋯, and nothing else.
+    #[gpui::test]
+    fn collapsed_stop_widths_counts_an_armed_stop_and_an_exit_code(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text = HeaderText { cx };
+            let armed = collapsed_stop_widths(Some(&StopSlot::Armed), &text);
+            assert_eq!(armed.len(), 2, "Confirm stop and Cancel stay inline");
+            assert!(
+                (armed[0] - text.button("Confirm stop")).abs() < f32::EPSILON,
+                "Confirm stop keeps its width"
+            );
+            assert!(
+                (armed[1] - text.button("Cancel")).abs() < f32::EPSILON,
+                "Cancel keeps its width"
+            );
+            let exited =
+                collapsed_stop_widths(Some(&StopSlot::ExitCode("exit 1".to_owned())), &text);
+            assert_eq!(exited.len(), 1, "the exit code stays inline");
+            assert!(
+                (exited[0] - text.button("exit 1")).abs() < f32::EPSILON,
+                "the exit code is measured as the cluster measures it"
+            );
+            assert!(
+                collapsed_stop_widths(Some(&StopSlot::Stop), &text).is_empty(),
+                "an unarmed Stop moves into ⋯"
+            );
+            assert!(
+                collapsed_stop_widths(None, &text).is_empty(),
+                "an empty pane keeps nothing"
+            );
+        });
     }
 }
