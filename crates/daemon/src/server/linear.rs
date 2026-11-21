@@ -741,12 +741,16 @@ fn answer_refusal(
 }
 
 /// Run the Test on its own task, so a slow Linear does not hold up the
-/// connection, and answer the requester alone with its `LinearTest`.
+/// connection, and answer the requester alone with its `LinearTest`. A
+/// successful Test then fetches the team keys at once and scans every
+/// session again, so a team added since the last fetch is picked up; a
+/// failed one changes nothing more.
 fn spawn_test(hub: &Hub, out_tx: mpsc::UnboundedSender<DaemonMessage>, request_id: Option<String>) {
-    let linear = Arc::clone(&hub.linear);
-    let events = hub.state_events.clone();
+    let wiring = Wiring::of(hub);
     tokio::spawn(async move {
-        let reply = match linear.test(&events).await {
+        let result = wiring.linear.test(&wiring.events).await;
+        let passed = result.is_ok();
+        let reply = match result {
             Ok(data) => DaemonMessage::LinearTest {
                 workspace_name: Some(data.workspace_name.or(data.workspace).unwrap_or_default()),
                 team_keys: data.team_keys,
@@ -761,6 +765,11 @@ fn spawn_test(hub: &Hub, out_tx: mpsc::UnboundedSender<DaemonMessage>, request_i
             },
         };
         let _ = out_tx.send(reply);
+        if passed {
+            // `test` has released the service lock; `refresh_all` takes it
+            // afresh, never nested.
+            wiring.refresh_all().await;
+        }
     });
 }
 
@@ -828,7 +837,7 @@ impl Wiring {
         self.linear.publish_issues(fetched, &self.events);
     }
 
-    /// After the key or the switch changed: fetch the context at once and
+    /// After the key or the switch changed, or a Test passed: fetch the context at once and
     /// scan every session again; nothing while off or with no usable key.
     async fn refresh_all(&self) {
         {
@@ -859,8 +868,10 @@ impl Wiring {
             {
                 service.use_key(chosen);
             }
+            // Forced, so every tick fetches the team keys even when a Test
+            // or a key change fetched them less than a tick ago.
             self.linear
-                .refresh_context(&mut service, &self.events, false)
+                .refresh_context(&mut service, &self.events, true)
                 .await
         };
         if changed {
@@ -1177,6 +1188,8 @@ mod tests {
             "the failed identifier is asked once, however often the title changes"
         );
 
+        // The tick fetches the team keys first, then the issues.
+        fake.push(Ok(context_reply(&["RT"], "acme")));
         fake.push(Ok(batch_reply(&ids(&["RT-200"]))));
         let (_clients_tx, clients_rx) = watch::channel(1usize);
         let refresh = spawn_refresh(&hub, clients_rx);
@@ -1297,6 +1310,8 @@ mod tests {
         exited.terminal_title = Some("RT-3".to_owned());
         exited.status = SessionStatus::Stopped;
         hub.sessions.insert(exited);
+        // The tick fetches the team keys first, then the issues.
+        fake.push(Ok(context_reply(&["RT"], "acme")));
         fake.push(Ok(batch_reply(&ids(&["RT-1", "RT-2"]))));
         let mut events = hub.state_events.subscribe();
         let (_clients_tx, clients_rx) = watch::channel(1usize);
@@ -1530,6 +1545,86 @@ mod tests {
             query, "query Test { teams { nodes { key } } organization { name urlKey } }",
             "the Test runs whatever the switch, bypassing the cached context"
         );
+    }
+
+    /// A session whose terminal title names `CITY-1`, a team the setup's
+    /// context does not know.
+    fn naming_a_new_team(hub: &Hub) {
+        let mut record = idle_record("s1");
+        record.terminal_title = Some("CITY-1 plan the route".to_owned());
+        hub.sessions.insert(record);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_picks_up_a_team_added_since_the_last_fetch() {
+        let (hub, _scratch, fake) = keyed_hub("linear-tick-new-team").await;
+        naming_a_new_team(&hub);
+        fake.push(Ok(context_reply(&["RT", "CITY"], "acme")));
+        fake.push(Ok(batch_reply(&ids(&["CITY-1"]))));
+        let mut events = hub.state_events.subscribe();
+
+        tokio::time::advance(REFRESH_TICK).await;
+        Wiring::of(&hub).tick().await;
+
+        let issues = next_broadcast(&mut events).await;
+        assert_eq!(identifiers_of(&issues), ids(&["CITY-1"]));
+        assert_eq!(hub.linear.team_keys(), ids(&["RT", "CITY"]));
+        assert_eq!(published_status(&hub).team_keys, ids(&["RT", "CITY"]));
+        assert_eq!(asked(&fake), [ids(&["CITY-1"])], "fetched once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_test_picks_up_a_team_added_since_the_last_fetch() {
+        let (hub, _scratch, fake) = keyed_hub("linear-test-new-team").await;
+        naming_a_new_team(&hub);
+        tokio::time::advance(Duration::from_mins(1)).await;
+        fake.push(Ok(context_reply(&["RT", "CITY"], "acme")));
+        fake.push(Ok(context_reply(&["RT", "CITY"], "acme")));
+        fake.push(Ok(batch_reply(&ids(&["CITY-1"]))));
+        let mut events = hub.state_events.subscribe();
+
+        let reply = reply_to(&hub, test_linear()).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::LinearTest { team_keys, error: None, request_id: Some(id), .. }
+                    if *team_keys == ids(&["RT", "CITY"]) && id == "t1"
+            ),
+            "{reply:?}"
+        );
+        let issues = next_broadcast(&mut events).await;
+
+        assert_eq!(identifiers_of(&issues), ids(&["CITY-1"]));
+        assert_eq!(hub.linear.team_keys(), ids(&["RT", "CITY"]));
+        let queries: Vec<String> = fake
+            .requests()
+            .iter()
+            .map(|request| request["query"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert!(queries[1].starts_with("query Test"), "{queries:?}");
+        assert!(queries[2].starts_with("query Context"), "{queries:?}");
+        assert_eq!(
+            queries.len(),
+            4,
+            "setup, Test, refresh, CITY-1: {queries:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_test_refreshes_nothing() {
+        let (hub, _scratch, fake) = keyed_hub("linear-test-failed-no-refresh").await;
+        naming_a_new_team(&hub);
+        fake.push(Err(LinearError::Status(500)));
+
+        let reply = reply_to(&hub, test_linear()).await;
+        assert!(
+            matches!(&reply, DaemonMessage::LinearTest { error: Some(_), .. }),
+            "{reply:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert_eq!(fake.requests().len(), 2, "only the setup and the Test");
+        assert_eq!(hub.linear.team_keys(), ids(&["RT"]));
     }
 
     #[tokio::test]

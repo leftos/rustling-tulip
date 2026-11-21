@@ -27,6 +27,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A Linear team created after the app started is picked up within five minutes, or at once when Settings › Linear's Test is pressed.
 - On the phone, a slash command such as /reload-plugins is no longer underlined as a path that opens nothing.
 - The chat shows Submit and Cancel at a question's review step with current Claude Code, and answering one of several questions keeps the session waiting for you.
 

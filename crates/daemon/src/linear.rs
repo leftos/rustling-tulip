@@ -30,8 +30,9 @@ pub(crate) const OFFLINE_VARIABLE: &str = "RUSTLING_TULIP_LINEAR_OFFLINE";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most identifiers one issue query asks for.
 const BATCH_SIZE: usize = 50;
-/// How long the team keys and `urlKey` stay current.
-const CONTEXT_MAX_AGE: TimeDelta = TimeDelta::hours(24);
+/// How long the team keys and `urlKey` stay current: under the 5-minute
+/// tick, so every tick fetches them again and a new team is seen within it.
+const CONTEXT_MAX_AGE: TimeDelta = TimeDelta::minutes(4);
 /// How long a cached issue stays current; an older copy is fetched again.
 const ISSUE_MAX_AGE: TimeDelta = TimeDelta::minutes(1);
 /// The workspace's team keys, its name and its `urlKey`.
@@ -280,7 +281,8 @@ impl LinearClient {
     }
 
     /// Whether the context should be fetched at `now`: it never was, or the
-    /// copy is more than a day old.
+    /// copy is more than four minutes old, so every 5-minute tick refreshes
+    /// it.
     pub(crate) fn context_due(&self, now: DateTime<Utc>) -> bool {
         self.context
             .as_ref()
@@ -1104,7 +1106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_context_is_due_after_a_day() {
+    async fn the_context_is_due_after_four_minutes() {
         let reply = json!({
             "data": { "teams": { "nodes": [ { "key": "RT" } ] }, "organization": { "urlKey": "acme" } }
         });
@@ -1115,9 +1117,13 @@ mod tests {
             .refresh_context(t0())
             .await
             .expect("the context parses");
-        assert!(!client.context_due(t0() + TimeDelta::hours(23)));
-        assert!(!client.context_due(t0() + TimeDelta::hours(24)));
-        assert!(client.context_due(t0() + TimeDelta::hours(24) + TimeDelta::seconds(1)));
+        assert!(!client.context_due(t0() + TimeDelta::minutes(3) + TimeDelta::seconds(59)));
+        assert!(!client.context_due(t0() + TimeDelta::minutes(4)));
+        assert!(client.context_due(t0() + TimeDelta::minutes(4) + TimeDelta::seconds(1)));
+        assert!(
+            client.context_due(t0() + TimeDelta::minutes(5)),
+            "every 5-minute tick refreshes it"
+        );
     }
 
     #[tokio::test]
