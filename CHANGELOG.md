@@ -6,6 +6,11 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A Windows path in a chat answer, such as one through a `.tmp` folder, keeps every backslash where it is drawn and where its link opens.
+- A Mac whose daemon was started outside the desktop session says its login Keychain is out of reach, instead of a bare error saving a secret.
+- Settings › Linear offers Clear only for a saved key, and a refused key's line says whether Linear refused the saved key or LINEAR_API_KEY.
+- A narrow chat pane whose Stop is armed drops its context label instead of squeezing the session's name.
+
 ### Changed
 
 - The phone's Needs you first is a switch beside the sort, so sessions that need you come first under A–Z or the desktop's tabs too.
