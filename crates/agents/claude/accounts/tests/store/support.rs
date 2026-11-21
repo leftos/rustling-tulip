@@ -225,7 +225,7 @@ fn make_private(_dir: &Path) {}
 
 /// The DACL of `path` holds one ACE, not inherited, naming the current user, as the store makes its root, folders and
 /// files. Off Windows: owned by the effective uid, with no group or other permission bit.
-#[cfg(unix)]
+#[cfg(all(unix, accounts_locks))]
 pub fn assert_owner_only(path: &Path) {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -277,7 +277,7 @@ pub fn assert_owner_only(path: &Path) {
 }
 
 /// Off Windows: adds the group write bit to `path`.
-#[cfg(unix)]
+#[cfg(all(unix, accounts_locks))]
 pub fn grant_users_write(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 

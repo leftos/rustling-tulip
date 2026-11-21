@@ -115,218 +115,6 @@ pub fn resolve_existing_dir(raw: &str) -> anyhow::Result<PathBuf> {
     Ok(simplify_path(&canonical))
 }
 
-#[cfg(test)]
-#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
-#[cfg_attr(
-    not(windows),
-    expect(
-        clippy::items_after_test_module,
-        reason = "the non-Windows variants of the items below follow the test module"
-    )
-)]
-mod dir_tests {
-    use super::*;
-
-    #[test]
-    fn resolve_existing_dir_rejects_a_missing_path() {
-        let missing = std::env::temp_dir().join("rt-pin-does-not-exist-1a2b3c");
-        let err = resolve_existing_dir(&missing.to_string_lossy())
-            .expect_err("a missing directory must not resolve");
-        assert!(
-            format!("{err:#}").contains("no longer readable"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn resolve_existing_dir_rejects_a_file() {
-        let file = std::env::temp_dir().join("rt-pin-is-a-file-1a2b3c");
-        std::fs::write(&file, b"").expect("writing the fixture file");
-        let err = resolve_existing_dir(&file.to_string_lossy())
-            .expect_err("a file must not resolve as a worktree");
-        assert!(
-            format!("{err:#}").contains("not a directory"),
-            "unexpected error: {err:#}"
-        );
-        let _ = std::fs::remove_file(&file);
-    }
-
-    #[test]
-    fn resolve_existing_dir_normalizes_a_real_directory() {
-        let dir = std::env::temp_dir();
-        let out = resolve_existing_dir(&dir.to_string_lossy()).expect("temp dir must resolve");
-        assert!(out.is_dir());
-        assert!(
-            !out.to_string_lossy().starts_with(r"\\?\"),
-            "verbatim prefix should have been simplified: {}",
-            out.display()
-        );
-    }
-
-    #[test]
-    fn summarizer_dir_is_created() {
-        let data_local =
-            std::env::temp_dir().join(format!("rt-summarizer-data-local-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_local);
-        let wanted = data_local.join("summarizer");
-        let dir = ensure_summarizer_dir(wanted.clone()).expect("create the summarizer dir");
-        assert_eq!(dir, wanted);
-        assert!(dir.is_dir(), "{}", dir.display());
-        let again = ensure_summarizer_dir(wanted).expect("an existing dir resolves");
-        assert_eq!(again, dir);
-        let _ = std::fs::remove_dir_all(&data_local);
-    }
-
-    #[test]
-    fn elevated_profile_has_no_accounts_dir() {
-        let accounts = PathBuf::from(r"C:\scratch\accounts");
-        assert_eq!(accounts_dir_of(Profile::Elevated, accounts.clone()), None);
-        assert_eq!(
-            accounts_dir_of(Profile::Ordinary, accounts.clone()),
-            Some(accounts)
-        );
-    }
-
-    #[test]
-    fn profile_rule_agrees_with_integrity_elevation() {
-        use crate::integrity::IntegrityLevel;
-
-        for rid in [0x1000, 0x2000, 0x2100, 0x3000, 0x4000] {
-            assert_eq!(
-                profile::profile_for_rid(rid) == Profile::Elevated,
-                IntegrityLevel::from_rid(rid).is_elevated(),
-                "{rid:#x}"
-            );
-        }
-    }
-
-    #[test]
-    fn summarizer_spend_file_is_in_the_config_dir() {
-        let root = PathBuf::from(r"C:\scratch\config");
-        let dirs = Dirs {
-            config: root.clone(),
-            state_file: root.join("state.json"),
-            handshake_file: root.join("daemon.json"),
-            remote_config_file: root.join("remote.json"),
-            sessions_dir: root.join("sessions"),
-            worktrees_dir: root.join("worktrees"),
-            binaries_dir: root.join("binaries"),
-            bin_templates: None,
-        };
-        assert_eq!(
-            summarizer_spend_file(&dirs),
-            root.join("summarizer-spend.json")
-        );
-    }
-}
-
-#[cfg(all(test, windows))]
-#[expect(
-    clippy::expect_used,
-    reason = "tests assert the resolved override is present"
-)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strips_drive_verbatim_prefix() {
-        let out = simplify_path(Path::new(r"\\?\C:\Users\foo\repo"));
-        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
-    }
-
-    #[test]
-    fn converts_unc_verbatim_to_normal() {
-        let out = simplify_path(Path::new(r"\\?\UNC\server\share\dir"));
-        assert_eq!(out, PathBuf::from(r"\\server\share\dir"));
-    }
-
-    #[test]
-    fn leaves_normal_paths_unchanged() {
-        let out = simplify_path(Path::new(r"C:\Users\foo\repo"));
-        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
-    }
-
-    #[test]
-    fn leaves_volume_guid_alone() {
-        let p = r"\\?\Volume{12345678-1234-1234-1234-123456789012}\dir";
-        assert_eq!(simplify_path(Path::new(p)), PathBuf::from(p));
-    }
-
-    #[test]
-    fn dispatch_dir_env_override_wins() {
-        let root = if cfg!(windows) { r"C:\logs" } else { "/logs" };
-        assert_eq!(
-            dispatch_live_dir_from(Some(root.into()), [Some(PathBuf::from("plugin"))]),
-            Some(PathBuf::from(root))
-        );
-        let relative = dispatch_live_dir_from(Some("logs".into()), [Some(PathBuf::from("plugin"))])
-            .expect("a relative override is made absolute");
-        assert!(relative.is_absolute());
-        assert!(relative.ends_with("logs"));
-    }
-
-    #[test]
-    fn dispatch_dir_empty_var_counts_as_unset() {
-        assert_eq!(
-            dispatch_live_dir_from(Some(OsString::new()), [Some(PathBuf::from("plugin"))]),
-            Some(PathBuf::from("plugin"))
-        );
-    }
-
-    #[test]
-    fn dispatch_dir_falls_back_to_the_first_plugin_folder() {
-        assert_eq!(
-            dispatch_live_dir_from(
-                None,
-                [None, Some(PathBuf::from("a")), Some(PathBuf::from("b"))]
-            ),
-            Some(PathBuf::from("a"))
-        );
-    }
-
-    #[test]
-    fn dispatch_dir_is_none_without_either() {
-        assert_eq!(dispatch_live_dir_from(None, [None]), None);
-    }
-
-    #[test]
-    fn gates_root_unset_is_the_machine() {
-        assert_eq!(gates_root_from(None), GatesRoot::Machine);
-    }
-
-    #[test]
-    fn gates_root_empty_var_counts_as_unset() {
-        assert_eq!(gates_root_from(Some(OsString::new())), GatesRoot::Machine);
-    }
-
-    #[test]
-    fn gates_root_absolute_override_stays() {
-        let root = if cfg!(windows) { r"C:\gates" } else { "/gates" };
-        assert_eq!(
-            gates_root_from(Some(root.into())),
-            GatesRoot::Override(PathBuf::from(root))
-        );
-    }
-
-    #[test]
-    fn gates_root_relative_override_is_made_absolute() {
-        let root = gates_root_from(Some("gates".into()));
-        assert!(
-            matches!(&root, GatesRoot::Override(dir) if dir.is_absolute() && dir.ends_with("gates")),
-            "{root:?}"
-        );
-    }
-
-    #[test]
-    fn gates_root_that_cannot_be_made_absolute_is_unusable_never_the_machine() {
-        let failed = Err(std::io::Error::other("no current dir"));
-        assert_eq!(
-            gates_root_of(OsStr::new("gates"), failed),
-            GatesRoot::Unusable
-        );
-    }
-}
-
 impl Dirs {
     /// Resolve this daemon's folders by its profile and create them. An
     /// elevated daemon first creates its protected root, and the config and
@@ -622,4 +410,209 @@ pub(crate) fn resolve_bin_templates_dir() -> Option<PathBuf> {
     std::env::var_os("RUSTLING_TULIP_BIN_TEMPLATES")
         .filter(|value| !value.as_os_str().is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
+mod dir_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_existing_dir_rejects_a_missing_path() {
+        let missing = std::env::temp_dir().join("rt-pin-does-not-exist-1a2b3c");
+        let err = resolve_existing_dir(&missing.to_string_lossy())
+            .expect_err("a missing directory must not resolve");
+        assert!(
+            format!("{err:#}").contains("no longer readable"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_existing_dir_rejects_a_file() {
+        let file = std::env::temp_dir().join("rt-pin-is-a-file-1a2b3c");
+        std::fs::write(&file, b"").expect("writing the fixture file");
+        let err = resolve_existing_dir(&file.to_string_lossy())
+            .expect_err("a file must not resolve as a worktree");
+        assert!(
+            format!("{err:#}").contains("not a directory"),
+            "unexpected error: {err:#}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn resolve_existing_dir_normalizes_a_real_directory() {
+        let dir = std::env::temp_dir();
+        let out = resolve_existing_dir(&dir.to_string_lossy()).expect("temp dir must resolve");
+        assert!(out.is_dir());
+        assert!(
+            !out.to_string_lossy().starts_with(r"\\?\"),
+            "verbatim prefix should have been simplified: {}",
+            out.display()
+        );
+    }
+
+    #[test]
+    fn summarizer_dir_is_created() {
+        let data_local =
+            std::env::temp_dir().join(format!("rt-summarizer-data-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_local);
+        let wanted = data_local.join("summarizer");
+        let dir = ensure_summarizer_dir(wanted.clone()).expect("create the summarizer dir");
+        assert_eq!(dir, wanted);
+        assert!(dir.is_dir(), "{}", dir.display());
+        let again = ensure_summarizer_dir(wanted).expect("an existing dir resolves");
+        assert_eq!(again, dir);
+        let _ = std::fs::remove_dir_all(&data_local);
+    }
+
+    #[test]
+    fn elevated_profile_has_no_accounts_dir() {
+        let accounts = PathBuf::from(r"C:\scratch\accounts");
+        assert_eq!(accounts_dir_of(Profile::Elevated, accounts.clone()), None);
+        assert_eq!(
+            accounts_dir_of(Profile::Ordinary, accounts.clone()),
+            Some(accounts)
+        );
+    }
+
+    #[test]
+    fn profile_rule_agrees_with_integrity_elevation() {
+        use crate::integrity::IntegrityLevel;
+
+        for rid in [0x1000, 0x2000, 0x2100, 0x3000, 0x4000] {
+            assert_eq!(
+                profile::profile_for_rid(rid) == Profile::Elevated,
+                IntegrityLevel::from_rid(rid).is_elevated(),
+                "{rid:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn summarizer_spend_file_is_in_the_config_dir() {
+        let root = PathBuf::from(r"C:\scratch\config");
+        let dirs = Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            remote_config_file: root.join("remote.json"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+            bin_templates: None,
+        };
+        assert_eq!(
+            summarizer_spend_file(&dirs),
+            root.join("summarizer-spend.json")
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert the resolved override is present"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_drive_verbatim_prefix() {
+        let out = simplify_path(Path::new(r"\\?\C:\Users\foo\repo"));
+        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
+    }
+
+    #[test]
+    fn converts_unc_verbatim_to_normal() {
+        let out = simplify_path(Path::new(r"\\?\UNC\server\share\dir"));
+        assert_eq!(out, PathBuf::from(r"\\server\share\dir"));
+    }
+
+    #[test]
+    fn leaves_normal_paths_unchanged() {
+        let out = simplify_path(Path::new(r"C:\Users\foo\repo"));
+        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
+    }
+
+    #[test]
+    fn leaves_volume_guid_alone() {
+        let p = r"\\?\Volume{12345678-1234-1234-1234-123456789012}\dir";
+        assert_eq!(simplify_path(Path::new(p)), PathBuf::from(p));
+    }
+
+    #[test]
+    fn dispatch_dir_env_override_wins() {
+        let root = if cfg!(windows) { r"C:\logs" } else { "/logs" };
+        assert_eq!(
+            dispatch_live_dir_from(Some(root.into()), [Some(PathBuf::from("plugin"))]),
+            Some(PathBuf::from(root))
+        );
+        let relative = dispatch_live_dir_from(Some("logs".into()), [Some(PathBuf::from("plugin"))])
+            .expect("a relative override is made absolute");
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("logs"));
+    }
+
+    #[test]
+    fn dispatch_dir_empty_var_counts_as_unset() {
+        assert_eq!(
+            dispatch_live_dir_from(Some(OsString::new()), [Some(PathBuf::from("plugin"))]),
+            Some(PathBuf::from("plugin"))
+        );
+    }
+
+    #[test]
+    fn dispatch_dir_falls_back_to_the_first_plugin_folder() {
+        assert_eq!(
+            dispatch_live_dir_from(
+                None,
+                [None, Some(PathBuf::from("a")), Some(PathBuf::from("b"))]
+            ),
+            Some(PathBuf::from("a"))
+        );
+    }
+
+    #[test]
+    fn dispatch_dir_is_none_without_either() {
+        assert_eq!(dispatch_live_dir_from(None, [None]), None);
+    }
+
+    #[test]
+    fn gates_root_unset_is_the_machine() {
+        assert_eq!(gates_root_from(None), GatesRoot::Machine);
+    }
+
+    #[test]
+    fn gates_root_empty_var_counts_as_unset() {
+        assert_eq!(gates_root_from(Some(OsString::new())), GatesRoot::Machine);
+    }
+
+    #[test]
+    fn gates_root_absolute_override_stays() {
+        let root = if cfg!(windows) { r"C:\gates" } else { "/gates" };
+        assert_eq!(
+            gates_root_from(Some(root.into())),
+            GatesRoot::Override(PathBuf::from(root))
+        );
+    }
+
+    #[test]
+    fn gates_root_relative_override_is_made_absolute() {
+        let root = gates_root_from(Some("gates".into()));
+        assert!(
+            matches!(&root, GatesRoot::Override(dir) if dir.is_absolute() && dir.ends_with("gates")),
+            "{root:?}"
+        );
+    }
+
+    #[test]
+    fn gates_root_that_cannot_be_made_absolute_is_unusable_never_the_machine() {
+        let failed = Err(std::io::Error::other("no current dir"));
+        assert_eq!(
+            gates_root_of(OsStr::new("gates"), failed),
+            GatesRoot::Unusable
+        );
+    }
 }

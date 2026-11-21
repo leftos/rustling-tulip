@@ -1,6 +1,6 @@
 //! The driver token: the `claude setup-token` token a driven run's real
 //! Claude logs in with, held in one Windows Credential Manager entry
-//! (service [`SERVICE`], user [`USER`]) that the owner fills by hand with
+//! (service `SERVICE`, user `USER`, both Windows-only) that the owner fills by hand with
 //! `tools/rt-driver-mcp/set-driver-token.ps1`.
 //!
 //! The server sets it on the isolated daemon only, as [`TOKEN_ENV`], never on
@@ -13,9 +13,11 @@ use std::ffi::OsString;
 use std::io::BufRead;
 
 /// The Credential Manager service the driver token is filed under.
+#[cfg(windows)]
 pub const SERVICE: &str = "rustling-tulip-driver";
 
 /// The Credential Manager user the driver token is filed under.
+#[cfg(windows)]
 pub const USER: &str = "driver-token";
 
 /// A launch whose `env` sets this runs a real Claude, which needs the token.
