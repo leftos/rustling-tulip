@@ -44,7 +44,8 @@
 - [ ] RT-1450 Show Claude's "Make auto mode your default permission mode?" dialog as a Chat card and as needing you
 - [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule
-- [ ] RT-2049 Read a review quoted above a box holding a draft as Idle, not awaiting input · release vNext
+- [ ] RT-2090 Never read a session Idle while its question card is still on screen
+- [ ] RT-2093 Count Claude Code's other delivered prompts as deliveries, not answers
 
 ## Updates and installer
 
@@ -115,6 +116,8 @@
 - [ ] RT-1457 Check rustling-tulipd's output and exit code when a script runs it on Windows
 - [ ] RT-1462 Keep session labels across auto-resume at daemon start
 - [ ] RT-1463 Report a send that never reached the agent from rustling-tulipd send
+- [ ] RT-2094 Order the session list by when clients first heard of each session
+- [ ] RT-2095 Never list a session whose spawn is still pending, or tell clients when it is discarded
 
 ## Build, test and driver tooling
 
@@ -242,7 +245,6 @@
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
-- [ ] RT-2057 Keep a wrapped path whole in a question card's text · release vNext
 
 ## Settings and themes
 
@@ -321,8 +323,6 @@
   - [ ] RT-2002 Drop the leading space before "Have a code?" on the phone
   - [ ] RT-2003 Dim the status bar and bottom strip under the phone's pairing dialog
   - [ ] RT-2004 Raise the number pad for the phone's pairing code field
-  - [ ] RT-2005 Keep the phone key bar's → key clear of Hide · release vNext
-  - [ ] RT-2006 Give the landscape key bar's session status room to read · release vNext
   - [ ] RT-2007 Inset the phone viewer's line-number gutter from the screen edge
   - [ ] RT-2008 Keep two-digit line numbers on one line in the phone viewer
   - [ ] RT-2009 Keep the phone browser's rows still when a fetch finishes
@@ -525,9 +525,6 @@
 
 ## Phone app
 
-- [ ] RT-1473 Keep the phone header's Back on one line beside a long title · release vNext
-- [ ] RT-1472 Strip a plan's leading "#" from the phone plan sheet's title · release vNext
-- [ ] RT-1471 Sort a new row into its phone Home group as the desktop does · release vNext
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
@@ -540,7 +537,6 @@
 - [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
 - [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
 - [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving
-- [ ] RT-1460 Sort phone Home's groups by the desktop's sort, needs-you first · release vNext
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
 - [ ] RT-1647 Drop the relay's cached APNs provider token when APNs refuses it
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
@@ -550,7 +546,6 @@
 - [ ] RT-1704 Clear the signing values from testflight.ps1's environment once each is used
 - [ ] RT-1708 Fix the iOS-only clippy warnings so the phone app's iOS clippy passes
 - [ ] RT-1709 Find why the notification extension does not launch for a simulator push
-- [ ] RT-1724 Keep the phone Home's scroll position across a session visit, and make Add a host 44 px · release vNext
 - [ ] RT-1726 Answer the right host from the phone tray, let a tap through after a swipe, and clear an ended card after Open
 - [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
@@ -588,11 +583,8 @@
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2053 Keep the phone composer's handles and edit bar clear of its buttons and the keyboard
 - [ ] RT-2054 Stop the phone composer redrawing twice per keystroke with no selection shown
-- [ ] RT-2056 Read the phone pasteboard once per Paste and scale photos by pixels · release vNext
-- [ ] RT-2074 Route the phone Keys dock's Paste key through a system paste control · release vNext
-- [ ] RT-2075 Measure whether iOS refuses Command-V and the phone edit bar's Paste, and route them through system paste UI · release vNext
-- [ ] RT-2084 Disarm the phone Keys page's Delete when a long-press drag starts in edit mode · release vNext
 - [ ] RT-2085 Leave the drag slot line out of the phone list's row pitch so a drop at a row's centre lands after it
+- [ ] RT-2091 Show phone Home as refreshing until the fresh session list arrives after a foreground
 
 ## Dashboard, Gates and Linear
 
@@ -648,7 +640,7 @@
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
-- [ ] RT-1951 Read the Linear key from the env-secrets store too · release vNext
+- [ ] RT-2092 Send none of a locked Dashboard's held changes on Apply
 
 ## Repos, workspaces and worktrees
 
@@ -760,6 +752,7 @@
 - [ ] RT-1976 Name every variable an isolated experiment daemon must set or clear
 - [ ] RT-2015 Correct native-client.md: a model picker switch keeps the stepped effort
 - [ ] RT-2016 Correct testing.md: the real CLI's folder-trust dialog needs Down then Enter
+- [ ] RT-2086 Correct mobile-app.md: the phone's Paste goes through the system paste control
 
 ## Backlog
 
@@ -819,7 +812,6 @@
 - [ ] RT-1734 Settle a finished short run's running mark in the phone's chat
 - [ ] RT-1736 Measure the iOS keyboard's on-screen overlap, not its frame height, in the gpui fork
 - [ ] RT-1744 Move the phone's terminal with its session when a duplicate host is dropped
-- [ ] RT-1746 Fix the phone key bar's Ctrl after Backspace, Ctrl+C over a selection, and Back over its Quick dock · release vNext
 - [ ] RT-1763 Forget a link press released off the text in the gpui fork's InteractiveText
 - [ ] RT-1775 Log a chat context the agent adapter cannot downcast instead of silently replacing it
 - [ ] RT-1794 Bound how long a tailnet dial to a switched-off host stays Connecting
@@ -851,9 +843,10 @@
 - [ ] RT-2032 Count the issue dot in the Compact agent chip's width estimate
 - [ ] RT-2033 Draw a Compact agent chip's issue identifier in its label's colour, size and weight
 - [ ] RT-2047 Keep a host's Linear switch across a reconnect until its new status arrives
-- [ ] RT-2048 Lock the Dashboard key field so it takes no focus or paste off this machine · release vNext
 - [ ] RT-2077 Check whether the phone shell's chat drops the backslash before a dot in a Windows path
 - [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
+- [ ] RT-2088 Read a cui-layout review with a task panel under it as awaiting input
+- [ ] RT-2089 Keep the space after a full-width question row ending in a word with a slash
 
 ## Design files
 
@@ -862,7 +855,7 @@
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-956
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574, RT-1951
+- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-779, RT-789, RT-1509, RT-1574
 - [default-shell.md](default-shell.md) — RT-956
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167, RT-1509, RT-1541, RT-1542, RT-1552, RT-1558
@@ -871,7 +864,7 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, RT-2086, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
