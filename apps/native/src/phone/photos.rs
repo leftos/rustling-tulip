@@ -167,18 +167,23 @@ pub fn fit(len: usize) -> Fit {
     }
 }
 
-/// The size an image of `width` by `height` is scaled to so its longer side
-/// is at most `long_side`, keeping its shape; an image already within it
-/// keeps its size.
+/// The pixel size an image of `width` by `height` pixels is drawn at so its
+/// longer side is exactly `max_long` pixels, keeping its shape: an image
+/// already within `max_long` keeps its size rather than growing, and a
+/// shorter side never rounds below one pixel.
 #[must_use]
-pub fn scaled_size(width: f64, height: f64, long_side: u32) -> (f64, f64) {
+pub fn scaled_pixel_size(width: f64, height: f64, max_long: f64) -> (f64, f64) {
     let longer = width.max(height);
-    let limit = f64::from(long_side);
-    if longer <= limit || longer <= 0.0 {
+    if longer <= max_long || longer <= 0.0 || max_long <= 0.0 {
         return (width, height);
     }
-    let ratio = limit / longer;
-    ((width * ratio).round(), (height * ratio).round())
+    let ratio = max_long / longer;
+    let shorter = |side: f64| (side * ratio).round().max(1.0);
+    if width >= height {
+        (max_long, shorter(height))
+    } else {
+        (shorter(width), max_long)
+    }
 }
 
 /// The name a picked image of `format` uploads under, picked at `at`:
@@ -199,7 +204,9 @@ mod tests {
     use gpui::ImageFormat;
     use protocol::UPLOAD_MAX_BYTES;
 
-    use super::{Fit, PickSlot, SCALED_LONG_SIDE, SCALED_QUALITY, fit, picked_name, scaled_size};
+    use super::{
+        Fit, PickSlot, SCALED_LONG_SIDE, SCALED_QUALITY, fit, picked_name, scaled_pixel_size,
+    };
 
     #[test]
     fn a_taken_answer_answers_only_its_own_pick_and_only_once() {
@@ -259,11 +266,21 @@ mod tests {
     }
 
     #[test]
-    fn scaling_keeps_the_shape_and_caps_the_longer_side() {
-        assert_eq!(scaled_size(4032.0, 3024.0, 2048), (2048.0, 1536.0));
-        assert_eq!(scaled_size(3024.0, 4032.0, 2048), (1536.0, 2048.0));
-        assert_eq!(scaled_size(1000.0, 500.0, 2048), (1000.0, 500.0));
-        assert_eq!(scaled_size(0.0, 0.0, 2048), (0.0, 0.0));
+    fn a_4032_by_3024_photo_scales_to_2048_by_1536() {
+        assert_eq!(scaled_pixel_size(4032.0, 3024.0, 2048.0), (2048.0, 1536.0));
+    }
+
+    #[test]
+    fn a_portrait_photo_scales_its_long_side() {
+        assert_eq!(scaled_pixel_size(3024.0, 4032.0, 2048.0), (1536.0, 2048.0));
+        assert_eq!(scaled_pixel_size(8000.0, 10.0, 2048.0), (2048.0, 3.0));
+    }
+
+    #[test]
+    fn a_small_photo_is_never_upscaled() {
+        assert_eq!(scaled_pixel_size(2048.0, 1000.0, 2048.0), (2048.0, 1000.0));
+        assert_eq!(scaled_pixel_size(1000.0, 800.0, 2048.0), (1000.0, 800.0));
+        assert_eq!(scaled_pixel_size(0.0, 0.0, 2048.0), (0.0, 0.0));
     }
 
     #[test]

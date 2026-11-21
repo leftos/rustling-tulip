@@ -15,6 +15,7 @@
 //! `PhotosUI`.
 
 use std::cell::OnceCell;
+use std::ptr::NonNull;
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -24,18 +25,22 @@ use gpui::ImageFormat;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{
-    MainThreadMarker, MainThreadOnly, define_class, extern_class, extern_methods, msg_send,
+    AnyThread, MainThreadMarker, MainThreadOnly, define_class, extern_class, extern_methods,
+    msg_send,
 };
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSData, NSError, NSObject, NSString};
 use objc2_photos_ui::{
     PHPickerConfiguration, PHPickerConfigurationAssetRepresentationMode, PHPickerFilter,
     PHPickerResult, PHPickerViewControllerDelegate,
 };
-use objc2_ui_kit::{UIApplication, UIImage, UIResponder, UIViewController};
+use objc2_ui_kit::{
+    UIApplication, UIGraphicsImageRenderer, UIGraphicsImageRendererContext,
+    UIGraphicsImageRendererFormat, UIImage, UIResponder, UIViewController,
+};
 
 use super::pasteboard::PastedImage;
-use super::photos::{Fit, PhotoPicker, PickSlot, SCALED_QUALITY, fit, scaled_size};
+use super::photos::{Fit, PhotoPicker, PickSlot, SCALED_QUALITY, fit, scaled_pixel_size};
 
 /// The type a picked item is taken as it is under.
 const JPEG_TYPE: &str = "public.jpeg";
@@ -236,14 +241,32 @@ pub(super) fn fitted(bytes: Vec<u8>, format: ImageFormat) -> PastedImage {
     }
 }
 
-/// `bytes` scaled so the longer side is at most `long_side` and encoded as
-/// JPEG at `quality`; `None` when they cannot be read as an image.
+/// `bytes` drawn so the longer side is exactly `long_side` pixels (an image
+/// already within it keeps its size rather than growing), in the orientation
+/// the image carries, and encoded as JPEG at `quality`; `None` when they
+/// cannot be read as an image.
 fn scaled(bytes: &[u8], long_side: u32, quality: f64) -> Option<Vec<u8>> {
     let image = UIImage::imageWithData(&NSData::with_bytes(bytes))?;
     // SAFETY: an image's size is read-only state, safe off the main thread.
     let size = unsafe { image.size() };
-    let (width, height) = scaled_size(size.width, size.height, long_side);
-    let thumbnail = image.imageByPreparingThumbnailOfSize(CGSize::new(width, height))?;
+    let (width, height) = scaled_pixel_size(size.width, size.height, f64::from(long_side));
+    // An image made from data is at scale 1, so its point size is its pixel
+    // size: drawing it into that many points at scale 1 gives exactly that
+    // many pixels, and `drawInRect` applies the orientation it carries.
+    let format = UIGraphicsImageRendererFormat::new();
+    format.setScale(1.0);
+    let renderer = UIGraphicsImageRenderer::initWithSize_format(
+        UIGraphicsImageRenderer::alloc(),
+        CGSize::new(width, height),
+        &format,
+    );
+    let bounds = CGRect::new(CGPoint::ZERO, CGSize::new(width, height));
+    let drawing = RcBlock::new(move |_context: NonNull<UIGraphicsImageRendererContext>| {
+        image.drawInRect(bounds);
+    });
+    // SAFETY: `drawing` is a live block for the call, which runs it before
+    // `imageWithActions` returns.
+    let thumbnail = unsafe { renderer.imageWithActions(RcBlock::as_ptr(&drawing)) };
     let jpeg = thumbnail.jpeg_representation(quality)?;
     tracing::info!(
         from = bytes.len(),

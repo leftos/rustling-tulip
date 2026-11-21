@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's Settings › Hosts buttons are full-size touch targets, and lifting a key by a long press in Settings › Keys' edit mode clears an armed Delete.
 - A plan's title drops its heading's "#" marks on the chat card, the phone's plan sheet and the Needs you row.
 - The phone's Keys dock Paste key pastes through iOS's own paste button, so iOS 16 and later no longer refuse it.
+- The phone reads the clipboard once per image paste, and a photo too large to upload is scaled to exactly 2048 pixels on its longer side.
 
 ## v0.18.1-alpha
 

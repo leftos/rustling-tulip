@@ -137,6 +137,38 @@ impl ImageSource {
     }
 }
 
+/// The image source among the types an item offers, `conforms` answering
+/// whether it conforms to a type identifier: PNG over JPEG over any other
+/// image, and `None` when it offers no image. `conforms` sees the type tree,
+/// so a HEIC conforms to `public.image`.
+#[cfg_attr(
+    not(any(target_os = "ios", test)),
+    expect(dead_code, reason = "only the iOS paste paths choose an image source")
+)]
+pub(crate) fn image_source(conforms: impl Fn(&str) -> bool) -> Option<ImageSource> {
+    if conforms(PNG_TYPE) {
+        Some(ImageSource::Png)
+    } else if conforms(JPEG_TYPE) {
+        Some(ImageSource::Jpeg)
+    } else if conforms(IMAGE_TYPE) {
+        Some(ImageSource::Other)
+    } else {
+        None
+    }
+}
+
+/// The image source a pasteboard that lists `types` reads as: PNG over JPEG
+/// over any other image, and any list naming neither as
+/// [`ImageSource::Other`], the read that accepts whatever image the board
+/// holds. The caller has already seen that the board holds an image.
+#[cfg_attr(
+    not(any(target_os = "ios", test)),
+    expect(dead_code, reason = "only the iOS paste paths choose an image source")
+)]
+pub(crate) fn source_from_types(types: &[String]) -> ImageSource {
+    image_source(|kind| types.iter().any(|listed| listed == kind)).unwrap_or(ImageSource::Other)
+}
+
 /// What an item offering `offered`, whose types `conforms` to the type
 /// identifiers it is asked about, pastes as on a host that takes uploads
 /// when `uploads`. An image is any item conforming to `public.image`: PNG
@@ -153,15 +185,7 @@ pub(crate) fn paste_kind(
     conforms: impl Fn(&str) -> bool,
     uploads: bool,
 ) -> PasteKind {
-    let image = if conforms(PNG_TYPE) {
-        Some(ImageSource::Png)
-    } else if conforms(JPEG_TYPE) {
-        Some(ImageSource::Jpeg)
-    } else if conforms(IMAGE_TYPE) {
-        Some(ImageSource::Other)
-    } else {
-        None
-    };
+    let image = image_source(&conforms);
     let text = TEXT_TYPES
         .iter()
         .any(|kind| offered.contains(kind) || conforms(kind));
@@ -300,8 +324,8 @@ mod tests {
     use gpui::{Bounds, ImageFormat, Pixels, point, px, size};
 
     use super::{
-        IMAGE_TYPE, ImageSource, PasteKind, PasteSpot, must_unhide, paste_kind, pasted_name,
-        spot_fully_visible, spots_to_hide,
+        IMAGE_TYPE, ImageSource, PasteKind, PasteSpot, image_source, must_unhide, paste_kind,
+        pasted_name, source_from_types, spot_fully_visible, spots_to_hide,
     };
 
     /// The image types the tests' items offer, each conforming to
@@ -315,15 +339,69 @@ mod tests {
         "public.image",
     ];
 
-    /// What an item offering `offered` pastes as on a host that takes
-    /// uploads when `uploads`: each offered type conforms to itself, and an
-    /// image type to `public.image`.
-    fn kind_of(offered: &[&str], uploads: bool) -> PasteKind {
-        let conforms = |kind: &str| {
+    /// Whether an item offering `offered` conforms to the type identifier
+    /// `kind`: each offered type to itself, and an image type to
+    /// `public.image`, as the system's type tree has it.
+    fn conforms_of<'a>(offered: &'a [&str]) -> impl Fn(&str) -> bool + 'a {
+        move |kind: &str| {
             offered.contains(&kind)
                 || (kind == IMAGE_TYPE && offered.iter().any(|offer| IMAGES.contains(offer)))
-        };
-        paste_kind(offered, conforms, uploads)
+        }
+    }
+
+    /// The image source an item offering `offered` reads as.
+    fn source_of(offered: &[&str]) -> Option<ImageSource> {
+        image_source(conforms_of(offered))
+    }
+
+    /// What an item offering `offered` pastes as on a host that takes
+    /// uploads when `uploads`.
+    fn kind_of(offered: &[&str], uploads: bool) -> PasteKind {
+        paste_kind(offered, conforms_of(offered), uploads)
+    }
+
+    #[test]
+    fn image_source_prefers_png_then_jpeg_then_any_image() {
+        assert_eq!(
+            source_of(&["public.png", "public.jpeg"]),
+            Some(ImageSource::Png)
+        );
+        assert_eq!(source_of(&["public.jpeg"]), Some(ImageSource::Jpeg));
+        assert_eq!(source_of(&[IMAGE_TYPE]), Some(ImageSource::Other));
+        assert_eq!(
+            source_of(&["public.tiff", "public.png"]),
+            Some(ImageSource::Png)
+        );
+    }
+
+    #[test]
+    fn image_source_is_none_without_an_image_type() {
+        assert_eq!(source_of(&["public.utf8-plain-text"]), None);
+        assert_eq!(source_of(&[]), None);
+    }
+
+    #[test]
+    fn heic_reads_through_the_image_path() {
+        let source = source_of(&["public.heic"]);
+        assert_eq!(source, Some(ImageSource::Other));
+        assert_eq!(source.map(ImageSource::type_id), Some(IMAGE_TYPE));
+    }
+
+    #[test]
+    fn source_from_types_falls_back_when_no_listed_type_is_known() {
+        assert_eq!(
+            source_from_types(&["com.compuserve.gif".to_owned()]),
+            ImageSource::Other
+        );
+        assert_eq!(
+            source_from_types(&["public.heic".to_owned()]),
+            ImageSource::Other
+        );
+        assert_eq!(source_from_types(&[]), ImageSource::Other);
+        assert_eq!(
+            source_from_types(&["public.jpeg".to_owned(), "public.png".to_owned()]),
+            ImageSource::Png
+        );
     }
 
     #[test]

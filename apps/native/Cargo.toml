@@ -165,6 +165,8 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIButtonConfiguration",
     "UIColor",
     "UIControl",
+    "UIGraphicsImageRenderer",
+    "UIGraphicsRenderer",
     "UIImage",
     "UIPasteConfiguration",
     "UIPasteConfigurationSupporting",
