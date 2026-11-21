@@ -77,17 +77,45 @@ const UNREFERENCED_GRACE: TimeDelta = TimeDelta::hours(1);
 /// What a store operation says when Windows Credential Manager is out of reach
 /// of this daemon's logon session, as for a daemon a key-based SSH login
 /// started.
-pub(crate) const VAULT_UNREACHABLE: &str = concat!(
+const WINDOWS_VAULT_UNREACHABLE: &str = concat!(
     "This daemon cannot reach Windows Credential Manager because it was started from an SSH login. ",
     "Start rustling-tulip on this PC from the desktop app or the login autostart to use saved secrets."
 );
 
+/// What a store operation says when the login Keychain refuses this daemon
+/// because it runs outside the logged-on desktop session.
+const MAC_VAULT_UNREACHABLE: &str = concat!(
+    "This daemon cannot reach this Mac's login Keychain because it was started outside the logged-on ",
+    "desktop session (an SSH login or a background job). Start rustling-tulip on this Mac from the ",
+    "desktop app or the login autostart to use saved secrets."
+);
+
+/// The out-of-reach text for `macos`: the Mac's when true, else Windows'.
+const fn vault_unreachable_text(macos: bool) -> &'static str {
+    if macos {
+        MAC_VAULT_UNREACHABLE
+    } else {
+        WINDOWS_VAULT_UNREACHABLE
+    }
+}
+
+/// What a store operation says when this OS's secret store is out of reach of
+/// this daemon's session.
+pub(crate) const VAULT_UNREACHABLE: &str = vault_unreachable_text(cfg!(target_os = "macos"));
+
 /// How `windows-native-keyring-store` shows Windows error 1312
 /// (`ERROR_NO_SUCH_LOGON_SESSION`). The store keeps the error code in a private
-/// type with no accessor, so [`is_no_logon_session`] can only match this text.
+/// type with no accessor, so [`is_store_out_of_reach`] can only match this text.
 const NO_LOGON_SESSION_TEXT: &str = "ERROR_NO_SUCH_LOGON_SESSION";
 
-/// The error of a store operation that could not reach Credential Manager; it
+/// How `security_framework::base::Error`'s Debug shows Keychain error -25308
+/// (`errSecInteractionNotAllowed`), whatever the OS's language.
+const KEYCHAIN_NO_INTERACTION_CODE: &str = "code: -25308";
+
+/// The English message macOS gives Keychain error -25308.
+const KEYCHAIN_NO_INTERACTION_TEXT: &str = "User interaction is not allowed";
+
+/// The error of a store operation that could not reach the secret store; it
 /// displays as [`VAULT_UNREACHABLE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VaultUnreachable;
@@ -100,17 +128,27 @@ impl fmt::Display for VaultUnreachable {
 
 impl std::error::Error for VaultUnreachable {}
 
-/// Whether `err` is Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION`: the
-/// process's logon session has no Credential Manager, as for a key-based SSH
-/// login (logon type 3). The store reports it as `NoStorageAccess`; any other
-/// code is a `PlatformFailure`.
-pub(crate) fn is_no_logon_session(err: &KeyringError) -> bool {
+/// Whether `err` says this daemon's session cannot reach the secret store:
+/// Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION`, whose logon session has
+/// no Credential Manager, as for a key-based SSH login (logon type 3; the
+/// store reports it as `NoStorageAccess`); or Keychain error -25308,
+/// `errSecInteractionNotAllowed`, for a Mac daemon started outside the
+/// logged-on desktop session (the store reports it as a `PlatformFailure`).
+pub(crate) fn is_store_out_of_reach(err: &KeyringError) -> bool {
     match err {
         KeyringError::NoStorageAccess(platform) | KeyringError::PlatformFailure(platform) => {
-            platform.to_string().contains(NO_LOGON_SESSION_TEXT)
+            let display = platform.to_string();
+            display.contains(NO_LOGON_SESSION_TEXT)
+                || is_keychain_interaction_refused(&format!("{platform:?}"), &display)
         }
         _ => false,
     }
+}
+
+/// Whether a store error whose Debug is `debug` and Display is `display` is
+/// Keychain error -25308: by its code, or by its English message.
+fn is_keychain_interaction_refused(debug: &str, display: &str) -> bool {
+    debug.contains(KEYCHAIN_NO_INTERACTION_CODE) || display.contains(KEYCHAIN_NO_INTERACTION_TEXT)
 }
 
 /// The refusal of a spawn whose secret could not be read or saved because
@@ -530,7 +568,7 @@ fn stored_value(service: &str, key: &str, id: &str) -> Result<Option<String>, Va
     match Entry::new(service, &user(key, id)).and_then(|entry| entry.get_password()) {
         Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
-        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable),
+        Err(err) if is_store_out_of_reach(&err) => Err(VaultUnreachable),
         Err(err) => {
             warn!(key, id, error = %err, "env_secrets: could not read a saved secret");
             Ok(None)
@@ -543,7 +581,7 @@ fn store_value(service: &str, key: &str, id: &str, value: &str) -> anyhow::Resul
         .with_context(|| format!("opening the credential entry for {key}"))?;
     match entry.set_password(value) {
         Ok(()) => Ok(()),
-        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).with_context(|| format!("saving {key} to Windows Credential Manager")),
     }
 }
@@ -553,7 +591,7 @@ fn remove_stored(service: &str, key: &str, id: &str) -> anyhow::Result<()> {
         .with_context(|| format!("opening the credential entry for {key}"))?;
     match entry.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).with_context(|| format!("deleting the saved secret for {key}")),
     }
 }
@@ -632,6 +670,36 @@ pub(crate) mod test_support {
     }
 
     impl std::error::Error for StoreCode {}
+
+    /// A Keychain error shown the way `security_framework::base::Error` shows
+    /// one: its Debug names the numeric code, its Display the OS's message.
+    struct KeychainCode {
+        code: i32,
+        message: &'static str,
+    }
+
+    impl fmt::Debug for KeychainCode {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Error")
+                .field("code", &self.code)
+                .field("message", &self.message)
+                .finish()
+        }
+    }
+
+    impl fmt::Display for KeychainCode {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for KeychainCode {}
+
+    /// The keyring error the macOS store returns for Keychain error `code`
+    /// that has no mapping of its own: a `PlatformFailure`.
+    pub(crate) fn keychain_error_with_code(code: i32, message: &'static str) -> KeyringError {
+        KeyringError::PlatformFailure(Box::new(KeychainCode { code, message }))
+    }
 
     /// The keyring error the Windows store returns for Windows error `code`:
     /// `NoStorageAccess` for 1312, `PlatformFailure` for any other.
@@ -771,8 +839,8 @@ pub(crate) mod test_support {
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 mod tests {
     use super::test_support::{
-        NO_LOGON_SESSION, inject_row_error as inject_store_error, mock_store, scratch,
-        store_error_with_code,
+        NO_LOGON_SESSION, inject_row_error as inject_store_error, keychain_error_with_code,
+        mock_store, scratch, store_error_with_code,
     };
     use super::*;
     use crate::{history, orphan};
@@ -832,12 +900,32 @@ mod tests {
 
     #[test]
     fn the_classifier_recognises_windows_error_1312_and_no_other_code() {
-        assert!(is_no_logon_session(&store_error_with_code(
+        assert!(is_store_out_of_reach(&store_error_with_code(
             NO_LOGON_SESSION
         )));
         // ERROR_ACCESS_DENIED: the store is locked, not out of this session's reach.
-        assert!(!is_no_logon_session(&store_error_with_code(5)));
-        assert!(!is_no_logon_session(&KeyringError::NoEntry));
+        assert!(!is_store_out_of_reach(&store_error_with_code(5)));
+        assert!(!is_store_out_of_reach(&KeyringError::NoEntry));
+    }
+
+    #[test]
+    fn the_classifier_recognises_keychain_error_25308_as_out_of_reach() {
+        assert!(
+            is_store_out_of_reach(&keychain_error_with_code(-25308, "..")),
+            "errSecInteractionNotAllowed by its code"
+        );
+        // errSecAuthFailed: the Keychain answered, it is not out of reach.
+        assert!(!is_store_out_of_reach(&keychain_error_with_code(
+            -25293, ".."
+        )));
+        assert!(!is_store_out_of_reach(&KeyringError::NoEntry));
+        assert!(
+            is_store_out_of_reach(&keychain_error_with_code(
+                -1,
+                "User interaction is not allowed."
+            )),
+            "errSecInteractionNotAllowed by its message"
+        );
     }
 
     fn index_text() -> String {

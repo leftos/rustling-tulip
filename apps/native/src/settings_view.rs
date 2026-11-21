@@ -21,7 +21,7 @@ use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, AutoSwitchStrategy, ClientMessage, DaemonMessage,
     FEATURE_AGENT_COMMANDS, FEATURE_AGENT_USER_HOOKS, FEATURE_DEFAULT_SHELL,
     FEATURE_DETAILED_LOGGING, FEATURE_LINEAR_SETTINGS, FEATURE_SUBAGENT_LISTING, FieldKind,
-    KeepAwakeMode, KeyState, LinearKeyState, OptionValue, RemoteState, Secret, SubagentListing,
+    KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret, SubagentListing,
     SummarizerKeySource, SummarizerSettings, SummarySource, UserHooksWire, error_codes,
 };
 
@@ -8929,16 +8929,10 @@ impl RootView {
                 .is_some_and(|field| !field.draft.trim().is_empty())
     }
 
-    /// Whether Clear takes a press: the key is not locked and the daemon
-    /// holds a saved key, accepted or refused.
+    /// Whether Clear takes a press: the key is not locked and the key the
+    /// daemon uses is its saved one, accepted or refused.
     fn linear_clear_enabled(&self) -> bool {
-        !self.linear_key_locked()
-            && self.shown_linear().is_some_and(|status| {
-                matches!(
-                    status.key,
-                    LinearKeyState::Stored | LinearKeyState::Rejected
-                )
-            })
+        !self.linear_key_locked() && self.shown_linear().is_some_and(|status| status.key_saved)
     }
 
     /// Whether the switch shows Linear on: pending, else the daemon's.
@@ -9209,7 +9203,7 @@ impl RootView {
         };
         let state = quiet(
             "settings-linear-key-state",
-            linear_settings::key_state_words(status.key).to_owned(),
+            linear_settings::key_state_words(status.key, status.key_saved).to_owned(),
         );
         let note = self
             .linear_key_note()

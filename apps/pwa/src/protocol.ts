@@ -6509,8 +6509,11 @@ export type DaemonMessage =
    * team keys it reaches, and the display text of the last failed Linear
    * request (cleared by the next success). Sent only by a daemon that
    * lists [`FEATURE_LINEAR_SETTINGS`].
+   *
+   * `key_saved`: True when the key in use is the one saved in the secret store,
+   * false for `LINEAR_API_KEY` or no key.
    */
-  | { type: "linear_status"; enabled: boolean; key: LinearKeyState; workspace_name?: string | null; team_keys?: string[]; last_error?: string | null }
+  | { type: "linear_status"; enabled: boolean; key: LinearKeyState; workspace_name?: string | null; team_keys?: string[]; last_error?: string | null; key_saved?: boolean }
   /**
    * The answer to [`ClientMessage::TestLinear`], to the requester alone:
    * exactly one of `workspace_name` (with the `team_keys` the key reaches)

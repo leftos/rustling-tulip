@@ -18,6 +18,8 @@ pub(crate) struct LinearStatus {
     pub(crate) workspace_name: Option<String>,
     pub(crate) team_keys: Vec<String>,
     pub(crate) last_error: Option<String>,
+    /// Whether the key in use is the one saved in the host's secret store.
+    pub(crate) key_saved: bool,
 }
 
 /// Where the Test this window asked a host for stands.
@@ -71,6 +73,7 @@ impl LinearSettingsState {
                 workspace_name,
                 team_keys,
                 last_error,
+                key_saved,
             } => {
                 self.hosts.entry(host.clone()).or_default().status = Some(LinearStatus {
                     enabled: *enabled,
@@ -78,6 +81,7 @@ impl LinearSettingsState {
                     workspace_name: workspace_name.clone(),
                     team_keys: team_keys.clone(),
                     last_error: last_error.clone(),
+                    key_saved: *key_saved,
                 });
                 true
             }
@@ -180,13 +184,15 @@ impl LinearSettingsState {
     }
 }
 
-/// The words the Linear tab shows for the key's state.
-pub(crate) const fn key_state_words(state: LinearKeyState) -> &'static str {
+/// The words the Linear tab shows for the key's state; a refused key says
+/// whether it is the saved one (`key_saved`) or `LINEAR_API_KEY`.
+pub(crate) const fn key_state_words(state: LinearKeyState, key_saved: bool) -> &'static str {
     match state {
         LinearKeyState::Missing => "No key",
         LinearKeyState::Stored => "Key saved",
         LinearKeyState::Environment => "Using LINEAR_API_KEY",
-        LinearKeyState::Rejected => "Linear refused this key",
+        LinearKeyState::Rejected if key_saved => "Linear refused the saved key",
+        LinearKeyState::Rejected => "Linear refused LINEAR_API_KEY",
         LinearKeyState::Unreachable => "The secure store is out of reach on this host",
         LinearKeyState::Unknown => "Unknown",
     }
@@ -226,6 +232,7 @@ mod tests {
             workspace_name: Some("Leftos".to_owned()),
             team_keys: strings(&["RT", "YAAT"]),
             last_error: None,
+            key_saved: true,
         }
     }
 
@@ -255,18 +262,32 @@ mod tests {
 
     #[test]
     fn key_state_words_name_every_state() {
-        for (state, words) in [
-            (LinearKeyState::Missing, "No key"),
-            (LinearKeyState::Stored, "Key saved"),
-            (LinearKeyState::Environment, "Using LINEAR_API_KEY"),
-            (LinearKeyState::Rejected, "Linear refused this key"),
+        for (state, saved, words) in [
+            (LinearKeyState::Missing, false, "No key"),
+            (LinearKeyState::Stored, true, "Key saved"),
+            (LinearKeyState::Environment, false, "Using LINEAR_API_KEY"),
+            (
+                LinearKeyState::Rejected,
+                true,
+                "Linear refused the saved key",
+            ),
+            (
+                LinearKeyState::Rejected,
+                false,
+                "Linear refused LINEAR_API_KEY",
+            ),
             (
                 LinearKeyState::Unreachable,
+                false,
                 "The secure store is out of reach on this host",
             ),
-            (LinearKeyState::Unknown, "Unknown"),
+            (LinearKeyState::Unknown, false, "Unknown"),
         ] {
-            assert_eq!(key_state_words(state), words, "{state:?}");
+            assert_eq!(
+                key_state_words(state, saved),
+                words,
+                "{state:?}, saved {saved}"
+            );
         }
     }
 

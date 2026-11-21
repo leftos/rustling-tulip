@@ -2871,6 +2871,7 @@ fn shot_linear_status() -> DaemonMessage {
         workspace_name: Some("Leftos".to_owned()),
         team_keys: vec!["RT".to_owned(), "YAAT".to_owned()],
         last_error: None,
+        key_saved: true,
     }
 }
 

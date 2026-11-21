@@ -61,7 +61,7 @@ pub(crate) fn set(provider: &str, key: &Secret) -> anyhow::Result<()> {
     }
     match entry(provider)?.set_password(text) {
         Ok(()) => Ok(()),
-        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if env_secrets::is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err)
             .with_context(|| format!("saving the {provider} key to Windows Credential Manager")),
     }
@@ -80,7 +80,9 @@ fn read_stored(provider: &str) -> Result<Option<Secret>, VaultUnreachable> {
         Ok(text) => Ok(Some(Secret::new(text))),
         Err(err) => match err.downcast_ref::<KeyringError>() {
             Some(KeyringError::NoEntry) => Ok(None),
-            Some(store_err) if env_secrets::is_no_logon_session(store_err) => Err(VaultUnreachable),
+            Some(store_err) if env_secrets::is_store_out_of_reach(store_err) => {
+                Err(VaultUnreachable)
+            }
             _ => {
                 warn!(provider, error = %format!("{err:#}"), "summarizer: could not read the saved key; treating it as missing");
                 Ok(None)
@@ -112,7 +114,7 @@ pub(crate) fn get(provider: &str, source: &KeySource) -> Result<Option<Secret>, 
 pub(crate) fn delete(provider: &str) -> anyhow::Result<()> {
     match entry(provider)?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if env_secrets::is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).with_context(|| {
             format!("deleting the {provider} key from Windows Credential Manager")
         }),

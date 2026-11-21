@@ -176,6 +176,8 @@ struct WireStatus {
     workspace_name: Option<String>,
     team_keys: Vec<String>,
     last_error: Option<String>,
+    /// Whether the key in use is the saved one.
+    key_saved: bool,
 }
 
 impl WireStatus {
@@ -187,6 +189,7 @@ impl WireStatus {
             workspace_name: data.workspace_name,
             team_keys: data.team_keys,
             last_error: service.last_error.clone(),
+            key_saved: service.chosen == LinearKeyState::Stored,
         }
     }
 
@@ -197,6 +200,7 @@ impl WireStatus {
             workspace_name: self.workspace_name.clone(),
             team_keys: self.team_keys.clone(),
             last_error: self.last_error.clone(),
+            key_saved: self.key_saved,
         }
     }
 }
@@ -1476,6 +1480,23 @@ mod tests {
         service.use_key(changed);
         assert!(service.usable(), "a different key may be used again");
         assert_eq!(service.key_state(), LinearKeyState::Stored);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_key_says_whether_it_is_saved() {
+        for (chosen, saved) in [
+            (LinearKeyState::Environment, false),
+            (LinearKeyState::Stored, true),
+        ] {
+            let (hub, _scratch, fake) = keyed_hub("linear-rejected-source").await;
+            hub.linear.service.lock().await.chosen = chosen;
+            fake.push(Err(LinearError::Rejected));
+
+            hub.linear.request(&ids(&["RT-1"]), &hub.state_events).await;
+            let status = published_status(&hub);
+            assert_eq!(status.key, LinearKeyState::Rejected, "{chosen:?}");
+            assert_eq!(status.key_saved, saved, "{chosen:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

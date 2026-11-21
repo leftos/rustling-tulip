@@ -8207,6 +8207,10 @@ pub enum DaemonMessage {
         team_keys: Vec<String>,
         #[serde(default)]
         last_error: Option<String>,
+        /// True when the key in use is the one saved in the secret store,
+        /// false for `LINEAR_API_KEY` or no key.
+        #[serde(default)]
+        key_saved: bool,
     },
     /// The answer to [`ClientMessage::TestLinear`], to the requester alone:
     /// exactly one of `workspace_name` (with the `team_keys` the key reaches)
@@ -19272,6 +19276,7 @@ mod tests {
             workspace_name: Some("Acme".to_string()),
             team_keys: vec!["RT".to_string()],
             last_error: Some("Linear answered HTTP 500".to_string()),
+            key_saved: true,
         };
         let json = serde_json::to_string(&status).expect("serialize");
         assert!(json.contains(r#""type":"linear_status""#), "{json}");
@@ -19283,6 +19288,7 @@ mod tests {
             workspace_name,
             team_keys,
             last_error,
+            key_saved,
         } = back
         else {
             panic!("decoded as another message: {json}");
@@ -19292,6 +19298,7 @@ mod tests {
         assert_eq!(workspace_name.as_deref(), Some("Acme"));
         assert_eq!(team_keys, vec!["RT".to_string()]);
         assert_eq!(last_error.as_deref(), Some("Linear answered HTTP 500"));
+        assert!(key_saved);
 
         let reply = DaemonMessage::LinearTest {
             workspace_name: None,
@@ -19326,6 +19333,7 @@ mod tests {
             workspace_name,
             team_keys,
             last_error,
+            key_saved,
         } = serde_json::from_str::<DaemonMessage>(bare).expect("deserialize")
         else {
             panic!("decoded as another message: {bare}");
@@ -19335,6 +19343,7 @@ mod tests {
         assert_eq!(workspace_name, None);
         assert_eq!(team_keys, Vec::<String>::new());
         assert_eq!(last_error, None);
+        assert!(!key_saved, "an older daemon's status reads as no saved key");
     }
 
     #[test]

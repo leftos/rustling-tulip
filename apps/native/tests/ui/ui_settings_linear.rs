@@ -60,6 +60,20 @@ fn status() -> DaemonMessage {
         workspace_name: Some("Leftos".to_owned()),
         team_keys: vec!["RT".to_owned(), "YAAT".to_owned()],
         last_error: None,
+        key_saved: true,
+    }
+}
+
+/// A `LinearStatus` with Linear on and the key in use refused; `key_saved`
+/// says whether it is the saved key.
+fn rejected(key_saved: bool) -> DaemonMessage {
+    DaemonMessage::LinearStatus {
+        enabled: true,
+        key: LinearKeyState::Rejected,
+        workspace_name: None,
+        team_keys: Vec::new(),
+        last_error: Some("Linear refused the key (HTTP 401).".to_owned()),
+        key_saved,
     }
 }
 
@@ -131,16 +145,10 @@ fn the_status_rows_show_the_key_state_workspace_and_teams(cx: &mut TestAppContex
     assert!(drawn(&mut h, "settings-linear-teams=RT, YAAT"));
     assert!(drawn(&mut h, "settings-linear-enabled"), "the switch");
 
-    h.send(DaemonMessage::LinearStatus {
-        enabled: true,
-        key: LinearKeyState::Rejected,
-        workspace_name: None,
-        team_keys: Vec::new(),
-        last_error: Some("Linear refused the key (HTTP 401).".to_owned()),
-    });
+    h.send(rejected(true));
     assert!(drawn(
         &mut h,
-        "settings-linear-key-state=Linear refused this key"
+        "settings-linear-key-state=Linear refused the saved key"
     ));
     assert!(drawn(&mut h, "settings-linear-workspace=—"), "no workspace");
     assert!(drawn(&mut h, "settings-linear-teams=—"), "no teams");
@@ -205,6 +213,28 @@ fn clear_sends_no_key(cx: &mut TestAppContext) {
     let sets = key_sets(&h.sent());
     assert_eq!(sets.len(), 1, "{sets:?}");
     assert_eq!(sets[0].0, None, "Clear deletes the saved key");
+}
+
+#[gpui::test]
+fn clear_is_offered_only_for_a_saved_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = page(cx, &dir, rejected(false));
+    assert!(drawn(
+        &mut h,
+        "settings-linear-key-state=Linear refused LINEAR_API_KEY"
+    ));
+    press(&mut h, "settings-linear-key-clear");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [],
+        "LINEAR_API_KEY is not saved, so Clear has nothing to delete"
+    );
+
+    h.send(rejected(true));
+    press(&mut h, "settings-linear-key-clear");
+    let sets = key_sets(&h.sent());
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].0, None, "Clear deletes the refused saved key");
 }
 
 #[gpui::test]

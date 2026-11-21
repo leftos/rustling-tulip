@@ -572,6 +572,7 @@ fn linear_status(enabled: bool) -> DaemonMessage {
         workspace_name: Some("Acme".to_owned()),
         team_keys: vec!["RT".to_owned()],
         last_error: None,
+        key_saved: true,
     }
 }
 

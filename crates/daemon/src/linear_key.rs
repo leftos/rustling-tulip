@@ -38,7 +38,7 @@ pub(crate) fn set(key: &Secret) -> anyhow::Result<()> {
     }
     match entry()?.set_password(text) {
         Ok(()) => Ok(()),
-        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if env_secrets::is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).context("saving the Linear API key to the secret store"),
     }
 }
@@ -56,7 +56,9 @@ pub(crate) fn read_stored() -> Result<Option<Secret>, VaultUnreachable> {
         Ok(text) => Ok(Some(Secret::new(text))),
         Err(err) => match err.downcast_ref::<KeyringError>() {
             Some(KeyringError::NoEntry) => Ok(None),
-            Some(store_err) if env_secrets::is_no_logon_session(store_err) => Err(VaultUnreachable),
+            Some(store_err) if env_secrets::is_store_out_of_reach(store_err) => {
+                Err(VaultUnreachable)
+            }
             _ => {
                 warn!(error = %format!("{err:#}"), "linear: could not read the saved key; treating it as missing");
                 Ok(None)
@@ -74,7 +76,7 @@ pub(crate) fn read_stored() -> Result<Option<Secret>, VaultUnreachable> {
 pub(crate) fn delete() -> anyhow::Result<()> {
     match entry()?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) if env_secrets::is_store_out_of_reach(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).context("deleting the Linear API key from the secret store"),
     }
 }
