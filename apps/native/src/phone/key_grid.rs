@@ -780,15 +780,34 @@ fn char_label(value: char, step: &Step) -> String {
     value.to_string()
 }
 
-/// How many equal columns of at least `min_cell` pt, `gap` apart, fit in
-/// `width`, and at least one however narrow the width.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the count is clamped to at least one first, and a phone's width in points is far below what a usize holds"
-)]
-pub(crate) fn grid_columns(width: f32, min_cell: f32, gap: f32) -> usize {
-    ((width + gap) / (min_cell + gap)).max(1.0) as usize
+/// What a key's row on the Keys page says it does, beside its label: a send
+/// key's presses as the derived label names each, joined by " then ", or
+/// "Sends nothing" while the key types nothing, as a key with no presses or
+/// with one press that types nothing does; Ctrl, Paste and Quick's role; and
+/// what a key of a kind this build does not know needs.
+pub(crate) fn row_summary(key: &GridKey) -> String {
+    match &key.action {
+        KeyAction::Send { steps } => {
+            // Whether a key types anything does not hang on the terminal's
+            // modes, only on its presses.
+            let modes = KeyModes {
+                app_cursor: false,
+                shift_enter: ShiftEnter::BackslashCr,
+            };
+            if key_bytes(steps, false, modes).is_none() {
+                return "Sends nothing".to_owned();
+            }
+            steps
+                .iter()
+                .map(step_label)
+                .collect::<Vec<_>>()
+                .join(" then ")
+        }
+        KeyAction::Ctrl => "Modifier".to_owned(),
+        KeyAction::Paste => "Pastes the clipboard".to_owned(),
+        KeyAction::Quick => "Opens Quick replies".to_owned(),
+        KeyAction::Unknown => "Needs a newer version".to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -900,19 +919,66 @@ mod tests {
     }
 
     #[test]
-    fn grid_columns_at_390_points() {
-        assert_eq!(grid_columns(358.0, 72.0, 8.0), 4);
+    fn row_summary_of_a_plain_key() {
+        assert_eq!(row_summary(&key_of("esc")), "Esc");
+        assert_eq!(row_summary(&key_of("up")), "↑");
+        assert_eq!(row_summary(&key_of("1")), "1");
     }
 
     #[test]
-    fn grid_columns_narrower() {
-        assert_eq!(grid_columns(300.0, 72.0, 8.0), 3);
+    fn row_summary_of_a_ctrl_chord() {
+        assert_eq!(row_summary(&key_of("ctrl-c")), "Ctrl+C");
     }
 
     #[test]
-    fn grid_columns_never_below_one() {
-        assert_eq!(grid_columns(60.0, 72.0, 8.0), 1);
-        assert_eq!(grid_columns(0.0, 72.0, 8.0), 1);
+    fn row_summary_of_shift_tab() {
+        assert_eq!(row_summary(&key_of("shift-tab")), "Shift+Tab");
+    }
+
+    #[test]
+    fn row_summary_joins_two_presses_with_then() {
+        let key = GridKey {
+            id: "save".to_owned(),
+            label: "Save".to_owned(),
+            action: KeyAction::Send {
+                steps: vec![
+                    plain_step(named_step(NamedKey::Esc)),
+                    plain_step(char_step(':')),
+                ],
+            },
+        };
+        assert_eq!(row_summary(&key), "Esc then :");
+    }
+
+    #[test]
+    fn row_summary_of_the_protected_keys_names_their_role() {
+        assert_eq!(row_summary(&key_of("ctrl")), "Modifier");
+        assert_eq!(row_summary(&key_of("paste")), "Pastes the clipboard");
+        assert_eq!(row_summary(&key_of("quick")), "Opens Quick replies");
+    }
+
+    #[test]
+    fn row_summary_of_a_key_with_a_press_that_types_nothing() {
+        let key = GridKey {
+            id: "half".to_owned(),
+            label: "Half".to_owned(),
+            action: KeyAction::Send {
+                steps: vec![
+                    plain_step(named_step(NamedKey::Esc)),
+                    plain_step(StepKey::Unknown),
+                ],
+            },
+        };
+        assert_eq!(row_summary(&key), "Sends nothing");
+        let ctrl_digit = key_of_step("ctrl-1", held_step(true, false, false, char_step('1')));
+        assert_eq!(row_summary(&ctrl_digit), "Sends nothing");
+    }
+
+    #[test]
+    fn row_summary_of_a_key_this_build_does_not_know() {
+        assert_eq!(row_summary(&unknown_key()), "Needs a newer version");
+        let silent = key_of_step("silent", plain_step(StepKey::Unknown));
+        assert_eq!(row_summary(&silent), "Sends nothing");
     }
 
     #[test]

@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - The phone's Needs you first is a switch beside the sort, so sessions that need you come first under A–Z or the desktop's tabs too.
+- The phone's Settings › Keys lists one key per row, saying what each sends, under a live preview of the key bar, and shows where a dragged key will land.
 
 ## v0.18.0-alpha
 

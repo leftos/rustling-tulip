@@ -8,13 +8,13 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, HitboxBehavior,
-    ScrollEvent, Window, canvas, div, prelude::*, px,
+    ScrollEvent, Stateful, Window, canvas, div, prelude::*, px,
 };
 
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::key_bar::KeyBar;
-use super::key_grid::{self, KeyAction};
+use super::key_grid::{self, GridKey, KeyAction};
 use super::pasteboard::PasteSpot;
 use super::session::Page;
 use super::session_view::{KeySurface, QuickTarget, record_paste_bounds, status_line};
@@ -22,7 +22,7 @@ use super::settings_view::BACK_LABEL;
 use super::terminal_fit::{self, Pan};
 use super::{PhoneLayout, PhoneRoot};
 use crate::RootView;
-use crate::buttons::ButtonKind;
+use crate::buttons::{ButtonKind, ButtonLook, ButtonSize, Layer, button, button_look};
 use crate::driver_id::DriverId as _;
 use crate::target::HostKey;
 use crate::term_view::{TerminalPane, TypedFilter};
@@ -36,6 +36,56 @@ const BAR_KEY_PAD: f32 = 6.0;
 
 /// The widest a bar key draws, so a long label truncates rather than runs on.
 const BAR_KEY_MAX: f32 = 96.0;
+
+/// Where a row of bar keys draws, which decides what its keys do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BarKeys {
+    /// The Terminal page's bar: a tap presses the key, Ctrl lights while it
+    /// is armed, and the system paste control sits over Paste.
+    Terminal,
+    /// The Keys page's read-only preview of the bar: the same keys, which
+    /// take no tap, Ctrl unlit, and no paste control.
+    Preview,
+}
+
+impl BarKeys {
+    /// The driver id of the row's sideways scroll.
+    fn scroll_id(self) -> &'static str {
+        match self {
+            Self::Terminal => "phone-key-bar-scroll",
+            Self::Preview => "phone-keys-preview",
+        }
+    }
+
+    /// The driver id of `key`'s button in the row.
+    fn key_id(self, key: &GridKey) -> String {
+        match self {
+            Self::Terminal => format!("phone-bar-{}", key.id),
+            Self::Preview => format!("phone-keys-preview-{}", key.id),
+        }
+    }
+}
+
+/// A preview key's button: the bar key's look with no hover or press fill
+/// and the default cursor, since it takes no tap.
+fn preview_button(selector: &str, kind: ButtonKind, cx: &Context<PhoneRoot>) -> Stateful<Div> {
+    let look = button_look(
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        kind,
+        ButtonSize::Large,
+        false,
+        Layer::Base,
+        &theme(cx),
+    );
+    button(
+        selector,
+        ButtonLook {
+            opacity: 1.0,
+            ..look
+        },
+    )
+}
 
 /// The Hide key's label, pinned at the bar's right end.
 const HIDE_LABEL: &str = "Hide";
@@ -322,45 +372,7 @@ impl PhoneRoot {
     /// it; Back and the status pinned at its start while the terminal fills
     /// the screen.
     fn key_bar_row(&self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
-        let armed = self.key_bar.borrow().armed();
-        let mut scroll = div()
-            .id("phone-key-bar-scroll")
-            .driver_id(|| "phone-key-bar-scroll".to_owned())
-            .flex()
-            .gap(px(BAR_GAP))
-            .flex_1()
-            .min_w_0()
-            .overflow_x_scroll();
-        let saved = self.root.read(cx).sidebar.ui_state().phone_keys.clone();
-        for (index, key) in key_grid::resolved(saved.as_deref()).iter().enumerate() {
-            let kind = if key.action == KeyAction::Ctrl && armed {
-                ButtonKind::Primary
-            } else {
-                ButtonKind::Outlined
-            };
-            let dimmed = key_grid::is_inert(key);
-            let drawn = phone_button(&format!("phone-bar-{}", key.id), kind, cx)
-                .flex_none()
-                .min_w(px(TOUCH_TARGET))
-                .max_w(px(BAR_KEY_MAX))
-                .min_h(px(TOUCH_TARGET))
-                .px(px(BAR_KEY_PAD))
-                .truncate()
-                .child(key.label.clone())
-                .when(dimmed, |button| {
-                    button.opacity(crate::spawn_view::DISABLED_OPACITY)
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.press_grid_key(index, KeySurface::Terminal, window, cx);
-                }));
-            // The system paste control sits over the Paste key, as over the
-            // composer's Paste button.
-            scroll = scroll.child(if key.action == KeyAction::Paste {
-                record_paste_bounds(drawn, PasteSpot::Terminal)
-            } else {
-                drawn
-            });
-        }
+        let scroll = self.bar_keys_row(BarKeys::Terminal, cx).flex_1().min_w_0();
         let hide = keyboard_up.then(|| {
             phone_button("phone-bar-hide", ButtonKind::Outlined, cx)
                 .flex_none()
@@ -394,6 +406,75 @@ impl PhoneRoot {
             .child(scroll)
             .children(hide)
             .children(raise)
+    }
+
+    /// The saved keys in their order as one sideways-scrolling row of bar
+    /// keys, drawn for `keys`: the Terminal bar's, or the Keys page's preview
+    /// of it. It reads the saved keys each time it draws.
+    pub(super) fn bar_keys_row(&self, keys: BarKeys, cx: &mut Context<Self>) -> Stateful<Div> {
+        let armed = keys == BarKeys::Terminal && self.key_bar.borrow().armed();
+        let mut scroll = div()
+            .id(keys.scroll_id())
+            .driver_id(|| keys.scroll_id().to_owned())
+            .flex()
+            .gap(px(BAR_GAP))
+            .overflow_x_scroll()
+            // On the Settings page a sideways swipe on the preview must not
+            // scroll the page, nor an upward one the preview.
+            .when(keys == BarKeys::Preview, |row| {
+                row.restrict_scroll_to_axis()
+            });
+        let saved = self.root.read(cx).sidebar.ui_state().phone_keys.clone();
+        for (index, key) in key_grid::resolved(saved.as_deref()).iter().enumerate() {
+            scroll = scroll.child(Self::bar_key(index, key, keys, armed, cx));
+        }
+        scroll
+    }
+
+    /// One bar key: its label, truncated, Ctrl lit while `armed`, dimmed
+    /// while the key does nothing. On the Terminal bar a tap presses it and
+    /// the system paste control sits over Paste, as over the composer's
+    /// Paste button; the preview's keys take no tap and record no paste
+    /// spot.
+    fn bar_key(
+        index: usize,
+        key: &GridKey,
+        keys: BarKeys,
+        armed: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let kind = if key.action == KeyAction::Ctrl && armed {
+            ButtonKind::Primary
+        } else {
+            ButtonKind::Outlined
+        };
+        let dimmed = key_grid::is_inert(key);
+        let base = match keys {
+            BarKeys::Terminal => phone_button(&keys.key_id(key), kind, cx),
+            BarKeys::Preview => preview_button(&keys.key_id(key), kind, cx),
+        };
+        let drawn = base
+            .flex_none()
+            .min_w(px(TOUCH_TARGET))
+            .max_w(px(BAR_KEY_MAX))
+            .min_h(px(TOUCH_TARGET))
+            .px(px(BAR_KEY_PAD))
+            .truncate()
+            .child(key.label.clone())
+            .when(dimmed, |button| {
+                button.opacity(crate::spawn_view::DISABLED_OPACITY)
+            });
+        if keys == BarKeys::Preview {
+            return drawn;
+        }
+        let drawn = drawn.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_grid_key(index, KeySurface::Terminal, window, cx);
+        }));
+        if key.action == KeyAction::Paste {
+            record_paste_bounds(drawn, PasteSpot::Terminal)
+        } else {
+            drawn
+        }
     }
 
     /// While the terminal fills the screen, pinned at the bar's start

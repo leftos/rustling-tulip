@@ -12,11 +12,10 @@ use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::{field_box, phone_button};
 use super::quick_replies::{self, ListError, ReplyEdit, ReplyGroup, ReplySet};
-use super::reorder::{self, ListId, ReorderDrag};
+use super::reorder::{self, ListId, dragged_row, slot_of};
 use super::settings::{Page, Settings, SubPage};
 use super::settings_view::{CHEVRON, section_label};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
-use crate::drag::Side;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -46,10 +45,6 @@ const STALE_ITEM: &str = "That item no longer exists.";
 const TITLE_PLACEHOLDER: &str = "Group title";
 /// A new reply's field says what to type.
 const REPLY_PLACEHOLDER: &str = "Reply text";
-/// How faintly a dragged row draws while it is lifted.
-const LIFTED_OPACITY: f32 = 0.4;
-/// The accent line marking a drop slot, in points.
-const SLOT_LINE: f32 = 2.0;
 
 /// The two sets, in the order the page draws them.
 const SETS: [ReplySet; 2] = [ReplySet::Agent, ReplySet::Shell];
@@ -86,45 +81,6 @@ fn reply_count(n: usize) -> String {
     } else {
         format!("{n} replies")
     }
-}
-
-/// The drop slot a drag marks on the row at `index`, if any.
-fn slot_of(drag: Option<ReorderDrag>, index: usize) -> Option<Side> {
-    drag.and_then(|drag| drag.over)
-        .filter(|(at, _)| *at == index)
-        .map(|(_, side)| side)
-}
-
-/// One row of a dragged list as its page draws it: the accent line where the
-/// row above would drop it, the row itself, at reduced opacity while it is
-/// the lifted one, and the line where it would drop below it.
-fn dragged_row(
-    row: Stateful<Div>,
-    lifted: bool,
-    slot: Option<Side>,
-    t: &UiTheme,
-) -> Vec<AnyElement> {
-    let line = || {
-        div()
-            .flex_none()
-            .h(px(SLOT_LINE))
-            .w_full()
-            .bg(gpui::rgb(t.accent))
-            .into_any_element()
-    };
-    let mut out = Vec::new();
-    if slot == Some(Side::Before) {
-        out.push(line());
-    }
-    out.push(if lifted {
-        row.opacity(LIFTED_OPACITY).into_any_element()
-    } else {
-        row.into_any_element()
-    });
-    if slot == Some(Side::After) {
-        out.push(line());
-    }
-    out
 }
 
 /// A title or reply editor: the field, the sub-page it saves and its refusal.

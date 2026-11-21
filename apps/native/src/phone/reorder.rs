@@ -1,18 +1,33 @@
-//! Drag to reorder the phone's Settings lists and grids: where a finger is
-//! in an equal-height list or a fixed-column grid, the items with one moved
-//! to another's side, and the one drag area a page draws over the boxes it
-//! recorded each frame. `quick_replies_view` and `keys_view` draw them.
+//! Drag to reorder the phone's Settings lists: where a finger is in an
+//! equal-height list, the items with one moved to another's side, the one
+//! drag area a page draws over the boxes it recorded each frame, and how a
+//! dragged list draws its lifted row and its drop slot. `quick_replies_view`
+//! and `keys_view` draw them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{App, Bounds, Context, IntoElement, Pixels, Point, Styled as _, Window, canvas, px};
+use gpui::{
+    AnyElement, App, Bounds, Context, Div, IntoElement, ParentElement as _, Pixels, Point,
+    Stateful, Styled as _, Window, canvas, div, px,
+};
 
 use super::PhoneRoot;
 use super::long_press::long_press_drag_area;
 use super::quick_replies::{self, ReplyEdit, ReplySet};
 use super::settings::{Settings, SubPage};
 use crate::drag::Side;
+use crate::driver_id::DriverId as _;
+use crate::ui_theme::UiTheme;
+
+/// How faintly a dragged row draws while it is lifted.
+const LIFTED_OPACITY: f32 = 0.4;
+/// The accent line marking a drop slot, in points.
+const SLOT_LINE: f32 = 2.0;
+/// The driver id of the mark over the lifted row, which draws nothing.
+const LIFTED_ID: &str = "phone-drag-lifted";
+/// The driver id of the accent line at the drop slot.
+const SLOT_ID: &str = "phone-drag-slot";
 
 /// A drawn list's box in the window: `len` rows share its height.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,32 +38,15 @@ pub(crate) struct ListBox {
     pub(crate) height: f32,
 }
 
-/// A drawn grid's box in the window: `cols` equal cells a row, `gap` apart.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct GridBox {
-    /// The window x of its left edge.
-    pub(crate) left: f32,
-    /// The window y of its top.
-    pub(crate) top: f32,
-    /// Its width: its columns' together.
-    pub(crate) width: f32,
-    /// Its height: its rows' together.
-    pub(crate) height: f32,
-    /// How many cells a row holds.
-    pub(crate) cols: usize,
-    /// The gap between two cells, across and down.
-    pub(crate) gap: f32,
-}
-
-/// Which list or grid a drag moves, and so which edit its lift makes.
+/// Which list a drag moves, and so which edit its lift makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListId {
     /// A set's groups on the Quick replies page.
     ReplyGroups(ReplySet),
     /// The open group page's replies.
     Replies,
-    /// The Keys page's grid.
-    KeyGrid,
+    /// The Keys page's keys.
+    KeyList,
     /// The open key editor's presses.
     KeySteps,
 }
@@ -78,85 +76,23 @@ pub(crate) struct RecordedList {
 }
 
 impl RecordedList {
-    /// Whether `y` is on one of its rows: inside the box, over a row it
+    /// Whether `at` is on one of its rows: inside the box, over a row it
     /// holds.
-    fn holds_row(self, y: f32) -> bool {
+    fn holds(self, at: Point<Pixels>) -> bool {
+        let y = at.y / px(1.0);
         y >= self.list.top
             && y <= self.list.top + self.list.height
             && list_slot(y, self.list, self.rows).is_some()
     }
-}
 
-/// A grid as its page drew it in the last frame: its box and how many cells
-/// it holds, so a press can hit-test the grid without an entity.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RecordedGrid {
-    /// Which grid it is.
-    pub(crate) id: ListId,
-    /// Its box in the window.
-    pub(crate) grid: GridBox,
-    /// How many cells it holds.
-    pub(crate) len: usize,
-}
-
-impl GridBox {
-    /// Whether (`x`, `y`) is inside its box.
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.left
-            && x <= self.left + self.width
-            && y >= self.top
-            && y <= self.top + self.height
-    }
-}
-
-impl RecordedGrid {
-    /// Whether (`x`, `y`) is on one of its drawn cells: inside the box and
-    /// over a cell it holds, the empty places after the last key being none.
-    fn holds(self, x: f32, y: f32) -> bool {
-        self.grid.contains(x, y)
-            && grid_cell(x, y, self.grid, self.len).is_some_and(|(index, ..)| index < self.len)
-    }
-}
-
-/// A box a page drew in its last frame, for a press on the page to hit-test.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RecordedBox {
-    /// An equal-height list's rows.
-    List(RecordedList),
-    /// A fixed-column grid's cells.
-    Grid(RecordedGrid),
-}
-
-impl RecordedBox {
-    /// Which list or grid it is.
-    fn id(self) -> ListId {
-        match self {
-            Self::List(list) => list.id,
-            Self::Grid(grid) => grid.id,
-        }
-    }
-
-    /// Whether `at` is on a row of the list, or inside the grid's box.
-    fn holds(self, at: Point<Pixels>) -> bool {
-        let (x, y) = (at.x / px(1.0), at.y / px(1.0));
-        match self {
-            Self::List(list) => list.holds_row(y),
-            Self::Grid(grid) => grid.holds(x, y),
-        }
-    }
-
-    /// The row or cell `at` points at, and which half of it.
+    /// The row `at` points at, and which half of it.
     fn slot(self, at: Point<Pixels>) -> Option<(usize, Side)> {
-        let (x, y) = (at.x / px(1.0), at.y / px(1.0));
-        match self {
-            Self::List(list) => list_slot(y, list.list, list.rows),
-            Self::Grid(grid) => grid_slot(x, y, grid.grid, grid.len),
-        }
+        list_slot(at.y / px(1.0), self.list, self.rows)
     }
 }
 
-/// The boxes a page drew in its last frame, one per list or grid.
-pub(crate) type ListBoxes = Rc<RefCell<Vec<RecordedBox>>>;
+/// The boxes a page drew in its last frame, one per list.
+pub(crate) type ListBoxes = Rc<RefCell<Vec<RecordedList>>>;
 
 /// The row of an equal-height list a finger at `y` points at, and which half
 /// of it; none while the list holds no row or drew no height.
@@ -180,44 +116,6 @@ pub(crate) fn list_slot(y: f32, list: ListBox, len: usize) -> Option<(usize, Sid
     ))
 }
 
-/// The cell of `grid` that (`x`, `y`) is over: its index before a cell past
-/// the last key clamps to the last, its left edge and its width; none while
-/// the grid holds no cell or no column.
-#[expect(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a drawn grid holds far fewer cells than an f32 counts exactly, and the row and column are clamped into it first"
-)]
-fn grid_cell(x: f32, y: f32, grid: GridBox, len: usize) -> Option<(usize, f32, f32)> {
-    if len == 0 || grid.cols == 0 {
-        return None;
-    }
-    let cols = grid.cols as f32;
-    let rows = len.div_ceil(grid.cols) as f32;
-    let cell = (grid.width - grid.gap * (cols - 1.0)) / cols;
-    let pitch = (grid.height + grid.gap) / rows;
-    let col = ((x - grid.left) / (cell + grid.gap))
-        .floor()
-        .clamp(0.0, cols - 1.0);
-    let row = ((y - grid.top) / pitch).floor().clamp(0.0, rows - 1.0);
-    let index = (row * cols + col) as usize;
-    Some((index, grid.left + col * (cell + grid.gap), cell))
-}
-
-/// The cell of a fixed-column grid a finger at (`x`, `y`) points at, and
-/// which half of it; none while the grid holds no cell or no column. A row
-/// or column outside the grid clamps to its edge, a point in a gap belongs
-/// to the cell before it, and a cell past the last one is the last one's
-/// `After`.
-pub(crate) fn grid_slot(x: f32, y: f32, grid: GridBox, len: usize) -> Option<(usize, Side)> {
-    let (index, left, cell) = grid_cell(x, y, grid, len)?;
-    if index >= len {
-        return Some((len - 1, Side::After));
-    }
-    Some((index, crate::drag::side_of(x, left, cell)))
-}
-
 /// `items` with the one at `from` moved to `side` of the one at `to`; an
 /// index that names nothing leaves them as they are.
 #[must_use]
@@ -231,9 +129,9 @@ pub(crate) fn reordered<T: Clone>(items: &[T], from: usize, to: usize, side: Sid
 
 /// Records `drawn` as its page drew it this frame, replacing the box it
 /// recorded before, for a press on the page to hit-test against.
-fn record(boxes: &ListBoxes, drawn: RecordedBox) {
+fn record(boxes: &ListBoxes, drawn: RecordedList) {
     let mut boxes = boxes.borrow_mut();
-    match boxes.iter_mut().find(|known| known.id() == drawn.id()) {
+    match boxes.iter_mut().find(|known| known.id == drawn.id) {
         Some(entry) => *entry = drawn,
         None => boxes.push(drawn),
     }
@@ -248,14 +146,14 @@ pub(super) fn list_box_canvas(boxes: &ListBoxes, list: ListId, rows: usize) -> i
         move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
             record(
                 &boxes,
-                RecordedBox::List(RecordedList {
+                RecordedList {
                     id: list,
                     list: ListBox {
                         top: bounds.origin.y / px(1.0),
                         height: bounds.size.height / px(1.0),
                     },
                     rows,
-                }),
+                },
             );
         },
         |_, (), _, _| {},
@@ -266,40 +164,54 @@ pub(super) fn list_box_canvas(boxes: &ListBoxes, list: ListId, rows: usize) -> i
     .size_full()
 }
 
-/// Records the grid drawn over this canvas as a `cols`-column grid, `gap`
-/// apart, holding `len` cells, for a press on the page to hit-test against.
-pub(super) fn grid_box_canvas(
-    boxes: &ListBoxes,
-    list: ListId,
-    cols: usize,
-    gap: f32,
-    len: usize,
-) -> impl IntoElement {
-    let boxes = boxes.clone();
-    canvas(
-        move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
-            record(
-                &boxes,
-                RecordedBox::Grid(RecordedGrid {
-                    id: list,
-                    grid: GridBox {
-                        left: bounds.origin.x / px(1.0),
-                        top: bounds.origin.y / px(1.0),
-                        width: bounds.size.width / px(1.0),
-                        height: bounds.size.height / px(1.0),
-                        cols,
-                        gap,
-                    },
-                    len,
-                }),
-            );
-        },
-        |_, (), _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
+/// The drop slot `drag` marks on the row at `index`, if any.
+pub(super) fn slot_of(drag: Option<ReorderDrag>, index: usize) -> Option<Side> {
+    drag.and_then(|drag| drag.over)
+        .filter(|(at, _)| *at == index)
+        .map(|(_, side)| side)
+}
+
+/// One row of a dragged list as its page draws it: the accent line where the
+/// row above would drop it, the row itself, at reduced opacity and marked
+/// while it is the lifted one, and the line where it would drop below it.
+pub(super) fn dragged_row(
+    row: Stateful<Div>,
+    lifted: bool,
+    slot: Option<Side>,
+    t: &UiTheme,
+) -> Vec<AnyElement> {
+    let line = || {
+        div()
+            .driver_id(|| SLOT_ID.to_owned())
+            .flex_none()
+            .h(px(SLOT_LINE))
+            .w_full()
+            .bg(gpui::rgb(t.accent))
+            .into_any_element()
+    };
+    let mut out = Vec::new();
+    if slot == Some(Side::Before) {
+        out.push(line());
+    }
+    out.push(if lifted {
+        row.relative()
+            .opacity(LIFTED_OPACITY)
+            .child(
+                div()
+                    .driver_id(|| LIFTED_ID.to_owned())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+            .into_any_element()
+    } else {
+        row.into_any_element()
+    });
+    if slot == Some(Side::After) {
+        out.push(line());
+    }
+    out
 }
 
 /// The one drag area a page draws over its body: it wants only a press on a
@@ -331,16 +243,16 @@ pub(super) fn reorder_area(boxes: &ListBoxes, cx: &mut Context<PhoneRoot>) -> im
     )
 }
 
-// How a page's drag works: the boxes its lists and grids recorded, and the
-// one area over them that lifts a row or cell and drops it.
+// How a page's drag works: the boxes its lists recorded, and the one area
+// over them that lifts a row and drops it.
 impl PhoneRoot {
     /// Clears the recorded boxes before a page draws its own.
     pub(super) fn forget_list_boxes(&self) {
         self.list_boxes.borrow_mut().clear();
     }
 
-    /// A long press on an editable page: the recorded box under it and the
-    /// row or cell there lift for a drag.
+    /// A long press on an editable page: the recorded list under it and the
+    /// row there lift for a drag.
     fn reorder_press(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.reorder_drag = None;
         let hit = {
@@ -354,7 +266,7 @@ impl PhoneRoot {
             return;
         };
         self.reorder_drag = Some(ReorderDrag {
-            list: hit.id(),
+            list: hit.id,
             from,
             over: None,
         });
@@ -368,7 +280,7 @@ impl PhoneRoot {
         };
         let recorded = {
             let boxes = self.list_boxes.borrow();
-            boxes.iter().find(|drawn| drawn.id() == drag.list).copied()
+            boxes.iter().find(|drawn| drawn.id == drag.list).copied()
         };
         let Some(recorded) = recorded else {
             return;
@@ -378,7 +290,7 @@ impl PhoneRoot {
         cx.notify();
     }
 
-    /// The held finger lifted: the row or cell drops where it is over, and
+    /// The held finger lifted: the row drops where it is over, and
     /// the list saves once. A cancelled touch drops the drag and saves
     /// nothing.
     fn reorder_end(&mut self, ended: bool, cx: &mut Context<Self>) {
@@ -391,7 +303,7 @@ impl PhoneRoot {
         cx.notify();
     }
 
-    /// The edit a lifted drag makes on the list or grid it came from.
+    /// The edit a lifted drag makes on the list it came from.
     fn apply_drag(&mut self, drag: ReorderDrag, to: usize, side: Side, cx: &mut Context<Self>) {
         match drag.list {
             ListId::ReplyGroups(set) => {
@@ -416,7 +328,7 @@ impl PhoneRoot {
                 };
                 self.save_move(set, edit, cx);
             }
-            ListId::KeyGrid => self.move_key(drag.from, to, side, cx),
+            ListId::KeyList => self.move_key(drag.from, to, side, cx),
             ListId::KeySteps => self.move_press(drag.from, to, side, cx),
         }
     }
@@ -493,110 +405,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    /// The grid box the slot tests hit-test: four columns of 82 pt from x 16,
-    /// rows 52 pt tall from y 100, holding ten cells.
-    fn grid() -> GridBox {
-        GridBox {
-            left: 16.0,
-            top: 100.0,
-            width: 352.0,
-            height: 148.0,
-            cols: 4,
-            gap: 8.0,
-        }
-    }
-
-    #[test]
-    fn grid_slot_left_half_of_the_first_cell() {
-        assert_eq!(grid_slot(20.0, 110.0, grid(), 10), Some((0, Side::Before)));
-    }
-
-    #[test]
-    fn grid_slot_right_half_of_the_first_cell() {
-        assert_eq!(grid_slot(60.0, 110.0, grid(), 10), Some((0, Side::After)));
-    }
-
-    #[test]
-    fn grid_slot_gap_belongs_to_the_cell_before() {
-        assert_eq!(grid_slot(100.0, 110.0, grid(), 10), Some((0, Side::After)));
-    }
-
-    #[test]
-    fn grid_slot_second_column() {
-        assert_eq!(grid_slot(110.0, 110.0, grid(), 10), Some((1, Side::Before)));
-    }
-
-    #[test]
-    fn grid_slot_second_row() {
-        assert_eq!(grid_slot(20.0, 160.0, grid(), 10), Some((4, Side::Before)));
-    }
-
-    #[test]
-    fn grid_slot_last_key() {
-        assert_eq!(grid_slot(110.0, 210.0, grid(), 10), Some((9, Side::Before)));
-    }
-
-    #[test]
-    fn grid_slot_past_the_last_key_is_after_it() {
-        assert_eq!(grid_slot(200.0, 210.0, grid(), 10), Some((9, Side::After)));
-        assert_eq!(grid_slot(290.0, 210.0, grid(), 10), Some((9, Side::After)));
-    }
-
-    #[test]
-    fn grid_slot_above_clamps_to_the_first_row() {
-        assert_eq!(grid_slot(20.0, 40.0, grid(), 10), Some((0, Side::Before)));
-    }
-
-    #[test]
-    fn grid_slot_right_clamps_to_the_last_column() {
-        assert_eq!(grid_slot(500.0, 110.0, grid(), 10), Some((3, Side::After)));
-    }
-
-    #[test]
-    fn grid_slot_empty_grid_has_no_slot() {
-        assert_eq!(grid_slot(20.0, 110.0, grid(), 0), None);
-        let none = GridBox { cols: 0, ..grid() };
-        assert_eq!(grid_slot(20.0, 110.0, none, 10), None);
-    }
-
-    /// The recorded grid the hold tests hit-test: the slot tests' box holding
-    /// ten cells.
-    fn recorded_grid() -> RecordedGrid {
-        RecordedGrid {
-            id: ListId::KeyGrid,
-            grid: grid(),
-            len: 10,
-        }
-    }
-
-    #[test]
-    fn grid_holds_a_full_rows_cell() {
-        assert!(recorded_grid().holds(20.0, 110.0), "the first cell");
-        assert!(recorded_grid().holds(110.0, 110.0), "the second column");
-    }
-
-    #[test]
-    fn grid_holds_the_last_rows_last_key() {
-        assert!(recorded_grid().holds(110.0, 210.0), "the tenth cell");
-    }
-
-    #[test]
-    fn grid_holds_no_point_past_the_last_key() {
-        assert!(
-            !recorded_grid().holds(200.0, 210.0),
-            "the empty place after the last key"
-        );
-        assert!(
-            !recorded_grid().holds(290.0, 210.0),
-            "the rest of the last row"
-        );
-    }
-
-    #[test]
-    fn grid_holds_no_point_below_the_grid() {
-        assert!(!recorded_grid().holds(20.0, 300.0), "below the box");
     }
 
     /// The items `reordered` moves: a, b, c and d.

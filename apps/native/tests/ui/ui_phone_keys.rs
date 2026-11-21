@@ -1,6 +1,7 @@
-//! The phone's Keys page under Settings: a muted hint, the key grid in fixed
-//! equal columns (four at 390 pt), and Restore defaults with its confirm row,
-//! which is dimmed while the built-in grid already shows.
+//! The phone's Keys page under Settings: a read-only preview of the Terminal
+//! bar, a muted hint, a full-width row per key in the saved order, and
+//! Restore defaults with its confirm row, which is dimmed while the built-in
+//! keys already show.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,11 +122,11 @@ fn last_default_cell() -> usize {
     20
 }
 
-/// Window point in the left sixth of what `selector` tags, which is a cell's
-/// left half: a drop there takes the cell's `Before`.
+/// Window point near the top of what `selector` tags, which is a row's top
+/// half: a drop there takes the row's `Before`.
 fn before(h: &mut Harness<'_>, selector: &str) -> Point<Pixels> {
     let bounds = h.bounds(selector);
-    point(bounds.left() + px(6.0), bounds.center().y)
+    point(bounds.center().x, bounds.top() + px(6.0))
 }
 
 /// A send action of one plain press of each named key in `names`, in order.
@@ -163,9 +164,21 @@ fn close_settings(h: &mut Harness<'_>) {
     }
 }
 
+/// Scrolls the Keys page until what `selector` tags shows, since a row per
+/// key runs the page past the window's foot.
+fn scroll_page_to(h: &mut Harness<'_>, selector: &str) {
+    h.scroll_into_view("phone-settings", selector);
+}
+
+/// Taps Add key, scrolled into view under the keys.
+fn tap_add_key(h: &mut Harness<'_>) {
+    scroll_page_to(h, "phone-keys-add");
+    h.click_on("phone-keys-add");
+}
+
 /// Adds a key with one empty press, through Add key and Add press.
 fn add_key_with_a_press(h: &mut Harness<'_>) {
-    h.click_on("phone-keys-add");
+    tap_add_key(h);
     h.click_on("phone-key-editor-add-step");
 }
 
@@ -240,7 +253,7 @@ fn dock_open(h: &mut Harness<'_>) {
 }
 
 #[gpui::test]
-fn the_keys_row_opens_the_grid(cx: &mut TestAppContext) {
+fn the_keys_row_opens_the_list(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir);
 
@@ -252,62 +265,63 @@ fn the_keys_row_opens_the_grid(cx: &mut TestAppContext) {
     h.click_on(row);
 
     assert!(drawn(&mut h, "phone-settings"), "Settings shows");
-    assert!(drawn(&mut h, "phone-keys-grid"), "the grid draws");
-    assert!(drawn(&mut h, "phone-keys-cell-0"), "with its first key");
+    assert!(drawn(&mut h, "phone-keys-list"), "the list draws");
+    assert!(drawn(&mut h, "phone-keys-row-0"), "with its first key");
     assert!(!drawn(&mut h, row), "the page takes the list's place");
 }
 
 #[gpui::test]
-fn the_grid_lists_the_keys_in_order(cx: &mut TestAppContext) {
+fn the_list_draws_a_row_per_key_in_order(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
-    let mut previous = h.bounds("phone-keys-cell-0");
+    let mut previous = h.bounds("phone-keys-row-0");
     assert!(previous.size.width > px(0.0), "the first key draws");
     assert!(previous.size.height >= touch_target());
     for index in 1..=last_default_cell() {
-        let cell = format!("phone-keys-cell-{index}");
-        let bounds = h.bounds(&cell);
-        assert!(bounds.size.width > px(0.0), "{cell} draws");
+        let row = format!("phone-keys-row-{index}");
+        let bounds = h.bounds(&row);
+        assert!(bounds.size.width > px(0.0), "{row} draws");
         assert!(
-            bounds.top() > previous.top()
-                || (bounds.top() == previous.top() && bounds.left() > previous.left()),
-            "{cell} follows the key before it: {bounds:?} after {previous:?}"
+            bounds.top() >= previous.bottom(),
+            "{row} sits under the key before it: {bounds:?} after {previous:?}"
         );
         previous = bounds;
     }
     assert!(
-        !drawn(&mut h, "phone-keys-cell-21"),
-        "the built-in grid holds twenty-one keys"
+        !drawn(&mut h, "phone-keys-row-21"),
+        "the built-in keys are twenty-one"
     );
 }
 
 #[gpui::test]
-fn the_grid_draws_four_columns_at_390_points(cx: &mut TestAppContext) {
+fn each_key_row_is_full_width_and_a_touch_target_tall_at_390_points(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir);
     h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
     open_keys(&mut h);
 
-    let first = h.bounds("phone-keys-cell-0");
-    let mut left = first.left();
-    for index in 1..4 {
-        let cell = format!("phone-keys-cell-{index}");
-        let bounds = h.bounds(&cell);
-        assert_eq!(
-            bounds.top(),
-            first.top(),
-            "{cell} shares the first row's top"
-        );
-        assert!(bounds.left() > left, "{cell} follows the one before it");
-        left = bounds.left();
-    }
-    let fifth = h.bounds("phone-keys-cell-4");
-    assert!(
-        fifth.top() > first.top(),
-        "the fifth key starts a second row"
+    let list = h.bounds("phone-keys-list");
+    assert_eq!(
+        list.size.width,
+        h.bounds("phone-keys-preview").size.width,
+        "the list spans the page, as the preview does"
     );
+    for index in 0..=last_default_cell() {
+        let row = format!("phone-keys-row-{index}");
+        let bounds = h.bounds(&row);
+        assert_eq!(
+            bounds.left(),
+            list.left(),
+            "{row} starts at the list's edge"
+        );
+        assert_eq!(bounds.size.width, list.size.width, "{row} spans the list");
+        assert!(
+            bounds.size.height >= touch_target(),
+            "{row} is a touch target tall: {bounds:?}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -318,11 +332,11 @@ fn restore_asks_then_brings_back_the_default_grid(cx: &mut TestAppContext) {
     open_keys(&mut h);
 
     assert!(
-        drawn(&mut h, "phone-keys-cell-3"),
+        drawn(&mut h, "phone-keys-row-3"),
         "the saved grid's last key draws"
     );
     assert!(
-        !drawn(&mut h, "phone-keys-cell-4"),
+        !drawn(&mut h, "phone-keys-row-4"),
         "the built-in grid's keys do not"
     );
 
@@ -339,7 +353,7 @@ fn restore_asks_then_brings_back_the_default_grid(cx: &mut TestAppContext) {
         "the field goes: the built-in grid shows again"
     );
     assert!(
-        drawn(&mut h, "phone-keys-cell-20"),
+        drawn(&mut h, "phone-keys-row-20"),
         "all twenty-one default keys are back"
     );
 
@@ -364,6 +378,7 @@ fn restore_is_dimmed_while_the_defaults_show(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
+    scroll_page_to(&mut h, "phone-keys-restore");
     h.click_on("phone-keys-restore");
 
     assert!(
@@ -425,7 +440,7 @@ fn adding_a_ctrl_b_key_appends_it_to_the_bar_and_the_dock(cx: &mut TestAppContex
     let mut h = phone_open(cx, &dir, &json!({}));
     open_keys(&mut h);
 
-    h.click_on("phone-keys-add");
+    tap_add_key(&mut h);
     h.click_on("phone-key-editor-add-step");
     h.click_on("phone-key-editor-step-0-ctrl");
     pick_char(&mut h, 0, "b");
@@ -464,7 +479,7 @@ fn a_key_with_no_presses_is_refused(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
-    h.click_on("phone-keys-add");
+    tap_add_key(&mut h);
     h.click_on("phone-key-editor-save");
 
     assert!(drawn(&mut h, "phone-key-editor-error"), "the refusal shows");
@@ -542,7 +557,7 @@ fn a_sequence_sends_each_press_in_order(cx: &mut TestAppContext) {
     let mut h = phone_open(cx, &dir, &json!({}));
     open_keys(&mut h);
 
-    h.click_on("phone-keys-add");
+    tap_add_key(&mut h);
     h.click_on("phone-key-editor-add-step");
     pick_named(&mut h, 0, "esc");
     h.click_on("phone-key-editor-add-step");
@@ -576,7 +591,7 @@ fn editing_a_key_keeps_its_place_and_id(cx: &mut TestAppContext) {
     let mut h = phone_saved(cx, &dir, &ui);
     open_keys(&mut h);
 
-    h.click_on("phone-keys-cell-1");
+    h.click_on("phone-keys-row-1");
     assert!(
         drawn(&mut h, "phone-key-editor-label"),
         "Tab opens its editor"
@@ -609,7 +624,7 @@ fn removing_a_key_drops_it_from_the_bar(cx: &mut TestAppContext) {
     let mut h = phone_open(cx, &dir, &ui);
     open_keys(&mut h);
 
-    h.click_on("phone-keys-cell-2");
+    h.click_on("phone-keys-row-2");
     h.click_on("phone-key-editor-remove");
 
     assert!(
@@ -636,7 +651,7 @@ fn paste_quick_and_ctrl_open_no_editor(cx: &mut TestAppContext) {
     open_keys(&mut h);
 
     for index in [2, 7, 8] {
-        h.click_on(&format!("phone-keys-cell-{index}"));
+        h.click_on(&format!("phone-keys-row-{index}"));
         assert!(
             !drawn(&mut h, "phone-key-editor-label"),
             "cell {index} opens no editor"
@@ -731,7 +746,7 @@ fn back_from_the_editor_discards_it(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
-    h.click_on("phone-keys-add");
+    tap_add_key(&mut h);
     type_text(&mut h, "tmux");
     h.click_on("phone-settings-back");
 
@@ -739,7 +754,7 @@ fn back_from_the_editor_discards_it(cx: &mut TestAppContext) {
         !drawn(&mut h, "phone-key-editor-label"),
         "the editor closes"
     );
-    assert!(drawn(&mut h, "phone-keys-grid"), "the grid shows again");
+    assert!(drawn(&mut h, "phone-keys-list"), "the grid shows again");
     assert!(
         saved_ui(&dir).get("phone_keys").is_none(),
         "the draft was discarded"
@@ -752,8 +767,8 @@ fn a_long_press_drag_moves_a_key_and_the_bar_follows(cx: &mut TestAppContext) {
     let mut h = phone_open(cx, &dir, &json!({}));
     open_keys(&mut h);
 
-    let from = h.center("phone-keys-cell-3");
-    let to = before(&mut h, "phone-keys-cell-0");
+    let from = h.center("phone-keys-row-3");
+    let to = before(&mut h, "phone-keys-row-0");
     h.long_press_drag(from, to);
 
     let saved = saved_ui(&dir);
@@ -779,8 +794,8 @@ fn a_long_press_drag_moves_paste(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
-    let from = h.center("phone-keys-cell-7");
-    let to = before(&mut h, "phone-keys-cell-0");
+    let from = h.center("phone-keys-row-7");
+    let to = before(&mut h, "phone-keys-row-0");
     h.long_press_drag(from, to);
 
     let saved = saved_ui(&dir);
@@ -805,7 +820,7 @@ fn a_long_press_drag_reorders_a_keys_presses(cx: &mut TestAppContext) {
     ] });
     let mut h = phone_saved(cx, &dir, &ui);
     open_keys(&mut h);
-    h.click_on("phone-keys-cell-0");
+    h.click_on("phone-keys-row-0");
 
     let from = h.center("phone-key-editor-step-0");
     let to = point(
@@ -832,6 +847,7 @@ fn a_long_press_on_add_key_still_opens_the_editor(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
+    scroll_page_to(&mut h, "phone-keys-add");
     h.long_press_on("phone-keys-add");
 
     assert!(
@@ -841,30 +857,36 @@ fn a_long_press_on_add_key_still_opens_the_editor(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_hold_on_the_empty_end_of_the_last_row_lifts_nothing(cx: &mut TestAppContext) {
+fn a_hold_below_the_last_row_lifts_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = phone(cx, &dir);
-    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    let ui = json!({ "phone_keys": [
+        named_key("esc", "Esc", "esc"),
+        named_key("tab", "Tab", "tab"),
+        named_key("enter", "Enter", "enter"),
+    ] });
+    let mut h = phone_saved(cx, &dir, &ui);
     open_keys(&mut h);
 
-    let column = h.bounds("phone-keys-cell-2");
-    let last = h.bounds("phone-keys-cell-20");
-    let from = point(column.center().x, last.center().y);
-    let to = before(&mut h, "phone-keys-cell-0");
+    let list = h.bounds("phone-keys-list");
+    let from = point(list.center().x, list.bottom() + px(4.0));
+    let to = before(&mut h, "phone-keys-row-0");
     h.long_press_drag(from, to);
 
-    assert!(
-        saved_ui(&dir).get("phone_keys").is_none(),
-        "the empty places of the last row lift nothing"
+    let saved = saved_ui(&dir);
+    assert_eq!(
+        saved["phone_keys"][0]["id"],
+        json!("esc"),
+        "the room under the last row lifts nothing"
     );
-    assert!(
-        drawn(&mut h, "phone-keys-cell-20"),
-        "so the grid keeps its keys and their order"
+    assert_eq!(
+        saved["phone_keys"].as_array().map(Vec::len),
+        Some(3),
+        "so nothing was saved"
     );
 }
 
 #[gpui::test]
-fn a_part_full_last_row_draws_cells_at_the_grid_width(cx: &mut TestAppContext) {
+fn a_long_list_draws_every_row_at_the_list_width(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let keys: Vec<Value> = (0..23)
         .map(|n| named_key(&format!("k{n}"), "K", "esc"))
@@ -874,20 +896,23 @@ fn a_part_full_last_row_draws_cells_at_the_grid_width(cx: &mut TestAppContext) {
     h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
     open_keys(&mut h);
 
-    let (first, second) = (h.bounds("phone-keys-cell-0"), h.bounds("phone-keys-cell-1"));
-    let (last, last_next) = (
-        h.bounds("phone-keys-cell-24"),
-        h.bounds("phone-keys-cell-25"),
+    let first = h.bounds("phone-keys-row-0");
+    let (before_last, last) = (h.bounds("phone-keys-row-24"), h.bounds("phone-keys-row-25"));
+    assert!(
+        last.top() >= before_last.bottom(),
+        "the appended protected keys close the list, one under another"
     );
-    assert!(last.top() > first.top(), "the cells sit in the last row");
     assert_eq!(
         last.left(),
         first.left(),
-        "the last row's first cell starts where the first row's does"
+        "the last row starts where the first does"
     );
     assert_eq!(last.size.width, first.size.width, "and is the same width");
-    assert_eq!(last_next.left(), second.left());
-    assert_eq!(last_next.size.width, second.size.width);
+    assert_eq!(last.size.height, first.size.height, "and the same height");
+    assert!(
+        !drawn(&mut h, "phone-keys-row-26"),
+        "twenty-three saved keys and the three protected ones"
+    );
 }
 
 #[gpui::test]
@@ -904,22 +929,22 @@ fn a_long_key_label_keeps_its_row_one_height(cx: &mut TestAppContext) {
     h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
     open_keys(&mut h);
 
-    let long = h.bounds("phone-keys-cell-1");
-    let same_row = h.bounds("phone-keys-cell-0");
-    let next_row = h.bounds("phone-keys-cell-4");
+    let long = h.bounds("phone-keys-row-1");
+    let above = h.bounds("phone-keys-row-0");
+    let below = h.bounds("phone-keys-row-4");
     assert!(
-        drawn(&mut h, "phone-keys-cell-1"),
-        "the long label's cell draws"
+        drawn(&mut h, "phone-keys-row-1"),
+        "the long label's row draws"
     );
     assert_eq!(
-        long.size.height, same_row.size.height,
+        long.size.height, above.size.height,
         "a long label keeps its row one height"
     );
     assert_eq!(
-        long.size.height, next_row.size.height,
+        long.size.height, below.size.height,
         "and the rows stay one height"
     );
-    assert_eq!(long.size.height, touch_target());
+    assert!(long.size.height >= touch_target());
 }
 
 #[gpui::test]
@@ -928,8 +953,8 @@ fn a_cancelled_key_drag_saves_nothing(cx: &mut TestAppContext) {
     let mut h = phone(cx, &dir);
     open_keys(&mut h);
 
-    let from = h.center("phone-keys-cell-4");
-    let to = before(&mut h, "phone-keys-cell-0");
+    let from = h.center("phone-keys-row-4");
+    let to = before(&mut h, "phone-keys-row-0");
     h.touch(TouchPhase::Started, from);
     h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
     h.touch(TouchPhase::Moved, to);
@@ -940,7 +965,145 @@ fn a_cancelled_key_drag_saves_nothing(cx: &mut TestAppContext) {
         "a cancelled touch drops the drag without saving"
     );
     assert!(
-        drawn(&mut h, "phone-keys-cell-20"),
-        "the grid keeps its keys and their order"
+        drawn(&mut h, "phone-keys-row-20"),
+        "the list keeps its keys and their order"
+    );
+}
+
+#[gpui::test]
+fn the_keys_page_previews_the_bar_in_saved_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    let preview = h.bounds("phone-keys-preview");
+    assert!(preview.size.width > px(0.0), "the preview draws");
+    assert!(
+        preview.bottom() <= h.bounds("phone-keys-list").top(),
+        "at the top of the page, over the list"
+    );
+    let mut previous = h.bounds("phone-keys-preview-esc");
+    for id in ["tab", "ctrl", "up", "down"] {
+        let key = h.bounds(&format!("phone-keys-preview-{id}"));
+        assert_eq!(key.top(), previous.top(), "{id} sits in the one row");
+        assert!(
+            key.left() > previous.left(),
+            "{id} follows the key before it, as the bar draws them"
+        );
+        previous = key;
+    }
+
+    h.click_on("phone-keys-preview-esc");
+    assert!(
+        !drawn(&mut h, "phone-key-editor-label"),
+        "a preview key takes no tap"
+    );
+    assert!(saved_ui(&dir).get("phone_keys").is_none());
+
+    let from = h.center("phone-keys-row-3");
+    let to = before(&mut h, "phone-keys-row-0");
+    h.long_press_drag(from, to);
+
+    assert_eq!(saved_ui(&dir)["phone_keys"][0]["id"], json!("up"));
+    assert!(
+        h.bounds("phone-keys-preview-up").left() < h.bounds("phone-keys-preview-esc").left(),
+        "the preview follows the saved order"
+    );
+}
+
+#[gpui::test]
+fn a_lifted_key_row_is_dimmed_and_its_slot_drawn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+    assert!(!drawn(&mut h, "phone-drag-lifted"), "nothing is lifted yet");
+    assert!(!drawn(&mut h, "phone-drag-slot"), "and no slot shows");
+
+    let from = h.center("phone-keys-row-3");
+    let to = before(&mut h, "phone-keys-row-0");
+    h.touch(TouchPhase::Started, from);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+    h.touch(TouchPhase::Moved, to);
+
+    let (lifted, row) = (h.bounds("phone-drag-lifted"), h.bounds("phone-keys-row-3"));
+    assert!(lifted.size.width > px(0.0), "the lifted row is marked");
+    assert_eq!(
+        (lifted.left(), lifted.top()),
+        (row.left(), row.top()),
+        "over the row the finger lifted"
+    );
+    let (slot, first) = (h.bounds("phone-drag-slot"), h.bounds("phone-keys-row-0"));
+    assert!(slot.size.height > px(0.0), "the slot line draws");
+    assert!(
+        slot.bottom() <= first.top(),
+        "over the first row, where the key would drop"
+    );
+    assert_eq!(
+        slot.size.width,
+        h.bounds("phone-keys-list").size.width,
+        "across the list"
+    );
+
+    h.touch(TouchPhase::Ended, to);
+
+    assert!(
+        !drawn(&mut h, "phone-drag-lifted"),
+        "the drop ends the lift"
+    );
+    assert!(!drawn(&mut h, "phone-drag-slot"), "and the slot line");
+}
+
+#[gpui::test]
+fn a_protected_key_row_has_no_chevron(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    assert!(
+        drawn(&mut h, "phone-keys-row-0-chevron"),
+        "Esc's row ends in a chevron"
+    );
+    for index in [2, 7, 8] {
+        assert!(drawn(&mut h, &format!("phone-keys-row-{index}")));
+        assert!(
+            !drawn(&mut h, &format!("phone-keys-row-{index}-chevron")),
+            "row {index} (Ctrl, Paste or Quick) opens no editor, so draws no chevron"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_sideways_swipe_on_the_preview_leaves_the_page_where_it_was(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    let list_top = h.bounds("phone-keys-list").top();
+    let esc_left = h.bounds("phone-keys-preview-esc").left();
+    let at = h.center("phone-keys-preview");
+    let pan = |dx: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(dx, px(0.0))),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: gpui::ScrollSource::Touch,
+    };
+    let gap = Duration::from_millis(10);
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    h.advance(gap);
+    h.cx.simulate_event(pan(px(-60.0), TouchPhase::Moved));
+    h.advance(gap);
+    h.cx.simulate_event(pan(px(-60.0), TouchPhase::Moved));
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.bounds("phone-keys-list").top(),
+        list_top,
+        "the Settings page keeps its vertical place"
+    );
+    assert!(
+        h.bounds("phone-keys-preview-esc").left() < esc_left,
+        "while the preview scrolls sideways"
     );
 }

@@ -1,12 +1,13 @@
 //! Draws the phone's Settings Keys page and the key editor over it
-//! ([`super::key_grid`]'s data): a muted hint, the key grid in fixed equal
-//! columns, Add key and Restore defaults with its confirm row, then the
-//! editor one key at a time — its label, its presses, and the picker that
-//! sets one press's key. It only renders and forwards taps.
+//! ([`super::key_grid`]'s data): a read-only preview of the Terminal bar, a
+//! muted hint, a row per key in the saved order, Add key and Restore
+//! defaults with its confirm row, then the editor one key at a time — its
+//! label, its presses, and the picker that sets one press's key. It only
+//! renders and forwards taps.
 
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, Focusable, SharedString, Stateful, Subscription, Window,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, Entity, Focusable, SharedString, Stateful,
+    Subscription, Window, div, prelude::*, px,
 };
 
 use super::PhoneRoot;
@@ -15,7 +16,8 @@ use super::hosts_view::{field_box, phone_button};
 use super::key_grid::{self, DraftStep, GridKey, KeyAction, KeyDraft, KeyEdit, NamedKey, StepKey};
 use super::reorder::{self, ListId};
 use super::settings::{Page, Settings, SubPage};
-use super::settings_view::section_label;
+use super::settings_view::{CHEVRON, section_label};
+use super::terminal_view::BarKeys;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, outlined_button};
 use crate::drag::Side;
 use crate::driver_id::DriverId as _;
@@ -23,7 +25,7 @@ use crate::fonts::ui_px;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::UiTheme;
 
-/// The line over the grid, naming the two gestures the page answers.
+/// The line over the keys, naming the two gestures the page answers.
 const HINT: &str = "Long-press a key to move it; tap one to change it.";
 /// The Restore defaults button's label.
 const RESTORE_ROW_LABEL: &str = "Restore defaults";
@@ -55,13 +57,11 @@ const PICKER_REFUSAL: &str = "Type one character.";
 const USE_LABEL: &str = "Use";
 /// What an editor says when the key it edits is gone.
 const STALE_ITEM: &str = "That item no longer exists.";
-/// The least width of a grid column, in points.
-const CELL_MIN: f32 = 72.0;
-/// The gap between two cells, in points.
-const CELL_GAP: f32 = 8.0;
-/// A cell's horizontal padding, its button's own: an empty place of the last
-/// row takes it too, so every column is one width.
-const CELL_PAD_X: f32 = 16.0;
+/// The least height of a key's row, in points.
+const ROW_HEIGHT: f32 = 48.0;
+/// The widest a row's "what it sends" text draws before it truncates, in
+/// points.
+const SUMMARY_MAX: f32 = 160.0;
 
 /// What the Keys page's Restore defaults draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,33 +552,26 @@ impl PhoneRoot {
             .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
     }
 
-    /// The Keys page: the hint, the grid in as many equal columns as the
-    /// window fits, then Add key and Restore defaults, with the page's drag
-    /// area over the grid.
-    pub(super) fn keys_page(
-        &self,
-        window: &mut Window,
-        t: &UiTheme,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    /// The Keys page: a read-only preview of the Terminal bar, the hint, a
+    /// row per key in the saved order, then Add key and Restore defaults,
+    /// with the page's drag area over the rows.
+    pub(super) fn keys_page(&self, _: &mut Window, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         self.forget_list_boxes();
-        let saved = self.saved_keys(cx);
-        let keys = key_grid::resolved(saved.as_deref());
-        let width = f32::from(window.viewport_size().width) - 2.0 * SIDE_PADDING;
-        let columns = key_grid::grid_columns(width, CELL_MIN, CELL_GAP);
+        let keys = self.resolved_keys(cx);
         div()
             .relative()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .p(px(SIDE_PADDING))
+            .child(self.bar_keys_row(BarKeys::Preview, cx))
             .child(
                 div()
                     .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
                     .text_color(gpui::rgb(t.muted))
                     .child(HINT),
             )
-            .child(self.keys_grid(&keys, columns, cx))
+            .child(self.keys_list(&keys, t, cx))
             .child(Self::add_key_row(cx))
             .child(self.keys_restore_row(t, cx))
             .child(reorder::reorder_area(&self.list_boxes, cx))
@@ -594,73 +587,80 @@ impl PhoneRoot {
             }))
     }
 
-    /// The grid: `columns` equal cells a row, the last row's empty places
-    /// kept so every cell is the same width, and its box recorded for a
-    /// press to hit-test.
-    fn keys_grid(&self, keys: &[GridKey], columns: usize, cx: &mut Context<Self>) -> Div {
-        let mut grid = div()
-            .driver_id(|| "phone-keys-grid".to_owned())
+    /// The keys as one list, a row each in order, the lifted row dimmed and
+    /// the drop slot drawn while a drag moves one, and its box recorded for
+    /// a press to hit-test.
+    fn keys_list(&self, keys: &[GridKey], t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let drag = self
+            .reorder_drag
+            .filter(|drag| drag.list == ListId::KeyList);
+        let rows: Vec<AnyElement> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(index, key)| {
+                reorder::dragged_row(
+                    Self::key_row(index, key, t, cx),
+                    drag.is_some_and(|drag| drag.from == index),
+                    reorder::slot_of(drag, index),
+                    t,
+                )
+            })
+            .collect();
+        div()
+            .driver_id(|| "phone-keys-list".to_owned())
             .relative()
             .flex()
             .flex_col()
-            .gap(px(CELL_GAP));
-        for (row, chunk) in keys.chunks(columns).enumerate() {
-            let mut line = div().flex().gap(px(CELL_GAP));
-            for (offset, key) in chunk.iter().enumerate() {
-                let index = row * columns + offset;
-                line = line.child(Self::key_cell(index, key, cx));
-            }
-            for _ in chunk.len()..columns {
-                line = line.child(Self::grid_spacer());
-            }
-            grid = grid.child(line);
+            .children(rows)
+            .child(reorder::list_box_canvas(
+                &self.list_boxes,
+                ListId::KeyList,
+                keys.len(),
+            ))
+    }
+
+    /// One key's row: its label, truncated, then what it sends in muted
+    /// text, one line so every row is one height, dimmed while the key does
+    /// nothing. A send or inert key's row ends in a chevron and a tap opens
+    /// its editor; Ctrl, Paste and Quick draw no chevron and take no tap.
+    fn key_row(index: usize, key: &GridKey, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = format!("phone-keys-row-{index}");
+        let row = div()
+            .id(SharedString::from(id.clone()))
+            .driver_id(|| id.clone())
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .min_h(px(ROW_HEIGHT))
+            .px(px(SIDE_PADDING))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
+            .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+            .child(div().flex_1().min_w_0().truncate().child(key.label.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(SUMMARY_MAX))
+                    .truncate()
+                    .text_color(gpui::rgb(t.muted))
+                    .child(key_grid::row_summary(key)),
+            )
+            .when(key_grid::is_inert(key), |row| {
+                row.opacity(crate::spawn_view::DISABLED_OPACITY)
+            });
+        if key_grid::is_protected(key) {
+            return row;
         }
-        grid.child(reorder::grid_box_canvas(
-            &self.list_boxes,
-            ListId::KeyGrid,
-            columns,
-            CELL_GAP,
-            keys.len(),
-        ))
-    }
-
-    /// An empty place of the grid's last row: as wide as a cell and drawing
-    /// nothing, so every column keeps one width.
-    fn grid_spacer() -> Div {
-        div()
-            .flex_1()
-            .min_w_0()
-            .px(px(CELL_PAD_X))
-            .border_1()
-            .border_color(gpui::transparent_black())
-    }
-
-    /// One cell: the key's label on one line, truncated so its row is one
-    /// height, dimmed while the key does nothing; a tap opens a send or inert
-    /// key's editor, and Paste, Quick and Ctrl take none.
-    fn key_cell(index: usize, key: &GridKey, cx: &mut Context<Self>) -> Stateful<Div> {
-        let dimmed = key_grid::is_inert(key);
-        let editable = !key_grid::is_protected(key);
-        let cell = phone_button(
-            &format!("phone-keys-cell-{index}"),
-            ButtonKind::Outlined,
-            cx,
+        row.child(
+            div()
+                .driver_id(|| format!("{id}-chevron"))
+                .flex_none()
+                .text_color(gpui::rgb(t.muted))
+                .child(CHEVRON),
         )
-        .flex_1()
-        .min_w_0()
-        .min_h(px(TOUCH_TARGET))
-        .truncate()
-        .child(key.label.clone())
-        .when(dimmed, |cell| {
-            cell.opacity(crate::spawn_view::DISABLED_OPACITY)
-        });
-        if editable {
-            cell.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.open_key_editor(Some(index), window, cx);
-            }))
-        } else {
-            cell
-        }
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.open_key_editor(Some(index), window, cx);
+        }))
     }
 
     /// Restore defaults: the button, or the row that asks first. It is dimmed

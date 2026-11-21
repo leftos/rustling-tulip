@@ -231,6 +231,9 @@ impl PhoneRoot {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        // A sideways swipe on the Keys page's bar preview
+                        // must not scroll the page.
+                        .restrict_scroll_to_axis()
                         .child(body),
                 ),
         )

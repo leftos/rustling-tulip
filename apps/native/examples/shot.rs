@@ -92,8 +92,8 @@
 //! `phone-settings-appearance` shows Settings' Appearance page: its header
 //! with Back and the title `Appearance`, the theme list with the one in use
 //! marked, and the text-size row under them.
-//! `phone-settings-keys` shows Settings' Keys page: the hint, the key grid
-//! in four columns a row over Add key, and Restore defaults under them.
+//! `phone-settings-keys` shows Settings' Keys page: the key bar's preview,
+//! the hint, a row per key, then Add key and Restore defaults.
 //! `phone-settings-key-edit` shows that page with the Ctrl+C key's editor
 //! open: the header's title `Key` over the label field, the `Presses` label
 //! and the key's one press (Ctrl lit, key `c`, Remove), Add press and Save,
