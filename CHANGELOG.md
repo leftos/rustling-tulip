@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.
+
 ## v0.17.1-alpha
 
 ### Fixed

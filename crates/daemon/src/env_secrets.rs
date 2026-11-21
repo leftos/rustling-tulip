@@ -129,8 +129,7 @@ pub(crate) fn vault_unreachable_failure() -> SpawnFailure {
 ///
 /// # Errors
 ///
-/// Fails when the platform store cannot be created, or off Windows, where this
-/// module has no store to install.
+/// Fails when the platform store cannot be created.
 #[cfg(windows)]
 pub fn init() -> anyhow::Result<()> {
     let store = windows_native_keyring_store::Store::new()
@@ -139,12 +138,29 @@ pub fn init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Install the user's login Keychain as the process's credential store.
+///
+/// Meant for startup, before any spawn seals a value.
+///
 /// # Errors
 ///
-/// Always: the store is Windows Credential Manager.
-#[cfg(not(windows))]
+/// Fails when the platform store cannot be created.
+#[cfg(target_os = "macos")]
 pub fn init() -> anyhow::Result<()> {
-    anyhow::bail!("the secret store is Windows Credential Manager; there is no store off Windows")
+    let store = apple_native_keyring_store::keychain::Store::new()
+        .context("creating the macOS Keychain credential store")?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
+/// # Errors
+///
+/// Always: the store is Windows Credential Manager or the macOS Keychain.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn init() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "the secret store is Windows Credential Manager or the macOS Keychain; there is none on this platform"
+    )
 }
 
 /// Save `value` under `key` and return the id standing for it: an indexed id
@@ -789,6 +805,29 @@ mod tests {
             "the error names the position: {shown}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The login Keychain as this process's store: a value written through
+    /// `keyring_core` reads back and can be deleted. Touches the real Keychain,
+    /// so it stays ignored until run on the Mac builder.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "touches the login Keychain; run on the Mac builder"]
+    fn keychain_store_round_trips_a_value() {
+        init().expect("the login Keychain is installed as the store");
+        let service = format!("rustling-tulip-test-{}", uuid::Uuid::new_v4().simple());
+        let entry = Entry::new(&service, "probe").expect("the entry builds");
+        entry
+            .set_password("v")
+            .expect("the Keychain accepts the value");
+        assert_eq!(
+            entry.get_password().expect("the value reads back"),
+            "v",
+            "the login Keychain returns what was written"
+        );
+        entry
+            .delete_credential()
+            .expect("the entry is deleted from the Keychain");
     }
 
     #[test]

@@ -1597,7 +1597,7 @@ The client builds and runs on macOS (arm64), packed as an unsigned app bundle (`
 - Sessions work: a shell and a Claude session start under `rt-tracer`, which the daemon reaches over a Unix socket in the temp folder, and a Claude session's hooks reach the daemon.
 - Autostart is a LaunchAgent (`daemon_client::autostart`).
 - Notifications: macOS has no OS toasts, so every Needs you and Finished toast is the app's own toast window whatever `toast_style` says ("The app's own toasts"). Pairing prompts still go to the OS notifier and show nothing (RT-1032). Focus / Do Not Disturb and full-screen apps are not checked (RT-1036). A real Mac check is open (RT-1030).
-- Secrets: the daemon refuses to seal an env secret, so a secret reaches a session as an `${env:NAME}` row, and the summarizer cannot read a saved key ([env-secrets.md](./env-secrets.md) "macOS"). Tailnet device tokens are not stored either; the client logs that there is no store off Windows.
+- Secrets: the daemon keeps sealed env rows and the summarizer's keys in the login Keychain, and the client keeps tailnet device tokens there too ([env-secrets.md](./env-secrets.md) "macOS", [on-disk.md](./on-disk.md)).
 - Signing and notarization are deferred (RT-665).
 
 ## Tests

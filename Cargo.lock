@@ -1847,6 +1847,7 @@ dependencies = [
  "agent-registry",
  "alacritty_terminal",
  "anyhow",
+ "apple-native-keyring-store",
  "axum",
  "axum-server",
  "base64 0.22.1",

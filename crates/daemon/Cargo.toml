@@ -97,8 +97,9 @@ p256 = { version = "0.14.0", default-features = false, features = [
 # rest of the daemon stays on `sha2` 0.10.
 sha2_011 = { package = "sha2", version = "0.11" }
 # Cross-platform credential-store API. `crates/daemon/src/env_secrets.rs` files
-# sealed environment-row values under Windows Credential Manager; the platform
-# store itself is `windows-native-keyring-store` below.
+# sealed environment-row values under Windows Credential Manager or the macOS
+# login Keychain; the platform stores themselves are
+# `windows-native-keyring-store` and `apple-native-keyring-store` below.
 keyring-core = "1.0"
 
 # TLS for the tailnet listener. Pinned to the `ring` crypto backend to match
@@ -152,6 +153,12 @@ tokio = { workspace = true, features = ["test-util"] }
 # handle on macOS (`file_tail::open_regular`, the tail's open,
 # `file_tail::open_inside`, the folder fetch's, and `file_tail::final_path`).
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS's login Keychain as the `keyring-core` store for sealed env rows,
+# summarizer keys and the Linear key; the `keychain` feature is the legacy
+# (login) keychain store.
+apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager as the `keyring-core` store. Default features off
