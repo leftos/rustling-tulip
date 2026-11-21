@@ -2288,4 +2288,14 @@ mod tests {
         );
         assert_eq!(linked(&linked_text_spans("Pick one")), []);
     }
+
+    #[test]
+    fn a_cards_backticked_path_links() {
+        let spans = linked_text_spans("Keep `/tmp/a.txt` as is");
+        assert_eq!(
+            linked(&spans),
+            [("/tmp/a.txt".to_owned(), false, file("/tmp/a.txt"))]
+        );
+        assert_eq!(texts(&spans), "Keep `/tmp/a.txt` as is");
+    }
 }

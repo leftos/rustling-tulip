@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A reply that quotes a question's review step above an input box holding your draft no longer reads as waiting on you, while a real review in a named session still does.
+- A question card shows a path or link that wraps past the terminal's width whole, so it opens, and a path written in backticks links too.
 
 ## v0.18.1-alpha
 

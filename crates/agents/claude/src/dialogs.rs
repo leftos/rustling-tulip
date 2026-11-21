@@ -935,7 +935,8 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     let first_option = (title + 1..end)
         .find(|&index| numbered(&rows[index]).is_some())
         .unwrap_or(end);
-    let found = question_options(&rows[first_option..end]);
+    let width = dialog_width(rows, bar, footer);
+    let found = question_options(&rows[first_option..end], width);
     if found.options.is_empty() {
         return Some(Parsed::HalfDrawn);
     }
@@ -948,7 +949,7 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
         cursor: found.cursor,
         ..prompt(
             ChatPromptKind::Question,
-            question_text(&rows[title..first_option]),
+            question_text(&rows[title..first_option], width),
             String::new(),
             found.options,
         )
@@ -975,18 +976,19 @@ fn question_without_bar(rows: &[String]) -> Option<Parsed> {
     if !has_chat_about_this(rows, end, footer) {
         return None;
     }
-    let found = question_options(&rows[first_option..end]);
+    let start = question_start(rows, first_option);
+    let width = dialog_width(rows, start, footer);
+    let found = question_options(&rows[first_option..end], width);
     if found.options.is_empty() {
         return Some(Parsed::HalfDrawn);
     }
-    let start = question_start(rows, first_option);
     Some(Parsed::Prompt(ChatPrompt {
         questions: Vec::new(),
         multi: found.multi,
         cursor: found.cursor,
         ..prompt(
             ChatPromptKind::Question,
-            question_text(&rows[start..first_option]),
+            question_text(&rows[start..first_option], width),
             String::new(),
             found.options,
         )
@@ -1095,16 +1097,110 @@ fn question_start(rows: &[String], first_option: usize) -> usize {
 
 /// A question wrapped over `rows` (from its title to its first option),
 /// each row trimmed, its `│` gutter (a long question's left bar) and the
-/// space after it taken off, and the blank ones left out, joined by spaces.
-fn question_text(rows: &[String]) -> String {
-    rows.iter()
-        .map(|row| {
-            let text = row.trim();
-            text.strip_prefix('│').map_or(text, str::trim_start)
-        })
-        .filter(|row| !row.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// space after it taken off, and the blank ones left out, joined as
+/// [`push_row`] joins rows in a dialog `width` columns wide.
+fn question_text(rows: &[String], width: usize) -> String {
+    let mut text = String::new();
+    let mut upper = "";
+    for row in rows {
+        let trimmed = row.trim();
+        let line = trimmed.strip_prefix('│').map_or(trimmed, str::trim_start);
+        if line.is_empty() {
+            upper = "";
+            continue;
+        }
+        push_row(&mut text, upper, line, width);
+        upper = row;
+    }
+    text
+}
+
+/// The width of the dialog whose rows run from `top` to `bottom` (the
+/// footer, which is left out): its widest row in cells, trailing spaces
+/// aside, from the last rule at or above `top` (a dialog's rules span its
+/// width) down.
+fn dialog_width(rows: &[String], top: usize, bottom: usize) -> usize {
+    let from = rule_indices(rows)
+        .into_iter()
+        .rev()
+        .find(|&index| index <= top)
+        .unwrap_or(top);
+    rows.get(from..bottom.min(rows.len()))
+        .unwrap_or_default()
+        .iter()
+        .map(|row| row.trim_end().chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Append `text`, the row under the drawn row `upper`, to `target`: right
+/// after it when `upper` ends a path or web address hard-wrapped at the
+/// dialog's `width` ([`wraps_mid_token`]), else after one space; with no
+/// space in front of the first text.
+fn push_row(target: &mut String, upper: &str, text: &str, width: usize) {
+    if !target.is_empty() && !wraps_mid_token(upper, text, width) {
+        target.push(' ');
+    }
+    target.push_str(text);
+}
+
+/// Whether the drawn row `upper` and the `next` row's text are one path or
+/// web address split where the dialog `width` columns wide ran out: `upper`
+/// fills the width (within one cell), its last token is a path or address
+/// ([`is_path_token`]), `next` does not open a list item, and that token with
+/// `next`'s first word is longer than the row's text (the width less the
+/// row's indent and `│` gutter, within one cell): the agent's wrap splits a
+/// word only when it outgrows a whole row, and moves a shorter one whole.
+fn wraps_mid_token(upper: &str, next: &str, width: usize) -> bool {
+    let upper = upper.trim_end();
+    let drawn = upper.chars().count();
+    if drawn + 1 < width || opens_a_list(next) {
+        return false;
+    }
+    let Some(last) = upper
+        .split_whitespace()
+        .last()
+        .filter(|last| is_path_token(last))
+    else {
+        return false;
+    };
+    let text = upper.trim_start();
+    let text = text.strip_prefix('│').map_or(text, str::trim_start);
+    let indent = drawn - text.chars().count();
+    let first = next
+        .split_whitespace()
+        .next()
+        .map_or(0, |word| word.chars().count());
+    last.chars().count() + first + 1 > width.saturating_sub(indent)
+}
+
+/// Whether `token` reads as a path or web address: it holds a `\`, a `/`,
+/// `://` or a drive (`C:`) at its start, and does not end in `.`, `,` or
+/// `)`, which end a sentence or an aside instead.
+fn is_path_token(token: &str) -> bool {
+    if token.ends_with(['.', ',', ')']) {
+        return false;
+    }
+    let bare = token.trim_start_matches(['\'', '"', '`', '(', '[', '<']);
+    let mut chars = bare.chars();
+    let drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && chars.next().is_none_or(|c| matches!(c, '\\' | '/'));
+    drive || token.contains(['\\', '/'])
+}
+
+/// Whether `text` opens with a bullet (`-`, `*`, `•`, `·`) or a number
+/// (`1.`, `2)`), so it starts an item rather than continuing a token.
+fn opens_a_list(text: &str) -> bool {
+    let Some(first) = text.split_whitespace().next() else {
+        return false;
+    };
+    if matches!(first, "-" | "*" | "•" | "·") {
+        return true;
+    }
+    first
+        .strip_suffix(['.', ')'])
+        .is_some_and(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Whether `rows[index]` is a question card's tab bar: `←  ☐ Next fn  ✔
@@ -1158,19 +1254,22 @@ struct QuestionOptions {
 
 /// The options among a question step's `rows`: each numbered row's label
 /// (its box taken off, `Type something.` without its period), the deeper
-/// indented rows under it joined as its description. `selected` is the
-/// tick on a multi-select question and the cursor otherwise. The `Next`
-/// row and `Chat about this` are not options.
-fn question_options(rows: &[String]) -> QuestionOptions {
+/// indented rows under it joined as its description ([`push_row`], in a
+/// dialog `width` columns wide). `selected` is the tick on a multi-select
+/// question and the cursor otherwise. The `Next` row and `Chat about this`
+/// are not options.
+fn question_options(rows: &[String], width: usize) -> QuestionOptions {
     let mut found = QuestionOptions {
         options: Vec::new(),
         multi: false,
         cursor: None,
     };
     let mut indent = 0;
+    let mut upper = "";
     for row in rows {
         if let Some(option) = numbered(row) {
             indent = option.indent;
+            upper = "";
             let (ticked, label) = checkbox(option.label);
             found.multi |= ticked.is_some();
             if option.selected {
@@ -1191,14 +1290,13 @@ fn question_options(rows: &[String]) -> QuestionOptions {
         let text = row.trim();
         let unmarked = text.strip_prefix(CURSOR).unwrap_or(text).trim();
         if text.is_empty() || unmarked == NEXT_ROW || indent_of(row) <= indent {
+            upper = "";
             continue;
         }
         if let Some(last) = found.options.last_mut() {
             let description = last.description.get_or_insert_with(String::new);
-            if !description.is_empty() {
-                description.push(' ');
-            }
-            description.push_str(text);
+            push_row(description, upper, text, width);
+            upper = row;
         }
     }
     found
@@ -1330,12 +1428,13 @@ fn review(
     };
     let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
     let options = collect_options(&rows[first..end], |_| false);
+    let width = dialog_width(rows, body.start, end);
     Parsed::Prompt(ChatPrompt {
         questions: tabs,
         ..prompt(
             ChatPromptKind::Review,
             REVIEW_TITLE.to_owned(),
-            review_body(&rows[body]),
+            review_body(&rows[body], width),
             options,
         )
     })
@@ -1343,27 +1442,26 @@ fn review(
 
 /// The review's pairs as lines `<question> -> <answer>`: a `●` row starts
 /// a question, a `→` row holds its answer, and any other row continues the
-/// one before it. A long question's rows carry a `│` gutter, taken off as
-/// [`question_text`] takes it.
-fn review_body(rows: &[String]) -> String {
+/// one before it ([`push_row`], in a dialog `width` columns wide). A long
+/// question's rows carry a `│` gutter, taken off as [`question_text`] takes
+/// it.
+fn review_body(rows: &[String], width: usize) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut upper = "";
     for row in rows {
         let text = row.trim();
         let text = text.strip_prefix('│').map_or(text, str::trim_start);
         if let Some(question) = text.strip_prefix('●') {
             pairs.push((question.trim().to_owned(), String::new()));
-            continue;
+        } else if let Some((question, answer)) = pairs.last_mut() {
+            if let Some(given) = text.strip_prefix('→') {
+                given.trim().clone_into(answer);
+            } else if !text.is_empty() {
+                let target = if answer.is_empty() { question } else { answer };
+                push_row(target, upper, text, width);
+            }
         }
-        let Some((question, answer)) = pairs.last_mut() else {
-            continue;
-        };
-        if let Some(given) = text.strip_prefix('→') {
-            given.trim().clone_into(answer);
-        } else if !text.is_empty() {
-            let target = if answer.is_empty() { question } else { answer };
-            target.push(' ');
-            target.push_str(text);
-        }
+        upper = if text.is_empty() { "" } else { row };
     }
     let lines: Vec<String> = pairs
         .iter()
@@ -2279,7 +2377,7 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
 mod tests {
     use super::{
         clear_draft_recipe, next_view_key, read, read_draft, read_styled, read_view,
-        read_view_styled, recipe, spinner_above,
+        read_view_styled, recipe, review_body, spinner_above,
     };
     use agent_api::{
         AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal,
@@ -3847,6 +3945,115 @@ mod tests {
         assert_eq!(
             prompt.options[0].description.as_deref(),
             Some("Subtraction")
+        );
+    }
+
+    /// A question card `width` columns wide: its rule and tab bar, the
+    /// `question` rows, the `options` rows, its inner rule and its footer.
+    fn card(width: usize, question: &[&str], options: &[&str]) -> Vec<String> {
+        for row in question.iter().chain(options) {
+            assert!(row.chars().count() <= width, "{row:?} fits the card");
+        }
+        let rule = "─".repeat(width);
+        let mut screen = vec![rule.clone()];
+        screen.extend(rows(&["←  ☐ Next fn  ☐ Tests  ✔ Submit  →", ""]));
+        screen.extend(rows(question));
+        screen.push(String::new());
+        screen.extend(rows(options));
+        screen.push(rule);
+        screen.extend(rows(&[
+            "  9. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        screen
+    }
+
+    #[test]
+    fn a_path_wrapped_mid_segment_joins_without_a_space() {
+        let upper = "See X:\\dev\\rustling-tulip\\city-142-ui-mo";
+        assert_eq!(upper.chars().count(), 40, "the row fills the card");
+        let screen = card(
+            40,
+            &[upper, "cks.tmp\\x.md now?"],
+            &["❯ 1. Yes", "  2. Type something."],
+        );
+        assert_eq!(
+            question(&screen).subject,
+            "See X:\\dev\\rustling-tulip\\city-142-ui-mocks.tmp\\x.md now?"
+        );
+    }
+
+    #[test]
+    fn a_url_wrapped_at_the_row_end_joins_without_a_space() {
+        let upper = "see https://example.com/very/long/pa";
+        let width = upper.chars().count();
+        let screen = card(
+            width,
+            &[upper, "th/page.html"],
+            &["❯ 1. Yes", "  2. Type something."],
+        );
+        assert_eq!(
+            question(&screen).subject,
+            "see https://example.com/very/long/path/page.html"
+        );
+    }
+
+    #[test]
+    fn a_path_on_a_short_row_keeps_the_space() {
+        let options = ["❯ 1. Yes", "  2. Type something."];
+        let full = "Then open the old notes at C:\\a\\b.md and";
+        assert_eq!(full.chars().count(), 40, "the row fills the card");
+        for (upper, joined) in [
+            ("Open C:\\a\\b.md and", "Open C:\\a\\b.md and then save"),
+            (full, "Then open the old notes at C:\\a\\b.md and then save"),
+            ("Keep C:\\a\\b.md", "Keep C:\\a\\b.md then save"),
+        ] {
+            let screen = card(40, &[upper, "then save"], &options);
+            assert_eq!(question(&screen).subject, joined, "{upper:?}");
+        }
+    }
+
+    #[test]
+    fn a_short_path_ending_a_full_row_keeps_its_space() {
+        let upper = "Should I archive the notes at C:\\a\\b.md";
+        assert_eq!(
+            upper.chars().count(),
+            39,
+            "the row fills the card within one cell"
+        );
+        let screen = card(40, &[upper, "now?"], &["❯ 1. Yes", "  2. Type something."]);
+        assert_eq!(
+            question(&screen).subject,
+            "Should I archive the notes at C:\\a\\b.md now?"
+        );
+    }
+
+    #[test]
+    fn a_review_row_ending_in_a_short_path_keeps_its_space() {
+        let upper = " ● Should I archive the old notes in X:\\dev\\a\\notes.md";
+        assert_eq!(upper.chars().count(), 54, "the row fills the dialog");
+        let body = review_body(&rows(&[upper, "   first?", "   → Yes"]), 54);
+        assert_eq!(
+            body,
+            "Should I archive the old notes in X:\\dev\\a\\notes.md first? -> Yes"
+        );
+    }
+
+    #[test]
+    fn an_option_description_wrapped_mid_path_joins_without_a_space() {
+        let upper = "     See X:\\dev\\rustling-tulip\\city-1-mo";
+        assert_eq!(upper.chars().count(), 40, "the row fills the card");
+        let screen = read(&ask(&[
+            "❯ 1. sub",
+            upper,
+            "     cks.tmp\\x.md",
+            "  2. Type something.",
+        ]));
+        let prompt = screen.prompt.expect("a question prompt");
+        assert_eq!(
+            prompt.options[0].description.as_deref(),
+            Some("See X:\\dev\\rustling-tulip\\city-1-mocks.tmp\\x.md")
         );
     }
 

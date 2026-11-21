@@ -130,7 +130,7 @@ static URL_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| compile(r#"(?i)(?-u:\b)https?://[^\s<>"'`{}|\\^]+"#));
 static PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     compile(
-        r#"(^['"]?|[\s(\[{<]['"]?)((?:[A-Za-z]:[\\/]|\\\\[^\s\\/:*?"<>|]+[\\/][^\s\\/:*?"<>|]+[\\/]|\/|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s<>"'`|]*)"#,
+        r#"(^['"`]?|[\s(\[{<]['"`]?)((?:[A-Za-z]:[\\/]|\\\\[^\s\\/:*?"<>|]+[\\/][^\s\\/:*?"<>|]+[\\/]|\/|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s<>"'`|]*)"#,
     )
 });
 static BARE_NAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
@@ -180,7 +180,7 @@ const SPACED_WORDS: usize = 8;
 
 /// A character no spaced reading runs on past.
 fn ends_spaced_reading(c: char) -> bool {
-    matches!(c, '<' | '>' | '"' | '\'' | '|')
+    matches!(c, '<' | '>' | '"' | '\'' | '`' | '|')
 }
 
 /// How far short of its wrap column a row may stop and still count as wrapped.
@@ -1429,12 +1429,13 @@ fn web_link(start_index: usize, token: &str, segments: &[Segment]) -> TerminalLi
     link
 }
 
-/// The text between the quote just before character `start` of `chars` and
+/// The text between the quote (`'`, `"` or a backtick) just before character
+/// `start` of `chars` and
 /// the matching quote after it, trimmed as a link is; `None` when no quote
 /// leads the path or none closes it.
 fn quoted_text(chars: &[char], start: usize) -> Option<String> {
     let quote = *chars.get(start.checked_sub(1)?)?;
-    if quote != '\'' && quote != '"' {
+    if !matches!(quote, '\'' | '"' | '`') {
         return None;
     }
     let close = start + chars.get(start..)?.iter().position(|c| *c == quote)?;
@@ -1445,7 +1446,7 @@ fn quoted_text(chars: &[char], start: usize) -> Option<String> {
 /// The spaced readings of the path at characters `start..end` of `chars`,
 /// longest first: the path run on over each of the next [`SPACED_WORDS`]
 /// words, each a single space after the last, that holds a `\` or `/`. A
-/// double space, a word that starts no word, and any of `<>"'|` end the run;
+/// double space, a word that starts no word, and any of ``<>"'`|`` end the run;
 /// a word is cut at the stop character it holds.
 fn spaced_readings(chars: &[char], start: usize, end: usize) -> Vec<String> {
     let mut readings: Vec<String> = Vec::new();
@@ -2800,6 +2801,27 @@ mod tests {
             targets(&links),
             Vec::<&str>::new(),
             "a quote inside a word leads nothing"
+        );
+    }
+
+    #[test]
+    fn a_backticked_path_links() {
+        let links = detect_links("see `C:\\foo\\bar.md` now");
+        assert_eq!(targets(&links), [r"C:\foo\bar.md"]);
+        assert_eq!(links[0].kind, LinkKind::Path);
+    }
+
+    #[test]
+    fn a_backticked_spaced_path_offers_the_whole_path() {
+        let links = detect_links("open `C:\\Program Files\\Git\\x.md` now");
+        assert_eq!(links[0].target, r"C:\Program");
+        assert_eq!(spaced(&links[0]), [r"C:\Program Files\Git\x.md"]);
+
+        let quoted = detect_links("open \"C:\\Program Files\\Git\\x.md\" now");
+        assert_eq!(
+            spaced(&quoted[0]),
+            [r"C:\Program Files\Git\x.md"],
+            "the double-quoted form reads the same"
         );
     }
 
