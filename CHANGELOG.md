@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On an iPad, the Chat box's Paste keeps working while a sheet covers only the session list.
 - The phone's paste button comes back after a theme change, and grabbing the Chat box's end selection handle low no longer pastes.
 - The phone's pinned host header is right again as soon as the Home list changes without a scroll, such as when a Needs you card appears.
+- The phone's Chat box keeps its keyboard button, now labelled Hide, inside the button row while the keyboard is up.
 
 ### Changed
 

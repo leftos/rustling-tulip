@@ -93,8 +93,9 @@ const QUICK_EMPTY_TEXT: &str = "No quick replies. Add them in Settings › Quick
 const QUICK_EMPTY_ID: &str = "phone-quick-empty";
 /// The Keys tray's button's label.
 const KEYS_LABEL: &str = "Keys";
-/// The Hide keyboard button's label.
-const HIDE_LABEL: &str = "Hide keyboard";
+/// The Hide keyboard button's label, short enough for its fifth of a
+/// phone's composer row.
+const HIDE_LABEL: &str = "Hide";
 /// The room between the composer's rows, and between its buttons.
 const COMPOSER_GAP: f32 = 8.0;
 /// What the composer's note row asks once the draft's Clear is tapped.
@@ -810,14 +811,19 @@ impl PhoneRoot {
     /// The buttons under the composer's field, in the order
     /// [`buttons_shown`] gives them: Paste, Photos while the host takes
     /// uploads, Quick and Keys, and Hide keyboard while the on-screen
-    /// keyboard is up.
+    /// keyboard is up. Each takes an equal share of the row, and a label
+    /// wider than its share truncates, so the last button stays inside.
     fn composer_buttons(keyboard_up: bool, photos: bool, cx: &mut Context<Self>) -> Div {
-        let mut row = div().flex().gap(px(COMPOSER_GAP));
+        let mut row = div()
+            .driver_id(|| "phone-composer-buttons".to_owned())
+            .flex()
+            .gap(px(COMPOSER_GAP));
         for button in buttons_shown(keyboard_up, photos) {
             let drawn = phone_button(button.id(), ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))
                 .flex_1()
-                .child(button.label());
+                .min_w_0()
+                .child(div().truncate().child(button.label()));
             let drawn = match button {
                 ComposerButton::Paste => record_paste_bounds(
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1356,6 +1362,7 @@ mod tests {
                 "phone-composer-hide"
             ]
         );
+        assert_eq!(ComposerButton::Hide.label(), "Hide");
     }
 
     #[test]

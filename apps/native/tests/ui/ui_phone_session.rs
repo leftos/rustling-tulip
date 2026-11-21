@@ -2986,6 +2986,30 @@ fn hide_keyboard_lowers_it(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn the_composer_row_keeps_hide_inside_it_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    // The iPhone 17's width, with its keyboard up: five buttons in the row.
+    h.cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
+    draw_insets(&mut h, Some(keyboard_insets(px(445.0))));
+
+    assert!(
+        drawn(&mut h, "phone-composer-photos"),
+        "a host that takes uploads adds Photos, so the row holds five"
+    );
+    let row = h.bounds("phone-composer-buttons");
+    let hide = h.bounds("phone-composer-hide");
+    assert!(
+        hide.size.width > px(0.0),
+        "Hide keyboard is drawn while the keyboard is up"
+    );
+    assert!(
+        hide.right() <= row.right() + px(1.0),
+        "Hide stays inside its row: {hide:?} in {row:?}"
+    );
+}
+
 // ── The chat's own buttons ─────────────────────────────────────────────────
 
 /// The file `tailing_tool`'s call writes.
