@@ -1146,47 +1146,82 @@ fn push_row(target: &mut String, upper: &str, text: &str, width: usize) {
 
 /// Whether the drawn row `upper` and the `next` row's text are one path or
 /// web address split where the dialog `width` columns wide ran out: `upper`
-/// fills the width (within one cell), its last token is a path or address
-/// ([`is_path_token`]), `next` does not open a list item, and that token with
-/// `next`'s first word is longer than the row's text (the width less the
-/// row's indent and `│` gutter, within one cell): the agent's wrap splits a
-/// word only when it outgrows a whole row, and moves a shorter one whole.
+/// fills the width (within one cell), its last token and `next`'s first word
+/// are the two pieces of one ([`split_a_token`]), `next` does not open a list
+/// item, and that token with `next`'s first word is longer than the row's
+/// text (the width less the row's indent and `│` gutter, within one cell):
+/// the agent's wrap splits a word only when it outgrows a whole row, and
+/// moves a shorter one whole.
 fn wraps_mid_token(upper: &str, next: &str, width: usize) -> bool {
     let upper = upper.trim_end();
     let drawn = upper.chars().count();
     if drawn + 1 < width || opens_a_list(next) {
         return false;
     }
-    let Some(last) = upper
-        .split_whitespace()
-        .last()
-        .filter(|last| is_path_token(last))
-    else {
+    let (Some(last), Some(first)) = (
+        upper.split_whitespace().last(),
+        next.split_whitespace().next(),
+    ) else {
         return false;
     };
+    if !split_a_token(last, first) {
+        return false;
+    }
     let text = upper.trim_start();
     let text = text.strip_prefix('│').map_or(text, str::trim_start);
     let indent = drawn - text.chars().count();
-    let first = next
-        .split_whitespace()
-        .next()
-        .map_or(0, |word| word.chars().count());
-    last.chars().count() + first + 1 > width.saturating_sub(indent)
+    last.chars().count() + first.chars().count() + 1 > width.saturating_sub(indent)
 }
 
-/// Whether `token` reads as a path or web address: it holds a `\`, a `/`,
-/// `://` or a drive (`C:`) at its start, and does not end in `.`, `,` or
-/// `)`, which end a sentence or an aside instead.
+/// Whether `last`, the drawn row's last token, and `first`, the next row's
+/// first word, are one path or web address split across the rows: `last` is
+/// one ([`is_path_token`]) or ends a web address's `:/`; else `last` holds a
+/// single `/`, `first` carries one too, and `first` does not open a path or
+/// address of its own.
+fn split_a_token(last: &str, first: &str) -> bool {
+    if is_path_token(last) || last.ends_with(":/") {
+        return true;
+    }
+    last.matches('/').count() == 1 && first.contains('/') && !opens_a_path(first)
+}
+
+/// Whether `token` reads as a path or web address: after a leading quote or
+/// bracket goes, a drive (`C:`) at its start, a `\`, a `://`, a leading `/`,
+/// `./`, `../` or `~/`, or two `/`, and it does not end in `.`, `,` or `)`,
+/// which end a sentence or an aside instead. A single `/` between two words
+/// ("and/or") is prose.
 fn is_path_token(token: &str) -> bool {
     if token.ends_with(['.', ',', ')']) {
         return false;
     }
     let bare = token.trim_start_matches(['\'', '"', '`', '(', '[', '<']);
+    has_drive(bare)
+        || token.contains('\\')
+        || token.contains("://")
+        || opens_with_a_slash(bare)
+        || token.matches('/').count() >= 2
+}
+
+/// Whether `token` opens a path or web address: a drive (`C:`) at its start,
+/// a `://`, or a leading `/`, `./`, `../` or `~/`.
+fn opens_a_path(token: &str) -> bool {
+    let bare = token.trim_start_matches(['\'', '"', '`', '(', '[', '<']);
+    has_drive(bare) || token.contains("://") || opens_with_a_slash(bare)
+}
+
+/// Whether `bare` starts with a drive (`C:`), alone or before a separator.
+fn has_drive(bare: &str) -> bool {
     let mut chars = bare.chars();
-    let drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.next() == Some(':')
-        && chars.next().is_none_or(|c| matches!(c, '\\' | '/'));
-    drive || token.contains(['\\', '/'])
+        && chars.next().is_none_or(|c| matches!(c, '\\' | '/'))
+}
+
+/// Whether `bare` opens with `/`, `./`, `../` or `~/`.
+fn opens_with_a_slash(bare: &str) -> bool {
+    ["/", "./", "../", "~/"]
+        .iter()
+        .any(|prefix| bare.starts_with(prefix))
 }
 
 /// Whether `text` opens with a bullet (`-`, `*`, `•`, `·`) or a number
@@ -2376,7 +2411,7 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
 )]
 mod tests {
     use super::{
-        clear_draft_recipe, next_view_key, read, read_draft, read_styled, read_view,
+        clear_draft_recipe, is_path_token, next_view_key, read, read_draft, read_styled, read_view,
         read_view_styled, recipe, review_body, spinner_above,
     };
     use agent_api::{
@@ -4055,6 +4090,52 @@ mod tests {
             prompt.options[0].description.as_deref(),
             Some("See X:\\dev\\rustling-tulip\\city-1-mocks.tmp\\x.md")
         );
+    }
+
+    #[test]
+    fn a_full_width_row_ending_in_and_or_keeps_its_space() {
+        let body = review_body(&rows(&[" ● see and/or", "   more text"]), 11);
+        assert_eq!(body, "see and/or more text ->");
+    }
+
+    #[test]
+    fn is_path_token_reads_paths_and_addresses_but_not_prose() {
+        for path in [
+            "/usr/bin",
+            "./a",
+            "../a",
+            "~/a",
+            "a/b/c",
+            "C:\\x",
+            "https://x.y/z",
+            "docs\\a",
+        ] {
+            assert!(is_path_token(path), "{path:?} is a path or web address");
+        }
+        for prose in ["and/or", "yes/no", "a/b", "path/."] {
+            assert!(!is_path_token(prose), "{prose:?} is prose");
+        }
+    }
+
+    #[test]
+    fn a_long_relative_path_split_after_its_first_segment_rejoins() {
+        let upper = "Should I archive the old notes in docs/p";
+        assert_eq!(upper.chars().count(), 40, "the row fills the card");
+        let screen = card(
+            41,
+            &[upper, "lans/archive/native-client-parity.md now?"],
+            &["❯ 1. Yes", "  2. Type something."],
+        );
+        assert_eq!(
+            question(&screen).subject,
+            "Should I archive the old notes in docs/plans/archive/native-client-parity.md now?"
+        );
+    }
+
+    #[test]
+    fn a_url_split_inside_its_scheme_rejoins() {
+        let body = review_body(&rows(&[" ● see https:/", "   /example.com/a/b/c"]), 15);
+        assert_eq!(body, "see https://example.com/a/b/c ->");
     }
 
     #[test]

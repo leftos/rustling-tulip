@@ -5684,6 +5684,42 @@ fn an_unknown_key_source_locks_the_dashboard_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_locked_host_sends_no_held_dashboard_values(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.send(keep_awake_status(KeepAwakeMode::Off, false));
+    h.click_on("settings-dashboard-key-clear");
+    h.click_on("settings-dashboard-enabled");
+    assert_eq!(key_action(&mut h), "Undo delete", "a deletion is held");
+    h.click_on("settings-tab-general");
+    h.click_on("settings-keep-awake-when-busy");
+    h.sent();
+    h.send(with_settings(
+        dashboard_status("keyed").build(),
+        |settings| {
+            settings.key_source = protocol::SummarizerKeySource::Unknown;
+        },
+    ));
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::SetKeepAwakeMode { .. })),
+        "the host's other pending row still goes: {sent:?}"
+    );
+    assert_eq!(
+        summarizer_sets(&sent),
+        [],
+        "a locked host's held Dashboard values are dropped"
+    );
+    assert_eq!(
+        key_sets(&sent),
+        [],
+        "a locked host's held key deletion is dropped"
+    );
+}
+
+#[gpui::test]
 fn a_locked_dashboard_key_field_takes_no_focus_typing_or_paste(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let status = with_settings(dashboard_status("keyed").build(), |settings| {

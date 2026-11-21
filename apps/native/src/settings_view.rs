@@ -8283,8 +8283,12 @@ impl RootView {
     /// `host`'s held key deletion, while its row draws it: the deletion is
     /// for the provider shown as chosen, that provider takes a key, and the
     /// key source shown is the stored one. One that is not stays held but
-    /// shows nowhere, counts for nothing and is never sent.
+    /// shows nowhere, counts for nothing and is never sent, and a host whose
+    /// daemon reads its key from a source this app cannot name holds none.
     fn live_key_delete(&self, host: &HostKey) -> Option<String> {
+        if self.summarizer_locked_for(host) {
+            return None;
+        }
         let provider = self
             .settings_pending
             .host(host)
@@ -8450,7 +8454,9 @@ impl RootView {
     /// Apply reaching `host`'s Dashboard: its pending toggles, choices,
     /// variable and cap as one settings message, then `delete`, the key
     /// deletion its page shows, then a typed key, sent as the key Save sent
-    /// before and the field emptied.
+    /// before and the field emptied. A host whose daemon reads its key from
+    /// a source this app cannot name gets nothing: its held values are
+    /// dropped.
     fn apply_dashboard(
         &mut self,
         host: &HostKey,
@@ -8459,6 +8465,16 @@ impl RootView {
         delete: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.summarizer_locked_for(host) {
+            if !held.is_empty() {
+                tracing::info!(
+                    ?host,
+                    dropped = held.len(),
+                    "settings: a locked host's Dashboard values are dropped"
+                );
+            }
+            return;
+        }
         let Some(mut settings) = self.summarizer_settings.next_settings(host).cloned() else {
             return;
         };
@@ -8493,7 +8509,7 @@ impl RootView {
         if let Some(deleted) = delete {
             self.send_summarizer_delete(host, deleted);
         }
-        if has(PendingRow::DashboardKey) && !self.summarizer_locked_for(host) {
+        if has(PendingRow::DashboardKey) {
             self.send_summarizer_key(host, provider, cx);
         }
     }
