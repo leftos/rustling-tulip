@@ -625,6 +625,61 @@ fn the_dashboard_watches_every_host_and_lists_both_hosts_rows(cx: &mut TestAppCo
     );
 }
 
+/// The Linear context of a host whose workspace `acme` has the team `key`.
+fn linear_team(key: &str) -> DaemonMessage {
+    DaemonMessage::LinearContext {
+        team_keys: vec![key.to_owned()],
+        workspace: Some("acme".to_owned()),
+        key_configured: true,
+    }
+}
+
+#[gpui::test]
+fn a_dashboard_title_chip_reads_its_own_hosts_team_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let dashboard: TabEntry = serde_json::from_value(serde_json::json!({
+        "id": "d1",
+        "name": "Dashboard",
+        "content": { "kind": "dashboard" },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("dashboard tab fixture");
+    let titled = |id: &str| {
+        session(id)
+            .in_repo("gone")
+            .status("working")
+            .label("RT-139 Hover card")
+            .build()
+    };
+    let fixture = Fixture {
+        sessions: vec![titled("a1")],
+        tabs: vec![tab("t1", &pane("p1", Some("a1"))), dashboard],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(linear_team("RT"));
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![titled("b1")],
+    });
+    h.host(&remote()).send(linear_team("YAAT"));
+    h.cx.simulate_resize(gpui::size(px(1920.0), px(1200.0)));
+    h.click_on("tab-d1");
+    h.click_on("dashboard-view-by-status");
+
+    let drawn = |h: &mut Harness<'_>, selector: &str| h.bounds(selector).origin.x >= px(0.0);
+    assert!(drawn(&mut h, "dashboard-row-b1"), "the remote row draws");
+    assert!(
+        drawn(&mut h, "dashboard-row-a1-title-issue=RT-139"),
+        "RT is This PC's team"
+    );
+    assert!(
+        !drawn(&mut h, "dashboard-row-b1-title-issue"),
+        "RT is not the remote host's team"
+    );
+}
+
 /// A daemon status for `(repo_id, worktree)` with `changes` unstaged.
 fn repo_status(repo_id: &str, worktree: &str, changes: &[&str]) -> DaemonMessage {
     let files: Vec<serde_json::Value> = changes

@@ -3050,7 +3050,7 @@ fn shot_dispatch_runs() -> Result<DaemonMessage> {
         "runs": [{
             "run_id": SHOT_RUN,
             "session_id": SHOT_PETAL_CONVERSATION,
-            "title": "Wire dispatch runs into the sidebar",
+            "title": "RT-139 Wire dispatch runs into the sidebar",
             "backend": "backend-flash",
             "tier": 2,
             "worktree": format!("{TULIP_PATH}.wt\\df9"),
@@ -3152,7 +3152,7 @@ fn subagent_rows(rows: &mut [Row], now: DateTime<Utc>) {
         },
         {
             "agent_id": SHOT_SUBAGENT, "depth": 1, "agent_type": "Explore",
-            "description": "Map the sidebar nesting", "model": "Opus 5.5", "effort": "high",
+            "description": "RT-139 Map the sidebar nesting", "model": "Opus 5.5", "effort": "high",
             "state": "running", "started_at": ago(3),
         },
         {
@@ -3550,6 +3550,15 @@ fn issue_row() -> Row {
     }
 }
 
+/// Whether `view` draws a title naming [`SHOT_ISSUE`], so This PC sends
+/// [`shot_linear`]: a session, a subagent or a dispatch run's title.
+fn shows_linear(view: View) -> bool {
+    matches!(
+        view,
+        View::Main | View::Dashboard | View::DashboardCompact | View::Subagents | View::Dispatch
+    )
+}
+
 /// This PC's Linear context, with a key and the team `RT`, and its copy of
 /// [`SHOT_ISSUE`], In Progress, which colour the chip's dot.
 fn shot_linear(now: DateTime<Utc>) -> [DaemonMessage; 2] {
@@ -3791,7 +3800,7 @@ impl FakeDaemon {
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
         })?;
-        if self.view == View::Main {
+        if shows_linear(self.view) {
             for msg in shot_linear(self.now) {
                 self.send(msg)?;
             }
@@ -5312,6 +5321,8 @@ fn dashboard_rows(rows: &mut Vec<Row>) {
         });
     }
     for row in rows.iter_mut().filter(|row| row.id == "s-ask") {
+        // Its title names an issue of This PC's team, drawn as a chip.
+        row.label = "RT-139 Flight plan parser";
         row.extra["pending_input"] = json!({
             "kind": "permission",
             "tool_name": "Bash",
@@ -5444,7 +5455,7 @@ fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
                 "now": { "kind": "running_tool", "text": "Running Bash · 1m: cargo nextest run -p native" },
                 "agents": [
                     {
-                        "key": "subagent:a1", "kind": "subagent", "name": "Check the footer pill spacing",
+                        "key": "subagent:a1", "kind": "subagent", "name": "RT-139 Check the footer pill spacing",
                         "task": "Running Grep · footer.rs", "state": "running", "started_at": ago(4),
                         "model": "Opus 5.5", "effort": "high",
                         "children": [{

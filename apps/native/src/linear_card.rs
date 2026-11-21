@@ -594,4 +594,96 @@ mod tests {
             );
         }
     }
+
+    /// This PC has the team RT, the remote host `box` the team YAAT, both
+    /// in workspace `acme` with a key; This PC holds a copy of RT-12.
+    fn two_hosts() -> (HashMap<HostKey, IssueContext>, LinearCache) {
+        let context = |key: &str| IssueContext::new(&[key.to_owned()], Some("acme"), true);
+        let contexts = HashMap::from([
+            (HostKey::Local, context("RT")),
+            (HostKey::Remote("box".to_owned()), context("YAAT")),
+        ]);
+        let mut issues = LinearCache::default();
+        issues.set_key_configured(&HostKey::Local, true);
+        issues.upsert(&HostKey::Local, &[issue()]);
+        (contexts, issues)
+    }
+
+    #[test]
+    fn a_title_chip_takes_the_identifier_of_its_own_hosts_teams_only() {
+        let (contexts, issues) = two_hosts();
+        let chips = TitleChips {
+            contexts: &contexts,
+            issues: &issues,
+            now: now(),
+        };
+        let remote = HostKey::Remote("box".to_owned());
+        let named = |host: &HostKey, title: &str| {
+            chips.chip(host, title).map(|chip| {
+                let url = chip.open_url().to_owned();
+                (chip.host, chip.identifier, chip.rest, url)
+            })
+        };
+        assert_eq!(named(&remote, "RT-7 x"), None, "RT is not box's team");
+        assert_eq!(
+            named(&HostKey::Local, "RT-7 x"),
+            Some((
+                HostKey::Local,
+                "RT-7".to_owned(),
+                "x".to_owned(),
+                "https://linear.app/acme/issue/RT-7".to_owned()
+            )),
+            "RT is This PC's team"
+        );
+        assert_eq!(
+            named(&remote, "YAAT-3: radar"),
+            Some((
+                remote.clone(),
+                "YAAT-3".to_owned(),
+                "radar".to_owned(),
+                "https://linear.app/acme/issue/YAAT-3".to_owned()
+            )),
+            "YAAT is box's team"
+        );
+        assert_eq!(named(&HostKey::Local, "YAAT-3: radar"), None);
+    }
+
+    #[test]
+    fn a_title_chip_reads_its_hosts_copy_for_the_dot() {
+        let (contexts, issues) = two_hosts();
+        let chips = TitleChips {
+            contexts: &contexts,
+            issues: &issues,
+            now: now(),
+        };
+        let drawn = |title: &str| {
+            chips.chip(&HostKey::Local, title).map(|chip| {
+                let url = chip.open_url().to_owned();
+                (chip.dot, chip.rest, url)
+            })
+        };
+        assert_eq!(
+            drawn("RT-12 Hover card"),
+            Some((Some(0x00f2_c94c), "Hover card".to_owned(), issue().url)),
+            "the copy's state colour and its own address"
+        );
+        assert_eq!(
+            drawn("RT-7 x").map(|(dot, _, _)| dot),
+            Some(None),
+            "no copy, a muted dot"
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_linear_context_has_no_title_chip() {
+        let (contexts, issues) = two_hosts();
+        let chips = TitleChips {
+            contexts: &contexts,
+            issues: &issues,
+            now: now(),
+        };
+        let unknown = HostKey::Remote("elsewhere".to_owned());
+        assert_eq!(chips.chip(&unknown, "RT-7 x"), None);
+        assert_eq!(chips.chip(&unknown, "YAAT-3 x"), None);
+    }
 }

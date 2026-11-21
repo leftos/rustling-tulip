@@ -29,6 +29,8 @@ use crate::dashboard_view::{state_colour, stuck_flag};
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::{DEFAULT_FAMILY, ui_family, ui_px, ui_text_size, ui_weight};
+use crate::linear_card::TitleChip;
+use crate::linear_card_view::{framed_issue_chip, issue_target};
 use crate::sidebar::{ContainerKind, DashboardView};
 use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view};
 use crate::ui_theme::{UiTheme, theme};
@@ -209,11 +211,17 @@ impl RootView {
         let session = self.session_cell(row, layout, state_w, cx);
         let chips_name = format!("dashboard-compact-chips-{}", row.session_id);
         let chip_w = chips_room(layout.chips_w);
+        let host = self.host_of_session(&row.session_id);
+        let title_chips = self.title_chips();
         let chips: Vec<AnyElement> = row
             .chips
             .iter()
             .enumerate()
-            .map(|(n, chip)| chip_element(&row.session_id, n, chip, chip_w, cx))
+            .map(|(n, chip)| {
+                let name = format!("dashboard-compact-chip-{}-{n}", row.session_id);
+                let issue = title_chips.chip(&host, &chip.name);
+                chip_element(&name, chip, issue.as_ref(), chip_w, cx)
+            })
             .collect();
         let chips_cell = div()
             .flex()
@@ -289,11 +297,7 @@ impl RootView {
                     part("now-text"),
                 ))
             });
-        let label = if layout.stacked {
-            div().flex_1().min_w(px(0.0))
-        } else {
-            fixed(LABEL_W)
-        };
+        let label = self.compact_label(row, layout, cx);
         div()
             .flex()
             .flex_none()
@@ -312,14 +316,7 @@ impl RootView {
                 &part("glyph"),
                 &t,
             )))
-            .child(
-                tagged(label, part("label")).child(
-                    cell_text(&part("label-text"), &row.label)
-                        .text_size(ui_px(cx, 12.5))
-                        .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                        .text_color(gpui::rgb(t.text)),
-                ),
-            )
+            .child(label)
             .child(
                 tagged(fixed(state_w), part("state")).child(
                     cell_text(&part("state-text"), &row.state)
@@ -341,6 +338,43 @@ impl RootView {
                     ),
                 )
             })
+    }
+
+    /// The session cell's label: the title's Linear chip, tagged
+    /// `dashboard-compact-row-<id>-title-issue`, when the title names an
+    /// issue of its host's teams, then the rest of the title; else the title.
+    fn compact_label(
+        &self,
+        row: &CompactRow,
+        layout: CompactLayout,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let name = format!("dashboard-compact-row-{}", row.session_id);
+        let host = self.host_of_session(&row.session_id);
+        let issue = self.title_chips().chip(&host, &row.label);
+        let chipped = issue.is_some();
+        let text = issue
+            .as_ref()
+            .map_or_else(|| row.label.clone(), |issue| issue.rest.clone());
+        let chip = issue
+            .as_ref()
+            .map(|issue| framed_issue_chip(format!("{name}-title-issue"), issue, cx));
+        let label = if layout.stacked {
+            div().flex_1().min_w(px(0.0))
+        } else {
+            fixed(LABEL_W)
+        };
+        tagged(label, format!("{name}-label"))
+            .when(chipped, |label| label.flex().items_center().gap(px(6.0)))
+            .children(chip)
+            .child(
+                cell_text(&format!("{name}-label-text"), &text)
+                    .when(chipped, |text| text.flex_1().min_w(px(0.0)))
+                    .text_size(ui_px(cx, 12.5))
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .text_color(gpui::rgb(t.text)),
+            )
     }
 
     /// The header's `Compact | By status` control. It is one keyboard stop
@@ -560,17 +594,20 @@ fn faded(colour: u32, alpha: u32) -> u32 {
     (colour << 8) | alpha
 }
 
-/// One node's chip: its glyph, its kind's icon, its name and what it does,
-/// at most `max_w` wide; a finished node muted, a failed one in danger.
+/// One node's chip, tagged `name`: its glyph, its kind's icon, its name and
+/// what it does, at most `max_w` wide; a finished node muted, a failed one
+/// in danger. With `issue`, the name leads with its Linear identifier
+/// (tagged `<name>-issue`) and shows the rest.
 fn chip_element(
-    session_id: &str,
-    n: usize,
+    name: &str,
     chip: &CompactChip,
+    issue: Option<&TitleChip>,
     max_w: f32,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let t = theme(cx);
-    let name = format!("dashboard-compact-chip-{session_id}-{n}");
+    let target = issue.map(|issue| issue_target(format!("{name}-issue"), issue, cx));
+    let text = issue.map_or(chip.name.as_str(), |issue| issue.rest.as_str());
     let finished = chip.state == AgentState::Finished;
     let failed = chip.state == AgentState::Failed;
     let (fill, edge) = match chip.kind {
@@ -591,7 +628,7 @@ fn chip_element(
         t.text_2
     };
     let mono = chip.kind != ChipKind::Agent;
-    let label = cell_text(&format!("{name}-name"), &chip.name)
+    let label = cell_text(&format!("{name}-name"), text)
         .flex_shrink(1.0)
         .text_color(gpui::rgb(name_colour))
         .when(mono, |text| {
@@ -602,7 +639,7 @@ fn chip_element(
         .when(!mono && !finished, |text| {
             text.font_weight(crate::fonts::ui_weight(cx, FontWeight::MEDIUM))
         });
-    let selector = name.clone();
+    let selector = name.to_owned();
     div()
         .flex()
         .flex_none()
@@ -636,6 +673,7 @@ fn chip_element(
                     .child(DISPATCH_ARROW),
             )
         })
+        .children(target)
         .child(label)
         .child(
             cell_text(&format!("{name}-what"), &chip.what)

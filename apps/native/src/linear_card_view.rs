@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, AnyView, App, Context, Div, FontWeight, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, Stateful, WeakEntity, Window, anchored, deferred, div, prelude::*, px,
+    Render, SharedString, Stateful, WeakEntity, Window, anchored, deferred, div, prelude::*, px,
 };
 
 use crate::driver_id::DriverId as _;
@@ -189,6 +189,61 @@ pub(crate) fn issue_dot(color: Option<u32>, t: &UiTheme) -> Div {
         .size(px(6.0))
         .rounded_full()
         .bg(gpui::rgb(color.unwrap_or(t.muted)))
+}
+
+/// A Linear title chip's press target, tagged `selector`, which also owns
+/// its card: the state dot, then the identifier, tagged
+/// `<selector>=<IDENTIFIER>`. Hovering it asks the chip's host for its
+/// issue and shows the card; a left press opens the issue and goes no
+/// further, so the row under it neither selects nor opens anything.
+pub(crate) fn issue_target(
+    selector: String,
+    issue: &TitleChip,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let t = ui_theme::theme(cx);
+    let (tag, text_tag) = (selector.clone(), format!("{selector}={}", issue.identifier));
+    let (url, host) = (issue.open_url().to_owned(), issue.host.clone());
+    let root = cx.entity().downgrade();
+    div()
+        .id(SharedString::from(selector.clone()))
+        .driver_id(move || tag)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(5.0))
+        .cursor_pointer()
+        .on_hover(RootView::ask_on_chip_hover(issue, cx))
+        .tooltip(card_tooltip(selector, root, issue.clone()))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.on_any_mouse_down(event, window, cx);
+                cx.stop_propagation();
+                this.open_issue_link(&url, &host, window, cx);
+            }),
+        )
+        .child(issue_dot(issue.dot, &t))
+        .child(
+            div()
+                .font_family(DEFAULT_FAMILY)
+                .driver_id(move || text_tag)
+                .child(issue.identifier.clone()),
+        )
+}
+
+/// [`issue_target`] in the sidebar leaf chip's outlined frame, as a
+/// Dashboard session title leads with it.
+pub(crate) fn framed_issue_chip(
+    selector: String,
+    issue: &TitleChip,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = ui_theme::theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    let target = issue_target(selector, issue, cx);
+    crate::sidebar_view::chip(offset, target, crate::sidebar_view::ChipSize::Row, &t)
+        .into_any_element()
 }
 
 /// A pill of `label` behind a dot of colour `dot`.

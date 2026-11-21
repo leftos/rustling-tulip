@@ -31,6 +31,8 @@ use crate::dashboard_rows::{
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
+use crate::linear_card::TitleChip;
+use crate::linear_card_view::{framed_issue_chip, issue_target};
 use crate::sidebar::DashboardView;
 use crate::status_glyph::{Glyph, GlyphSize, Shape, glyph, glyph_view, marker_mode};
 use crate::target::HostKey;
@@ -243,15 +245,11 @@ impl RootView {
                         .is_some_and(|session| self.dashboard_answers.is_out(session));
                     body.push(ask_block_element(ask, answer_out, cx));
                 }
+                let host = self.host_of_session(&cells.session_id);
+                let title_chips = self.title_chips();
                 body.extend(cells.nested.iter().map(|nested| {
-                    nested_row(
-                        crate::fonts::ui_text_size(cx),
-                        crate::fonts::ui_weight_shift(cx),
-                        &cells.session_id,
-                        nested,
-                        columns,
-                        &theme(cx),
-                    )
+                    let issue = title_chips.chip(&host, &nested.name);
+                    nested_row(&cells.session_id, nested, columns, issue.as_ref(), cx)
                 }));
             }
         }
@@ -374,6 +372,9 @@ impl RootView {
         let mark = self.row_glyph(&id, &t);
         let asking = format!("{name}-asking");
         let selector = name.clone();
+        let host = self.host_of_session(&id);
+        let issue = self.title_chips().chip(&host, &cells.label);
+        let session = session_cell(cells, accent, &name, issue.as_ref(), cx);
         grid_line(div().id(SharedString::from(name.clone())))
             .driver_id(move || selector)
             .relative()
@@ -402,14 +403,7 @@ impl RootView {
                 &format!("{name}-glyph"),
                 &theme(cx),
             )))
-            .child(fixed(SESSION_W).child(session_cell(
-                offset,
-                crate::fonts::ui_weight_shift(cx),
-                cells,
-                accent,
-                &name,
-                &t,
-            )))
+            .child(fixed(SESSION_W).child(session))
             .when(columns.linear, |row| {
                 row.child(
                     fixed(LINEAR_W).child(
@@ -969,14 +963,34 @@ fn two_lines(offset: i8, first: impl IntoElement, second: Option<Div>) -> Div {
         })
 }
 
+/// The Session column's two lines: the title, led by its Linear chip
+/// `issue` (tagged `<name>-title-issue`) and then showing the rest, over
+/// the container and branch.
 fn session_cell(
-    offset: i8,
-    shift: i8,
     cells: &RowCells,
     accent: u32,
     name: &str,
-    t: &UiTheme,
+    issue: Option<&TitleChip>,
+    cx: &mut Context<RootView>,
 ) -> Div {
+    let (offset, shift) = (
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+    );
+    let t = &theme(cx);
+    let text = issue.map_or(cells.label.as_str(), |issue| issue.rest.as_str());
+    let label = line_text(&format!("{name}-label"), text)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD));
+    let first = match issue {
+        None => label,
+        Some(issue) => div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w(px(0.0))
+            .child(framed_issue_chip(format!("{name}-title-issue"), issue, cx))
+            .child(label.flex_1().min_w(px(0.0))),
+    };
     let second = div()
         .flex()
         .items_center()
@@ -1002,12 +1016,7 @@ fn session_cell(
                 .font_weight(crate::fonts::mono_weight())
                 .text_color(gpui::rgb(t.subtle)),
         );
-    two_lines(
-        offset,
-        line_text(&format!("{name}-label"), &cells.label)
-            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD)),
-        Some(second),
-    )
+    two_lines(offset, first, Some(second))
 }
 
 /// The state word's colour: the glyph's hue, quieter for an idle, starting
@@ -1274,16 +1283,23 @@ fn numbers(offset: i8, first: &str, second: &str, t: &UiTheme) -> Div {
 
 /// A node of a Working row's agent tree: its name across the Session and
 /// Linear columns, its task across Now and Summary, its stuck flag, and its
-/// age under Run.
+/// age under Run. With `issue`, the name leads with its Linear identifier
+/// (tagged `<row>-issue`) and shows the rest.
 fn nested_row(
-    offset: i8,
-    shift: i8,
     session_id: &str,
     nested: &NestedRow,
     columns: Columns,
-    t: &UiTheme,
+    issue: Option<&TitleChip>,
+    cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let (offset, shift, t) = (
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        &theme(cx),
+    );
     let name = format!("dashboard-sub-{session_id}-{}", nested.key);
+    let target = issue.map(|issue| issue_target(format!("{name}-issue"), issue, cx));
+    let text = issue.map_or(nested.name.as_str(), |issue| issue.rest.as_str());
     let name_w = SESSION_W + if columns.linear { GAP + LINEAR_W } else { 0.0 };
     let stuck_w = CONTEXT_W
         + if columns.agents { AGENTS_W + GAP } else { 0.0 }
@@ -1333,7 +1349,8 @@ fn nested_row(
                         &format!("{name}-glyph"),
                         t,
                     ))
-                    .child(line_text(&format!("{name}-name"), &nested.name).flex_1())
+                    .children(target)
+                    .child(line_text(&format!("{name}-name"), text).flex_1())
                     .when_some(nested.spawn.as_deref(), |cell, spawn| {
                         let spawn_id = format!("{name}-spawn");
                         cell.child(

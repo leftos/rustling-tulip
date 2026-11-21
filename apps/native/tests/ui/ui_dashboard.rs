@@ -9,7 +9,7 @@
 use crate::support;
 
 use chrono::{DateTime, Duration, Local, Utc};
-use gpui::{Font, FontWeight, Modifiers, TestAppContext, TextRun, black, font, px, size};
+use gpui::{Font, FontWeight, Modifiers, TestAppContext, TextRun, black, font, point, px, size};
 use protocol::{
     ActivitySegment, AgentState, ClientMessage, DaemonMessage, PromptChoice, SegmentActivity,
     SegmentKind, SessionSnapshot, TabEntry,
@@ -2250,6 +2250,131 @@ fn a_working_session_draws_its_agent_tree_as_chips(cx: &mut TestAppContext) {
         !drawn(&mut h, &format!("dashboard-compact-fold-{}", block.index)),
         "nothing folded or ended, no fold row"
     );
+}
+
+/// Session `s1` working in `r1`, titled "RT-139 Hover card", whose agent
+/// tree ([`send_rt_139_agents`]) is a subagent described "RT-139 Hover
+/// card" and a dispatch run named "deepseek: RT-139"; with `linear`, This
+/// PC's daemon has a key and the team `RT`, and sent its copy of RT-139.
+fn titled_rt_139<'a>(cx: &'a mut TestAppContext, dir: &TestDir, linear: bool) -> Harness<'a> {
+    let s1 = session("s1")
+        .in_repo("r1")
+        .status("working")
+        .label("RT-139 Hover card")
+        .build();
+    let mut h = Harness::with(cx, dir, &on_dashboard(vec![s1]));
+    if linear {
+        h.send(DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        });
+        h.send(support::linear_issues(vec![support::linear_issue(
+            "RT-139",
+            "Hover card",
+        )]));
+    }
+    h
+}
+
+/// The facts of [`titled_rt_139`]'s `s1`, sent once the Dashboard shows.
+fn send_rt_139_agents(h: &mut Harness<'_>) {
+    h.send(facts_message(vec![
+        facts("s1")
+            .agents(json!([
+                { "key": "subagent:1", "kind": "subagent", "name": "RT-139 Hover card", "task": "editing chips", "state": "running", "started_at": minutes_ago(2) },
+                { "key": "dispatch:1", "kind": "dispatch", "name": "deepseek: RT-139", "task": "queued", "state": "queued", "started_at": minutes_ago(1) },
+            ]))
+            .build(),
+    ]));
+}
+
+const RT_139_URL: &str = "https://linear.app/acme/issue/RT-139";
+
+#[gpui::test]
+fn a_by_status_title_naming_an_issue_is_a_chip_that_opens_it_and_no_drawer(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    show_dashboard(&mut h);
+    send_rt_139_agents(&mut h);
+    let chip = "dashboard-row-s1-title-issue";
+    assert!(drawn(&mut h, &format!("{chip}=RT-139")), "the title's chip");
+    assert!(
+        drawn(&mut h, "dashboard-sub-s1-subagent:1-issue=RT-139"),
+        "the nested subagent row's chip"
+    );
+    let at = h.bounds(chip).center();
+    h.hover(at, Modifiers::none());
+    h.advance(std::time::Duration::from_millis(600));
+    for line in [
+        format!("linear-card-id-{chip}=RT-139"),
+        format!("linear-card-state-{chip}=In Progress"),
+        format!("linear-card-foot-{chip}=Click to open"),
+    ] {
+        assert!(drawn(&mut h, &line), "the hover card shows {line}");
+    }
+    h.click(point(at.x + px(4.0), at.y + px(4.0)), Modifiers::none());
+    assert_eq!(h.opened(), [support::Opened::Url(RT_139_URL.to_owned())]);
+    assert!(
+        drawer(&mut h, "s1").is_none(),
+        "a chip press opens no drawer"
+    );
+}
+
+#[gpui::test]
+fn a_compact_title_and_agent_chip_naming_an_issue_draw_its_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    show_compact(&mut h);
+    send_rt_139_agents(&mut h);
+    let chip = "dashboard-compact-row-s1-title-issue";
+    assert!(drawn(&mut h, &format!("{chip}=RT-139")), "the title's chip");
+    for n in 0..2 {
+        assert!(
+            drawn(
+                &mut h,
+                &format!("dashboard-compact-chip-s1-{n}-issue=RT-139")
+            ),
+            "agent chip {n} names RT-139"
+        );
+    }
+    let at = h.bounds(chip).center();
+    h.click(at, Modifiers::none());
+    assert_eq!(h.opened(), [support::Opened::Url(RT_139_URL.to_owned())]);
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("d1".to_owned()),
+        "a chip press selects no session"
+    );
+}
+
+#[gpui::test]
+fn dashboard_rows_on_a_host_with_no_linear_context_have_no_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, false);
+    show_compact(&mut h);
+    send_rt_139_agents(&mut h);
+    assert!(
+        drawn(&mut h, "dashboard-compact-chip-s1-0"),
+        "the agent chip draws"
+    );
+    assert!(drawn(&mut h, "dashboard-compact-row-s1"));
+    for selector in [
+        "dashboard-compact-row-s1-title-issue",
+        "dashboard-compact-chip-s1-0-issue",
+    ] {
+        assert!(!drawn(&mut h, selector), "no {selector}");
+    }
+    h.click_on("dashboard-view-by-status");
+    assert!(drawn(&mut h, "dashboard-row-s1"));
+    for selector in [
+        "dashboard-row-s1-title-issue",
+        "dashboard-sub-s1-subagent:1-issue",
+    ] {
+        assert!(!drawn(&mut h, selector), "no {selector}");
+    }
 }
 
 #[gpui::test]

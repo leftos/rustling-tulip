@@ -3281,6 +3281,56 @@ fn s1_run_with_r1a() -> protocol::DispatchRunSnapshot {
     run
 }
 
+/// [`nested_subagent_harness`] with `s1`'s subagent `a1` described and its
+/// run `d1` titled "RT-139 Hover card"; with `linear`, This PC's daemon has
+/// a key and the team `RT`, and sent its copy of RT-139.
+fn nested_rt_139<'a>(cx: &'a mut TestAppContext, dir: &TestDir, linear: bool) -> Harness<'a> {
+    let mut a1 = subagent("a1");
+    a1["description"] = serde_json::json!("RT-139 Hover card");
+    let mut run = s1_run();
+    "RT-139 Hover card".clone_into(&mut run.title);
+    let mut h = nested_subagent_harness(cx, dir, vec![a1], vec![run]);
+    if linear {
+        h.send(DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        });
+        h.send(support::linear_issues(vec![support::linear_issue(
+            "RT-139",
+            "Hover card",
+        )]));
+    }
+    h
+}
+
+#[gpui::test]
+fn subagent_and_dispatch_run_leaves_naming_an_issue_draw_its_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = nested_rt_139(cx, &dir, true);
+    for leaf in ["a1", "d1"] {
+        assert!(
+            painted(&mut h, &format!("leaf-{leaf}-issue=RT-139")),
+            "{leaf}'s label names RT-139 as a chip"
+        );
+    }
+}
+
+#[gpui::test]
+fn subagent_and_dispatch_run_leaves_on_a_host_with_no_linear_context_have_no_chip(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = nested_rt_139(cx, &dir, false);
+    for leaf in ["a1", "d1"] {
+        assert!(painted(&mut h, &format!("leaf-{leaf}")), "{leaf} draws");
+        assert!(
+            !painted(&mut h, &format!("leaf-{leaf}-issue")),
+            "{leaf} draws no chip"
+        );
+    }
+}
+
 #[gpui::test]
 fn subagents_draw_indented_under_their_host_with_the_sa_tag(cx: &mut TestAppContext) {
     let dir = TestDir::new();

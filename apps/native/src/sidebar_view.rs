@@ -2432,7 +2432,7 @@ const HEADLESS_PILL_TIP: &str =
 /// A leaf chip's size: at the subline's end, or in the chip row and a
 /// Compact line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChipSize {
+pub(crate) enum ChipSize {
     Subline,
     Row,
 }
@@ -2461,7 +2461,7 @@ impl ChipSize {
 }
 
 /// An outlined Geist Mono chip of `size`, lettered in `t.subtle`.
-fn chip<E: Styled>(offset: i8, element: E, size: ChipSize, t: &UiTheme) -> E {
+pub(crate) fn chip<E: Styled>(offset: i8, element: E, size: ChipSize, t: &UiTheme) -> E {
     element
         .flex()
         .flex_none()
@@ -3084,9 +3084,7 @@ fn leaf_row(
         host_chip(crate::fonts::ui_text_size(cx), name, label.clone(), &t)
     });
     let fold = session_fold(leaf, host, cx);
-    let issue = (leaf.kind == LeafKind::Session)
-        .then(|| ctx.title_chips.chip(host, &leaf.label))
-        .flatten();
+    let issue = ctx.title_chips.chip(host, &leaf.label);
     match density {
         LeafDensity::Compact => {
             let pill = if leaf.kind == LeafKind::Session {

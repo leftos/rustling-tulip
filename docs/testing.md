@@ -128,9 +128,9 @@ To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of th
 
 The views:
 
-- `main`, `source-control`, `diff`, `settings`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view; `main` also shows an idle session "RT-139 hover card" with its Linear title chip in the sidebar leaf.
+- `main`, `source-control`, `diff`, `settings`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view, where This PC has a Linear context and the sessions titled "RT-139 Flight plan parser" and "RT-139 Check the footer pill spacing" show their title chips; `main` also shows an idle session "RT-139 hover card" with its Linear title chip in the sidebar leaf.
 - `settings-claude`: Settings on Claude's page scrolled to its end, the end of Launch command and then Hooks.
-- `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080.
+- `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080, with This PC's Linear context so the RT-139 titles show their chips and the agent-tree chips their dot and identifier.
 - `main-compact`: the sidebar's Compact leaves.
 - `main-narrow`: the tulip tab split three ways, its narrow pane headers collapsed to the ⋯ overflow button.
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
@@ -177,8 +177,8 @@ The views:
 - `phone-ipad-portrait`: the same two panes in an iPad's portrait window (820x1180, insets top 24 and bottom 20).
 - `phone-landscape-home`: the same two panes in an iPhone's landscape window (874x402, insets bottom 21 and sides 62).
 - `phone-landscape-terminal`: the same iPhone landscape window with the working session on its Terminal page, full screen with no header and no list: the terminal over the key bar, which starts with `Back` and the session's status word outside the sideways scroll.
-- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log".
-- `subagents`: the "Petal footer polish" session nested with three subagent rows (`SA`), oldest first: a killed reviewer, the running Explore one, and a finished child of it at depth 2, then its dispatch run's `DS` row; beside it a pane following the running subagent, its header and transcript (an answer, a read, a search and a test run still going).
+- `dispatch`: the tulip tab split with a pane following a working dispatch run (header with its `DS` chip and Stop, stats line, the run's transcript: answers, a tool call with its output and one still running), its `DS` leaf under the tulip repo, one run nested under the "Petal footer polish" session and one unnested run, "Trim the dispatch log"; the run "RT-139 Wire dispatch runs into the sidebar" shows its title chip.
+- `subagents`: the "Petal footer polish" session nested with three subagent rows (`SA`), oldest first: a killed reviewer, the running Explore one, and a finished child of it at depth 2, then its dispatch run's `DS` row; beside it a pane following the running subagent, its header and transcript (an answer, a read, a search and a test run still going); the subagent "RT-139 Map the sidebar nesting" shows its title chip.
 - `host-rebind`: the rebind dialog for the remote `box` over the two-host window, with 3 active sessions, Auto layout and its picker, Follow box's layout above Follow laptop's layout, the "Only sessions without a pane" checkbox, and Cancel and Rebind.
 - `perf`: the status bar with two CPU and RAM pills, one amber, and the open "Track CPU and RAM on" menu.
 - `panes-accent`: four panes in a 2x2 grid, the Theme pane focused, beside the Rose, Periwinkle and Lilac panes a chosen colour stores an accent and a frame for.

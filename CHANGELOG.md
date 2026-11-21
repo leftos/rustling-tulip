@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - On a Mac, saved secrets (secret environment rows and the Dashboard summarizer's key) are kept in the login Keychain.
+- Linear issue chips show on the Dashboard's session titles and on subagent and dispatch-run rows in the Dashboard and the sidebar.
 
 ## v0.17.1-alpha
 
