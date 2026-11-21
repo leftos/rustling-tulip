@@ -39,7 +39,7 @@ All additive; no protocol bump.
 
 - **Tab.** "Linear", after Dashboard, offered when the Settings host lists `linear_settings`; follows the host selector.
 - **Rows.** A switch, "Show Linear issue links". The key: a masked text field with Save and Clear, locked with the note "Set the key on {host} itself." when the Settings host is not this machine or the connection is remote (`accounts_admin_locked`'s rule). Key state words: Missing "No key", Stored "Key saved", Environment "Using LINEAR_API_KEY", Rejected "Linear refused this key", Unreachable "The secure store is out of reach on this host". Status: Workspace (name), Teams (keys, comma-separated), Last error (when set). A Test button and its result line: "Reached {workspace} · teams {keys}" or the error.
-- **Off.** `IssueContext` gains `enabled` (default true; an older daemon never sends `LinearStatus`), set per host from `LinearStatus.enabled`. Off: no underline at all, linear.app URLs included; no title chips; an open card closes.
+- **Off.** `IssueContext` gains `enabled` (default true; an older daemon never sends `LinearStatus`), set per host from `LinearStatus.enabled`. Off: no text is an issue link (a bare identifier is plain text, and a linear.app issue URL is only the ordinary web link every URL is, with no Linear card); no title chips; an open card closes.
 - **No-key card.** "Add a Linear API key in Settings › Linear to see this issue's details." in place of the text naming `LINEAR_API_KEY`.
 - **Shot.** `native-shot settings-linear`.
 
