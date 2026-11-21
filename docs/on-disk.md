@@ -104,6 +104,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   A value that is not a list loads as absent, and a group that does not decode is dropped with a warning; a loaded list is normalised: titles trimmed, a blank title named "Group", a repeated title numbered " 2", " 3" and so on, and a reply that is blank or holds a line break dropped.
 
+  It holds how the phone's Home orders its sessions (`phone_order`): `"manual"`, `"alphabetical"`, `"needs_you_first"` or `"desktop_tabs"`; absent, or a value that names none of them, loads as `"manual"`.
+
   It holds the phone's key grid (`phone_keys`), in grid order: a list of `{"id", "label", "action"}` keys.
 
   An action is `{"kind": "send", "steps": [...]}`, each step `{"ctrl", "alt", "shift", "key"}` with a key of `{"kind": "char", "value": "b"}` or `{"kind": "named", "name": "page_up"}` — the named keys' own names, as in `esc`, `page_up`, `page_down` and `f1`.

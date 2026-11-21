@@ -227,6 +227,27 @@ pub enum RepoSort {
     NeedsYou,
 }
 
+/// How the phone's Home orders the sessions inside each host; the hosts
+/// keep their order whatever the choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhoneOrder {
+    /// Groups and sessions by name, case-insensitive; Detached stays last.
+    Alphabetical,
+    /// A "Needs you" group first, holding every session waiting on the
+    /// owner, then the groups without them.
+    NeedsYouFirst,
+    /// One group per tab of the desktop's own layout on the host, then the
+    /// sessions in no tab.
+    DesktopTabs,
+    /// Every row in its fixed place, as the sidebar keeps them; also what a
+    /// missing value or one this build does not know loads as
+    /// (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    Manual,
+}
+
 /// What a leaf stands for: a session, a dispatch run the daemon lists, or a
 /// subagent one of its sessions started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +623,10 @@ pub struct UiState {
         skip_serializing_if = "Option::is_none"
     )]
     pub phone_keys: Option<Vec<GridKey>>,
+    /// How the phone's Home orders its sessions; a file without it, or with
+    /// a value that names no order, loads as Manual.
+    #[serde(default)]
+    pub phone_order: PhoneOrder,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -1543,6 +1568,7 @@ impl Default for UiState {
             phone_agent_replies: None,
             phone_shell_replies: None,
             phone_keys: None,
+            phone_order: PhoneOrder::Manual,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -2850,6 +2876,11 @@ impl SidebarModel {
     /// Saves the phone's key grid; `None` restores the built-in grid.
     pub fn set_phone_keys(&mut self, keys: Option<Vec<GridKey>>) {
         self.ui.phone_keys = keys;
+    }
+
+    /// Saves how the phone's Home orders its sessions.
+    pub fn set_phone_order(&mut self, order: PhoneOrder) {
+        self.ui.phone_order = order;
     }
 
     /// The look the interface draws in now: the six appearance fields.
@@ -7369,6 +7400,7 @@ pub(crate) mod tests {
             phone_agent_replies: None,
             phone_shell_replies: None,
             phone_keys: None,
+            phone_order: PhoneOrder::Manual,
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),
@@ -9060,6 +9092,47 @@ pub(crate) mod tests {
             !loaded.general.copy_on_select,
             "the rest of the group loads"
         );
+    }
+
+    #[test]
+    fn phone_order_round_trips_and_loads_manual_when_missing_or_unknown() {
+        let dir = TestDir::new("phone-order");
+        // Every released shape has no `phone_order`.
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_collapsed": true, "saved_hosts": [] }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.phone_order, PhoneOrder::Manual, "a file without it");
+        assert!(loaded.sidebar_collapsed, "the rest loads");
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "phone_order": "by_colour" }"#).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).phone_order,
+            PhoneOrder::Manual,
+            "an unknown value"
+        );
+
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(
+            model.ui_state().phone_order,
+            PhoneOrder::Manual,
+            "the default"
+        );
+        for (order, saved) in [
+            (PhoneOrder::Alphabetical, "alphabetical"),
+            (PhoneOrder::NeedsYouFirst, "needs_you_first"),
+            (PhoneOrder::DesktopTabs, "desktop_tabs"),
+            (PhoneOrder::Manual, "manual"),
+        ] {
+            model.set_phone_order(order);
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(written["phone_order"], saved);
+            assert_eq!(load_ui_state(&dir.0).phone_order, order, "{saved}");
+        }
     }
 
     #[test]

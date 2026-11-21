@@ -76,6 +76,10 @@ fn now_ms() -> i64 {
 /// safe area. It draws only those of a phone-shape [`RootView`], whose
 /// sidebar has no This PC group, so This PC's dormant slot never shows as a
 /// connection.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a state of its own, set and read separately"
+)]
 pub struct PhoneRoot {
     pub(super) root: Entity<RootView>,
     /// The add form's fields, its refusal and whether it shows.
@@ -115,6 +119,8 @@ pub struct PhoneRoot {
     pub(super) tray: super::tray::Tray,
     /// The sheet a long press on a Home row opened, while it is open.
     sheet: Option<Sheet>,
+    /// Whether Home's sort sheet is open.
+    pub(super) sort_menu: bool,
     /// Settings, drawn in place of Home or the hosts screen while open.
     pub(super) settings: Option<super::settings::Settings>,
     /// The Quick replies title or reply editor over the open editor
@@ -251,6 +257,7 @@ impl PhoneRoot {
             terminal_quick: false,
             tray: super::tray::Tray::default(),
             sheet: None,
+            sort_menu: false,
             settings: None,
             reply_editor: None,
             key_editor: None,
@@ -892,6 +899,17 @@ impl PhoneRoot {
         self.home(cx).rows().count()
     }
 
+    /// The headings of Home's groups now, in list order.
+    #[must_use]
+    pub fn home_group_names(&self, cx: &App) -> Vec<String> {
+        self.home(cx)
+            .hosts
+            .into_iter()
+            .flat_map(|host| host.groups)
+            .map(|group| group.name)
+            .collect()
+    }
+
     /// Shows `host`'s session `session_id` in place of Home, on its chat
     /// when the chat is mirrored, else on its terminal, and loads its chat
     /// while it can show. It opens no tab and lays out no pane, and closes
@@ -917,6 +935,7 @@ impl PhoneRoot {
         self.shown = Some(shown.clone());
         self.prompt_sheet = SheetState::default();
         self.sheet = None;
+        self.sort_menu = false;
         self.root
             .update(cx, |root, cx| root.show_phone_chat(Some(shown), cx));
         cx.notify();
@@ -1176,9 +1195,15 @@ impl PhoneRoot {
         cx.notify();
     }
 
-    /// What Home lists now: every host's groups in their manual order.
+    /// What Home lists now: every host's groups in the order the owner
+    /// picked, Manual unless another is saved.
     pub(super) fn home(&self, cx: &App) -> home::Home {
-        home::from_sidebar(&self.root.read(cx).sidebar)
+        let root = self.root.read(cx);
+        super::order::apply(
+            home::from_sidebar(&root.sidebar),
+            root.sidebar.ui_state().phone_order,
+            &root.phone_layouts,
+        )
     }
 
     /// The shown session left its host's list: Home shows again.
@@ -1886,6 +1911,11 @@ impl PhoneRoot {
             .then(|| self.sheet_layer(padding.bottom, cx))
             .flatten()
             .map(boxed(Pane::List));
+        let sort_sheet = self
+            .home_sheet_over(host_open, cx)
+            .then(|| self.sort_sheet_layer(padding.bottom, cx))
+            .flatten()
+            .map(boxed(Pane::List));
         let browser_sheet = self
             .browser_sheet_shown()
             .then(|| self.browser_sheet_layer(padding.bottom, cx))
@@ -1900,6 +1930,7 @@ impl PhoneRoot {
             .map(boxed(Pane::Session));
         sheet
             .into_iter()
+            .chain(sort_sheet)
             .chain(browser_sheet)
             .chain(prompt_sheet)
             .collect()

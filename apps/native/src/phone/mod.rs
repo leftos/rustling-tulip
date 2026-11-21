@@ -16,6 +16,7 @@ mod layout;
 pub(crate) mod lifecycle;
 mod long_press;
 mod open_tap;
+pub(crate) mod order;
 mod prompt_sheet;
 pub mod push;
 #[cfg(target_os = "ios")]

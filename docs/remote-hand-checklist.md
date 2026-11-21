@@ -204,6 +204,8 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Open a Claude session's Terminal page and tap the terminal so the keyboard rises. **Expect:** the terminal keeps its width and row count (Claude does not redraw), the cursor's row shows above the key bar, and a drag down over the terminal shows the rows the keyboard hides. Ask Claude a question that uses AskUserQuestion, then open its chat with the keyboard still up. **Expect:** the chat shows the question's card, never "Can't read the prompt box right now."
 - [ ] Ask Claude for an AskUserQuestion with three questions and answer all three from the phone. **Expect:** the chat then shows the review card with `Submit answers` and `Cancel`; tap `Submit answers` and Claude goes on.
 - [ ] Fetch a folder from the browser: press and hold a folder row and tap `Fetch folder`. **Expect:** a result line reads `Fetching <name>…`, then `Fetched <name> · <size>`, and the folder shows in the Files app under On My iPhone › Rustling Tulip.
+- [ ] Sort on Home: each order (Manual, A–Z, Needs you first, Desktop tabs) regroups the list; Desktop tabs mirrors the desktop's tabs on that host. **Expect:** after each pick the sheet closes and the list regroups, with the pick checked when the sheet reopens; Desktop tabs shows one group per tab of that host's desktop layout, then `Not in a tab`.
+- [ ] A session row shows a › and a pressed highlight; a tap anywhere on it opens the session. **Expect:** each row ends in a `›`, darkens while the finger is down, and opens its session wherever on the row you tap.
 
 ### Files from the host
 

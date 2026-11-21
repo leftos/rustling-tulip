@@ -36,7 +36,7 @@ const THEMES_LABEL: &str = "Theme";
 /// The Appearance page's heading over the text-size row.
 const TEXT_SIZE_LABEL: &str = "Text size";
 /// The mark beside the theme the phone draws in.
-const CHECK: &str = "✓";
+pub(super) const CHECK: &str = "✓";
 /// The stepper's button one size smaller.
 const DOWN_LABEL: &str = "−";
 /// The stepper's button one size larger.
@@ -182,14 +182,17 @@ impl PhoneRoot {
     }
 
     /// The header over Home and the hosts screen: the `Settings` button at
-    /// its right end.
-    pub(super) fn home_header_row(t: &UiTheme, cx: &mut Context<Self>) -> Div {
+    /// its right end, and over Home (`sort`) the sort button before it.
+    pub(super) fn home_header_row(sort: bool, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let open = phone_button("phone-settings-open", ButtonKind::Outlined, cx)
             .min_h(px(TOUCH_TARGET))
             .flex_none()
             .child(OPEN_LABEL)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_settings(cx)));
-        header_frame(t).justify_end().child(open)
+        header_frame(t)
+            .justify_end()
+            .when(sort, |header| header.child(Self::sort_button(cx)))
+            .child(open)
     }
 
     /// While Settings is open: its header over the category list, the page it

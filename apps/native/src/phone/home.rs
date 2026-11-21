@@ -1,7 +1,8 @@
 //! The phone's Home: the open hosts' sessions grouped under their repo or
-//! workspace, every row in a fixed place. Urgency is a mark, not a
-//! position: a container holding a session that needs the owner carries a
-//! count and a mark, and its rows say so, but nothing moves.
+//! workspace, in the Manual order every row in a fixed place. Urgency is a
+//! mark, not a position: a container holding a session that needs the
+//! owner carries a count and a mark, and its rows say so, but nothing
+//! moves. The other orders the owner can pick are [`super::order`]'s.
 //!
 //! Plain Rust over the sidebar's host groups, so the order and the marks
 //! are unit-testable without GPUI; `home_view` draws them.
@@ -58,6 +59,9 @@ pub(crate) struct HomeHost {
     pub(crate) host: HostKey,
     /// The name its header shows.
     pub(crate) label: String,
+    /// A line under its header, over its groups: why the order picked
+    /// cannot apply to it.
+    pub(crate) note: Option<&'static str>,
     pub(crate) groups: Vec<HomeGroup>,
 }
 
@@ -105,6 +109,7 @@ pub(crate) fn home(groups: Vec<HostGroup>) -> Home {
             groups: group.containers.iter().filter_map(home_group).collect(),
             host: group.host,
             label: group.label,
+            note: None,
         })
         .collect();
     Home {

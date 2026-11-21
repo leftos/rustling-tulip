@@ -1702,6 +1702,9 @@ pub struct RootView {
     pub(crate) phone_stats: PhoneStats,
     /// The phone browser's host answers and each connection's host info.
     pub(crate) phone_browse: phone::browser::Inbox,
+    /// The desktop's own layout on each host, which the phone's Desktop
+    /// tabs order groups Home by.
+    pub(crate) phone_layouts: phone::order::PhoneLayouts,
     /// The updater, the update ready to install and the last check.
     update: update_view::UpdateUi,
 }
@@ -2198,6 +2201,7 @@ impl RootView {
             phone_opens: Vec::new(),
             phone_stats: PhoneStats::default(),
             phone_browse: phone::browser::Inbox::default(),
+            phone_layouts: phone::order::PhoneLayouts::default(),
             update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);
@@ -3390,6 +3394,77 @@ impl RootView {
         self.sidebar.set_phone_keys(keys);
         self.save_ui();
         cx.refresh_windows();
+    }
+
+    /// Saves how the phone's Home orders its sessions; Desktop tabs asks
+    /// each open host that can list its layouts for them. Home redraws.
+    pub fn set_phone_order(&mut self, order: sidebar::PhoneOrder, cx: &mut Context<Self>) {
+        self.sidebar.set_phone_order(order);
+        self.save_ui();
+        self.ask_every_phone_layout();
+        cx.notify();
+    }
+
+    /// While the phone's order is Desktop tabs, asks `host` for its layouts
+    /// when its connection is open and lists `host_layouts`; the reply is
+    /// matched to the request.
+    fn ask_phone_layouts(&mut self, host: &HostKey) {
+        let wanted = self.shape == RootShape::Phone
+            && self.sidebar.ui_state().phone_order == sidebar::PhoneOrder::DesktopTabs
+            && self
+                .conn_of(host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_HOST_LAYOUTS));
+        if !wanted {
+            return;
+        }
+        let request_id = new_request_id();
+        tracing::debug!(?host, "phone: asking for the host's layouts");
+        self.phone_layouts.asked(host, request_id.clone());
+        self.send_to(
+            host,
+            ClientMessage::ListHostLayouts {
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// [`Self::ask_phone_layouts`] for every saved host.
+    fn ask_every_phone_layout(&mut self) {
+        let hosts: Vec<HostKey> = self
+            .sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter_map(|saved| Some(HostKey::of(&saved.target().ok()?)))
+            .collect();
+        for host in &hosts {
+            self.ask_phone_layouts(host);
+        }
+    }
+
+    /// `host`'s `HostLayouts` answering the phone's request: the desktop's
+    /// own layout there is kept, and Home redraws.
+    fn on_phone_layouts_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        if let DaemonMessage::HostLayouts {
+            host_name,
+            layouts,
+            request_id,
+        } = msg
+            && self.phone_layouts.on_reply(
+                host,
+                host_name.as_deref(),
+                layouts,
+                request_id.as_deref(),
+            )
+        {
+            tracing::debug!(?host, layouts = layouts.len(), "phone: the host's layouts");
+            cx.notify();
+        }
     }
 
     /// Makes `weight` (one of [`fonts::UI_WEIGHTS`]) the interface's body
@@ -5319,6 +5394,7 @@ impl RootView {
         if !conn.is_open() {
             self.on_host_closed(host, window, cx);
             self.remote_update_dropped(host, window, cx);
+            self.phone_layouts.forget(host);
         }
         if !conn.is_open() && *host == HostKey::Local {
             self.agent_tabs.forget_applies(&HostKey::Local);
@@ -5865,6 +5941,7 @@ impl RootView {
         if self.phone_replies.on_message(host, &msg) {
             cx.notify();
         }
+        self.on_phone_layouts_message(host, &msg, cx);
         if matches!(msg, DaemonMessage::Welcome { .. }) && self.phone_stats.host_reset(host) {
             cx.notify();
         }
@@ -6236,6 +6313,7 @@ impl RootView {
         self.send_presence_to(host, active);
         if *host != HostKey::Local {
             self.ask_history(host);
+            self.ask_phone_layouts(host);
             return;
         }
         self.pane_forgets.reset_connection();
@@ -6473,9 +6551,11 @@ impl RootView {
     }
 
     /// The phone app came back to the foreground: every host's list is
-    /// stale until it sends a new one.
+    /// stale until it sends a new one, and, in the Desktop tabs order, its
+    /// layouts are asked for afresh.
     pub(crate) fn returned_to_foreground(&mut self) {
         self.lists_since_foreground.clear();
+        self.ask_every_phone_layout();
     }
 
     /// Forgets everything remote host `host`'s daemon sent: its sessions,

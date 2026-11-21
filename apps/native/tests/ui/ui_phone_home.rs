@@ -13,8 +13,8 @@ use gpui::{
     point, px,
 };
 use protocol::{
-    ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, FEATURE_RESUME_SESSION, PromptChoice,
-    SessionSnapshot,
+    ClientMessage, ContainerRef, DEVICE_NOT_APPROVED, DaemonMessage, FEATURE_HOST_LAYOUTS,
+    FEATURE_RESUME_SESSION, PromptChoice, SessionSnapshot,
 };
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
@@ -1556,4 +1556,224 @@ fn an_offline_host_on_home_shows_retry_and_redials_now(cx: &mut TestAppContext) 
         .filter(|command| matches!(command, NetCommand::Restart))
         .count();
     assert_eq!(restarts, 1, "Retry redials the host now");
+}
+
+#[gpui::test]
+fn every_row_draws_a_chevron_and_a_tap_anywhere_on_it_opens_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+
+    for id in IDS {
+        let selector = row(&saved_remote(), id);
+        let bounds = h.bounds(&selector);
+        let chevron = h.bounds(&format!("{selector}-chevron"));
+        assert!(
+            chevron.size.width > px(0.0),
+            "{selector}'s chevron is drawn"
+        );
+        assert!(
+            chevron.origin.x > bounds.center().x
+                && chevron.bottom_right().x <= bounds.bottom_right().x,
+            "{selector}'s chevron sits at its right edge"
+        );
+        let left_edge = point(bounds.origin.x + px(2.0), bounds.center().y);
+        for (spot, at) in [
+            ("left edge", left_edge),
+            ("label", bounds.center()),
+            ("chevron", chevron.center()),
+        ] {
+            h.click(at, Modifiers::none());
+            assert_eq!(
+                shown(&mut h).as_deref(),
+                Some(id),
+                "a tap on {id}'s {spot} opens it"
+            );
+            h.click_on("phone-session-back");
+            assert_eq!(shown(&mut h), None);
+        }
+    }
+}
+
+/// Picks `choice` (a sort row's selector tail) in Home's sort sheet.
+fn sort_by(h: &mut Harness<'_>, choice: &str) {
+    h.click_on("phone-home-sort");
+    h.click_on(&format!("phone-home-sort-{choice}"));
+}
+
+/// The top of `target`'s row for session `id`.
+fn row_top(h: &mut Harness<'_>, target: &Target, id: &str) -> Pixels {
+    h.bounds(&row(target, id)).origin.y
+}
+
+/// The note `target` shows under its header while it has no desktop
+/// layout.
+fn layout_note(target: &Target) -> String {
+    format!("phone-home-note-{}", wire(target))
+}
+
+#[gpui::test]
+fn sorting_a_to_z_reorders_the_list_and_saves_the_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    // The owner dragged r2 above r1: Manual keeps that order, A–Z does not.
+    h.host(&saved_remote())
+        .send(DaemonMessage::ContainersReordered {
+            ordered: vec![
+                ContainerRef::Repo("r2".to_owned()),
+                ContainerRef::Repo("r1".to_owned()),
+            ],
+        });
+    h.cx.run_until_parked();
+    let remote = saved_remote();
+    assert!(
+        row_top(&mut h, &remote, "b") < row_top(&mut h, &remote, "a"),
+        "Manual: r2's rows above r1's"
+    );
+
+    h.click_on("phone-home-sort");
+    assert!(
+        drawn(&mut h, "phone-home-sort-sheet"),
+        "the sort sheet opens"
+    );
+    for choice in ["manual", "alphabetical", "needs-you", "desktop-tabs"] {
+        let selector = format!("phone-home-sort-{choice}");
+        assert!(drawn(&mut h, &selector), "{selector} is drawn");
+        let height = h.bounds(&selector).size.height;
+        assert!(height >= touch_target(), "{selector} is {height:?} high");
+    }
+    assert!(
+        drawn(&mut h, "phone-home-sort-manual-check"),
+        "the current order is checked"
+    );
+    assert!(!drawn(&mut h, "phone-home-sort-alphabetical-check"));
+    h.click_on("phone-home-sort-alphabetical");
+
+    assert!(
+        !drawn(&mut h, "phone-home-sort-sheet"),
+        "a choice closes the sheet"
+    );
+    assert!(
+        row_top(&mut h, &remote, "a") < row_top(&mut h, &remote, "b"),
+        "A–Z puts r1's rows above r2's"
+    );
+    assert_eq!(
+        saved_ui(&dir)["phone_order"],
+        "alphabetical",
+        "and saves it"
+    );
+    h.click_on("phone-home-sort");
+    assert!(drawn(&mut h, "phone-home-sort-alphabetical-check"));
+}
+
+/// Opens `target` as [`open_host`] does, its `Welcome` listing `extra`
+/// beside the usual features.
+fn open_host_with(h: &mut Harness<'_>, target: &Target, extra: &[&str]) {
+    let mut host = h.host(target);
+    host.connect_with_features(extra);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+}
+
+/// The host's `HostLayouts` answering `request_id`: its own layout ("box",
+/// named after the host) with tab "Build" holding `c` then `a`, and a
+/// laptop's layout.
+fn host_layouts(request_id: &str) -> DaemonMessage {
+    let pane =
+        |id: &str, session: &str| json!({ "kind": "pane", "pane_id": id, "session_id": session });
+    let tab = |id: &str, name: &str, grid: serde_json::Value| {
+        json!({
+            "id": id,
+            "name": name,
+            "content": { "kind": "grid", "grid": grid },
+            "created_at": "2026-01-01T00:00:00Z",
+        })
+    };
+    let build = json!({
+        "kind": "split",
+        "direction": "horizontal",
+        "ratio": 0.5,
+        "first": pane("p1", "c"),
+        "second": pane("p2", "a"),
+    });
+    serde_json::from_value(json!({
+        "type": "host_layouts",
+        "host_name": "box",
+        "layouts": [
+            { "client_id": "desk", "name": "box", "tabs": [tab("t1", "Build", build)] },
+            { "client_id": "laptop", "name": "laptop", "tabs": [tab("t9", "Other", pane("p9", "b"))] },
+        ],
+        "request_id": request_id,
+    }))
+    .expect("a host layouts reply")
+}
+
+#[gpui::test]
+fn desktop_tabs_asks_a_host_listing_host_layouts_and_groups_its_rows_by_tab(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    let (remote, den) = (saved_remote(), den());
+    open_host_with(&mut h, &remote, &[FEATURE_HOST_LAYOUTS]);
+    open_host(&mut h, &den);
+    h.host(&remote).sent();
+    h.host(&den).sent();
+
+    sort_by(&mut h, "desktop-tabs");
+
+    let asked: Vec<Option<String>> = h
+        .host(&remote)
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListHostLayouts { request_id } => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked.len(), 1, "one ListHostLayouts: {asked:?}");
+    let request_id = asked[0].clone().expect("the request carries an id");
+    let den_sent = h.host(&den).sent();
+    assert!(
+        !den_sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ListHostLayouts { .. })),
+        "a host without host_layouts is not asked: {den_sent:?}"
+    );
+    assert!(
+        drawn(&mut h, &layout_note(&den)),
+        "a host without host_layouts shows the note"
+    );
+    assert!(
+        drawn(&mut h, &layout_note(&remote)),
+        "the asked host shows it until its reply"
+    );
+    assert_eq!(saved_ui(&dir)["phone_order"], "desktop_tabs");
+
+    h.host(&remote).send(host_layouts(&request_id));
+    h.cx.run_until_parked();
+
+    assert!(
+        !drawn(&mut h, &layout_note(&remote)),
+        "the reply ends the note"
+    );
+    let tag = wire(&remote);
+    let build = format!("phone-home-group-tab-{tag}-t1");
+    let rest = format!("phone-home-group-no-tab-{tag}");
+    assert!(drawn(&mut h, &build), "the own layout's tab heads its rows");
+    assert!(drawn(&mut h, &rest), "the rest sit under Not in a tab");
+    let tops = ["c", "a", "b"].map(|id| row_top(&mut h, &remote, id));
+    assert!(
+        h.bounds(&build).origin.y < tops[0] && tops[0] < tops[1],
+        "Build lists c then a, in pane order"
+    );
+    assert!(
+        tops[1] < h.bounds(&rest).origin.y && h.bounds(&rest).origin.y < tops[2],
+        "then Not in a tab lists b"
+    );
+    assert!(
+        drawn(&mut h, &layout_note(&den)),
+        "the other host keeps its note"
+    );
 }

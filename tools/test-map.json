@@ -1959,6 +1959,12 @@
     },
     {
       "paths": [
+        "apps/native/src/phone/order.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^phone::order::/) | test(/^phone::home::/))) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_home::/) | test(/^ui_phone_two_pane::/)))"
+    },
+    {
+      "paths": [
         "apps/native/src/phone/settings*.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^phone::settings::/)) | (binary_id(rustling-tulip-native::ui) & (test(/^ui_phone_settings::/) | test(/^ui_phone_viewer::/) | test(/^ui_phone_quick_replies::/) | test(/^ui_phone_push::/)))"

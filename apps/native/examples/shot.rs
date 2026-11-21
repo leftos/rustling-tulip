@@ -62,6 +62,10 @@
 //! two repos: one with a session waiting on a three-option question, which
 //! the Needs you tray above the list shows as its one card, the other with
 //! a working session and an idle one.
+//! `phone-home-sorted` shows the same Home in the Desktop tabs order, "box"
+//! listing `host_layouts`: its own layout's two tabs, `Relay` (the waiting
+//! relay session, then the working one) and `Release` (the other waiting
+//! session), as groups, then `Not in a tab` holding the idle session.
 //! `phone-sheet` shows the same Home with the working session's long-press
 //! sheet open over a scrim: its label, Stop and Cancel.
 //! `phone-session` shows the same Home's working session opened: its
@@ -412,6 +416,7 @@ enum View {
     EmptyMain,
     FirstConnect,
     PhoneHome,
+    PhoneHomeSorted,
     PhoneSheet,
     PhoneSession,
     PhoneSessionSheet,
@@ -486,6 +491,7 @@ impl View {
         Self::EmptyMain,
         Self::FirstConnect,
         Self::PhoneHome,
+        Self::PhoneHomeSorted,
         Self::PhoneSheet,
         Self::PhoneSession,
         Self::PhoneSessionSheet,
@@ -510,6 +516,7 @@ impl View {
         matches!(
             self,
             Self::PhoneHome
+                | Self::PhoneHomeSorted
                 | Self::PhoneSheet
                 | Self::PhoneSession
                 | Self::PhoneSessionSheet
@@ -635,6 +642,7 @@ impl View {
             Self::EmptyMain => "empty-main",
             Self::FirstConnect => "first-connect",
             Self::PhoneHome => "phone-home",
+            Self::PhoneHomeSorted => "phone-home-sorted",
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
@@ -699,6 +707,7 @@ impl View {
             Self::Chat | Self::ChatCompact | Self::ChatModelPicker => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             Self::PhoneHome
+            | Self::PhoneHomeSorted
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -755,6 +764,7 @@ impl View {
             // and by `start_phone_home_shot`, which checks its own rows.
             Self::Toast
             | Self::PhoneHome
+            | Self::PhoneHomeSorted
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -1052,6 +1062,7 @@ impl Shot {
             | View::EmptyMain
             | View::FirstConnect
             | View::PhoneHome
+            | View::PhoneHomeSorted
             | View::PhoneSheet
             | View::PhoneSession
             | View::PhoneSessionSheet
@@ -1113,6 +1124,7 @@ impl Shot {
             | View::UpdateHost
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
+            View::PhoneHomeSorted => phone_home_sorted_ui_state(),
             view if view.is_phone() => phone_home_ui_state(),
             _ => return Ok(()),
         };
@@ -1232,6 +1244,14 @@ fn perf_ui_state() -> Value {
 /// The layout the `phone-home` shot starts from: "box" alone saved.
 fn phone_home_ui_state() -> Value {
     json!({ "saved_hosts": [{ "name": SHOT_TAILNET_HOST, "port": 8787 }] })
+}
+
+/// The layout the `phone-home-sorted` shot starts from: the `phone-home`
+/// one, Home in the Desktop tabs order.
+fn phone_home_sorted_ui_state() -> Value {
+    let mut state = phone_home_ui_state();
+    state["phone_order"] = json!("desktop_tabs");
+    state
 }
 
 /// The device tokens the window holds: none, so the `connections` shots'
@@ -1843,6 +1863,14 @@ async fn capture_phone_home(
     if header.as_deref() != Some("Needs you · 1 of 2") {
         bail!("the phone-home view's tray reads {header:?}, not the first of two cards");
     }
+    if shot.view == View::PhoneHomeSorted {
+        let groups = handle.update(cx, |phone, _, cx| phone.home_group_names(cx))?;
+        if groups != PHONE_SORTED_GROUPS {
+            bail!(
+                "the phone-home-sorted view's groups are {groups:?}, not {PHONE_SORTED_GROUPS:?}"
+            );
+        }
+    }
     if shot.view == View::PhoneSheet {
         let opened = handle.update(cx, |phone, _, cx| {
             phone.open_sheet_on(PHONE_SHEET_SESSION, cx)
@@ -2291,6 +2319,7 @@ fn drive(
         | View::FirstConnect
         | View::Toast
         | View::PhoneHome
+        | View::PhoneHomeSorted
         | View::PhoneSheet
         | View::PhoneSession
         | View::PhoneSessionSheet
@@ -3949,7 +3978,9 @@ impl FakeDaemon {
                 vec![protocol::FEATURE_REMOTE_UPDATE.to_owned()]
             }
             View::Perf => vec![protocol::FEATURE_PERF_MONITOR.to_owned()],
-            View::HostRebind => vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()],
+            View::HostRebind | View::PhoneHomeSorted => {
+                vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()]
+            }
             View::PhoneBrowser => vec![
                 protocol::FEATURE_HOST_PATHS.to_owned(),
                 protocol::FEATURE_HOST_BROWSE.to_owned(),
@@ -4132,7 +4163,7 @@ impl FakeDaemon {
                     request_id: request_id.clone(),
                 }
             }
-            _ => return shot_reply(msg),
+            _ => return shot_reply(self.view, msg),
         };
         Ok(vec![reply])
     }
@@ -4164,12 +4195,55 @@ fn follow_reply(msg: &ClientMessage) -> Option<DaemonMessage> {
 }
 
 /// The replies to the messages no other arm of [`FakeDaemon::answer`] takes:
-/// a transcript to follow, and the rebind dialog's host layouts.
-fn shot_reply(msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
+/// a transcript to follow, and the host layouts the rebind dialog or the
+/// `phone-home-sorted` view's Home asks for.
+fn shot_reply(view: View, msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
     if let ClientMessage::ListHostLayouts { request_id } = msg {
-        return Ok(vec![shot_host_layouts(request_id.as_deref())?]);
+        let reply = if view == View::PhoneHomeSorted {
+            phone_sorted_layouts(request_id.as_deref())?
+        } else {
+            shot_host_layouts(request_id.as_deref())?
+        };
+        return Ok(vec![reply]);
     }
     Ok(follow_reply(msg).into_iter().collect())
+}
+
+/// The tab groups the `phone-home-sorted` view's Home shows, in order.
+const PHONE_SORTED_GROUPS: [&str; 3] = ["Relay", "Release", "Not in a tab"];
+
+/// "box"'s answer to the `phone-home-sorted` view's `ListHostLayouts`: its
+/// own layout, tab "Relay" splitting the relay and service-worker sessions
+/// and tab "Release" showing the plan check, which leaves the scrollback
+/// session in no tab; and the laptop's layout.
+fn phone_sorted_layouts(request_id: Option<&str>) -> Result<DaemonMessage> {
+    let relay = GridNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(pane("p-relay", BOX_SESSION)),
+        second: Box::new(pane("p-pwa", PHONE_SHEET_SESSION)),
+    };
+    parse_message(json!({
+        "type": "host_layouts",
+        "host_name": "box",
+        "layouts": [
+            {
+                "client_id": "client-box",
+                "name": "box",
+                "tabs": [
+                    grid_tab("box-relay", "Relay", &relay),
+                    grid_tab("box-release", "Release", &pane("p-plans", "b-plans")),
+                ],
+            },
+            {
+                "client_id": "client-laptop",
+                "name": "laptop",
+                "tabs": [grid_tab("laptop-main", "Review", &pane("p-lap1", BOX_SESSION))],
+            },
+        ],
+        "request_id": request_id,
+    }))
+    .context("the phone-home-sorted view's host layouts")
 }
 
 /// "box"'s answer to the rebind dialog's `ListHostLayouts`: the layout it

@@ -711,3 +711,58 @@ fn settings_stay_on_top_when_two_panes_turn_to_one(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-home"), "Home shows");
     assert!(!drawn(&mut h, "phone-settings"), "Settings stays closed");
 }
+
+#[gpui::test]
+fn the_list_pane_offers_the_sort_button_and_its_choice_applies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = ipad(cx, &dir);
+    // e moves to r2, which the owner dragged above r1: Manual keeps that
+    // order, A–Z does not.
+    let sessions = vec![
+        session("a")
+            .label("Alpha")
+            .in_repo("r1")
+            .status("working")
+            .build(),
+        session("e")
+            .label("Echo")
+            .in_repo("r2")
+            .status("stopped")
+            .build(),
+    ];
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::ContainersReordered {
+        ordered: vec![
+            protocol::ContainerRef::Repo("r2".to_owned()),
+            protocol::ContainerRef::Repo("r1".to_owned()),
+        ],
+    });
+    host.send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+    let pane = list_pane(&mut h);
+    assert!(drawn(&mut h, "phone-home-sort"), "the sort button shows");
+    assert!(
+        within(h.bounds("phone-home-sort"), pane),
+        "in the list pane's header"
+    );
+    assert!(
+        h.bounds(&row("e")).origin.y < h.bounds(&row("a")).origin.y,
+        "Manual: r2's row above r1's"
+    );
+
+    h.click_on("phone-home-sort");
+    assert!(
+        within(h.bounds("phone-home-sort-sheet"), pane),
+        "the sort sheet covers the list pane only"
+    );
+    h.click_on("phone-home-sort-alphabetical");
+
+    assert!(!drawn(&mut h, "phone-home-sort-sheet"));
+    assert!(
+        h.bounds(&row("a")).origin.y < h.bounds(&row("e")).origin.y,
+        "A–Z puts r1's row above r2's"
+    );
+}

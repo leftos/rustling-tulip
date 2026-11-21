@@ -17,6 +17,8 @@ use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
 use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
 use super::root_view::LIST_PANE_WIDTH;
+use super::settings_view::{CHECK, CHEVRON};
+use super::sheet::CANCEL_LABEL;
 use super::tray::{self, Arranged, Buttons, TrayCard};
 use crate::buttons::ButtonKind;
 use crate::chat_cards;
@@ -25,7 +27,7 @@ use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::{ui_px, ui_text_size, ui_weight_shift};
 use crate::needs_you;
-use crate::sidebar::DETACHED_BANNER;
+use crate::sidebar::{DETACHED_BANNER, PhoneOrder};
 use crate::sidebar_view::{HostHeaderState, leaf_key};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
@@ -53,6 +55,16 @@ const EMPTY_TEXT: &str = "No sessions yet";
 const TRAY_CARD_HEIGHT: f32 = 356.0;
 /// The button of a card whose prompt is answered on the session's page.
 const OPEN_LABEL: &str = "Open";
+/// Home's header button that opens the sort sheet, and the sheet's title.
+const SORT_LABEL: &str = "Sort";
+/// The orders the sort sheet offers, in its order: each with the tail of
+/// its row's selector and its label.
+const ORDERS: [(PhoneOrder, &str, &str); 4] = [
+    (PhoneOrder::Manual, "manual", "Manual"),
+    (PhoneOrder::Alphabetical, "alphabetical", "A–Z"),
+    (PhoneOrder::NeedsYouFirst, "needs-you", "Needs you first"),
+    (PhoneOrder::DesktopTabs, "desktop-tabs", "Desktop tabs"),
+];
 
 /// What a card says about its prompt, read before the card is drawn.
 struct CardFacts {
@@ -233,6 +245,28 @@ fn detached_banner(t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
         .child(DETACHED_BANNER)
 }
 
+/// What a host says under its header while the order picked cannot apply
+/// to it.
+fn note_line(host: &HostKey, note: &'static str, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+    let id = format!("phone-home-note-{}", host_tag(host));
+    div()
+        .driver_id(|| id)
+        .px(px(SIDE_PADDING))
+        .py(px(4.0))
+        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
+        .child(note)
+}
+
+/// The line between two rows of a group, inset by the side padding.
+fn hairline(t: &UiTheme) -> Div {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .mx(px(SIDE_PADDING))
+        .bg(gpui::rgb(t.line))
+}
+
 /// Home's line with nothing to list.
 fn empty_line(t: &UiTheme) -> Div {
     div()
@@ -262,6 +296,9 @@ impl PhoneRoot {
                     )
                 };
                 children.push(Self::host_header(host, state, &parts, &t, cx));
+            }
+            if let Some(note) = host.note {
+                children.push(note_line(&host.host, note, &t, cx));
             }
             for group in &host.groups {
                 let selected = self.selected_in(group);
@@ -614,8 +651,9 @@ impl PhoneRoot {
             .map(|row| row.session_id.clone())
     }
 
-    /// `group`'s heading, its banner when Detached, then its rows, the one
-    /// whose session is `selected` marked.
+    /// `group`'s heading, its banner when Detached, then its rows with a
+    /// hairline between each two, the one whose session is `selected`
+    /// marked.
     fn home_group(
         group: &HomeGroup,
         selected: Option<&str>,
@@ -623,23 +661,157 @@ impl PhoneRoot {
         cx: &mut Context<Self>,
     ) -> Div {
         let banner = group.detached.then(|| detached_banner(t, cx));
-        let rows: Vec<Stateful<Div>> = group
-            .rows
-            .iter()
-            .map(|row| Self::session_row(row, selected == Some(row.session_id.as_str()), t, cx))
-            .collect();
-        div()
+        let mut body = div()
             .flex()
             .flex_col()
             .child(group_heading(group, t, cx))
-            .children(banner)
-            .children(rows)
+            .children(banner);
+        for (at, row) in group.rows.iter().enumerate() {
+            if at > 0 {
+                body = body.child(hairline(t));
+            }
+            let chosen = selected == Some(row.session_id.as_str());
+            body = body.child(Self::session_row(row, chosen, t, cx));
+        }
+        body
     }
 
-    /// One session's row: a dot, its label and its status word, on the
-    /// raised ground with an accent edge while `selected`; a tap shows the
-    /// session (nothing while it is the one selected), a long press opens
-    /// its sheet.
+    /// Home's header button that opens the sort sheet.
+    pub(super) fn sort_button(cx: &mut Context<Self>) -> Stateful<Div> {
+        phone_button("phone-home-sort", ButtonKind::Outlined, cx)
+            .min_h(px(TOUCH_TARGET))
+            .flex_none()
+            .child(SORT_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.sort_menu = true;
+                cx.notify();
+            }))
+    }
+
+    /// Picks `order` for Home: saved, and the sheet closes.
+    fn choose_order(&mut self, order: PhoneOrder, cx: &mut Context<Self>) {
+        tracing::debug!(?order, "phone: Home's order picked");
+        self.sort_menu = false;
+        self.root
+            .update(cx, |root, cx| root.set_phone_order(order, cx));
+        cx.notify();
+    }
+
+    /// The sort sheet over a scrim, as the long-press sheet draws: its
+    /// title, a row per order with the current one checked, then Cancel,
+    /// its bottom clear of `bottom`'s home indicator. `None` while closed.
+    pub(super) fn sort_sheet_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.sort_menu {
+            return None;
+        }
+        let t = theme(cx);
+        let current = self.root.read(cx).sidebar.ui_state().phone_order;
+        let close = |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+            this.sort_menu = false;
+            cx.notify();
+        };
+        let scrim = div()
+            .id("phone-home-sort-scrim")
+            .driver_id(|| "phone-home-sort-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .on_click(cx.listener(close));
+        let rows: Vec<Stateful<Div>> = ORDERS
+            .iter()
+            .map(|&entry| Self::sort_row(entry, entry.0 == current, &t, cx))
+            .collect();
+        let panel = div()
+            .id("phone-home-sort-sheet")
+            .driver_id(|| "phone-home-sort-sheet".to_owned())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pt(px(16.0))
+            .pb(bottom + px(16.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .min_h(px(TOUCH_TARGET))
+                    .px(px(4.0))
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(SORT_LABEL),
+            )
+            .child(div().flex().flex_col().children(rows))
+            .child(
+                Self::sheet_button("phone-home-sort-cancel", ButtonKind::Outlined, cx)
+                    .child(CANCEL_LABEL)
+                    .on_click(cx.listener(close)),
+            );
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(panel),
+        )
+    }
+
+    /// One order's row in the sort sheet (`entry` as [`ORDERS`] lists it),
+    /// as Appearance's theme rows draw: the check while it is `current`,
+    /// then its label, a touch target tall; a tap picks it.
+    fn sort_row(
+        entry: (PhoneOrder, &str, &'static str),
+        current: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (order, key, label) = entry;
+        let id = format!("phone-home-sort-{key}");
+        let check_id = format!("{id}-check");
+        let mark = div()
+            .flex_none()
+            .w(px(18.0))
+            .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+            .when(current, |mark| mark.driver_id(|| check_id).child(CHECK));
+        div()
+            .id(SharedString::from(id.clone()))
+            .driver_id(|| id)
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .min_h(px(TOUCH_TARGET))
+            .px(px(4.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(gpui::rgb(t.line))
+            .child(mark)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+                    .child(label),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_order(order, cx)))
+    }
+
+    /// One session's row: a dot, its label and its status word, then a
+    /// chevron at its right edge, on the raised ground with an accent edge
+    /// while `selected` and while a finger is down on it; a tap anywhere on
+    /// it shows the session (nothing while it is the one selected), a long
+    /// press opens its sheet.
     fn session_row(
         row: &HomeRow,
         selected: bool,
@@ -648,6 +820,8 @@ impl PhoneRoot {
     ) -> Stateful<Div> {
         let leaf = leaf_key(&row.host, &row.session_id);
         let id = format!("phone-home-row-{leaf}");
+        let chevron_id = format!("{id}-chevron");
+        let raised = t.raised;
         let mark = selected.then(|| {
             let mark_id = format!("phone-home-row-selected-{leaf}");
             div()
@@ -686,6 +860,7 @@ impl PhoneRoot {
                 line.bg(gpui::rgba(t.ask_wash))
             })
             .when(selected, |line| line.bg(gpui::rgb(t.raised)))
+            .active(move |line| line.bg(gpui::rgb(raised)))
             .children(mark)
             .child(dot(color))
             .child(
@@ -706,6 +881,13 @@ impl PhoneRoot {
                             .text_color(gpui::rgb(color))
                             .child(row.status),
                     ),
+            )
+            .child(
+                div()
+                    .driver_id(|| chevron_id)
+                    .flex_none()
+                    .text_color(gpui::rgb(t.muted))
+                    .child(CHEVRON),
             )
             .child(long_press)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {

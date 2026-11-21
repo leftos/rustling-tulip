@@ -465,7 +465,7 @@ impl PhoneRoot {
     /// hosts' content, which Settings' Hosts page draws too.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
-        let header = Self::home_header_row(&t, cx);
+        let header = Self::home_header_row(false, &t, cx);
         div()
             .size_full()
             .flex()
@@ -498,12 +498,12 @@ impl PhoneRoot {
             .child(tail)
     }
 
-    /// Home while a saved host is open: under the header with its
-    /// `Settings` button, the session list filling the height.
+    /// Home while a saved host is open: under the header with its sort and
+    /// `Settings` buttons, the session list filling the height.
     pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
         let panel = self.home_list(cx);
         let t = theme(cx);
-        let header = Self::home_header_row(&t, cx);
+        let header = Self::home_header_row(true, &t, cx);
         let tap_lines = self.tap_lines(&t);
         let over = (!tap_lines.is_empty()).then(|| {
             div()
