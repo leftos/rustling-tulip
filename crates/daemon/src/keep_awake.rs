@@ -383,6 +383,7 @@ mod tests {
             resumed_from: Vec::new(),
             announced: false,
             listed_at: None,
+            chat_answers: 0,
         }
     }
 

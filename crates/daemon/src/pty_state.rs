@@ -206,7 +206,9 @@ struct Sight {
 /// the hold that shows no sign of hooks lands `Idle` at once, and a frame
 /// showing the agent idle lands it through the usual window. A main hook event
 /// or a later `Stop` is the other way out. At [`TURN_END_CEILING`], on a
-/// settled frame, a spinner drops it and anything else lands `Idle`.
+/// settled frame, a spinner drops it, a dialog drops it and raises
+/// `AwaitingInput` unless the status already is, an overlay keeps it, and
+/// anything else lands `Idle`.
 ///
 /// `attention_tx` receives one event each time the screen moves the session
 /// into `AwaitingInput`. `streams.rules` are the screen rules of the session's
@@ -991,8 +993,9 @@ impl ScreenWatch {
     /// hides what the turn is doing, so it keeps the hold and writes nothing,
     /// and the reading after the overlay resolves it, or a weak idle lands it
     /// with its flag; meanwhile the check goes on, so a shell's prompt can
-    /// still hand the shell back. Anything else lands `Idle`, with the flag
-    /// the frame shows (`shown`). Answers whether that decided the check.
+    /// still hand the shell back. A dialog never lands `Idle`: the agent asks
+    /// (see [`Self::ceiling_dialog`]). Anything else lands `Idle`, with the
+    /// flag the frame shows (`shown`). Answers whether that decided the check.
     fn turn_end_ceiling(
         &mut self,
         read: StatusRead,
@@ -1009,16 +1012,42 @@ impl ScreenWatch {
         }
         self.confirm.window = None;
         self.confirm.candidate = None;
+        if reads_dialog(reading) {
+            self.ceiling_dialog(read);
+            return true;
+        }
         if TurnEndSign::of(reading) != TurnEndSign::Spinner {
             self.publish_as(read, SessionStatus::Idle, "ceiling", shown);
             return true;
         }
-        if clear_turn_end(&self.registry, &self.session_id, read) {
-            // This watcher's own write, so its broadcast starts no hold.
-            self.wake.seen = Some(StatusRead { held: None, ..read });
-            info!(session_id = %self.session_id, why = "ceiling_spinner", "turn end dropped");
-        }
+        self.drop_held_turn_end(read, "ceiling_spinner");
         true
+    }
+
+    /// A dialog on screen at the ceiling: the agent asks, so the held turn
+    /// end is dropped, never landed, and a status not yet `AwaitingInput` is
+    /// raised to it past the dialog edge. One already `AwaitingInput` keeps
+    /// its pending prompt and gets no write.
+    fn ceiling_dialog(&mut self, read: StatusRead) {
+        let Some(read) = self.drop_held_turn_end(read, "ceiling_dialog") else {
+            return;
+        };
+        if read.status != SessionStatus::AwaitingInput {
+            self.publish_as(read, SessionStatus::AwaitingInput, "ceiling_dialog", false);
+        }
+    }
+
+    /// Forget the turn end `read` holds, logging `why`; answers the read with
+    /// it gone, or `None` when the record moved first and nothing was written.
+    fn drop_held_turn_end(&mut self, read: StatusRead, why: &'static str) -> Option<StatusRead> {
+        if !clear_turn_end(&self.registry, &self.session_id, read) {
+            return None;
+        }
+        // This watcher's own write, so its broadcast starts no hold.
+        let read = StatusRead { held: None, ..read };
+        self.wake.seen = Some(read);
+        info!(session_id = %self.session_id, why, "turn end dropped");
+        Some(read)
     }
 
     /// Follow a held turn end through one reading; answers whether that
@@ -1449,18 +1478,25 @@ impl ScreenWatch {
     /// Another writer moved the record from `before` to what the wake last
     /// saw: hold off the screen, which drops any check already scheduled, so
     /// a subagent's dialog on the grid is noted now. A move off
-    /// `AwaitingInput` while the screen showed the dialog (a chat answer)
-    /// disarms the dialog edge, since the dialog stays painted until the
-    /// agent redraws. The chat mirror still gets the grid at the next settle
-    /// point inside the hold: at once when the output is already quiet.
+    /// `AwaitingInput` while the screen showed the dialog sets the dialog
+    /// edge: a chat answer's (the record's [`SessionRecord::chat_answers`]
+    /// moved with it) disarms it, since the dialog stays painted until the
+    /// agent redraws; any other move (a hook ending the wait) arms it, so a
+    /// dialog still on screen raises `AwaitingInput` again, whether a hook or
+    /// the screen raised the wait. The count is compared between this read
+    /// and the one before, so a chat answer never applies to a later move.
+    /// The chat mirror still gets the grid at the next settle point inside
+    /// the hold: at once when the output is already quiet.
     fn foreign_write(&mut self, before: Option<StatusRead>, now: Instant) {
         self.note_held_off_dialog();
         let awaiting = |read: Option<StatusRead>| {
             read.is_some_and(|read| read.status == SessionStatus::AwaitingInput)
         };
+        let answers = |read: Option<StatusRead>| read.map(|read| read.chat_answers);
+        let chat_answered = answers(before) != answers(self.wake.seen);
         let dialog_shown = self.last_verdict == Some(Verdict::State(ScreenState::AwaitingInput));
         if awaiting(before) && !awaiting(self.wake.seen) && dialog_shown {
-            self.dialog_edge_armed = false;
+            self.dialog_edge_armed = !chat_answered;
         }
         self.confirm.hold(now);
         self.confirm.chat_through_hold = true;
@@ -1673,6 +1709,7 @@ fn hand_shell_back(
             pending: rec.pending_input.is_some(),
             held: None,
             raise: status_read(rec).raise,
+            chat_answers: rec.chat_answers,
         });
         let alert = held.and_then(|held| held.alert);
         changed.then(|| alert.map(|alert| alert.event(session_id)))
@@ -2234,6 +2271,9 @@ struct StatusRead {
     /// The hook raise of the pending prompt. Not compared: a raise moves
     /// with the pending flag or the main hook stamp, which are.
     raise: Option<RaiseRead>,
+    /// The record's [`SessionRecord::chat_answers`]. Not compared: a chat
+    /// answer moves the status or the pending flag, which are.
+    chat_answers: u64,
 }
 
 /// The hook raise of a pending prompt a [`StatusRead`] saw.
@@ -2289,6 +2329,7 @@ fn status_read(record: &SessionRecord) -> StatusRead {
             event_time: raise.event_time,
             deadline: raise.at + DIALOG_DRAW_DEADLINE,
         }),
+        chat_answers: record.chat_answers,
     }
 }
 
@@ -2690,6 +2731,7 @@ mod hysteresis_tests {
             resumed_from: Vec::new(),
             announced: false,
             listed_at: None,
+            chat_answers: 0,
         }
     }
 
@@ -5824,11 +5866,7 @@ mod hysteresis_tests {
         );
         h.chunk(permission_frame());
         pass_hold().await;
-        h.registry.update_if_changed(SESSION, |record| {
-            record.status = SessionStatus::Idle;
-            record.pending_input = None;
-            true
-        });
+        h.registry.clear_answered_prompt_if(SESSION, |_| true);
         settle().await;
         advance(CHECK_DEBOUNCE + ms(10)).await;
         // Arrow keys move the cursor in the dialog Claude still paints, past
@@ -5856,11 +5894,7 @@ mod hysteresis_tests {
         );
         h.chunk(permission_frame());
         pass_hold().await;
-        h.registry.update_if_changed(SESSION, |record| {
-            record.status = SessionStatus::Idle;
-            record.pending_input = None;
-            true
-        });
+        h.registry.clear_answered_prompt_if(SESSION, |_| true);
         settle().await;
         for _ in 0..20 {
             h.chunk(permission_frame());
@@ -6605,6 +6639,176 @@ mod hysteresis_tests {
         assert!(h.background(), "the held flag lands");
         assert!(!h.holds_turn_end());
         assert_eq!(h.attentions(), 0);
+    }
+
+    /// A dialog `frame` still on screen at the ceiling, over a `Working`
+    /// status: a chat answer cleared its wait and Claude never redrew, so the
+    /// dialog edge stays disarmed, then a tool call and a held `Stop` follow.
+    /// The ceiling raises the dialog and drops the hold; it never lands
+    /// `Idle` over the card.
+    async fn ceiling_raises_a_dialog_on_screen(tag: &str, frame: fn() -> Vec<u8>) {
+        let mut h = start_record(tag, false, hook_record(SessionStatus::AwaitingInput));
+        h.chunk(frame());
+        pass_hold().await;
+        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        settle().await;
+        pass_hold().await;
+        h.hook(2, &main_tool());
+        pass_hold().await;
+        h.hook(3, &main_stop(false));
+        h.chunk(frame());
+        advance(Duration::from_secs(59)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the stale dialog raised the prompt before the ceiling"
+        );
+        assert!(h.holds_turn_end(), "before the ceiling");
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the ceiling did not raise the dialog on screen"
+        );
+        assert!(!h.holds_turn_end(), "the ceiling kept the held turn end");
+        assert_eq!(h.attentions(), 1, "one Attention for the raised dialog");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_raises_a_question_still_on_screen() {
+        ceiling_raises_a_dialog_on_screen("ceiling-question", question_frame).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_raises_a_permission_dialog_too() {
+        ceiling_raises_a_dialog_on_screen("ceiling-permission", permission_frame).await;
+    }
+
+    /// A question pending while a `Stop` is held: at the ceiling the question
+    /// stays pending, no status is written, and the hold is dropped, so the
+    /// frames after it do not run the ceiling again. Every status change
+    /// settles a held turn end, so the question's hook drops it; the test
+    /// puts it back to reach the state the ceiling guards against.
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_keeps_a_pending_question() {
+        let h = start_record(
+            "ceiling-pending-question",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        let held = {
+            let rec = h.registry.get(SESSION).expect("session registered");
+            rec.lock().expect("record lock").turn_end.clone()
+        };
+        assert!(held.is_some(), "the Stop is held");
+        h.hook(
+            3,
+            &serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {"questions": [{
+                    "question": "Which function should be added to calc.py next?",
+                    "header": "Next fn",
+                    "multiSelect": false,
+                    "options": [{"label": "sub"}, {"label": "div"}, {"label": "pow"}],
+                }]},
+            }),
+        );
+        h.set_record(|record| record.turn_end = held);
+        h.chunk(question_frame());
+        pass_hold().await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert!(h.holds_turn_end(), "the held Stop is back");
+        let seq = h.status_seq();
+        advance(Duration::from_secs(61)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the ceiling ended the question"
+        );
+        assert!(
+            pending_input(&h).is_some(),
+            "the question is no longer pending"
+        );
+        assert!(!h.holds_turn_end(), "the ceiling kept the held turn end");
+        assert_eq!(h.status_seq(), seq, "the ceiling wrote a status");
+        for _ in 0..20 {
+            h.chunk(question_frame());
+            advance(ms(50)).await;
+        }
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert_eq!(h.status_seq(), seq, "a later frame wrote a status");
+    }
+
+    /// A wait the screen raised (the raise disarms the dialog edge), ended by
+    /// a main hook that is not spared while the card stays on screen: the
+    /// move re-arms the edge, so the next settled reading raises it again.
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_raised_wait_ended_by_a_hook_raises_again() {
+        let mut h = start_record(
+            "screen-raised-hook-ended",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the screen did not raise the question"
+        );
+        assert_eq!(h.attentions(), 1);
+        h.hook(2, &serde_json::json!({"hook_event_name": "PostToolUse"}));
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the hook ended the wait"
+        );
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the card still on screen did not raise the question again"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention for the second raise");
+    }
+
+    /// A hook that ends a question's wait while its card stays on screen
+    /// (not a chat answer) leaves the dialog edge armed: the next settled
+    /// reading of the card raises `AwaitingInput` again.
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_ended_wait_lets_the_screen_raise_the_question_again() {
+        let mut h = start_record(
+            "hook-ended-wait",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        h.chunk(question_frame());
+        pass_hold().await;
+        h.hook(2, &main_tool());
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the hook ended the wait"
+        );
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the card still on screen did not raise the question again"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention for the raised question");
     }
 
     #[tokio::test(start_paused = true)]

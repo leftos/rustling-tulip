@@ -38,6 +38,13 @@ const DELIVERED_TASK_NOTIFICATION_PREFIX: &str = "<task-notification>";
 /// The trailing space keeps a prompt starting "<eventual" the owner's own.
 const DELIVERED_EVENT_PREFIX: &str = "<event ";
 
+/// The openings of a poll event whose element carries no attributes, which
+/// the agent's CLI accepts as well.
+const DELIVERED_BARE_EVENT_PREFIXES: [&str; 2] = ["<event>", "<event/>"];
+
+/// The longest kind a field-declared poll event names.
+const MAX_POLL_EVENT_KIND: usize = 64;
+
 /// The work a main agent's turn end reports still running beside its idle
 /// turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -265,12 +272,37 @@ fn delivers_result(body: &Value) -> bool {
 }
 
 /// Whether a prompt's text is an envelope the agent delivers rather than
-/// input the owner typed: a finished task's notice or a poll event, after
-/// any leading whitespace.
+/// input the owner typed: a finished task's notice, a poll event's element
+/// (with or without attributes) or a field-declared poll event, after any
+/// leading whitespace.
 fn delivered_envelope(prompt: &str) -> bool {
     let prompt = prompt.trim_start();
     prompt.starts_with(DELIVERED_TASK_NOTIFICATION_PREFIX)
         || prompt.starts_with(DELIVERED_EVENT_PREFIX)
+        || DELIVERED_BARE_EVENT_PREFIXES
+            .iter()
+            .any(|prefix| prompt.starts_with(prefix))
+        || field_declared_poll_event(prompt)
+}
+
+/// Whether `prompt` is a poll event whose kind the host declared with
+/// fields, which the CLI hands the hook as its kind, its time and its fields
+/// on lines of their own: the first line a kind (a lowercase letter, then up
+/// to 63 lowercase letters, digits or hyphens), the second an RFC 3339 time.
+fn field_declared_poll_event(prompt: &str) -> bool {
+    let mut lines = prompt.lines();
+    let (Some(kind), Some(at)) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    poll_event_kind(kind) && chrono::DateTime::parse_from_rfc3339(at).is_ok()
+}
+
+/// Whether `kind` matches `^[a-z][a-z0-9-]{0,63}$`.
+fn poll_event_kind(kind: &str) -> bool {
+    let mut chars = kind.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && kind.len() <= MAX_POLL_EVENT_KIND
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// The live line a `MessageDisplay` payload carries: its `delta` as the

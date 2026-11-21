@@ -512,12 +512,14 @@ fn main_turn_end_ends_the_wait(record: &SessionRecord) -> bool {
 ///
 /// A subagent's event never ends or replaces a pending prompt: its tool calls
 /// fire the same hooks while the main agent waits on the user, and its own
-/// permission request counts only when no prompt is waiting (a pending value
-/// left beside another status is stale and is replaced). A weak idle (an
-/// idle the agent reports while it may still be waiting) is ignored while the
-/// record waits on a pending prompt, and so is a delivered event (the agent's
-/// own background result arriving as a prompt, [`HookReport::delivered`]):
-/// nobody answered the waiting prompt.
+/// permission request counts only when no prompt is waiting, a wait the
+/// screen raised included (a pending value left beside another status is
+/// stale and is replaced). A delivered event (the agent's own background
+/// result arriving as a prompt, [`HookReport::delivered`]) is ignored while
+/// the record is `AwaitingInput`, whether a hook raised the wait with a
+/// pending prompt or the screen raised it with none: nobody answered it. A
+/// weak idle (an idle the agent reports while it may still be waiting) is
+/// ignored only while a prompt is pending; with none, it ends the wait.
 ///
 /// A prompt a tool owns ends only when that tool finishes: tools run in
 /// parallel, so a `Glob`'s `PostToolUse` can land after an `AskUserQuestion`'s
@@ -530,6 +532,9 @@ fn main_turn_end_ends_the_wait(record: &SessionRecord) -> bool {
 /// still runs.
 fn leaves_pending_alone(record: &SessionRecord, report: &HookReport) -> bool {
     if spares_a_wait_not_mains(record, report) {
+        return true;
+    }
+    if record.status == SessionStatus::AwaitingInput && report.delivered {
         return true;
     }
     let Some(pending) = record.pending_input.as_ref() else {
@@ -1070,6 +1075,34 @@ mod tests {
             matches!(record.pending_input, Some(PendingInput::Question { .. })),
             "the question is no longer pending: {:?}",
             record.pending_input
+        );
+    }
+
+    /// A wait the screen raised has no pending prompt; a delivered event
+    /// still answers nobody, so it leaves the wait alone.
+    #[test]
+    fn a_delivered_event_keeps_a_screen_raised_wait() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::AwaitingInput;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        let applied = apply_body(
+            &mut record,
+            2,
+            &json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "<task-notification>\n<task-id>task-1</task-id>\n</task-notification>",
+            }),
+        );
+        assert!(
+            applied.status_change.is_none(),
+            "the delivered event moved the status: {:?}",
+            applied.status_change
+        );
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "a delivered event ended the screen-raised wait"
         );
     }
 

@@ -84,6 +84,62 @@ fn a_delivered_notice_after_leading_whitespace_spares_the_waiting_prompt() {
     assert!(report.spares_pending(), "the waiting prompt is not spared");
 }
 
+/// A poll event whose kind carries no attributes, which the CLI's own
+/// validator accepts as `<event>` or `<event/>`.
+#[test]
+fn a_delivered_bare_event_element_spares_the_waiting_prompt() {
+    for prompt in ["<event>deploy finished</event>", "<event/>", " \n<event>"] {
+        let report = map(&prompt_submit(prompt)).expect("a UserPromptSubmit maps");
+        assert!(
+            report.delivered,
+            "a delivered bare event element {prompt:?} reads as the owner's own prompt: {report:?}"
+        );
+        assert!(report.spares_pending(), "the waiting prompt is not spared");
+    }
+}
+
+/// A poll event the host declared with fields: the hook sees
+/// `[kind, at, fields].join("\n")`, with no element around it.
+#[test]
+fn a_field_declared_poll_event_spares_the_waiting_prompt() {
+    for prompt in [
+        "deploy-finished\n2026-11-21T18:00:00.000Z\nstatus: ok",
+        "  repl-status\n2026-01-01T00:00:00Z",
+    ] {
+        let report = map(&prompt_submit(prompt)).expect("a UserPromptSubmit maps");
+        assert!(
+            report.delivered,
+            "a field-declared poll event {prompt:?} reads as the owner's own prompt: {report:?}"
+        );
+        assert!(report.spares_pending(), "the waiting prompt is not spared");
+    }
+}
+
+/// A typed prompt that opens with a kebab-case word is the owner's own:
+/// its second line is no timestamp.
+#[test]
+fn a_typed_kebab_word_line_is_not_delivered() {
+    for typed in ["fix-it\nplease look again", "fix-it", "deploy\n"] {
+        let report = map(&prompt_submit(typed)).expect("a UserPromptSubmit maps");
+        assert!(
+            !report.delivered,
+            "the owner's prompt {typed:?} reads as delivered"
+        );
+    }
+}
+
+/// A typed prompt that only starts like an event element is the owner's own.
+#[test]
+fn a_typed_eventual_prompt_is_not_delivered() {
+    for typed in ["<eventual thing>", "<events>", "<event"] {
+        let report = map(&prompt_submit(typed)).expect("a UserPromptSubmit maps");
+        assert!(
+            !report.delivered,
+            "the owner's prompt {typed:?} reads as delivered"
+        );
+    }
+}
+
 /// The other side of the rule, which a fix must keep: what the owner types
 /// still ends a wait (`a_typed_prompt_still_ends_a_waiting_question` in the
 /// daemon's `hook_status`).

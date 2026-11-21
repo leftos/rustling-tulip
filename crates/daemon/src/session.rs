@@ -459,6 +459,14 @@ pub struct SessionRecord {
     /// A relaunched client keeps its id, so its unclaimed attach size
     /// replaces the one it left behind.
     pub size_client: Option<String>,
+    /// How many times [`SessionRegistry::clear_answered_prompt_if`] has
+    /// cleared this record's wait: a client's chat answer, or the status
+    /// watcher's own clear when a subagent's dialog leaves the screen. The
+    /// watcher tells a chat answer from a hook ending the wait by it moving;
+    /// its own clear runs only on a reading that shows no dialog, so it never
+    /// disarms the dialog edge. Runtime-only: neither mirrored into the
+    /// sidecar nor sent on the wire.
+    pub chat_answers: u64,
 }
 
 /// Whose hook raised a session's pending prompt, which decides what may end
@@ -1409,7 +1417,9 @@ impl SessionRegistry {
     /// record, a hook-driven record leaves `AwaitingInput` at once, with no
     /// settle window, and drops its pending input. The tests and the clear
     /// share one registry update, so a hook event cannot slip between them; a
-    /// session without hooks is left alone.
+    /// session without hooks is left alone. The same update counts the clear
+    /// in [`SessionRecord::chat_answers`], which tells the status watcher the
+    /// move was a chat answer's.
     pub fn clear_answered_prompt_if<F>(&self, id: &str, still: F)
     where
         F: FnOnce(&SessionRecord) -> bool,
@@ -1423,6 +1433,7 @@ impl SessionRegistry {
                 rec.status = SessionStatus::Idle;
             }
             rec.clear_pending();
+            rec.chat_answers = rec.chat_answers.wrapping_add(1);
             true
         });
     }
@@ -2149,6 +2160,7 @@ impl SessionRegistry {
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
+            chat_answers: 0,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -2246,6 +2258,7 @@ impl SessionRegistry {
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
+            chat_answers: 0,
         };
         push_recent_action(
             &mut record,
@@ -2320,6 +2333,7 @@ impl SessionRegistry {
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
+            chat_answers: 0,
         };
         push_recent_action(
             &mut record,
@@ -2421,6 +2435,7 @@ mod tests {
             resumed_from: Vec::new(),
             announced: false,
             listed_at: None,
+            chat_answers: 0,
         }
     }
 

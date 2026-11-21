@@ -1382,6 +1382,7 @@ fn interactive_record(
         resumed_from: new.resumed_from,
         announced: false,
         listed_at: None,
+        chat_answers: 0,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -1479,6 +1480,7 @@ fn plain_shell_record(
         resumed_from: new.resumed_from,
         announced: false,
         listed_at: None,
+        chat_answers: 0,
     };
     push_recent_action(
         &mut record,
@@ -2712,6 +2714,7 @@ impl HeadlessRecord<'_> {
             resumed_from: self.cfg.extras.resumed_from.clone(),
             announced: false,
             listed_at: None,
+            chat_answers: 0,
         }
     }
 }

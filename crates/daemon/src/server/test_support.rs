@@ -529,6 +529,7 @@ pub(crate) fn idle_record(id: &str) -> SessionRecord {
         resumed_from: Vec::new(),
         announced: false,
         listed_at: None,
+        chat_answers: 0,
     }
 }
 
