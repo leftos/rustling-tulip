@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The phone's Chat box pastes an image from the clipboard, and its Photos button sends a picture from the photo library.
 - Paths in chat answers and question cards are links that open the file, drawn in their own colour on the desktop and the phone.
 - A chat's header shows how much of the session's context is used, on the desktop and the phone, coloured as the Dashboard colours it.
+- With more than one host, the phone's session rows and Needs you cards name their host, and each host's header stays in view while its sessions scroll.
 
 ### Fixed
 

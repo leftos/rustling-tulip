@@ -66,6 +66,9 @@
 //! listing `host_layouts`: its own layout's two tabs, `Relay` (the waiting
 //! relay session, then the working one) and `Release` (the other waiting
 //! session), as groups, then `Not in a tab` holding the idle session.
+//! `phone-home-hosts` shows the same Home with a second saved host, "lab",
+//! listing one repo of fourteen sessions under it, scrolled to its end:
+//! "lab"'s header pinned over the list's top, and each row's host chip.
 //! `phone-sheet` shows the same Home with the working session's long-press
 //! sheet open over a scrim: its label, Stop and Cancel.
 //! `phone-session` shows the same Home's working session opened: its
@@ -421,6 +424,7 @@ enum View {
     FirstConnect,
     PhoneHome,
     PhoneHomeSorted,
+    PhoneHomeHosts,
     PhoneSheet,
     PhoneSession,
     PhoneSessionSheet,
@@ -442,7 +446,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 72] = [
+    const ALL: [Self; 73] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -497,6 +501,7 @@ impl View {
         Self::FirstConnect,
         Self::PhoneHome,
         Self::PhoneHomeSorted,
+        Self::PhoneHomeHosts,
         Self::PhoneSheet,
         Self::PhoneSession,
         Self::PhoneSessionSheet,
@@ -523,6 +528,7 @@ impl View {
             self,
             Self::PhoneHome
                 | Self::PhoneHomeSorted
+                | Self::PhoneHomeHosts
                 | Self::PhoneSheet
                 | Self::PhoneSession
                 | Self::PhoneSessionSheet
@@ -653,6 +659,7 @@ impl View {
             Self::FirstConnect => "first-connect",
             Self::PhoneHome => "phone-home",
             Self::PhoneHomeSorted => "phone-home-sorted",
+            Self::PhoneHomeHosts => "phone-home-hosts",
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
@@ -719,6 +726,7 @@ impl View {
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             Self::PhoneHome
             | Self::PhoneHomeSorted
+            | Self::PhoneHomeHosts
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -777,6 +785,7 @@ impl View {
             Self::Toast
             | Self::PhoneHome
             | Self::PhoneHomeSorted
+            | Self::PhoneHomeHosts
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -1076,6 +1085,7 @@ impl Shot {
             | View::FirstConnect
             | View::PhoneHome
             | View::PhoneHomeSorted
+            | View::PhoneHomeHosts
             | View::PhoneSheet
             | View::PhoneSession
             | View::PhoneSessionSheet
@@ -1139,6 +1149,7 @@ impl Shot {
             | View::UpdateHostBreaks => multi_host_ui_state(),
             View::Perf => perf_ui_state(),
             View::PhoneHomeSorted => phone_home_sorted_ui_state(),
+            View::PhoneHomeHosts => phone_home_hosts_ui_state(),
             view if view.is_phone() => phone_home_ui_state(),
             _ => return Ok(()),
         };
@@ -1268,15 +1279,32 @@ fn phone_home_sorted_ui_state() -> Value {
     state
 }
 
+/// The layout the `phone-home-hosts` shot starts from: "box", then "lab",
+/// saved.
+fn phone_home_hosts_ui_state() -> Value {
+    json!({
+        "saved_hosts": [
+            { "name": SHOT_TAILNET_HOST, "port": 8787 },
+            { "name": SHOT_LAB_HOST, "port": 8787 },
+        ],
+    })
+}
+
 /// The device tokens the window holds: none, so the `connections` shots'
 /// saved tailnet host reads as not paired, except one for "box" in the
-/// `phone-home` shot, whose phone is paired with it.
+/// `phone-home` shot, whose phone is paired with it, and one for "lab" too
+/// in the `phone-home-hosts` shot.
 fn shot_tokens(view: View) -> Arc<MemoryTokens> {
     let tokens = MemoryTokens::default();
-    if view.is_phone()
-        && let Err(err) = tokens.set(SHOT_TAILNET_HOST, "shot-token")
-    {
-        tracing::warn!("the shot's device token was not stored: {err}");
+    let hosts: &[&str] = match view {
+        View::PhoneHomeHosts => &[SHOT_TAILNET_HOST, SHOT_LAB_HOST],
+        view if view.is_phone() => &[SHOT_TAILNET_HOST],
+        _ => &[],
+    };
+    for host in hosts {
+        if let Err(err) = tokens.set(host, "shot-token") {
+            tracing::warn!("the shot's device token was not stored: {err}");
+        }
     }
     Arc::new(tokens)
 }
@@ -1522,6 +1550,19 @@ fn start_box_daemon(
     failure: &Arc<Mutex<Option<anyhow::Error>>>,
 ) -> Result<HostPair> {
     let fixture = RemoteFixture::build(view, now)?;
+    start_remote_daemon(view, now, fixture, SHOT_TAILNET_HOST, failure)
+}
+
+/// Starts a fake daemon answering as the tailnet host `host` with
+/// `fixture` in `view`, on a thread of its own, and returns the channels
+/// the window's connection to it uses.
+fn start_remote_daemon(
+    view: View,
+    now: DateTime<Utc>,
+    fixture: RemoteFixture,
+    host: &str,
+    failure: &Arc<Mutex<Option<anyhow::Error>>>,
+) -> Result<HostPair> {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let daemon = FakeDaemon {
@@ -1530,11 +1571,11 @@ fn start_box_daemon(
         now,
         failure: Arc::clone(failure),
     };
-    let target = Target::tailnet(SHOT_TAILNET_HOST, Some(8787));
+    let target = Target::tailnet(host, Some(8787));
     std::thread::Builder::new()
-        .name("fake-box-daemon".to_owned())
+        .name(format!("fake-{host}-daemon"))
         .spawn(move || daemon.run_remote(&fixture, &target, cmd_rx))
-        .context("starting the box daemon's thread")?;
+        .with_context(|| format!("starting the {host} daemon's thread"))?;
     Ok((cmd_tx, event_rx))
 }
 
@@ -1573,17 +1614,28 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         },
     );
     // The fake daemon's channels serve the first connection, and the "box"
-    // daemon's the `multi-host` shot's "box"; any other gets a pair nothing
-    // answers but its state.
+    // daemon's the `multi-host` shot's "box"; in the `phone-home-hosts`
+    // shot "box" takes the first pair and "lab" the other, whichever dials
+    // first. Any other gets a pair nothing answers but its state.
     let first = RefCell::new(Some(local));
     let remote = RefCell::new(remote);
+    let (first_host, remote_host) = if view == View::PhoneHomeHosts {
+        (Some(SHOT_TAILNET_HOST), SHOT_LAB_HOST)
+    } else {
+        (None, SHOT_TAILNET_HOST)
+    };
     let open_host: Transport = Rc::new(move |target: &Target| {
-        if let Some(pair) = first.borrow_mut().take() {
+        let named = |name: &str| {
+            target
+                .tailnet_host()
+                .is_some_and(|host| host.name() == name)
+        };
+        if first_host.is_none_or(named)
+            && let Some(pair) = first.borrow_mut().take()
+        {
             return pair;
         }
-        if target
-            .tailnet_host()
-            .is_some_and(|host| host.name() == SHOT_TAILNET_HOST)
+        if named(remote_host)
             && let Some(pair) = remote.borrow_mut().take()
         {
             return pair;
@@ -1822,7 +1874,19 @@ fn start_phone_home_shot(
     let failure = Arc::new(Mutex::new(None));
     // The phone opens no This PC connection: "box" takes the first pair.
     let remote = start_box_daemon(shot.view, now, &failure)?;
-    let deps = deps(shot.view, remote, None, &shot.ui_dir);
+    let lab = if shot.view == View::PhoneHomeHosts {
+        let fixture = RemoteFixture::phone_lab(now)?;
+        Some(start_remote_daemon(
+            shot.view,
+            now,
+            fixture,
+            SHOT_LAB_HOST,
+            &failure,
+        )?)
+    } else {
+        None
+    };
+    let deps = deps(shot.view, remote, lab, &shot.ui_dir);
     // The phone's root sweeps its copies folder as it opens: point it at the
     // shot's own folder first, never the real one.
     let copies = shot.ui_dir.join(SHOT_PHONE_COPIES);
@@ -1870,12 +1934,23 @@ async fn capture_phone_home(
 ) -> Result<()> {
     cx.background_executor().timer(LOAD_WAIT).await;
     let rows = handle.update(cx, |phone, _, cx| phone.home_row_count(cx))?;
-    if rows != PHONE_HOME_ROWS {
-        bail!("the phone-home view lists {rows} rows, not {PHONE_HOME_ROWS}");
+    let want = if shot.view == View::PhoneHomeHosts {
+        PHONE_HOME_ROWS + LAB_SESSIONS.len()
+    } else {
+        PHONE_HOME_ROWS
+    };
+    if rows != want {
+        bail!(
+            "the {} view lists {rows} rows, not {want}",
+            shot.view.name()
+        );
     }
     let header = handle.update(cx, |phone, _, cx| phone.tray_header(cx))?;
     if header.as_deref() != Some("Needs you · 1 of 2") {
         bail!("the phone-home view's tray reads {header:?}, not the first of two cards");
+    }
+    if shot.view == View::PhoneHomeHosts {
+        pin_lab_header(handle, cx).await?;
     }
     if shot.view == View::PhoneHomeSorted {
         let groups = handle.update(cx, |phone, _, cx| phone.home_group_names(cx))?;
@@ -1948,6 +2023,28 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// Scrolls the `phone-home-hosts` shot's Home to its end, which takes
+/// "lab"'s header past the list's top, and checks that header is the one
+/// pinned there and that "lab"'s rows carry its chip.
+async fn pin_lab_header(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    handle.update(cx, |phone, _, cx| {
+        let scroll = phone.home_scroll();
+        scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
+        cx.notify();
+    })?;
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    let pinned = handle.update(cx, |phone, _, cx| phone.pinned_host(cx))?;
+    if pinned.as_deref() != Some(SHOT_LAB_HOST) {
+        bail!("the phone-home-hosts view pins {pinned:?}, not {SHOT_LAB_HOST}");
+    }
+    let &(id, _) = LAB_SESSIONS.last().context("lab lists no session")?;
+    let chip = handle.update(cx, |phone, _, cx| phone.home_row_chip(id, cx))?;
+    if chip.is_none() {
+        bail!("the phone-home-hosts view draws no host chip on {id}'s row");
+    }
+    Ok(())
 }
 
 /// What the `phone-composer-edit` shot types into the composer.
@@ -2443,6 +2540,7 @@ fn drive(
         | View::Toast
         | View::PhoneHome
         | View::PhoneHomeSorted
+        | View::PhoneHomeHosts
         | View::PhoneSheet
         | View::PhoneSession
         | View::PhoneSessionSheet
@@ -3615,7 +3713,58 @@ impl RemoteFixture {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { repos, sessions })
     }
+
+    /// What the `phone-home-hosts` shot's "lab" lists: one repo and its
+    /// [`LAB_SESSIONS`], the first working and the rest idle, enough rows
+    /// that Home's list scrolls far past "lab"'s header.
+    fn phone_lab(now: DateTime<Utc>) -> Result<Self> {
+        let repos = parse_message(json!({
+            "type": "repos",
+            "repos": [
+                { "id": LAB_REPO, "name": LAB_REPO, "path": LAB_REPO_PATH, "default_branch": "main" },
+            ],
+        }))
+        .context("the phone-home-hosts fixture's repos")?;
+        let sessions = LAB_SESSIONS
+            .iter()
+            .zip(0..)
+            .map(|(&(id, label), at)| {
+                Row {
+                    id,
+                    label,
+                    status: if at == 0 { "working" } else { "idle" },
+                    members: json!([member(LAB_REPO, "main", LAB_REPO_PATH)]),
+                    minutes: 3 + at,
+                    extra: json!({}),
+                }
+                .snapshot(now)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { repos, sessions })
+    }
 }
+
+/// The repo the `phone-home-hosts` shot's "lab" lists.
+const LAB_REPO: &str = "tower";
+const LAB_REPO_PATH: &str = r"D:\src\tower";
+/// The sessions the `phone-home-hosts` shot's "lab" lists, as their ids and
+/// labels.
+const LAB_SESSIONS: [(&str, &str); 14] = [
+    ("l-approach", "Approach sequencing"),
+    ("l-arrivals", "Arrival board refresh"),
+    ("l-atis", "ATIS text parser"),
+    ("l-coords", "Coordinate grid fixes"),
+    ("l-depart", "Departure slot planner"),
+    ("l-flow", "Flow control limits"),
+    ("l-gates", "Gate assignment rules"),
+    ("l-handoff", "Sector handoff timing"),
+    ("l-holds", "Holding pattern drawing"),
+    ("l-metar", "METAR decoder update"),
+    ("l-notam", "NOTAM feed retry"),
+    ("l-radar", "Radar sweep smoothing"),
+    ("l-runway", "Runway config switch"),
+    ("l-squawk", "Squawk code allocator"),
+];
 
 /// The second repo the `phone-home` shot's "box" lists.
 const PHONE_REPO: &str = "harbour";

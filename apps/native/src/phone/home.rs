@@ -92,6 +92,27 @@ impl Home {
         self.rows()
             .find(|row| row.host == *host && row.session_id == session_id)
     }
+
+    /// The name the chip on `host`'s rows and tray cards shows: its
+    /// header's label, while host headers show; `None` with one host.
+    pub(crate) fn host_chip(&self, host: &HostKey) -> Option<&str> {
+        if !self.host_headers {
+            return None;
+        }
+        self.hosts
+            .iter()
+            .find(|listed| listed.host == *host)
+            .map(|listed| listed.label.as_str())
+    }
+}
+
+/// Which host's header is pinned over the list's top: the last one whose
+/// top, in `header_tops` (each host header's top in the scrolled content,
+/// in host order), lies above how far the content is `scrolled`; `None`
+/// while the first header has not left the top. An empty slice, as one
+/// host gives, pins nothing.
+pub(crate) fn pinned_host(header_tops: &[f32], scrolled: f32) -> Option<usize> {
+    header_tops.iter().rposition(|&top| top < scrolled)
 }
 
 /// Home over `model`'s host groups in their manual order.
@@ -505,6 +526,58 @@ mod tests {
         let home = from_sidebar(&quiet);
         assert!(home.host_headers, "a saved host that sent no list counts");
         assert!(home.hosts[1].groups.is_empty(), "and lists no row");
+    }
+
+    #[test]
+    fn one_host_gives_no_host_chip() {
+        let home = from_sidebar(&model(&[BOX], &working_and_idle()));
+        assert_eq!(home.host_chip(&key(BOX)), None);
+    }
+
+    #[test]
+    fn two_hosts_give_each_row_its_hosts_label_as_chip() {
+        let home = from_sidebar(&model(&[BOX, DEN], &working_and_idle()));
+        for host in &home.hosts {
+            assert_eq!(
+                home.host_chip(&host.host),
+                Some(host.label.as_str()),
+                "{:?}'s chip is its header's label",
+                host.host
+            );
+        }
+        assert_eq!(home.hosts.len(), 2, "both hosts are listed");
+    }
+
+    #[test]
+    fn no_header_is_pinned_without_headers() {
+        assert_eq!(pinned_host(&[], 0.0), None);
+        assert_eq!(pinned_host(&[], 120.0), None, "however far it scrolls");
+    }
+
+    #[test]
+    fn no_header_is_pinned_at_the_top() {
+        assert_eq!(pinned_host(&[0.0, 500.0], 0.0), None);
+    }
+
+    #[test]
+    fn the_first_header_pins_once_it_leaves_the_top() {
+        assert_eq!(pinned_host(&[0.0, 500.0], 0.5), Some(0));
+        assert_eq!(pinned_host(&[0.0, 500.0], 499.0), Some(0));
+    }
+
+    #[test]
+    fn the_next_header_at_the_top_is_not_pinned_yet() {
+        assert_eq!(pinned_host(&[0.0, 500.0], 500.0), Some(0));
+    }
+
+    #[test]
+    fn the_next_header_pins_once_it_passes_the_top() {
+        assert_eq!(pinned_host(&[0.0, 500.0], 501.0), Some(1));
+    }
+
+    #[test]
+    fn the_last_header_stays_pinned_past_the_end() {
+        assert_eq!(pinned_host(&[0.0, 500.0], 10_000.0), Some(1));
     }
 
     #[test]

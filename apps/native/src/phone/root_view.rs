@@ -119,6 +119,8 @@ pub struct PhoneRoot {
     pub(super) terminal_quick: bool,
     /// Home's Needs you tray: the card it shows and the swipe in progress.
     pub(super) tray: super::tray::Tray,
+    /// Home's list scroll, read for the host header pinned over its top.
+    pub(super) home_scroll: gpui::ScrollHandle,
     /// The sheet a long press on a Home row opened, while it is open.
     sheet: Option<Sheet>,
     /// Whether Home's sort sheet is open.
@@ -262,6 +264,7 @@ impl PhoneRoot {
             key_bar: Rc::new(RefCell::new(KeyBar::new())),
             terminal_quick: false,
             tray: super::tray::Tray::default(),
+            home_scroll: gpui::ScrollHandle::new(),
             sheet: None,
             sort_menu: false,
             settings: None,

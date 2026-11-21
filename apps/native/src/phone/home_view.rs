@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use super::PhoneRoot;
-use super::home::{HomeGroup, HomeHost, HomeRow, Tone};
+use super::home::{Home, HomeGroup, HomeHost, HomeRow, Tone, pinned_host};
 use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
 use super::root_view::LIST_PANE_WIDTH;
@@ -42,6 +42,8 @@ const DOT: f32 = 8.0;
 pub(super) const SIDE_PADDING: f32 = 16.0;
 /// A not-paired host's header button.
 const PAIR_LABEL: &str = "Pair";
+/// The widest a host chip draws before its name is cut.
+const HOST_CHIP_MAX_WIDTH: f32 = 120.0;
 
 /// The width, in points, of the accent edge on the selected row.
 const SELECTED_EDGE_WIDTH: f32 = 3.0;
@@ -79,23 +81,56 @@ fn line(id: &str, text: String) -> Div {
     truncating(id, StyledText::new(text)).driver_id(move || tag)
 }
 
-/// The card's text: the session, the prompt while the card says it, its
-/// command, how long it has waited and, after a refused answer, why.
-fn card_text(facts: &CardFacts, prompt: bool, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
+/// The chip naming a row's or a card's host while more than one host is
+/// listed: `label` small and muted in a thin rounded outline, cut with an
+/// ellipsis past its widest or where its line runs out, tagged `id`.
+fn host_chip(id: String, label: &str, t: &UiTheme, cx: &App) -> Div {
+    div()
+        .driver_id(move || id)
+        .flex_shrink(1.0)
+        .min_w_0()
+        .max_w(px(HOST_CHIP_MAX_WIDTH))
+        .px(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(t.line))
+        .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
+        .truncate()
+        .child(label.to_owned())
+}
+
+/// The card's text: the session and, while more than one host is listed,
+/// its host's `chip`, the prompt while the card says it, its command, how
+/// long it has waited and, after a refused answer, why.
+fn card_text(
+    facts: &CardFacts,
+    chip: Option<&str>,
+    prompt: bool,
+    t: &UiTheme,
+    cx: &Context<PhoneRoot>,
+) -> Div {
     let card = &facts.card;
     let small = ui_px(cx, STATUS_TEXT_SIZE);
+    // The label gives way last: it keeps its width up to the whole line,
+    // the container name shrinking first, then the chip.
     let session = div()
         .flex()
+        .items_center()
         .gap(px(6.0))
+        .overflow_hidden()
         .child(
             line("phone-tray-label", card.label.clone())
+                .flex_shrink_0()
+                .max_w_full()
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD)),
         )
         .child(
             line("phone-tray-container", card.container_name.clone())
                 .flex_1()
                 .text_color(gpui::rgb(t.muted)),
-        );
+        )
+        .children(chip.map(|label| host_chip("phone-tray-host".to_owned(), label, t, cx)));
     let command = card.command.clone().map(|command| {
         line("phone-tray-command", command)
             .text_size(small)
@@ -199,6 +234,76 @@ fn host_tag(host: &HostKey) -> &str {
     host.wire().unwrap_or("local")
 }
 
+/// Which of Home's list children are host headers, in host order, as
+/// `home_list` builds them: the tray first while it is shown, then per host
+/// its header, its note while it has one and a child per group. Empty
+/// while no host has a header.
+fn header_indexes(home: &Home, tray: bool) -> Vec<usize> {
+    if !home.host_headers {
+        return Vec::new();
+    }
+    let mut at = usize::from(tray);
+    home.hosts
+        .iter()
+        .map(|host| {
+            let header = at;
+            at += 1 + usize::from(host.note.is_some()) + host.groups.len();
+            header
+        })
+        .collect()
+}
+
+/// A host header's head row: its state's dot, its name and, while not
+/// online, where its connection stands, the status tagged
+/// `phone-home-{kind}-status-{tag}`; the header adds its buttons after it.
+fn host_head(host: &HomeHost, state: HostHeaderState, kind: &str, t: &UiTheme, cx: &App) -> Div {
+    let status = state.label().map(|text| {
+        let status_id = format!("phone-home-{kind}-status-{}", host_tag(&host.host));
+        div()
+            .driver_id(|| status_id)
+            .flex_none()
+            .text_color(gpui::rgb(t.muted))
+            .child(text)
+    });
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_h(px(TOUCH_TARGET))
+        .px(px(SIDE_PADDING))
+        .child(dot(state.dot(t)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(host.label.clone()),
+        )
+        .children(status)
+}
+
+/// A row's second line: its status word in its tone's colour, then, while
+/// more than one host is listed, its host's `chip`, tagged by the row's
+/// `leaf`.
+fn status_line(row: &HomeRow, leaf: &str, chip: Option<&str>, t: &UiTheme, cx: &App) -> Div {
+    let chip = chip.map(|label| host_chip(format!("phone-home-row-host-{leaf}"), label, t, cx));
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+                .text_color(gpui::rgb(tone_color(row.tone, t)))
+                .child(row.status),
+        )
+        .children(chip)
+}
+
 /// `group`'s heading: its name and, while any of its sessions need the
 /// owner, an amber wash, a dot and their count.
 fn group_heading(group: &HomeGroup, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div {
@@ -282,10 +387,13 @@ fn empty_line(t: &UiTheme) -> Div {
 impl PhoneRoot {
     /// Home: each open host's groups, under a header per host while more
     /// than one is open, scrolling within the height it is given.
-    pub(super) fn home_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// Beside it, the header of the host scrolled past the list's top,
+    /// drawn over that top while more than one host is listed.
+    pub(super) fn home_list(&self, cx: &mut Context<Self>) -> (Stateful<Div>, Option<Div>) {
         let home = self.home(cx);
         let t = theme(cx);
-        let mut children: Vec<Div> = self.needs_you_tray(cx).into_iter().collect();
+        let mut children: Vec<Div> = self.needs_you_tray(&home, cx).into_iter().collect();
+        let tray = !children.is_empty();
         for host in &home.hosts {
             if home.host_headers {
                 let (state, parts) = {
@@ -300,15 +408,17 @@ impl PhoneRoot {
             if let Some(note) = host.note {
                 children.push(note_line(&host.host, note, &t, cx));
             }
+            let chip = home.host_chip(&host.host);
             for group in &host.groups {
                 let selected = self.selected_in(group);
-                children.push(Self::home_group(group, selected.as_deref(), &t, cx));
+                children.push(Self::home_group(group, selected.as_deref(), chip, &t, cx));
             }
         }
         if home.rows().next().is_none() {
             children.push(empty_line(&t));
         }
-        div()
+        let pinned = self.pinned_header(&home, tray, &t, cx);
+        let list = div()
             .id("phone-home")
             .driver_id(|| "phone-home".to_owned())
             .flex_1()
@@ -319,13 +429,85 @@ impl PhoneRoot {
             .overflow_y_scroll()
             // A sideways swipe on the tray's card must not scroll the list.
             .restrict_scroll_to_axis()
-            .children(children)
+            .track_scroll(&self.home_scroll)
+            // The handle holds the last frame's place: draw again with it.
+            .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| cx.notify()))
+            .children(children);
+        (list, pinned)
+    }
+
+    /// The index in `home.hosts` of the host whose header is pinned over
+    /// the list's top, as the list's last frame placed its headers; `tray`
+    /// says whether the tray heads the list.
+    fn pinned_index(&self, home: &Home, tray: bool) -> Option<usize> {
+        let list_top = self.home_scroll.bounds().top();
+        let tops: Vec<f32> = header_indexes(home, tray)
+            .into_iter()
+            .map_while(|ix| self.home_scroll.bounds_for_item(ix))
+            .map(|bounds| f32::from(bounds.top() - list_top))
+            .collect();
+        pinned_host(&tops, -f32::from(self.home_scroll.offset().y))
+    }
+
+    /// The pinned host's header over the list's top: its head row alone,
+    /// on the header's ground, taking taps without acting on them; `None`
+    /// while no header has scrolled past the top.
+    fn pinned_header(
+        &self,
+        home: &Home,
+        tray: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let host = home.hosts.get(self.pinned_index(home, tray)?)?;
+        let state = self.root.read(cx).host_header_state(&host.host);
+        let id = format!("phone-home-pinned-{}", host_tag(&host.host));
+        Some(
+            div()
+                .driver_id(|| id)
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .bg(gpui::rgb(t.raised))
+                // A tap stops here; a pan from it still scrolls the list.
+                .block_mouse_except_scroll()
+                .child(host_head(host, state, "pinned", t, cx)),
+        )
+    }
+
+    /// The tag of the host whose header Home pins over its list's top now
+    /// ([`HostKey::wire`], or `local`), as the list's last frame placed it;
+    /// `None` while nothing is pinned.
+    #[must_use]
+    pub fn pinned_host(&self, cx: &App) -> Option<String> {
+        let home = self.home(cx);
+        let tray = self.tray_now(cx).is_some();
+        let host = home.hosts.get(self.pinned_index(&home, tray)?)?;
+        Some(host_tag(&host.host).to_owned())
+    }
+
+    /// The host chip Home draws on session `session_id`'s row now, the
+    /// first row listing that id; `None` while it draws none.
+    #[must_use]
+    pub fn home_row_chip(&self, session_id: &str, cx: &App) -> Option<String> {
+        let home = self.home(cx);
+        let row = home.rows().find(|row| row.session_id == session_id)?;
+        home.host_chip(&row.host).map(str::to_owned)
+    }
+
+    /// Home's list scroll, which a shot sets to draw the list scrolled.
+    #[must_use]
+    pub fn home_scroll(&self) -> ScrollHandle {
+        self.home_scroll.clone()
     }
 
     /// The Needs you tray: the card the tray shows, drawn off its place by
-    /// the swipe in progress; `None` while no session needs the owner.
-    fn needs_you_tray(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// the swipe in progress, its host's chip read from `home`; `None`
+    /// while no session needs the owner.
+    fn needs_you_tray(&self, home: &Home, cx: &mut Context<Self>) -> Option<Div> {
         let (arranged, facts) = self.tray_now(cx)?;
+        let chip = home.host_chip(&facts.card.key.host);
         let t = theme(cx);
         let card = div()
             .driver_id(|| "phone-tray-card".to_owned())
@@ -342,7 +524,7 @@ impl PhoneRoot {
             .border_color(gpui::rgb(t.asking))
             .bg(gpui::rgba(t.ask_wash))
             .child(tray_header(&arranged, &t, cx))
-            .child(self.tray_body(&facts, &t, cx))
+            .child(self.tray_body(&facts, chip, &t, cx))
             .child(Self::tray_buttons(&facts.card, cx));
         Some(
             div()
@@ -389,7 +571,13 @@ impl PhoneRoot {
     /// rows of a card the tray can answer, or every question and option of
     /// one it cannot. Its scroll is the shown card's own, and a vertical
     /// pan in it moves it alone while it has room.
-    fn tray_body(&self, facts: &CardFacts, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn tray_body(
+        &self,
+        facts: &CardFacts,
+        chip: Option<&str>,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let card = &facts.card;
         let listed = matches!(card.buttons, Buttons::Open) && !card.questions.is_empty();
         let handle = self.tray.body_scroll(&card.key);
@@ -416,7 +604,7 @@ impl PhoneRoot {
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(card_text(facts, !listed, t, cx));
+            .child(card_text(facts, chip, !listed, t, cx));
         if listed {
             body.children(chat_cards::tray_questions(
                 ui_text_size(cx),
@@ -569,14 +757,6 @@ impl PhoneRoot {
         let tag = host_tag(&host.host);
         let id = format!("phone-home-host-{tag}");
         let name = saved_name(&host.host);
-        let status = state.label().map(|text| {
-            let status_id = format!("phone-home-host-status-{tag}");
-            div()
-                .driver_id(|| status_id)
-                .flex_none()
-                .text_color(gpui::rgb(t.muted))
-                .child(text)
-        });
         let pair = (state == HostHeaderState::NotPaired).then(|| {
             let key = host.host.clone();
             phone_button(
@@ -596,22 +776,7 @@ impl PhoneRoot {
                 .flex_none()
                 .min_h(px(TOUCH_TARGET))
         });
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .min_h(px(TOUCH_TARGET))
-            .px(px(SIDE_PADDING))
-            .child(dot(state.dot(t)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                    .child(host.label.clone()),
-            )
-            .children(status)
+        let head = host_head(host, state, "host", t, cx)
             .children(pair)
             .children(redial);
         let mut extra = div()
@@ -657,6 +822,7 @@ impl PhoneRoot {
     fn home_group(
         group: &HomeGroup,
         selected: Option<&str>,
+        chip: Option<&str>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -671,7 +837,7 @@ impl PhoneRoot {
                 body = body.child(hairline(t));
             }
             let chosen = selected == Some(row.session_id.as_str());
-            body = body.child(Self::session_row(row, chosen, t, cx));
+            body = body.child(Self::session_row(row, chosen, chip, t, cx));
         }
         body
     }
@@ -815,6 +981,7 @@ impl PhoneRoot {
     fn session_row(
         row: &HomeRow,
         selected: bool,
+        chip: Option<&str>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -875,12 +1042,7 @@ impl PhoneRoot {
                             .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
                             .child(row.label.clone()),
                     )
-                    .child(
-                        div()
-                            .text_size(ui_px(cx, STATUS_TEXT_SIZE))
-                            .text_color(gpui::rgb(color))
-                            .child(row.status),
-                    ),
+                    .child(status_line(row, &leaf, chip, t, cx)),
             )
             .child(
                 div()

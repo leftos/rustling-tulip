@@ -9,8 +9,8 @@ use crate::support;
 use chrono::{DateTime, TimeDelta, Utc};
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    Bounds, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
-    point, px,
+    Bounds, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext,
+    TouchPhase, point, px,
 };
 use protocol::{
     ClientMessage, ContainerRef, DEVICE_NOT_APPROVED, DaemonMessage, FEATURE_HOST_LAYOUTS,
@@ -1785,4 +1785,252 @@ fn desktop_tabs_asks_a_host_listing_host_layouts_and_groups_its_rows_by_tab(
         drawn(&mut h, &layout_note(&den)),
         "the other host keeps its note"
     );
+}
+
+/// The selector of the host chip on `target`'s row for session `id`.
+fn row_chip(target: &Target, id: &str) -> String {
+    format!("phone-home-row-host-{}::{id}", wire(target))
+}
+
+/// The selector of `target`'s header pinned over the list's top.
+fn pinned_selector(target: &Target) -> String {
+    format!("phone-home-pinned-{}", wire(target))
+}
+
+/// The tag of the host whose header Home pins over its list now.
+fn pinned(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.run_until_parked();
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).pinned_host(cx))
+    })
+}
+
+/// The ids of the idle sessions that make a host's list run past the
+/// list's room.
+fn filler_ids() -> Vec<String> {
+    (0..30).map(|n| format!("f{n:02}")).collect()
+}
+
+/// Both saved hosts open, each listing [`listed`] and an idle session in
+/// r1 per [`filler_ids`].
+fn two_long_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = two_host_phone(cx, dir);
+    for target in [saved_remote(), den()] {
+        open_host(&mut h, &target);
+        let mut sessions = listed();
+        sessions.extend(
+            filler_ids()
+                .iter()
+                .map(|id| session(id).in_repo("r1").status("idle").build()),
+        );
+        h.host(&target).send(DaemonMessage::Sessions { sessions });
+    }
+    h.cx.run_until_parked();
+    h
+}
+
+/// Scrolls Home's list down by `dy` (up for a negative one) with one pan of
+/// the list's own scroll events, as [`flick`] pans the tray's card.
+fn scroll_list(h: &mut Harness<'_>, dy: Pixels) {
+    let at = h.center("phone-home");
+    scroll_list_at(h, at, dy);
+}
+
+/// [`scroll_list`] with the pan at `at`.
+fn scroll_list_at(h: &mut Harness<'_>, at: Point<Pixels>, dy: Pixels) {
+    let pan = |delta: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), delta)),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: ScrollSource::Touch,
+    };
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    h.cx.simulate_event(pan(-dy, TouchPhase::Moved));
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_pan_from_the_pinned_header_still_scrolls_the_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    scroll_list(&mut h, px(200.0));
+    let header = pinned_selector(&saved_remote());
+    assert!(drawn(&mut h, &header), "the first host's header is pinned");
+    let target = row(&saved_remote(), "f20");
+    let before = h.bounds(&target).top();
+    let at = h.center(&header);
+
+    scroll_list_at(&mut h, at, px(100.0));
+
+    assert_eq!(
+        h.bounds(&target).top(),
+        before - px(100.0),
+        "the pan from the pinned strip scrolled the list"
+    );
+}
+
+#[gpui::test]
+fn a_long_tray_label_keeps_its_width_beside_the_host_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    let mut long = waiting("c", 2, question(&["main", "dev"]));
+    long.label = "Release plan check across every saved host before the cut, then tag it".into();
+    send_waits(&mut h, vec![long]);
+    assert!(drawn(&mut h, "phone-tray-host"), "the card names its host");
+
+    let card = h.bounds("phone-tray-card");
+    let label = h.bounds("phone-tray-label");
+    // The card's 12 pt padding and 1 pt border either side.
+    let line_right = card.right() - px(13.0);
+    assert!(
+        (label.left() - (card.left() + px(13.0))).abs() < px(0.5),
+        "the label starts the line: {label:?} in {card:?}"
+    );
+    assert!(
+        (label.right() - line_right).abs() < px(0.5),
+        "a label longer than the line keeps the whole line: {label:?} in {card:?}"
+    );
+    assert!(
+        h.bounds("phone-tray-host").left() >= label.right(),
+        "the chip gives way to the label"
+    );
+
+    let mut short = waiting("c", 2, question(&["main", "dev"]));
+    short.label = "Cleanup".into();
+    send_waits(&mut h, vec![short]);
+    let label = h.bounds("phone-tray-label");
+    let chip = h.bounds("phone-tray-host");
+    assert!(chip.left() >= label.right(), "the chip follows the label");
+    assert!(
+        chip.right() <= card.right() - px(13.0) + px(0.5),
+        "the chip is no wider than the line leaves it: {chip:?} in {card:?}"
+    );
+}
+
+#[gpui::test]
+fn two_hosts_rows_and_tray_cards_show_the_host_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_host_phone(cx, &dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    send_waits(&mut h, vec![waiting("c", 2, question(&["main", "dev"]))]);
+
+    for target in [saved_remote(), den()] {
+        for id in IDS {
+            let chip = row_chip(&target, id);
+            assert!(drawn(&mut h, &chip), "{chip} is drawn");
+            let chevron = format!("{}-chevron", row(&target, id));
+            assert!(
+                h.bounds(&chip).right() <= h.bounds(&chevron).left(),
+                "{chip} leaves the chevron its place"
+            );
+        }
+    }
+    assert_eq!(header(&mut h).as_deref(), Some("Needs you · 1 of 1"));
+    assert!(drawn(&mut h, "phone-tray-host"), "the card names its host");
+}
+
+#[gpui::test]
+fn one_host_shows_no_host_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    send_waits(&mut h, vec![waiting("c", 2, question(&["main", "dev"]))]);
+
+    for id in IDS {
+        assert!(
+            drawn(&mut h, &row(&saved_remote(), id)),
+            "{id}'s row is drawn"
+        );
+        let chip = row_chip(&saved_remote(), id);
+        assert!(!drawn(&mut h, &chip), "{chip} is not drawn");
+    }
+    assert_eq!(header(&mut h).as_deref(), Some("Needs you · 1 of 1"));
+    assert!(!drawn(&mut h, "phone-tray-host"), "the card names no host");
+}
+
+#[gpui::test]
+fn the_scrolled_past_host_header_is_pinned_at_the_list_top(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    let (first, second) = (saved_remote(), den());
+    let list_top = h.bounds("phone-home").top();
+    let second_top = h
+        .bounds(&format!("phone-home-host-{}", wire(&second)))
+        .top()
+        - list_top;
+    assert!(
+        second_top > px(500.0),
+        "the second host's header starts below the room: {second_top:?}"
+    );
+
+    assert_eq!(pinned(&mut h), None, "nothing is pinned at rest");
+    assert!(!drawn(&mut h, &pinned_selector(&first)));
+    assert!(!drawn(&mut h, &pinned_selector(&second)));
+
+    scroll_list(&mut h, px(60.0));
+
+    assert_eq!(pinned(&mut h), Some(wire(&first)), "the first host pins");
+    assert!(drawn(&mut h, &pinned_selector(&first)));
+    assert!(!drawn(&mut h, &pinned_selector(&second)));
+    assert_eq!(
+        h.bounds(&pinned_selector(&first)).top(),
+        h.bounds("phone-home").top(),
+        "at the list's top"
+    );
+
+    scroll_list(&mut h, second_top - px(70.0));
+
+    assert_eq!(
+        pinned(&mut h),
+        Some(wire(&first)),
+        "the first host stays pinned while the second's header is below the top"
+    );
+
+    scroll_list(&mut h, px(30.0));
+
+    assert_eq!(pinned(&mut h), Some(wire(&second)), "the second host pins");
+    assert!(drawn(&mut h, &pinned_selector(&second)));
+    assert!(!drawn(&mut h, &pinned_selector(&first)));
+    assert_eq!(
+        h.bounds(&pinned_selector(&second)).top(),
+        h.bounds("phone-home").top(),
+        "at the list's top"
+    );
+
+    scroll_list(&mut h, px(-10_000.0));
+
+    assert_eq!(pinned(&mut h), None, "back at the top nothing is pinned");
+    assert!(!drawn(&mut h, &pinned_selector(&first)));
+    assert!(!drawn(&mut h, &pinned_selector(&second)));
+}
+
+#[gpui::test]
+fn a_tap_on_the_pinned_header_opens_no_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_long_hosts(cx, &dir);
+    scroll_list(&mut h, px(200.0));
+    let header = pinned_selector(&saved_remote());
+    assert!(drawn(&mut h, &header), "the first host's header is pinned");
+    let at = h.center(&header);
+    let ids: Vec<String> = IDS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .chain(filler_ids())
+        .collect();
+    assert!(
+        ids.iter()
+            .any(|id| h.bounds(&row(&saved_remote(), id)).contains(&at)),
+        "a row lies under the pinned header"
+    );
+
+    h.tap_on(&header);
+
+    assert_eq!(shown(&mut h), None, "the tap opens no session");
 }

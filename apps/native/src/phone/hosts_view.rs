@@ -501,7 +501,7 @@ impl PhoneRoot {
     /// Home while a saved host is open: under the header with its sort and
     /// `Settings` buttons, the session list filling the height.
     pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
-        let panel = self.home_list(cx);
+        let (panel, pinned) = self.home_list(cx);
         let t = theme(cx);
         let header = Self::home_header_row(true, &t, cx);
         let tap_lines = self.tap_lines(&t);
@@ -519,7 +519,18 @@ impl PhoneRoot {
             .flex_col()
             .child(header)
             .children(over)
-            .child(panel)
+            .child(
+                // No padding, so the pinned header sits on the list's top.
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(panel)
+                    .children(pinned),
+            )
     }
 
     /// The tap's line: what the phone is opening, or why it could not open
