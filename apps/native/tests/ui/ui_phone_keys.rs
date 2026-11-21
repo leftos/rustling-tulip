@@ -1188,6 +1188,166 @@ fn a_lifted_key_row_is_dimmed_and_its_slot_drawn(cx: &mut TestAppContext) {
     assert!(!drawn(&mut h, "phone-drag-slot"), "and the slot line");
 }
 
+/// Delivers one frame to the window, as the platform's frame source would,
+/// then lets the views settle; how many next-frame callbacks it ran.
+fn next_frame(h: &mut Harness<'_>) -> usize {
+    let ran = h.cx.update(gpui::Window::simulate_next_frame);
+    h.cx.run_until_parked();
+    ran
+}
+
+/// Delivers frames until what `selector` tags stops moving; how many frames
+/// moved it.
+fn frames_until_still(h: &mut Harness<'_>, selector: &str) -> usize {
+    let mut moved = 0;
+    while moved < 400 {
+        let top = h.bounds(selector).top();
+        next_frame(h);
+        if h.bounds(selector).top() == top {
+            break;
+        }
+        moved += 1;
+    }
+    assert!(moved < 400, "{selector} still moves after 400 frames");
+    moved
+}
+
+/// A finger held on what `selector` tags past the long-press time, which
+/// lifts its row.
+fn lift(h: &mut Harness<'_>, selector: &str) {
+    let at = h.center(selector);
+    h.touch(TouchPhase::Started, at);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+}
+
+/// Window point 10 pt above the Settings body's visible bottom, inside its
+/// bottom zone.
+fn in_the_bottom_zone(h: &mut Harness<'_>) -> Point<Pixels> {
+    let body = h.bounds("phone-settings-body");
+    point(body.center().x, body.bottom() - px(10.0))
+}
+
+#[gpui::test]
+fn a_key_dragged_to_the_bottom_edge_scrolls_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+    let list_top = h.bounds("phone-keys-list").top();
+
+    lift(&mut h, "phone-keys-row-0");
+    let held = in_the_bottom_zone(&mut h);
+    h.touch(TouchPhase::Moved, held);
+    let moved = frames_until_still(&mut h, "phone-keys-list");
+
+    assert!(
+        moved > 1,
+        "a finger held in the bottom zone scrolls the page frame after frame"
+    );
+    assert!(h.bounds("phone-keys-list").top() < list_top);
+    assert!(
+        h.bounds("phone-keys-restore").bottom() <= h.bounds("phone-settings-body").bottom(),
+        "down to the page's last row"
+    );
+    assert_eq!(
+        next_frame(&mut h),
+        0,
+        "at the page's end it asks for no more frames"
+    );
+
+    let row = h.bounds(&format!("phone-keys-row-{}", last_default_cell()));
+    let last = point(row.center().x, row.bottom() - px(6.0));
+    h.touch(TouchPhase::Moved, last);
+    h.touch(TouchPhase::Ended, last);
+
+    assert_eq!(
+        saved_ids(&dir).last().map(String::as_str),
+        Some("esc"),
+        "the first key dropped on the last row, scrolled into reach, lands last"
+    );
+    let top = h.bounds("phone-keys-list").top();
+    let position = h.bounds("phone-settings-body").center();
+    h.cx.simulate_event(ScrollEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-200.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.bounds("phone-keys-list").top(),
+        top,
+        "the page had scrolled to its end: there is no further to go"
+    );
+}
+
+#[gpui::test]
+fn the_page_stops_scrolling_when_the_finger_leaves_the_zone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+    let list_top = h.bounds("phone-keys-list").top();
+
+    lift(&mut h, "phone-keys-row-0");
+    let held = in_the_bottom_zone(&mut h);
+    h.touch(TouchPhase::Moved, held);
+    for _ in 0..3 {
+        next_frame(&mut h);
+    }
+    let scrolled = h.bounds("phone-keys-list").top();
+    assert!(scrolled < list_top, "the bottom zone scrolls the page");
+
+    let middle = h.bounds("phone-settings-body").center();
+    h.touch(TouchPhase::Moved, middle);
+    next_frame(&mut h);
+    assert_eq!(
+        h.bounds("phone-keys-list").top(),
+        scrolled,
+        "the frame after the finger left the zone moves nothing"
+    );
+    assert_eq!(next_frame(&mut h), 0, "and no further frame is asked for");
+
+    h.touch(TouchPhase::Cancelled, middle);
+    assert!(
+        saved_ui(&dir).get("phone_keys").is_none(),
+        "a cancelled drag saves nothing"
+    );
+}
+
+#[gpui::test]
+fn a_press_drag_left_by_saving_the_editor_scrolls_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_keys(&mut h);
+    h.click_on("phone-keys-row-0");
+
+    let from = h.center("phone-key-editor-step-0-handle");
+    h.touch(TouchPhase::Started, from);
+    let held = in_the_bottom_zone(&mut h);
+    h.touch(TouchPhase::Moved, held);
+    h.keys("enter");
+    assert!(
+        drawn(&mut h, "phone-keys-list"),
+        "Return saved the editor and the Keys page shows"
+    );
+
+    let top = h.bounds("phone-keys-list").top();
+    for _ in 0..3 {
+        next_frame(&mut h);
+    }
+    assert_eq!(
+        h.bounds("phone-keys-list").top(),
+        top,
+        "the press list is no longer drawn, so the held finger scrolls nothing"
+    );
+    assert_eq!(next_frame(&mut h), 0, "and no frame is asked for");
+
+    h.touch(TouchPhase::Cancelled, held);
+}
+
 #[gpui::test]
 fn a_protected_key_row_has_no_chevron(cx: &mut TestAppContext) {
     let dir = TestDir::new();

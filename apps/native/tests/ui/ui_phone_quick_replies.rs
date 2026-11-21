@@ -835,6 +835,61 @@ fn a_hold_then_pan_on_a_section_label_scrolls_the_page(cx: &mut TestAppContext) 
     );
 }
 
+/// Delivers frames to the window, as the platform's frame source would,
+/// until what `selector` tags stops moving; how many frames moved it.
+fn frames_until_still(h: &mut Harness<'_>, selector: &str) -> usize {
+    let mut moved = 0;
+    while moved < 400 {
+        let top = h.bounds(selector).top();
+        h.cx.update(gpui::Window::simulate_next_frame);
+        h.cx.run_until_parked();
+        if h.bounds(selector).top() == top {
+            break;
+        }
+        moved += 1;
+    }
+    assert!(moved < 400, "{selector} still moves after 400 frames");
+    moved
+}
+
+#[gpui::test]
+fn a_group_dragged_to_the_bottom_edge_scrolls_the_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "phone_agent_replies": (0..12)
+            .map(|n| json!({ "title": format!("g{n}"), "replies": ["x"] }))
+            .collect::<Vec<_>>(),
+        "phone_shell_replies": (0..12)
+            .map(|n| json!({ "title": format!("s{n}"), "replies": ["x"] }))
+            .collect::<Vec<_>>(),
+    });
+    let mut h = phone_saved(cx, &dir, &ui);
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    open_replies(&mut h);
+    let groups_top = h.bounds("phone-replies-agent-groups").top();
+
+    let from = h.center("phone-replies-agent-group-0");
+    h.touch(TouchPhase::Started, from);
+    h.advance(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+    let body = h.bounds("phone-settings-body");
+    let held = point(body.center().x, body.bottom() - px(10.0));
+    h.touch(TouchPhase::Moved, held);
+    let moved = frames_until_still(&mut h, "phone-replies-agent-groups");
+
+    assert!(
+        moved > 1,
+        "a row held in the bottom zone scrolls the page frame after frame"
+    );
+    assert!(h.bounds("phone-replies-agent-groups").top() < groups_top);
+
+    h.touch(TouchPhase::Cancelled, held);
+    assert_eq!(
+        saved_ui(&dir)["phone_agent_replies"][0]["title"],
+        json!("g0"),
+        "a cancelled drag moves nothing"
+    );
+}
+
 #[gpui::test]
 fn a_cancelled_long_press_drag_saves_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();

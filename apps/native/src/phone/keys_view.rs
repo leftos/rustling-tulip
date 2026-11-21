@@ -892,8 +892,10 @@ impl PhoneRoot {
                 lift.update(cx, |this, cx| this.lift_by_handle(list, index, cx))
                     .ok();
             },
-            move |at, _, cx| {
-                moved.update(cx, |this, cx| this.reorder_move(at, cx)).ok();
+            move |at, window, cx| {
+                moved
+                    .update(cx, |this, cx| this.reorder_move(at, window, cx))
+                    .ok();
             },
             move |ended, _, cx| {
                 end.update(cx, |this, cx| this.reorder_end(ended, cx)).ok();

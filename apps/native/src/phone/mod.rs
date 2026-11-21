@@ -2,6 +2,7 @@
 //! and the home indicator, drawn by [`PhoneRoot`] over a phone-shape
 //! [`RootView`].
 
+mod autoscroll;
 pub(crate) mod browser;
 mod browser_view;
 mod composer;

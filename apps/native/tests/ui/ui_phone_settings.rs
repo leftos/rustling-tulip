@@ -408,6 +408,44 @@ fn a_notification_tap_under_settings_shows_its_session(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn settings_opens_at_its_top_after_closing_scrolled_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = open_phone(cx, &dir, platform.clone());
+    h.cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+    h.click_on("phone-settings-open");
+    h.click_on("phone-settings-row-keys");
+    let top = h.bounds("phone-keys-list").top();
+    h.scroll_into_view("phone-settings", "phone-keys-restore");
+    assert!(
+        h.bounds("phone-keys-list").top() < top,
+        "the Keys page scrolled down"
+    );
+
+    platform.tap(REMOTE, "s1");
+    h.cx.run_until_parked();
+    assert_eq!(
+        shown_session(&mut h).as_deref(),
+        Some("s1"),
+        "the tap closed Settings for its session"
+    );
+    h.click_on("phone-session-back");
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, PhoneRoot::open_settings_keys);
+    });
+
+    assert_eq!(
+        h.bounds("phone-keys-list").top(),
+        top,
+        "Settings opens again at its top"
+    );
+}
+
+#[gpui::test]
 fn the_hosts_screen_shows_the_settings_button(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));

@@ -151,6 +151,7 @@ impl PhoneRoot {
         cx: &mut Context<Self>,
     ) {
         self.forget_pending_open();
+        self.settings_scroll_on_open();
         let mut settings = Settings::default();
         settings.open(Page::QuickReplies);
         settings.push(SubPage::ReplyGroup { set, group });

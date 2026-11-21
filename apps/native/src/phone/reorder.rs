@@ -4,15 +4,16 @@
 //! dragged list draws its lifted row and its drop slot. `quick_replies_view`
 //! and `keys_view` draw them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, IntoElement, ParentElement as _, Pixels, Point,
-    Stateful, Styled as _, Window, canvas, div, px,
+    ScrollHandle, Stateful, Styled as _, Window, canvas, div, point, px,
 };
 
 use super::PhoneRoot;
+use super::autoscroll::{self, Visible};
 use super::long_press::long_press_drag_area;
 use super::quick_replies::{self, ReplyEdit, ReplySet};
 use super::settings::{Settings, SubPage};
@@ -52,8 +53,8 @@ pub(crate) enum ListId {
 }
 
 /// The drag in progress: the list and the row it lifts, and the slot the
-/// finger is over once it has moved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// finger is over and where the finger is once it has moved.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ReorderDrag {
     /// The list the lifted row belongs to.
     pub(crate) list: ListId,
@@ -61,6 +62,9 @@ pub(crate) struct ReorderDrag {
     pub(crate) from: usize,
     /// The row and half the finger is over, once it has moved.
     pub(crate) over: Option<(usize, Side)>,
+    /// The finger's last window position, once it has moved: a finger held
+    /// still sends no moves, so each auto-scroll frame reads it here.
+    pub(crate) finger: Option<Point<Pixels>>,
 }
 
 /// A list as its page drew it in the last frame: its box and how many rows
@@ -91,8 +95,22 @@ impl RecordedList {
     }
 }
 
-/// The boxes a page drew in its last frame, one per list.
-pub(crate) type ListBoxes = Rc<RefCell<Vec<RecordedList>>>;
+/// What the open Settings page keeps for its drags: the boxes its lists
+/// drew in the last frame, one per list, the Settings body's scroll, which
+/// a drag held near its edge moves, and whether a frame is asked for to
+/// move it.
+#[derive(Default)]
+pub(crate) struct DragPage {
+    /// The boxes the page's lists drew in its last frame.
+    boxes: RefCell<Vec<RecordedList>>,
+    /// The Settings body's scroll.
+    pub(crate) scroll: ScrollHandle,
+    /// Whether an auto-scroll frame is asked for and not yet run.
+    stepping: Cell<bool>,
+}
+
+/// The open page's drag record, shared with the canvases that record it.
+pub(crate) type ListBoxes = Rc<DragPage>;
 
 /// The row of an equal-height list a finger at `y` points at, and which half
 /// of it; none while the list holds no row or drew no height.
@@ -130,7 +148,7 @@ pub(crate) fn reordered<T: Clone>(items: &[T], from: usize, to: usize, side: Sid
 /// Records `drawn` as its page drew it this frame, replacing the box it
 /// recorded before, for a press on the page to hit-test against.
 fn record(boxes: &ListBoxes, drawn: RecordedList) {
-    let mut boxes = boxes.borrow_mut();
+    let mut boxes = boxes.boxes.borrow_mut();
     match boxes.iter_mut().find(|known| known.id == drawn.id) {
         Some(entry) => *entry = drawn,
         None => boxes.push(drawn),
@@ -225,15 +243,17 @@ pub(super) fn reorder_area(boxes: &ListBoxes, cx: &mut Context<PhoneRoot>) -> im
         cx.weak_entity(),
         cx.weak_entity(),
     );
-    let wants = move |at: Point<Pixels>| held.borrow().iter().any(|drawn| drawn.holds(at));
+    let wants = move |at: Point<Pixels>| held.boxes.borrow().iter().any(|drawn| drawn.holds(at));
     long_press_drag_area(
         wants,
         move |at, _, cx| {
             // Fails only when the phone's root is gone.
             press.update(cx, |this, cx| this.reorder_press(at, cx)).ok();
         },
-        move |at, _, cx| {
-            moved.update(cx, |this, cx| this.reorder_move(at, cx)).ok();
+        move |at, window, cx| {
+            moved
+                .update(cx, |this, cx| this.reorder_move(at, window, cx))
+                .ok();
         },
         move |ended, _, cx| {
             end_root
@@ -248,7 +268,7 @@ pub(super) fn reorder_area(boxes: &ListBoxes, cx: &mut Context<PhoneRoot>) -> im
 impl PhoneRoot {
     /// Clears the recorded boxes before a page draws its own.
     pub(super) fn forget_list_boxes(&self) {
-        self.list_boxes.borrow_mut().clear();
+        self.list_boxes.boxes.borrow_mut().clear();
     }
 
     /// A long press on an editable page: the recorded list under it and the
@@ -256,7 +276,7 @@ impl PhoneRoot {
     fn reorder_press(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.reorder_drag = None;
         let hit = {
-            let boxes = self.list_boxes.borrow();
+            let boxes = self.list_boxes.boxes.borrow();
             boxes.iter().find(|drawn| drawn.holds(at)).copied()
         };
         let Some(hit) = hit else {
@@ -269,6 +289,7 @@ impl PhoneRoot {
             list: hit.id,
             from,
             over: None,
+            finger: None,
         });
         cx.notify();
     }
@@ -280,25 +301,104 @@ impl PhoneRoot {
             list,
             from,
             over: None,
+            finger: None,
         });
         cx.notify();
     }
 
-    /// The held finger moved: the slot it is over now.
-    pub(super) fn reorder_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// The held finger moved: the slot it is over now, and, when it is in an
+    /// edge zone of the Settings body, a frame asked for to scroll it.
+    pub(super) fn reorder_move(
+        &mut self,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(mut drag) = self.reorder_drag else {
             return;
         };
-        let recorded = {
-            let boxes = self.list_boxes.borrow();
-            boxes.iter().find(|drawn| drawn.id == drag.list).copied()
-        };
-        let Some(recorded) = recorded else {
+        let Some(recorded) = self.recorded(drag.list) else {
             return;
         };
         drag.over = recorded.slot(at);
+        drag.finger = Some(at);
         self.reorder_drag = Some(drag);
         cx.notify();
+        if self.autoscroll_step(at) != 0.0 {
+            self.ask_scroll_frame(window, cx);
+        }
+    }
+
+    /// The box `list` recorded, as the page last drew it or as an
+    /// auto-scroll frame moved it since.
+    fn recorded(&self, list: ListId) -> Option<RecordedList> {
+        let boxes = self.list_boxes.boxes.borrow();
+        boxes.iter().find(|drawn| drawn.id == list).copied()
+    }
+
+    /// How far the Settings body scrolls this frame with the finger at `at`
+    /// ([`autoscroll::autoscroll_step`] over its visible bounds).
+    fn autoscroll_step(&self, at: Point<Pixels>) -> f32 {
+        let bounds = self.list_boxes.scroll.bounds();
+        let visible = Visible {
+            top: bounds.top() / px(1.0),
+            bottom: bounds.bottom() / px(1.0),
+        };
+        autoscroll::autoscroll_step(at.y / px(1.0), visible, autoscroll::SETTINGS)
+    }
+
+    /// Asks for one auto-scroll frame, unless one is already asked for.
+    fn ask_scroll_frame(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_boxes.stepping.replace(true) {
+            return;
+        }
+        cx.on_next_frame(window, Self::scroll_frame);
+    }
+
+    /// One auto-scroll frame: while a drag is held in an edge zone, the
+    /// Settings body moves one step toward that edge, the drop slot follows
+    /// the finger in the moved list, and the next frame is asked for. A
+    /// drag that ended, a list no longer drawn, a finger out of the zones or
+    /// a page at its end asks for none.
+    fn scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_boxes.stepping.set(false);
+        let Some(mut drag) = self.reorder_drag else {
+            return;
+        };
+        let Some(finger) = drag.finger else {
+            return;
+        };
+        if self.recorded(drag.list).is_none() {
+            return;
+        }
+        if self.scroll_page_by(self.autoscroll_step(finger)) == 0.0 {
+            return;
+        }
+        if let Some(recorded) = self.recorded(drag.list) {
+            drag.over = recorded.slot(finger);
+        }
+        self.reorder_drag = Some(drag);
+        cx.notify();
+        self.ask_scroll_frame(window, cx);
+    }
+
+    /// Scrolls the Settings body by `step` points (positive toward its
+    /// bottom), never past either end, and moves the recorded boxes with
+    /// its content; how far it moved.
+    fn scroll_page_by(&self, step: f32) -> f32 {
+        let scroll = &self.list_boxes.scroll;
+        let offset = scroll.offset();
+        let (now, max) = (offset.y / px(1.0), scroll.max_offset().y / px(1.0));
+        let next = (now - step).clamp(-max.max(0.0), 0.0);
+        let moved = now - next;
+        if moved == 0.0 {
+            return 0.0;
+        }
+        scroll.set_offset(point(offset.x, px(next)));
+        for drawn in self.list_boxes.boxes.borrow_mut().iter_mut() {
+            drawn.list.top -= moved;
+        }
+        moved
     }
 
     /// The held finger lifted: the row drops where it is over, and

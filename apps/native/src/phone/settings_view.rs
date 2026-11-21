@@ -76,6 +76,7 @@ impl PhoneRoot {
     /// Opens Settings on its category list, as the header's button does.
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
         tracing::debug!("phone: opening Settings");
+        self.settings_scroll_on_open();
         self.forget_pending_open();
         self.storage_error = None;
         self.settings = Some(Settings::default());
@@ -103,6 +104,7 @@ impl PhoneRoot {
     /// Opens Settings on `page`, as the phone does by itself when the hosts
     /// screen's add form would otherwise leave the screen.
     pub(super) fn open_settings_on(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.settings_scroll_on_open();
         let mut settings = Settings::default();
         settings.open(page);
         self.settings = Some(settings);
@@ -112,6 +114,18 @@ impl PhoneRoot {
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
         cx.notify();
+    }
+
+    /// Puts the Settings body back at its top when Settings opens, as it
+    /// was not open: its scroll outlives Settings, and a page left scrolled
+    /// down must not open the next one part-way down. Moving between pages
+    /// while Settings stays open keeps the scroll.
+    pub(super) fn settings_scroll_on_open(&self) {
+        if self.settings.is_none() {
+            self.list_boxes
+                .scroll
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+        }
     }
 
     /// Opens Settings on its Appearance page, as the shot example does.
@@ -228,9 +242,12 @@ impl PhoneRoot {
                 .child(
                     div()
                         .id("phone-settings-body")
+                        .driver_id(|| "phone-settings-body".to_owned())
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        // A drag held near an edge scrolls the body.
+                        .track_scroll(&self.list_boxes.scroll)
                         // A sideways swipe on the Keys page's bar preview
                         // must not scroll the page.
                         .restrict_scroll_to_axis()
