@@ -5684,6 +5684,98 @@ fn an_unknown_key_source_locks_the_dashboard_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_locked_dashboard_key_field_takes_no_focus_typing_or_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let status = with_settings(dashboard_status("keyed").build(), |settings| {
+        settings.key_source = protocol::SummarizerKeySource::Unknown;
+    });
+    let mut h = dashboard_tab_after(cx, &dir, status);
+    assert!(
+        drawn(&mut h, "settings-dashboard-key-field"),
+        "the locked key row still draws its field"
+    );
+    h.click_on("settings-dashboard-key-field");
+    assert_ne!(
+        settings_focus(&mut h),
+        Some("settings-dashboard-key-field"),
+        "a locked key field takes no keyboard"
+    );
+    type_text(&mut h, "sk-typed");
+    h.set_clipboard("sk-pasted");
+    h.keys("secondary-v");
+    let draft = key_draft(&mut h);
+    assert!(
+        draft.as_deref().is_none_or(str::is_empty),
+        "a locked key field takes no text: {draft:?}"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(key_sets(&h.sent()), [], "a locked key field sends no key");
+}
+
+#[gpui::test]
+fn the_lock_arriving_moves_the_keyboard_from_the_key_field_to_test(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-field");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-dashboard-key-field"),
+        "the key field has the keyboard"
+    );
+    h.send(with_settings(
+        dashboard_status("keyed").build(),
+        |settings| {
+            settings.key_source = protocol::SummarizerKeySource::Unknown;
+        },
+    ));
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-dashboard-test"),
+        "the lock hands the keyboard to the stop after the key field the ring holds: Test"
+    );
+}
+
+#[gpui::test]
+fn a_key_pending_for_an_unlocked_host_is_sent_while_a_locked_host_is_shown(
+    cx: &mut TestAppContext,
+) {
+    use rustling_tulip_native::target::{HostKey, Target};
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-local");
+    assert_eq!(key_draft(&mut h).as_deref(), Some("sk-local"));
+    let remote = Target::tailnet("box.tail1234.ts.net", None);
+    let row = format!(
+        "settings-host-{}",
+        HostKey::of(&remote)
+            .wire()
+            .expect("a remote host has a wire key")
+    );
+    {
+        let mut host = h.host(&remote);
+        host.connect();
+        host.send(with_settings(
+            dashboard_status("keyed").build(),
+            |settings| {
+                settings.key_source = protocol::SummarizerKeySource::Unknown;
+            },
+        ));
+    }
+    h.click_on(&row);
+    assert!(
+        drawn(&mut h, "settings-dashboard-newer-daemon"),
+        "the shown host is the locked one"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [("keyed".to_owned(), Some("sk-local".to_owned()))],
+        "This PC's key goes though another host's tab is locked"
+    );
+}
+
+#[gpui::test]
 fn the_key_source_follows_the_daemon_after_env_applies(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));

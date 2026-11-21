@@ -5249,10 +5249,11 @@ impl RootView {
     }
 
     /// Whether one of the shown Dashboard tab's text fields has the
-    /// keyboard.
+    /// keyboard; none of them can while the tab is locked.
     fn dashboard_fields_focused(&self, window: &Window) -> bool {
         self.settings_open()
             && self.settings_tab == SettingsTab::Dashboard
+            && !self.summarizer_locked()
             && self.shown_dashboard_tab().is_some_and(|tab| {
                 [&tab.key_focus, &tab.variable_focus, &tab.cap_focus]
                     .into_iter()
@@ -7990,7 +7991,14 @@ impl RootView {
     /// app cannot name: its settings cannot be sent back whole, so the tab
     /// changes none of them.
     fn summarizer_locked(&self) -> bool {
-        self.shown_summarizer()
+        self.summarizer_locked_for(&self.settings_host)
+    }
+
+    /// Whether `host`'s daemon reads its key from a source this app cannot
+    /// name, so what this app builds for it cannot be sent back whole.
+    fn summarizer_locked_for(&self, host: &HostKey) -> bool {
+        self.summarizer_settings
+            .status(host)
             .is_some_and(|status| status.settings.key_source == SummarizerKeySource::Unknown)
     }
 
@@ -8485,7 +8493,7 @@ impl RootView {
         if let Some(deleted) = delete {
             self.send_summarizer_delete(host, deleted);
         }
-        if has(PendingRow::DashboardKey) {
+        if has(PendingRow::DashboardKey) && !self.summarizer_locked_for(host) {
             self.send_summarizer_key(host, provider, cx);
         }
     }
@@ -8862,7 +8870,8 @@ impl RootView {
 
     /// A Dashboard text field `width` px wide, ringed while `control` has
     /// the keyboard; a press gives it the keyboard. While the tab is
-    /// locked it is dimmed and takes no press.
+    /// locked it is a dimmed empty frame with no input in it, so nothing
+    /// can focus it or type or paste into it.
     fn dashboard_field(
         &self,
         control: SettingsControl,
@@ -8874,12 +8883,12 @@ impl RootView {
         let frame = field_frame(focused == Some(control), Layer::Floating, &theme(cx))
             .driver_id(move || control.selector().to_owned())
             .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
-            .w(px(width))
-            .child(input.clone());
+            .w(px(width));
         if self.summarizer_locked() {
-            return frame.opacity(DISABLED_OPACITY);
+            // A no-break space keeps the frame a field's height.
+            return frame.opacity(DISABLED_OPACITY).child("\u{a0}");
         }
-        frame.on_mouse_down(
+        frame.child(input.clone()).on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 this.press_settings_control(control, window, cx);
