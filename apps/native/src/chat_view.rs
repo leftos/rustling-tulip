@@ -42,9 +42,9 @@ use crate::chat::{
     RunningWork, ScriptRow, SendTracker, Strip, SuggestionChip, ViewKey,
 };
 use crate::chat_cards::{
-    ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardState, CardView, GiveBack, KeyAction,
-    OnPress, box_placeholder, card_answer_message, key_action, prompt_card, restored_box_text,
-    typed_option,
+    ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardLinks, CardState, CardView, GiveBack,
+    KeyAction, OnPress, box_placeholder, card_answer_message, key_action, prompt_card,
+    restored_box_text, typed_option,
 };
 use crate::chat_select::{self, Selection, TextPos, UnitSource, Units};
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
@@ -4202,7 +4202,7 @@ impl RootView {
             .sessions
             .get(session_id)
             .filter(|chat| chat.request.is_none())?;
-        self.card_area(session_id, chat, cx)
+        self.card_area_on(session_id, chat, LinkRoute::Phone, cx)
     }
 
     /// The id of session `session_id`'s current prompt card, only while its
@@ -4265,6 +4265,18 @@ impl RootView {
         chat: &SessionChat,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        self.card_area_on(session_id, chat, LinkRoute::Chat, cx)
+    }
+
+    /// [`Self::card_area`] whose card's links follow `route`: the desktop
+    /// chat's, or the phone's.
+    fn card_area_on(
+        &self,
+        session_id: &str,
+        chat: &SessionChat,
+        route: LinkRoute,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let elsewhere = chat.cards.answered_elsewhere().then(|| {
             muted_line(offset, ANSWERED_ELSEWHERE.to_owned(), &t)
@@ -4279,6 +4291,7 @@ impl RootView {
                 refusal: chat.cards.refusal(&prompt.id),
                 ghosts: chat.stack.ghosts().len(),
                 text_box: chat.card_box.as_ref().map(|card_box| &card_box.input),
+                links: CardLinks { session_id, route },
             };
             let id = session_id.to_owned();
             let drawn = prompt.clone();
@@ -5143,7 +5156,7 @@ pub(crate) fn chat_row(
         ChatEntry::System { text, .. } => system_pill(look, text),
         ChatEntry::Receipt {
             question, answer, ..
-        } => muted(format!("{question} \u{2014} {answer}")),
+        } => receipt_row(look, id, &format!("{question} \u{2014} {answer}")),
         ChatEntry::TurnEnd { duration_ms, .. } => muted(turn_label(*duration_ms)),
         ChatEntry::Unknown => div(),
     };
@@ -5154,6 +5167,23 @@ pub(crate) fn chat_row(
         .flex_col()
         .child(row)
         .into_any_element()
+}
+
+/// An answered question's receipt, `text`, as a muted line whose paths and
+/// web addresses are links the row's route follows.
+fn receipt_row(look: &RowLook<'_>, id: &str, text: &str) -> Div {
+    let name = format!("chat-receipt-{}-{id}", look.pane_id);
+    let line = crate::viewer_md_view::linked_text(
+        &name,
+        text,
+        look.link_route,
+        look.session_id,
+        &look.theme,
+    );
+    div()
+        .text_size(ui_px_at(look.text_offset, SMALL_TEXT_SIZE))
+        .text_color(gpui::rgb(look.theme.muted))
+        .child(line)
 }
 
 /// The muted first row of a chat whose older rows were left out.

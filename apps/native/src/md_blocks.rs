@@ -2,6 +2,7 @@
 //! its unique slug, and inline spans with their style flags and link targets.
 //! Plain Rust: no GPUI and no I/O.
 
+use crate::links::{self, LinkKind};
 use crate::open::validate_http_url;
 use crate::stretchtext::{self, Marker};
 
@@ -258,6 +259,145 @@ impl Lifter {
     fn finish(mut self) -> Vec<Span> {
         self.unlink();
         self.out
+    }
+}
+
+/// Links each path [`links::text_links`] finds in `document`'s prose and
+/// inline code outside every link to [`LinkTarget::File`], as a chat answer
+/// draws it: a code block, raw HTML and an image's alt text stay plain, and
+/// a Markdown link or a stretch keeps its own target.
+pub(crate) fn link_paths(document: &mut Document) {
+    for block in &mut document.blocks {
+        link_block(block);
+    }
+}
+
+fn link_block(block: &mut Block) {
+    match block {
+        Block::Heading { spans, .. } | Block::Paragraph(spans) => link_spans(spans),
+        Block::List { items, .. } => {
+            for inner in items.iter_mut().flat_map(|item| item.blocks.iter_mut()) {
+                link_block(inner);
+            }
+        }
+        Block::Quote(blocks) => {
+            for inner in blocks {
+                link_block(inner);
+            }
+        }
+        Block::Table { head, rows, .. } => {
+            for cell in head.iter_mut().chain(rows.iter_mut().flatten()) {
+                link_spans(cell);
+            }
+        }
+        Block::Code { .. } | Block::Html(_) | Block::Rule => {}
+    }
+}
+
+/// `spans` with each run of plain text joined into one span, so a path the
+/// parser cut into several runs is read whole, then each path in a span
+/// outside every link cut out as a span of its own, linked to it.
+fn link_spans(spans: &mut Vec<Span>) {
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for span in join_plain(std::mem::take(spans)) {
+        split_links(span, false, &mut out);
+    }
+    *spans = out;
+}
+
+/// `text`, a card's or a receipt's plain line, as spans: each path and web
+/// address [`links::text_links`] finds in it a span linked to it.
+pub(crate) fn linked_text_spans(text: &str) -> Vec<Span> {
+    let whole = Span {
+        text: text.to_owned(),
+        strong: false,
+        emphasis: false,
+        strikethrough: false,
+        code: false,
+        muted: false,
+        link: None,
+        range: 0..text.len(),
+    };
+    let mut out = Vec::new();
+    split_links(whole, true, &mut out);
+    out
+}
+
+/// Whether `next` continues `last` as one run of plain text: both outside
+/// every link, neither code nor muted, with the same styles.
+fn joins(last: &Span, next: &Span) -> bool {
+    let plain = |span: &Span| span.link.is_none() && !span.code && !span.muted;
+    plain(last)
+        && plain(next)
+        && last.strong == next.strong
+        && last.emphasis == next.emphasis
+        && last.strikethrough == next.strikethrough
+}
+
+/// `spans` with each run that [`joins`] made one span.
+fn join_plain(spans: Vec<Span>) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match out.last_mut() {
+            Some(last) if joins(last, &span) => {
+                last.text.push_str(&span.text);
+                last.range =
+                    last.range.start.min(span.range.start)..last.range.end.max(span.range.end);
+            }
+            _ => out.push(span),
+        }
+    }
+    out
+}
+
+/// Pushes `span` onto `out`, cut around each link [`links::text_links`]
+/// finds in its text (web addresses too when `urls` is set), each link a
+/// span of its own; a span already in a link, or muted, is pushed whole.
+fn split_links(span: Span, urls: bool, out: &mut Vec<Span>) {
+    if span.link.is_some() || span.muted {
+        out.push(span);
+        return;
+    }
+    let mut at = 0;
+    for link in links::text_links(&span.text, urls) {
+        let Some(target) = span
+            .text
+            .get(link.range.clone())
+            .and_then(|text| text_target(text, link.kind))
+        else {
+            continue;
+        };
+        out.extend(piece(&span, at..link.range.start, None));
+        out.extend(piece(&span, link.range.clone(), Some(target)));
+        at = link.range.end;
+    }
+    out.extend(piece(&span, at..span.text.len(), None));
+}
+
+/// The part `range` of `span`'s text with its styles and `link`; none when
+/// it is empty.
+fn piece(span: &Span, range: Range<usize>, link: Option<LinkTarget>) -> Option<Span> {
+    let text = span.text.get(range).filter(|text| !text.is_empty())?;
+    Some(Span {
+        text: text.to_owned(),
+        link,
+        range: span.range.clone(),
+        ..*span
+    })
+}
+
+/// What a link of `kind` found in plain text opens: a file at its path, or
+/// a web address that passes the URL check.
+fn text_target(text: &str, kind: LinkKind) -> Option<LinkTarget> {
+    match kind {
+        LinkKind::Path => Some(LinkTarget::File {
+            path: PathBuf::from(text),
+            anchor: None,
+        }),
+        LinkKind::Url => validate_http_url(text)
+            .ok()
+            .map(|url| LinkTarget::Url(url.to_owned())),
+        LinkKind::Issue => None,
     }
 }
 
@@ -1642,5 +1782,159 @@ mod tests {
         let doc = parse_doc("\u{FEFF}# Title\n");
         assert_eq!(doc.blocks.len(), 1);
         assert_eq!(heading_at(&doc.blocks, 0), (1, "title".to_owned()));
+    }
+
+    /// `text` as a chat answer reads it: composed with no stretch open,
+    /// parsed with line breaks, its stretches lifted and its paths linked.
+    fn answer_doc(text: &str) -> Document {
+        let composed = stretchtext::compose(text, &std::collections::BTreeSet::new(), false);
+        let mut doc = parse(&composed.source, Path::new(""), SoftBreaks::Line);
+        lift_stretchtext(&mut doc, &composed.keys);
+        link_paths(&mut doc);
+        doc
+    }
+
+    /// Each span of `spans` in a link: its text, whether it is code, and its
+    /// target.
+    fn linked(spans: &[Span]) -> Vec<(String, bool, LinkTarget)> {
+        spans
+            .iter()
+            .filter_map(|span| {
+                span.link
+                    .clone()
+                    .map(|link| (span.text.clone(), span.code, link))
+            })
+            .collect()
+    }
+
+    fn file(path: &str) -> LinkTarget {
+        LinkTarget::File {
+            path: PathBuf::from(path),
+            anchor: None,
+        }
+    }
+
+    #[test]
+    fn a_windows_path_in_an_inline_code_span_is_one_file_link() {
+        let path = r"X:\dev\city-life.wt\city-142-ui-mocks\.tmp\mocks\screens\index.html";
+        let doc = answer_doc(&format!("Open `{path}` to see the four screens"));
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(linked(spans), [(path.to_owned(), true, file(path))]);
+        assert_eq!(texts(spans), format!("Open {path} to see the four screens"));
+    }
+
+    #[test]
+    fn a_unix_path_in_prose_is_a_file_link() {
+        let doc = answer_doc("The log is at /var/log/app.log, see it.");
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(
+            linked(spans),
+            [(
+                "/var/log/app.log".to_owned(),
+                false,
+                file("/var/log/app.log")
+            )]
+        );
+        assert_eq!(texts(spans), "The log is at /var/log/app.log, see it.");
+    }
+
+    #[test]
+    fn home_and_relative_root_paths_are_file_links() {
+        let item_links = |path: &str| {
+            let doc = answer_doc(&format!("- read {path} first\n"));
+            let (_, items) = list_at(&doc.blocks, 0);
+            let item = items.first().expect("one item");
+            linked(spans_at(&item.blocks, 0))
+        };
+        for path in ["./notes/a.md", "../up/b.rs", "./x", "../x"] {
+            assert_eq!(
+                item_links(path),
+                [(path.to_owned(), false, file(path))],
+                "{path}"
+            );
+        }
+        // Nothing expands `~`, so a home path would never open.
+        for path in ["~/.claude/c.md", "~/x", r"~\x"] {
+            assert_eq!(item_links(path), [], "{path} is plain");
+        }
+    }
+
+    #[test]
+    fn a_single_segment_absolute_word_in_prose_is_not_linked() {
+        for word in ["/compact", "/clear", "/model", "/tmp"] {
+            let doc = answer_doc(&format!("Run {word} and `{word}` now."));
+            assert_eq!(linked(spans_at(&doc.blocks, 0)), [], "{word} is plain");
+        }
+        for path in ["/etc/hosts", "/a/b", r"X:\a", "X:/a"] {
+            let doc = answer_doc(&format!("Open {path} now."));
+            assert_eq!(
+                linked(spans_at(&doc.blocks, 0)),
+                [(path.to_owned(), false, file(path))],
+                "{path} links"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_in_a_fenced_block_is_not_linked() {
+        let doc = answer_doc("```\ncat /etc/hosts\n```\n");
+        assert_eq!(code_at(&doc.blocks, 0), (None, "cat /etc/hosts".to_owned()));
+    }
+
+    #[test]
+    fn a_slash_command_in_prose_is_not_linked() {
+        let doc = answer_doc("Run /reload-plugins and `/code-review` now.");
+        assert_eq!(linked(spans_at(&doc.blocks, 0)), []);
+    }
+
+    #[test]
+    fn a_bare_name_and_a_relative_path_are_not_linked() {
+        let doc = answer_doc("Edit main.rs in src/bin and notes.md.");
+        assert_eq!(linked(spans_at(&doc.blocks, 0)), []);
+    }
+
+    #[test]
+    fn a_markdown_link_text_keeps_its_link() {
+        let doc = answer_doc("See [/tmp/x.log](https://example.com/log) now.");
+        let target = LinkTarget::Url("https://example.com/log".to_owned());
+        assert_eq!(
+            linked(spans_at(&doc.blocks, 0)),
+            [("/tmp/x.log".to_owned(), false, target)]
+        );
+    }
+
+    #[test]
+    fn a_stretchtext_short_form_is_unchanged() {
+        let doc = answer_doc("{{Logs in /tmp/x.log|the long story}} done\n");
+        let spans = spans_at(&doc.blocks, 0);
+        let links = linked(spans);
+        assert!(!links.is_empty(), "the short form is a link: {spans:?}");
+        assert!(
+            links
+                .iter()
+                .all(|(_, _, target)| matches!(target, LinkTarget::Stretchtext { .. })),
+            "every link is the stretch's: {links:?}"
+        );
+    }
+
+    #[test]
+    fn a_cards_line_links_paths_and_web_addresses() {
+        let spans = linked_text_spans("Keep /tmp/a.txt or see https://example.com/x.");
+        assert_eq!(
+            linked(&spans),
+            [
+                ("/tmp/a.txt".to_owned(), false, file("/tmp/a.txt")),
+                (
+                    "https://example.com/x".to_owned(),
+                    false,
+                    LinkTarget::Url("https://example.com/x".to_owned())
+                ),
+            ]
+        );
+        assert_eq!(
+            texts(&spans),
+            "Keep /tmp/a.txt or see https://example.com/x."
+        );
+        assert_eq!(linked(&linked_text_spans("Pick one")), []);
     }
 }

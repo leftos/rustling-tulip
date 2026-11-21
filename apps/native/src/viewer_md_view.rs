@@ -439,12 +439,14 @@ pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc
 }
 
 /// A chat answer as [`crate::stretchtext::compose`] wrote it, parsed into rows
-/// with its stretches lifted into stretchtext links, its code coloured as
-/// [`prepare`] colours it.
+/// with its stretches lifted into stretchtext links and the paths in its
+/// prose and inline code made file links, its code coloured as [`prepare`]
+/// colours it.
 pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc {
     let mut document =
         md_blocks::parse(&composed.source, Path::new(""), md_blocks::SoftBreaks::Line);
     md_blocks::lift_stretchtext(&mut document, &composed.keys);
+    md_blocks::link_paths(&mut document);
     flatten(document, cancel)
 }
 
@@ -677,7 +679,8 @@ fn steps(count: usize, step: f32) -> f32 {
 /// colour and underline of a link `route` follows.
 ///
 /// A stretch's short form takes the link colour over a faded underline, so
-/// it reads apart from a web link; its closer draws muted, with none.
+/// it reads apart from a web link; its closer draws muted, with none. A
+/// chat's file link takes [`link_color`]'s own colour.
 fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
     let followed = span.link.as_ref().filter(|target| route.follows(target));
     let stretch = matches!(followed, Some(LinkTarget::Stretchtext { .. }));
@@ -686,8 +689,8 @@ fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
         a: STRETCH_UNDERLINE_ALPHA,
         ..hsla(t.periwinkle)
     });
-    let color = if linked {
-        Some(hsla(t.periwinkle))
+    let color = if let Some(target) = followed.filter(|_| linked) {
+        Some(hsla(link_color(target, route, t)))
     } else if span.muted {
         Some(hsla(t.subtle))
     } else {
@@ -709,6 +712,62 @@ fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
         }),
         ..HighlightStyle::default()
     }
+}
+
+/// The colour of a link to `target` that `route` follows: a chat's file
+/// link (a path) in lilac, every other link in periwinkle.
+fn link_color(target: &LinkTarget, route: LinkRoute, t: &UiTheme) -> u32 {
+    match (route, target) {
+        (LinkRoute::Chat | LinkRoute::Phone, LinkTarget::File { .. }) => t.lilac,
+        _ => t.periwinkle,
+    }
+}
+
+/// `text`, a plain line of session `session_id`'s chat such as a card's
+/// question or a receipt, with each path and web address in it drawn as a
+/// link `route` follows and opened as a chat answer's link opens. A click
+/// on a link goes no further, so a link inside a card's option row opens
+/// the link without picking the option. `id` names the text among its
+/// siblings; a line without links is plain text.
+pub(crate) fn linked_text(
+    id: &str,
+    text: &str,
+    route: LinkRoute,
+    session_id: &str,
+    t: &UiTheme,
+) -> AnyElement {
+    let spans = md_blocks::linked_text_spans(text);
+    let links = link_ranges(&spans, route);
+    if links.is_empty() {
+        return text.to_owned().into_any_element();
+    }
+    let (joined, ranges) = inline_text(&spans);
+    let highlights: Vec<(Range<usize>, HighlightStyle)> = ranges
+        .into_iter()
+        .zip(&spans)
+        .filter(|(range, _)| !range.is_empty())
+        .map(|(range, span)| (range, span_style(span, route, t)))
+        .collect();
+    let styled = StyledText::new(joined).with_highlights(highlights);
+    let (bounds, targets): (Vec<Range<usize>>, Vec<LinkTarget>) = links.into_iter().unzip();
+    let click = LinkClick {
+        tab_id: id.to_owned(),
+        route,
+        stretchtext: Some((session_id.to_owned(), String::new())),
+    };
+    InteractiveText::new(ElementId::Name(SharedString::from(id.to_owned())), styled)
+        .on_click(bounds, move |index, window, cx| {
+            cx.stop_propagation();
+            let Some(target) = targets.get(index).cloned() else {
+                return;
+            };
+            let Some(root) = window_root_view(window, cx) else {
+                tracing::debug!("a chat line's link click in a window without the root view");
+                return;
+            };
+            root.update(cx, |root, cx| click.follow(root, target, window, cx));
+        })
+        .into_any_element()
 }
 
 /// A code line's colours, dropping any span that does not fit `line` on

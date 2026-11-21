@@ -1295,7 +1295,10 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
         let start_index = indices.at(path.start());
         let trimmed = trim_link_candidate(path.as_str());
         let end_index = start_index + chars_len(&trimmed);
-        if trimmed.is_empty() || overlaps_existing_link(start_index, end_index, &links) {
+        if trimmed.is_empty()
+            || overlaps_existing_link(start_index, end_index, &links)
+            || is_slash_command_like(&trimmed)
+        {
             continue;
         }
         // A host name with a path after it is a web address, whatever files
@@ -1723,6 +1726,93 @@ fn locate(segments: &[Segment], index: usize) -> Location {
             after: index + 1,
         },
     }
+}
+
+/// Whether a path match reads as a slash command such as `/reload-plugins`
+/// rather than a path: it starts with `/`, holds that one `/` and no `\`,
+/// has a `-` and no `.`. `/tmp` and `/etc/hosts` stay paths.
+pub(crate) fn is_slash_command_like(value: &str) -> bool {
+    value.starts_with('/')
+        && value.matches('/').count() == 1
+        && !value.contains('\\')
+        && value.contains('-')
+        && !value.contains('.')
+}
+
+/// A link found in plain text such as a chat answer's prose or a card's
+/// line: its byte range in the text and its kind, a web address or a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextLink {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) kind: LinkKind,
+}
+
+/// The links in plain `text`, in order: each web address when `urls` is
+/// set, and each path that names its own root: a POSIX path of two
+/// segments or more (`/a/b`), a drive path (`X:\a`, `X:/a`) or one from the
+/// current folder (`./a`, `../a`). A bare name, a relative `a/b`, a
+/// one-segment word such as `/compact` or `/tmp`, a home path (`~/a`, which
+/// nothing expands) and a network path are no link.
+pub(crate) fn text_links(text: &str, urls: bool) -> Vec<TextLink> {
+    let mut web: Vec<TextLink> = Vec::new();
+    for found in URL_PATTERN.find_iter(text) {
+        let trimmed = trim_link_candidate(found.as_str());
+        if !trimmed.is_empty() {
+            web.push(TextLink {
+                range: found.start()..found.start() + trimmed.len(),
+                kind: LinkKind::Url,
+            });
+        }
+    }
+    let mut paths: Vec<TextLink> = Vec::new();
+    for captures in PATH_PATTERN.captures_iter(text) {
+        let Some(found) = captures.get(2) else {
+            continue;
+        };
+        let trimmed = trim_link_candidate(found.as_str());
+        let range = found.start()..found.start() + trimmed.len();
+        let overlaps =
+            |link: &TextLink| link.range.start < range.end && range.start < link.range.end;
+        if is_rooted_path(&trimmed) && !web.iter().chain(&paths).any(overlaps) {
+            paths.push(TextLink {
+                range,
+                kind: LinkKind::Path,
+            });
+        }
+    }
+    let mut links = if urls { web } else { Vec::new() };
+    links.extend(paths);
+    links.sort_by_key(|link| link.range.start);
+    links
+}
+
+/// Whether `value` is a path [`text_links`] links: a drive or current-folder
+/// path with something under its root, or a POSIX path of two segments or
+/// more, so a one-segment word (`/compact`, `/tmp`) stays plain.
+fn is_rooted_path(value: &str) -> bool {
+    let mut chars = value.chars();
+    let drive = matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(letter), Some(':'), Some('/' | '\\')) if letter.is_ascii_alphabetic()
+    );
+    let under = |rest: &str| !rest.is_empty() && !rest.starts_with(['/', '\\']);
+    if drive {
+        return value.get(3..).is_some_and(under);
+    }
+    if let Some(rest) = ["../", "..\\", "./", ".\\"]
+        .iter()
+        .find_map(|root| value.strip_prefix(root))
+    {
+        return under(rest);
+    }
+    value.strip_prefix('/').is_some_and(|rest| {
+        under(rest)
+            && rest
+                .split(['/', '\\'])
+                .filter(|segment| !segment.is_empty())
+                .count()
+                >= 2
+    })
 }
 
 /// The match with the punctuation a sentence ends on stripped off it.
@@ -3445,7 +3535,7 @@ mod tests {
 
 #[cfg(test)]
 mod title_tests {
-    use super::{IssueContext, title_issue};
+    use super::{IssueContext, LinkKind, detect_links, title_issue};
 
     /// The context of a host with a key whose workspace `acme` has team `RT`.
     fn rt() -> IssueContext {
@@ -3550,5 +3640,126 @@ mod title_tests {
                 assert_eq!(title_issue(title, &context), None, "{title}");
             }
         }
+    }
+
+    #[test]
+    fn a_slash_command_is_no_link() {
+        for name in ["/reload-plugins", "/code-review", "/plan-doc-hygiene"] {
+            for text in [
+                name.to_owned(),
+                format!("run {name} now"),
+                format!("({name})"),
+                format!("{name}."),
+                format!("{name}:"),
+            ] {
+                assert_eq!(detect_links(&text), [], "{text} names a skill, not a path");
+                assert_eq!(super::text_links(&text, true), [], "{text} in prose");
+            }
+        }
+    }
+
+    #[test]
+    fn a_top_level_path_still_links() {
+        for path in [
+            "/tmp",
+            "/usr",
+            "/etc/hosts",
+            r"C:\x",
+            "X:/a/b",
+            "/my-dir/file",
+            "/a-b.txt",
+        ] {
+            let text = format!("see {path} now");
+            let links = detect_links(&text);
+            assert_eq!(links.len(), 1, "{text}: {links:?}");
+            assert_eq!(links[0].kind, LinkKind::Path, "{text}");
+            assert_eq!(links[0].text, path, "{text}");
+        }
+    }
+
+    /// The text each of [`super::text_links`]'s links in `text` covers, with
+    /// its kind.
+    fn text_links_in(text: &str, urls: bool) -> Vec<(&str, LinkKind)> {
+        super::text_links(text, urls)
+            .into_iter()
+            .map(|link| (&text[link.range], link.kind))
+            .collect()
+    }
+
+    #[test]
+    fn text_links_find_rooted_paths() {
+        for path in [
+            "/etc/hosts",
+            "/a/b",
+            r"C:\x",
+            r"X:\a",
+            "X:/a",
+            "X:/a/b",
+            r"X:\dev\city-life.wt\city-142-ui-mocks\.tmp\mocks\screens\index.html",
+            "./x",
+            "../x",
+            r"..\x\y.rs",
+        ] {
+            let text = format!("Open {path}, then look.");
+            assert_eq!(
+                text_links_in(&text, false),
+                [(path, LinkKind::Path)],
+                "{text}"
+            );
+            assert_eq!(
+                text_links_in(path, false),
+                [(path, LinkKind::Path)],
+                "{path} alone"
+            );
+        }
+    }
+
+    #[test]
+    fn text_links_leave_names_relative_paths_and_roots_alone() {
+        for text in [
+            "notes.md",
+            "src/main.rs",
+            "and/or",
+            "either / or",
+            "~/",
+            "./",
+            r"\\host\share\x",
+            "//host/x",
+            "/reload-plugins",
+        ] {
+            assert_eq!(text_links_in(text, true), [], "{text}");
+        }
+    }
+
+    #[test]
+    fn text_links_leave_home_paths_and_single_segment_words_alone() {
+        for word in ["~/x", r"~\x", "/compact", "/clear", "/model", "/tmp"] {
+            let text = format!("Run {word} now.");
+            assert_eq!(text_links_in(&text, true), [], "{text}");
+            assert_eq!(text_links_in(word, true), [], "{word} alone");
+        }
+    }
+
+    #[test]
+    fn the_terminal_still_links_top_level_paths_but_not_slash_commands() {
+        for path in ["/tmp", "/etc/hosts"] {
+            let links = detect_links(&format!("see {path} now"));
+            assert_eq!(links.len(), 1, "{path}: {links:?}");
+            assert_eq!(links[0].text, path, "{path}");
+        }
+        assert_eq!(detect_links("run /reload-plugins now"), []);
+    }
+
+    #[test]
+    fn text_links_find_web_addresses_only_when_asked() {
+        let text = "See https://example.com/a/b. and /tmp/x";
+        assert_eq!(
+            text_links_in(text, true),
+            [
+                ("https://example.com/a/b", LinkKind::Url),
+                ("/tmp/x", LinkKind::Path)
+            ]
+        );
+        assert_eq!(text_links_in(text, false), [("/tmp/x", LinkKind::Path)]);
     }
 }

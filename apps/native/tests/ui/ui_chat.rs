@@ -34,7 +34,7 @@ use rustling_tulip_native::completion::CompletionItem;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
 use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey};
-use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
 
 const TO_TERMINAL: &str = "pane-view-terminal-p1";
 const TO_CHAT: &str = "pane-view-chat-p1";
@@ -2925,6 +2925,63 @@ fn clicking_an_option_row_sends_its_answer(cx: &mut TestAppContext) {
         [opt(1)],
         "a click on the description answers"
     );
+}
+
+/// A file in `dir` a card names, by its absolute path.
+fn card_file(dir: &TestDir) -> std::path::PathBuf {
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "x\n").expect("write the file");
+    let resolved = std::fs::canonicalize(&path).expect("canonicalize the file");
+    let text = resolved.to_string_lossy();
+    std::path::PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+/// A click on the first character of the text `selector` tags.
+fn click_first_char(h: &mut Harness<'_>, selector: &str) {
+    let bounds = h.bounds(selector);
+    h.click(
+        point(bounds.left() + px(2.0), bounds.top() + px(5.0)),
+        Modifiers::none(),
+    );
+}
+
+#[gpui::test]
+fn a_path_in_a_question_cards_body_opens_without_answering(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = card_file(&dir);
+    let mut h = loaded(cx, &dir);
+    let mut question = described_question();
+    question.body = format!("{} holds the notes.", file.display());
+    show(&mut h, question);
+
+    click_first_char(&mut h, "chat-card-body");
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(file)],
+        "the body's path is a link"
+    );
+    assert_eq!(answer_kinds(&mut h), [], "the click answers nothing");
+}
+
+#[gpui::test]
+fn a_path_link_in_an_option_description_does_not_pick_the_option(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = card_file(&dir);
+    let mut h = loaded(cx, &dir);
+    let mut question = described_question();
+    let description = format!("{} is the one to keep", file.display());
+    question.options = described(&[(1, "sub", Some(description.as_str())), (2, "div", None)]);
+    show(&mut h, question);
+
+    click_first_char(&mut h, "chat-card-option-desc-1");
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(file)],
+        "the description's path is a link"
+    );
+    assert_eq!(answer_kinds(&mut h), [], "the option is not picked");
 }
 
 #[gpui::test]

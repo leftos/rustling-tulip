@@ -19,6 +19,7 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::text_input::TextInput;
 use crate::ui_theme::UiTheme;
+use crate::viewer_md_view::{LinkRoute, linked_text};
 
 /// The line a card closed in the terminal or on another device leaves.
 pub const ANSWERED_ELSEWHERE: &str = "Answered elsewhere";
@@ -695,7 +696,8 @@ const ANSWERED_MARK: &str = "✔";
 /// What a card draws: its prompt, the agent its labels name, whether it was
 /// submitted and is still up, the daemon's reason for refusing its last
 /// answer, how many cards wait behind it, and its text box, for a card with
-/// an option that takes typed text.
+/// an option that takes typed text, and the session and route its question,
+/// body and option descriptions draw their links for.
 pub struct CardView<'a> {
     pub prompt: &'a ChatPrompt,
     pub agent: &'a str,
@@ -703,6 +705,22 @@ pub struct CardView<'a> {
     pub refusal: Option<&'a str>,
     pub ghosts: usize,
     pub text_box: Option<&'a Entity<TextInput>>,
+    pub(crate) links: CardLinks<'a>,
+}
+
+/// The session whose card a link is drawn in, and the route a click on it
+/// follows: the desktop chat's or the phone's.
+#[derive(Clone, Copy)]
+pub(crate) struct CardLinks<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) route: LinkRoute,
+}
+
+impl CardLinks<'_> {
+    /// `text` with its paths and web addresses drawn as links, named `id`.
+    fn text(self, id: &str, text: &str, t: &UiTheme) -> AnyElement {
+        linked_text(id, text, self.route, self.session_id, t)
+    }
 }
 
 /// What a card calls with the button pressed; the caller resolves and sends
@@ -790,11 +808,18 @@ pub fn prompt_card(
             card.child(
                 div()
                     .driver_id(|| "chat-card-subject".to_owned())
-                    .child(prompt.subject.clone()),
+                    .child(
+                        view.links
+                            .text("chat-card-subject-text", &prompt.subject, t),
+                    ),
             )
         })
         .when(!prompt.body.is_empty(), |card| {
-            card.child(small(offset, &prompt.body, t.text_2))
+            card.child(
+                small_div(offset, t.text_2)
+                    .driver_id(|| "chat-card-body".to_owned())
+                    .child(view.links.text("chat-card-body-text", &prompt.body, t)),
+            )
         })
         .child(actions)
         .children(adjust_row(offset, shift, view, on_press, t))
@@ -928,7 +953,7 @@ fn card_button(
         .text_box
         .filter(|_| button.answer == ButtonAnswer::TypedText);
     let base = match choice {
-        Some(option) => option_row(
+        Some(option) => option_row_linked(
             OptionRow {
                 offset,
                 shift,
@@ -940,6 +965,7 @@ fn card_button(
                 enabled: !busy,
                 min_height: None,
             },
+            Some(view.links),
             t,
         )
         .when(text_box.is_none(), Styled::w_full),
@@ -995,8 +1021,19 @@ pub(crate) struct OptionRow<'a> {
 }
 
 /// [`OptionRow`] drawn: its label, and under it its description in the
-/// colour a filled row's text takes.
+/// colour a filled row's text takes, as plain text.
 pub(crate) fn option_row(row: OptionRow<'_>, t: &UiTheme) -> Stateful<Div> {
+    option_row_linked(row, None, t)
+}
+
+/// [`option_row`] whose description draws its paths and web addresses as
+/// links for `links`, when it is set; a click on one opens the link and
+/// does not press the row.
+fn option_row_linked(
+    row: OptionRow<'_>,
+    links: Option<CardLinks<'_>>,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let (offset, shift, selector) = (row.offset, row.shift, row.selector);
     let base = if row.selected {
         primary_button(
@@ -1021,16 +1058,19 @@ pub(crate) fn option_row(row: OptionRow<'_>, t: &UiTheme) -> Stateful<Div> {
     };
     let base = base.flex_col().items_start().child(row.label.to_owned());
     let base = match row.description {
-        Some(description) => base.child(
-            small(
-                offset,
-                description,
-                option_description_color(row.selected, t),
+        Some(description) => {
+            let text = match links {
+                Some(links) => links.text(&format!("{selector}-desc-text"), description, t),
+                None => description.to_owned().into_any_element(),
+            };
+            base.child(
+                small_div(offset, option_description_color(row.selected, t))
+                    .child(text)
+                    .when_some(row.description_selector, |line, selector| {
+                        line.driver_id(move || selector)
+                    }),
             )
-            .when_some(row.description_selector, |line, selector| {
-                line.driver_id(move || selector)
-            }),
-        ),
+        }
         None => base,
     };
     match row.min_height {
@@ -1124,10 +1164,14 @@ fn ghost_edge(depth: usize, t: &UiTheme) -> Div {
 
 /// One small line of `text` in `color`.
 fn small(offset: i8, text: &str, color: u32) -> Div {
+    small_div(offset, color).child(text.to_owned())
+}
+
+/// The box of a small line in `color`, its text still to add.
+fn small_div(offset: i8, color: u32) -> Div {
     div()
         .text_size(ui_px_at(offset, SMALL_TEXT))
         .text_color(gpui::rgb(color))
-        .child(text.to_owned())
 }
 
 #[cfg(test)]

@@ -223,12 +223,20 @@ struct ShownCard {
 /// they were read at.
 type UnderlinedIssues = ((u64, usize), Vec<TerminalLink>);
 
+/// The viewport cells of one row of a link: its row, its columns, and the
+/// link's kind, which picks its underline's colour on the phone.
+type LinkCell = (usize, Range<usize>, LinkKind);
+
+/// One row's run of underlined cells: its row, its columns, and the
+/// underline's colour, the text's own colour when `None`.
+type UnderlineCell = (usize, Range<usize>, Option<u32>);
+
 /// The cells of every link on the phone's screen, row by row, as they were
 /// read at `key`: the pane's content generation and its scroll offset.
 #[derive(Debug)]
 struct VisibleLinks {
     key: (u64, usize),
-    cells: Vec<(usize, Range<usize>)>,
+    cells: Vec<LinkCell>,
 }
 
 /// How many confirmed readings a pane keeps.
@@ -2669,7 +2677,7 @@ impl TerminalPane {
 
     /// The viewport cells the hovered link's own characters take, row by
     /// row.
-    fn hovered_link_cells(&self) -> Option<Vec<(usize, Range<usize>)>> {
+    fn hovered_link_cells(&self) -> Option<Vec<LinkCell>> {
         let link = self.hovered_link()?;
         Some(link_cells(
             &link,
@@ -2686,7 +2694,7 @@ impl TerminalPane {
     }
 
     /// The viewport cells of every issue link on screen, row by row.
-    fn underlined_issue_cells(&self) -> Vec<(usize, Range<usize>)> {
+    fn underlined_issue_cells(&self) -> Vec<LinkCell> {
         let (offset, size) = (self.term.display_offset(), self.term.size());
         self.with_underlined(|links| {
             links
@@ -2711,7 +2719,7 @@ impl TerminalPane {
     /// The cells drawn underlined that take the pointing hand: on the phone
     /// every link on screen's (issue links among them), else the hovered
     /// link's.
-    fn underlined_cells(&self) -> Option<Vec<(usize, Range<usize>)>> {
+    fn underlined_cells(&self) -> Option<Vec<LinkCell>> {
         if !self.phone_links {
             return self.hovered_link_cells();
         }
@@ -2722,7 +2730,7 @@ impl TerminalPane {
     /// The cells underlined at all times besides [`Self::underlined_cells`]:
     /// a desktop pane's issue links. The phone's are already among every
     /// link on screen.
-    fn always_underlined_cells(&self) -> Vec<(usize, Range<usize>)> {
+    fn always_underlined_cells(&self) -> Vec<LinkCell> {
         if self.phone_links {
             return Vec::new();
         }
@@ -2731,7 +2739,7 @@ impl TerminalPane {
 
     /// The cells of every link on screen, read again only once the content
     /// or the scroll offset changed.
-    fn visible_link_cells(&self) -> Vec<(usize, Range<usize>)> {
+    fn visible_link_cells(&self) -> Vec<LinkCell> {
         let offset = self.term.display_offset();
         let key = (self.content_generation, offset);
         let mut cache = self.visible_links.borrow_mut();
@@ -2748,7 +2756,7 @@ impl TerminalPane {
 
     /// Reads the links of every row on screen at scroll `offset`, one link
     /// window at a time from the top row down, and returns their cells.
-    fn scan_visible_links(&self, offset: usize) -> Vec<(usize, Range<usize>)> {
+    fn scan_visible_links(&self, offset: usize) -> Vec<LinkCell> {
         let size = self.term.size();
         let (top, _) = self.grid_point(0, 0);
         let (bottom, _) = self.grid_point(size.rows.saturating_sub(1), 0);
@@ -3144,11 +3152,16 @@ impl Render for TerminalPane {
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
+                let t = ui_theme::theme(cx);
                 let (snap, marked, link, issues, relaid) = view.update(cx, |v, _| {
                     let relaid = v.lay_out(bounds, &m);
                     let snap = v.term.snapshot();
-                    let issues = v.always_underlined_cells();
-                    (snap, v.marked.clone(), v.underlined_cells(), issues, relaid)
+                    let phone = v.phone_links;
+                    let issues = underline_cells(v.always_underlined_cells(), phone, &t);
+                    let link = v
+                        .underlined_cells()
+                        .map(|cells| underline_cells(cells, phone, &t));
+                    (snap, v.marked.clone(), link, issues, relaid)
                 });
                 // The gutter was built before this layout, from the last one:
                 // a resize moves the anchors and a new cell height the rows,
@@ -3453,11 +3466,7 @@ fn cell_origin(origin: Point<Pixels>, m: &Metrics, row: usize, col: usize) -> Po
 
 /// The viewport cells `link`'s own characters take, row by row. Rows out of
 /// view are left out.
-fn link_cells(
-    link: &TerminalLink,
-    display_offset: usize,
-    size: GridSize,
-) -> Vec<(usize, Range<usize>)> {
+fn link_cells(link: &TerminalLink, display_offset: usize, size: GridSize) -> Vec<LinkCell> {
     let offset = i64::try_from(display_offset).unwrap_or(i64::MAX);
     link.segments
         .iter()
@@ -3466,8 +3475,27 @@ fn link_cells(
                 .ok()
                 .filter(|row| *row < size.rows)?;
             let end = segment.end_column.min(size.cols);
-            (segment.start_column < end).then_some((row, segment.start_column..end))
+            (segment.start_column < end).then_some((row, segment.start_column..end, link.kind))
         })
+        .collect()
+}
+
+/// The colour a link of `kind` is underlined in: on the phone (`phone`) a
+/// path's in lilac and an issue's in periwinkle; a web address's, and every
+/// link's on the desktop, in its text's own colour (`None`).
+fn underline_color(kind: LinkKind, phone: bool, t: &UiTheme) -> Option<u32> {
+    match kind {
+        LinkKind::Path if phone => Some(t.lilac),
+        LinkKind::Issue if phone => Some(t.periwinkle),
+        _ => None,
+    }
+}
+
+/// `cells` with each run's underline colour picked by [`underline_color`].
+fn underline_cells(cells: Vec<LinkCell>, phone: bool, t: &UiTheme) -> Vec<UnderlineCell> {
+    cells
+        .into_iter()
+        .map(|(row, cols, kind)| (row, cols, underline_color(kind, phone, t)))
         .collect()
 }
 
@@ -3476,7 +3504,7 @@ fn link_cells(
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,
-    link: &[(usize, Range<usize>)],
+    link: &[UnderlineCell],
     m: &Metrics,
     window: &mut Window,
     cx: &mut App,
@@ -3499,15 +3527,17 @@ fn paint_grid(
     paint_link_underline(bounds.origin, link, snap, m, window);
 }
 
-/// A 1px line along the bottom of the link's cells, in its text's colour.
+/// A 1px line along the bottom of the link's cells, in its own colour when
+/// it has one, else in its text's colour.
 fn paint_link_underline(
     origin: Point<Pixels>,
-    cells: &[(usize, Range<usize>)],
+    cells: &[UnderlineCell],
     snap: &Snapshot,
     m: &Metrics,
     window: &mut Window,
 ) {
-    for (row, cols) in cells {
+    for (row, cols, color) in cells {
+        let color = color.map_or_else(|| to_rgba(text_color_at(snap, *row, cols.start)), gpui::rgb);
         let at = cell_origin(origin, m, *row, cols.start);
         #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
         let width = m.cell_width * cols.len() as f32;
@@ -3516,7 +3546,7 @@ fn paint_link_underline(
                 point(at.x, at.y + m.line_height - px(1.0)),
                 size(width, px(1.0)),
             ),
-            to_rgba(text_color_at(snap, *row, cols.start)),
+            color,
         ));
     }
 }
@@ -4160,6 +4190,31 @@ mod tests {
             own,
             Some(to_rgba(other).into()),
             "the cell's own underline colour wins over the text colour"
+        );
+    }
+
+    #[test]
+    fn a_phone_underlines_a_path_in_lilac_and_an_issue_in_periwinkle() {
+        use crate::links::LinkKind;
+        let t = UiTheme::CONTRAST;
+        let cells = vec![
+            (0, 0..4, LinkKind::Path),
+            (1, 2..8, LinkKind::Issue),
+            (2, 0..3, LinkKind::Url),
+        ];
+        assert_eq!(
+            super::underline_cells(cells.clone(), true, &t),
+            [
+                (0, 0..4, Some(t.lilac)),
+                (1, 2..8, Some(t.periwinkle)),
+                (2, 0..3, None),
+            ],
+            "the phone colours a path and an issue; a web address keeps its text's colour"
+        );
+        assert_eq!(
+            super::underline_cells(cells, false, &t),
+            [(0, 0..4, None), (1, 2..8, None), (2, 0..3, None)],
+            "the desktop keeps every underline in its text's colour"
         );
     }
 }

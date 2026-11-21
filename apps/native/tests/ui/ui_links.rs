@@ -2088,6 +2088,47 @@ fn a_chat_file_link_is_drawn_as_a_link(cx: &mut TestAppContext) {
     assert_eq!(links, [("logs/app.log".to_owned(), None)]);
 }
 
+/// Clicks across the first lines of what `selector` tags, from its top
+/// left, until a click opens something; what it opened, empty when none
+/// did.
+fn click_until_opened(h: &mut Harness<'_>, selector: &str) -> Vec<Opened> {
+    let bounds = h.bounds(selector);
+    let bottom = bounds.bottom().min(bounds.top() + px(60.0));
+    let mut y = bounds.top() + px(2.0);
+    while y < bottom {
+        let mut x = bounds.left() + px(2.0);
+        while x < bounds.left() + px(120.0) {
+            h.click(point(x, y), Modifiers::none());
+            let opened = h.opened();
+            if !opened.is_empty() {
+                return opened;
+            }
+            x += px(6.0);
+        }
+        y += px(6.0);
+    }
+    Vec::new()
+}
+
+#[gpui::test]
+fn a_click_on_a_code_span_path_in_a_chat_answer_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(
+        dir.path(),
+        "city-142-ui-mocks/.tmp/mocks/screens/index.html",
+    );
+    let path = file.to_string_lossy().into_owned();
+    let text = format!("`{path}` holds the four screens");
+    let mut h = chat_in(cx, &dir, dir.path(), false, &text);
+    let links = h.root(|root, _| root.chat_answer_file_links("s1", "a1"));
+    assert_eq!(links, [(path, None)], "the code span's path is a file link");
+    assert_eq!(
+        click_until_opened(&mut h, "chat-row-p1-a1"),
+        [Opened::DefaultApp(file)],
+        "a click on the path opens it in its default app"
+    );
+}
+
 #[gpui::test]
 fn a_chat_link_with_a_line_anchor_opens_vscode_at_the_line(cx: &mut TestAppContext) {
     let dir = TestDir::new();

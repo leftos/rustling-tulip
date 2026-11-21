@@ -1574,6 +1574,15 @@ const NOTES: &str = "/home/me/src/notes.txt";
 /// A phone on session `id`'s page over a host that serves host paths,
 /// browsing and folder fetches, everything sent so far drained.
 fn on_paths_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Harness<'a> {
+    let mut h = paths_phone(cx, dir);
+    h.click_on(&row(id));
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// A phone on Home over a host that serves host paths, browsing and folder
+/// fetches, listing its sessions.
+fn paths_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     seed_ui(
         dir,
         &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
@@ -1601,9 +1610,129 @@ fn on_paths_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Har
         .cwd(REPO_ROOT)
         .build();
     host.send(DaemonMessage::Sessions { sessions });
-    h.click_on(&row(id));
+    h
+}
+
+/// A path that wraps over three lines and more in the phone's chat.
+const WRAPPED_PATH: &str = concat!(
+    r"X:\dev\city-life.wt\city-142-ui-mocks\.tmp\mocks\screens\first-pass\desktop-and-phone",
+    r"\layouts-for-the-owner-to-review\with-every-state-drawn\light-and-dark-themes",
+    r"\at-each-text-size\and-each-locale-the-app-ships\in-the-next-release\index.html"
+);
+
+/// A phone on session `a`'s chat over [`paths_phone`]'s host, its one answer
+/// `a1` reading `text`, everything sent so far drained.
+fn chat_on_paths_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
+    let mut h = paths_phone(cx, dir);
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request_id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::Answer {
+            id: "a1".to_owned(),
+            text: text.to_owned(),
+            live: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id,
+    });
+    h.cx.run_until_parked();
     h.host(&saved_remote()).sent();
     h
+}
+
+/// The chat entry, part and byte the phone's chat draws at `at`.
+fn chat_hit(h: &mut Harness<'_>, at: Point<Pixels>) -> Option<(String, u32, usize)> {
+    h.root(|root, _| root.phone_chat_hit(at))
+}
+
+/// One point on each drawn line of `selector`'s text, from the top, that
+/// draws a byte of chat entry `entry` in `bytes`. A line is told apart by
+/// the byte at its left edge.
+fn points_on_lines(
+    h: &mut Harness<'_>,
+    selector: &str,
+    entry: &str,
+    bytes: &std::ops::Range<usize>,
+) -> Vec<Point<Pixels>> {
+    let bounds = h.bounds(selector);
+    let mut lines: Vec<(usize, Vec<Pixels>)> = Vec::new();
+    let mut y = bounds.top();
+    while y < bounds.bottom() {
+        let mut x = bounds.left();
+        while x < bounds.right() {
+            if let Some((hit, _, byte)) = chat_hit(h, point(x, y))
+                && hit == entry
+            {
+                match lines.last_mut() {
+                    Some((start, ys)) if *start == byte => ys.push(y),
+                    _ => lines.push((byte, vec![y])),
+                }
+                break;
+            }
+            x += px(2.0);
+        }
+        y += px(1.0);
+    }
+    lines
+        .iter()
+        .filter_map(|(_, ys)| {
+            let y = ys[ys.len() / 2];
+            let mut inside = Vec::new();
+            let mut x = bounds.left();
+            while x < bounds.right() {
+                let at = point(x, y);
+                if chat_hit(h, at)
+                    .is_some_and(|(hit, _, byte)| hit == entry && bytes.contains(&byte))
+                {
+                    inside.push(at);
+                }
+                x += px(2.0);
+            }
+            // The middle of the line's run, well inside its glyphs.
+            inside.get(inside.len() / 2).copied()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn tapping_each_line_of_a_wrapped_code_span_path_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let text = format!("Open `{WRAPPED_PATH}` to see the four screens");
+    let mut h = chat_on_paths_page(cx, &dir, &text);
+    let start = "Open ".len();
+    let bytes = start..start + WRAPPED_PATH.len();
+    let points = points_on_lines(&mut h, "chat-row-phone-a1", "a1", &bytes);
+    assert!(
+        points.len() >= 3,
+        "the path wraps over three lines: {points:?}"
+    );
+
+    for at in points {
+        // Apart, so no two taps make a double tap.
+        h.advance(std::time::Duration::from_secs(1));
+        h.touch(TouchPhase::Started, at);
+        h.touch(TouchPhase::Ended, at);
+        // Left unanswered: a missing path's note above the chat would move
+        // the lines still to tap.
+        let sent = h.host(&saved_remote()).sent();
+        let asked: Vec<String> = stats(&sent).into_iter().map(|(_, path)| path).collect();
+        assert_eq!(asked, [WRAPPED_PATH], "a tap at {at:?} asks about the path");
+    }
 }
 
 /// The phone on session `n`'s terminal, whose output is `lines`, one per
