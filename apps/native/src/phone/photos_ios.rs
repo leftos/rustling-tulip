@@ -87,15 +87,14 @@ define_class!(
     #[name = "RTPhotoPickerDelegate"]
     struct PickerDelegate;
 
-    impl PickerDelegate {
+    unsafe impl NSObjectProtocol for PickerDelegate {}
+
+    unsafe impl PHPickerViewControllerDelegate for PickerDelegate {
         #[unsafe(method(picker:didFinishPicking:))]
         fn did_finish_picking(&self, picker: &UIViewController, results: &NSArray<PHPickerResult>) {
             finished(picker, results);
         }
     }
-
-    unsafe impl NSObjectProtocol for PickerDelegate {}
-    unsafe impl PHPickerViewControllerDelegate for PickerDelegate {}
 );
 
 thread_local! {
@@ -208,7 +207,7 @@ fn finished(picker: &UIViewController, results: &NSArray<PHPickerResult>) {
 
 /// `bytes` as a JPEG within the cap: a JPEG is kept, any other image
 /// re-encoded at [`SCALED_QUALITY`]; `None` when it cannot be read.
-fn as_jpeg(bytes: Vec<u8>) -> Option<PastedImage> {
+pub(super) fn as_jpeg(bytes: Vec<u8>) -> Option<PastedImage> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some(fitted(bytes, ImageFormat::Jpeg));
     }
@@ -272,4 +271,30 @@ fn top_view_controller(mtm: MainThreadMarker) -> Option<Retained<UIViewControlle
         top = presented;
     }
     Some(top)
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test fails loudly")]
+mod tests {
+    use objc2::{ClassType, ProtocolType, sel};
+    use objc2_photos_ui::PHPickerViewControllerDelegate;
+
+    use super::PickerDelegate;
+
+    #[test]
+    fn the_picker_delegate_registers_with_its_protocol_method() {
+        let class = PickerDelegate::class();
+        let protocol = <dyn PHPickerViewControllerDelegate>::protocol()
+            .expect("PhotosUI registers the picker's delegate protocol");
+        assert!(
+            class.conforms_to(protocol),
+            "the class conforms to the protocol"
+        );
+        assert!(
+            class
+                .instance_method(sel!(picker:didFinishPicking:))
+                .is_some(),
+            "the class answers picker:didFinishPicking:"
+        );
+    }
 }

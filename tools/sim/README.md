@@ -26,6 +26,8 @@ Every verb is one or more ssh calls, each run through a login `zsh` so the Mac's
 .\tools\sim\sim.ps1 reset                    # kill idb and its companion after a stale connection
 ```
 
+`swipe x y x y 1.5` with the same point twice and a long duration works as a long press. A `UIPasteControl` takes idb taps only when it renders.
+
 `describe` is how a run finds something to tap: every element carries a `frame` in points (`x`, `y`, `width`, `height`), and `tap` and `swipe` take points, never pixels. A screenshot is 3× the points on the current iPhone devices, so a frame's centre is `x + width/2`, `y + height/2`, unmultiplied.
 
 Every verb after `setup` needs a booted simulator and says `sim: no booted simulator; run sim.ps1 boot` when there is none.

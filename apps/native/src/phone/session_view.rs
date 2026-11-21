@@ -44,11 +44,46 @@ const QUICK_LABEL: &str = "Quick";
 
 /// Whether session `session_id`'s chat host takes uploads
 /// (`FEATURE_UPLOAD_FILE`), so the composer offers Photos.
-fn takes_uploads(root: &RootView, session_id: &str) -> bool {
+pub(super) fn takes_uploads(root: &RootView, session_id: &str) -> bool {
     root.loaded_chat_host(session_id)
         .and_then(|host| root.conn_of(&host))
         .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE))
 }
+/// Whether the system paste control takes the composer's Paste tap: on iOS
+/// 16 and later ([`super::paste_control_ios`]).
+#[cfg(target_os = "ios")]
+fn control_pastes() -> bool {
+    super::paste_control_ios::supported()
+}
+
+/// Off iOS the Paste button's own tap pastes.
+#[cfg(not(target_os = "ios"))]
+const fn control_pastes() -> bool {
+    false
+}
+
+/// The Paste button, recording where it is drawn each frame, for the
+/// system paste control to sit over.
+#[cfg(target_os = "ios")]
+fn record_paste_bounds(button: Stateful<Div>) -> Stateful<Div> {
+    button.child(
+        gpui::canvas(
+            |bounds, _, _| super::paste_control_ios::record_button(bounds),
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
+}
+
+/// Off iOS there is no paste control to place.
+#[cfg(not(target_os = "ios"))]
+fn record_paste_bounds(button: Stateful<Div>) -> Stateful<Div> {
+    button
+}
+
 /// What the Quick dock says while its set has no groups.
 const QUICK_EMPTY_TEXT: &str = "No quick replies. Add them in Settings › Quick replies.";
 /// The Quick dock's line while its set has no groups.
@@ -781,11 +816,15 @@ impl PhoneRoot {
                 .flex_1()
                 .child(button.label());
             let drawn = match button {
-                ComposerButton::Paste => {
-                    drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.paste_into_composer(window, cx);
-                    }))
-                }
+                ComposerButton::Paste => record_paste_bounds(drawn.on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        // On iOS 16 and later the system's paste control
+                        // over the button takes the tap.
+                        if !control_pastes() {
+                            this.paste_into_composer(window, cx);
+                        }
+                    },
+                ))),
                 ComposerButton::Photos => {
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_photo(cx)))
                 }
@@ -838,6 +877,42 @@ impl PhoneRoot {
             return;
         }
         input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// The last element of `PhoneRoot`'s frame on iOS: a zero-size canvas
+    /// whose prepaint, after the page's own, places the system paste control
+    /// over the Paste button drawn in this frame, or hides it when none was
+    /// drawn or a sheet `covered` the page.
+    #[cfg(target_os = "ios")]
+    pub(super) fn paste_frame_end(
+        this: &Self,
+        covered: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !control_pastes() {
+            return None;
+        }
+        let session = this.shown.as_ref().map(|(_, id)| id.clone());
+        let root = cx.entity().downgrade();
+        let t = theme(cx);
+        let colors = super::paste_control_ios::PasteColors {
+            text: t.text,
+            ground: t.ground,
+        };
+        let end = gpui::canvas(
+            move |_, _, cx| {
+                super::paste_control_ios::frame_end(covered, session, root, colors, cx);
+            },
+            |_, (), _, _| {},
+        )
+        .absolute();
+        Some(end.into_any_element())
+    }
+
+    /// Off iOS there is no paste control, so the frame ends with nothing.
+    #[cfg(not(target_os = "ios"))]
+    pub(super) fn paste_frame_end(_: &Self, _: bool, _: &mut Context<Self>) -> Option<AnyElement> {
+        None
     }
 
     /// Photos' tap: the platform's picker opens for one image, which uploads

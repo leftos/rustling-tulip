@@ -143,6 +143,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSItemProvider",
     "NSObject",
+    "NSProcessInfo",
     "NSProgress",
     "NSString",
     "NSURL",
@@ -151,7 +152,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # file URL, presented from the key window's view controller, its iPad popover
 # anchored by a source view and rect. The composer's image paste
 # (src/phone/pasteboard_ios.rs): `UIPasteboard`, and `UIImage` to re-encode
-# or scale a pasted or picked image.
+# or scale a pasted or picked image. The composer's Paste on iOS 16 and later
+# (src/phone/paste_control_ios.rs): `UIPasteControl`, its configuration and
+# colours, and the target it pastes into.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -159,7 +162,13 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIActivity",
     "UIActivityViewController",
     "UIApplication",
+    "UIButtonConfiguration",
+    "UIColor",
+    "UIControl",
     "UIImage",
+    "UIPasteConfiguration",
+    "UIPasteConfigurationSupporting",
+    "UIPasteControl",
     "UIPasteboard",
     "UIPopoverPresentationController",
     "UIPresentationController",

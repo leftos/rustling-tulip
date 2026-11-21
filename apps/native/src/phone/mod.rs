@@ -17,6 +17,8 @@ pub(crate) mod lifecycle;
 mod long_press;
 mod open_tap;
 pub(crate) mod order;
+#[cfg(target_os = "ios")]
+mod paste_control_ios;
 pub mod pasteboard;
 #[cfg(target_os = "ios")]
 mod pasteboard_ios;

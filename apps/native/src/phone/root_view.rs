@@ -2054,6 +2054,7 @@ impl Render for PhoneRoot {
             .root
             .update(cx, |root, cx| root.device_pairing_layer(cx));
         let layers = self.sheet_layers(host_open, padding, window, cx);
+        let paste_end = Self::paste_frame_end(self, !layers.is_empty() || pairing.is_some(), cx);
         let padded = || {
             div()
                 .pt(padding.top)
@@ -2090,5 +2091,7 @@ impl Render for PhoneRoot {
                     .size_full()
                     .child(div().relative().size_full().child(layer))
             }))
+            // Last, so its prepaint follows the Paste button's.
+            .children(paste_end)
     }
 }
