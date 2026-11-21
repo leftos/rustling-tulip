@@ -660,14 +660,102 @@ fn fetch_folder_fetches_the_folder_by_its_host_path_and_says_fetching(cx: &mut T
 
     assert!(!drawn(&mut h, "phone-browser-sheet"), "the sheet closes");
     assert_eq!(result_line(&mut h).as_deref(), Some("Fetching docs…"));
-    assert!(drawn(&mut h, "phone-browser-result"), "under the header");
-    let header = h.bounds("phone-browser-path");
+    assert!(drawn(&mut h, "phone-browser-result"), "the line shows");
+    let list = h.bounds("phone-browser-list");
     let line = h.bounds("phone-browser-result");
-    let row = h.bounds("phone-browser-row-docs");
     assert!(
-        header.bottom() <= line.top() && line.bottom() <= row.top(),
-        "between the header and the rows"
+        line.bottom() == list.bottom()
+            && line.left() == list.left()
+            && line.right() == list.right(),
+        "over the bottom of the list, across it: {line:?} in {list:?}"
     );
+}
+
+/// The tops of the `docs` row and the parent row.
+fn row_tops(h: &mut Harness<'_>) -> (gpui::Pixels, gpui::Pixels) {
+    (
+        h.bounds("phone-browser-row-docs").top(),
+        h.bounds("phone-browser-parent").top(),
+    )
+}
+
+/// `docs` and forty more folders after it, enough to scroll the list.
+fn many_folders() -> Vec<DirEntry> {
+    let mut entries = vec![entry("docs", PathKind::Dir, 0)];
+    entries.extend((0..40).map(|n| entry(&format!("more-{n:02}"), PathKind::Dir, 0)));
+    entries
+}
+
+/// Scrolls the browser's list as far down as it goes.
+fn scroll_list_to_end(h: &mut Harness<'_>) {
+    let at = h.bounds("phone-browser-list").center();
+    for _ in 0..3 {
+        h.cx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-100_000.0))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
+        });
+        h.cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn the_last_row_stays_reachable_under_the_fetch_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    browse(&mut h, SRC, many_folders(), None);
+    fetch_docs(&mut h);
+    assert!(drawn(&mut h, "phone-browser-result"), "the line shows");
+
+    scroll_list_to_end(&mut h);
+
+    let last = h.bounds("phone-browser-row-more-39");
+    let line = h.bounds("phone-browser-result");
+    assert!(
+        last.bottom() <= line.top(),
+        "the last row scrolls clear of the line: {last:?} under {line:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_fetch_line_opens_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    browse(&mut h, SRC, many_folders(), None);
+    fetch_docs(&mut h);
+
+    h.tap_on("phone-browser-result");
+    h.click_on("phone-browser-result");
+    h.long_press_on("phone-browser-result");
+
+    let sent = sent(&mut h);
+    assert_eq!(listings(&sent), [], "no folder opens: {sent:?}");
+    assert_eq!(folder_fetches(&sent), [], "and no fetch starts");
+    assert!(!drawn(&mut h, "phone-browser-sheet"), "no sheet opens");
+    assert_eq!(
+        phone_update(&mut h, |phone, _| phone.browser_path().map(str::to_owned)).as_deref(),
+        Some(SRC),
+        "the browser stays in its folder"
+    );
+}
+
+#[gpui::test]
+fn browser_rows_stay_still_through_a_fetch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = browsing(cx, &dir);
+    let before = row_tops(&mut h);
+
+    let id = fetch_docs(&mut h);
+    assert_eq!(result_line(&mut h).as_deref(), Some("Fetching docs…"));
+    assert_eq!(row_tops(&mut h), before, "Fetching moves no row");
+
+    stream_folder(&mut h, &id, "/home/me/src/docs", DOCS_FILES);
+    settle_until(&mut h, "the folder's result line", |h| {
+        result_line(h).is_some_and(|line| line.starts_with("Fetched"))
+    });
+    assert_eq!(row_tops(&mut h), before, "Fetched moves no row");
 }
 
 #[gpui::test]

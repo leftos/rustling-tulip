@@ -48,8 +48,8 @@ const PATH_GAP: f32 = 6.0;
 /// view's.
 const GUTTER_TEXT_SIZE: f32 = 11.0;
 const GUTTER_PAD: f32 = 12.0;
-/// A digit's width per pixel of text size, the diff view's guess before it
-/// measures.
+/// A digit's width per pixel of text size: the guess where the gutter's font
+/// gives no measured advance.
 const DIGIT_WIDTH_RATIO: f32 = 0.6;
 /// A line's height per pixel of the font size.
 const LINE_HEIGHT_RATIO: f32 = 1.4;
@@ -271,6 +271,7 @@ impl Rows {
                     .flex_none()
                     .w(px(self.gutter_width))
                     .pr(px(GUTTER_PAD))
+                    .whitespace_nowrap()
                     .text_right()
                     .text_size(px(GUTTER_TEXT_SIZE))
                     .text_color(gpui::rgb(if hovered { t.muted } else { t.subtle }))
@@ -1042,7 +1043,7 @@ impl RootView {
                 // The document is being parsed.
                 None => div().flex_1(),
             },
-            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text, root, &t),
+            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text, root, cx),
         });
         Some((banner, lines))
     }
@@ -1057,8 +1058,9 @@ impl RootView {
         tab: &ViewerTab,
         text: &Arc<ViewerText>,
         root: Option<WeakEntity<RootView>>,
-        t: &UiTheme,
+        cx: &App,
     ) -> Div {
+        let t = &theme(cx);
         let font = &self.sidebar.ui_state().terminal_font;
         let family = SharedString::from(
             font.family
@@ -1066,11 +1068,7 @@ impl RootView {
                 .unwrap_or_else(|| fonts::DEFAULT_FAMILY.to_owned()),
         );
         let digits = text.line_count().max(1).to_string().len();
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a line number's digit count is tiny"
-        )]
-        let gutter_width = digits as f32 * GUTTER_TEXT_SIZE * DIGIT_WIDTH_RATIO + GUTTER_PAD;
+        let gutter_width = gutter_width(digits, gutter_digit_width(cx, &family));
         let find = tab.find_shows().then(|| tab.find());
         let rows = Rows {
             tab_id: tab_id.to_owned(),
@@ -1105,6 +1103,31 @@ impl RootView {
             .text_size(px(font.size))
             .child(list)
     }
+}
+
+/// The width of the gutter for line numbers of `digits` digits, each
+/// `digit_width` px wide: room for them and the pad right of them.
+fn gutter_width(digits: usize, digit_width: f32) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a line number's digit count is tiny"
+    )]
+    let digits = digits as f32;
+    (digits * digit_width).ceil() + GUTTER_PAD
+}
+
+/// A digit's advance at the gutter's size in `family`, as the text system
+/// measures it, or the guess where the font gives none.
+fn gutter_digit_width(cx: &App, family: &SharedString) -> f32 {
+    let text = cx.text_system();
+    let font_id = text.resolve_font(&gpui::Font {
+        weight: fonts::mono_weight(),
+        ..gpui::font(family.clone())
+    });
+    text.advance(font_id, px(GUTTER_TEXT_SIZE), '0')
+        .map_or(GUTTER_TEXT_SIZE * DIGIT_WIDTH_RATIO, |size| {
+            size.width / px(1.0)
+        })
 }
 
 /// The row a drag reaches with the pointer `y` px below the line list's top,
@@ -1367,4 +1390,29 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
             )
         })
         .tooltip(tooltip(path.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gutter_fits_two_digits() {
+        let width = gutter_width(2, 7.0);
+        assert!(
+            width >= 2.0 * 7.0 + GUTTER_PAD,
+            "two 7 px digits and the pad fit in {width} px"
+        );
+    }
+
+    #[test]
+    fn the_gutter_holds_one_two_and_four_digits() {
+        for (digits, count) in [(1, 1.0), (2, 2.0), (4, 4.0)] {
+            let width = gutter_width(digits, 7.0);
+            assert!(
+                width >= count * 7.0 + GUTTER_PAD,
+                "{digits} digits fit in {width} px"
+            );
+        }
+    }
 }

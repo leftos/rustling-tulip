@@ -165,6 +165,45 @@ fn a_saved_text_file_opens_in_the_phone_viewer(cx: &mut TestAppContext) {
     );
 }
 
+/// The phone's side inset, in px: the room left of the page's text.
+const SIDE_PADDING: f32 = 16.0;
+
+#[gpui::test]
+fn the_phone_viewer_insets_its_gutter(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save(&mut h, &copies, "notes.txt", "first line\nsecond line\n");
+
+    let gutter = h.bounds("viewer-line-phone-viewer-1");
+    assert!(
+        gutter.left() >= px(SIDE_PADDING),
+        "the line numbers sit inside the side inset: {gutter:?}"
+    );
+}
+
+#[gpui::test]
+fn two_digit_line_numbers_stay_on_one_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    let text = "a line\n".repeat(12);
+
+    save(&mut h, &copies, "lines.txt", &text);
+
+    let one = h.bounds("viewer-line-phone-viewer-1");
+    let ten = h.bounds("viewer-line-phone-viewer-10");
+    assert!(
+        drawn(&mut h, "viewer-line-phone-viewer-10"),
+        "line 10 shows"
+    );
+    assert!(
+        ten.size.height <= one.size.height,
+        "line 10's number is one line, as line 1's is: {ten:?} against {one:?}"
+    );
+}
+
 /// Gives the phone a [`FakeShareSheet`] and hands back the spec's handle on
 /// it.
 fn fake_share(h: &mut Harness<'_>) -> Arc<FakeShareSheet> {
@@ -233,6 +272,23 @@ fn a_saved_markdown_file_renders(cx: &mut TestAppContext) {
     assert!(
         drawn(&mut h, "viewer-md-phone-viewer"),
         "the Markdown is rendered"
+    );
+}
+
+#[gpui::test]
+fn phone_markdown_keeps_its_own_padding(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save(&mut h, &copies, "readme.md", "# Title\n\nSome *words*.\n");
+
+    let page = h.bounds("phone-viewer");
+    let md = h.bounds("viewer-md-phone-viewer");
+    assert_eq!(
+        md.left() - page.left(),
+        page.right() - md.right(),
+        "the rendered Markdown sits as far from either edge: {md:?} in {page:?}"
     );
 }
 

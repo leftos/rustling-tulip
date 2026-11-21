@@ -22,7 +22,7 @@ use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_weight};
 use crate::spawn_form::human_size;
 use crate::ui_theme::{UiTheme, theme};
-use crate::viewer_tab::ViewerLoad;
+use crate::viewer_tab::{MarkdownMode, ViewerLoad};
 use crate::viewer_tab_view::{PHONE_VIEWER_ID, viewer_body_id};
 use crate::viewer_text::is_image_path;
 
@@ -128,9 +128,21 @@ impl PhoneRoot {
                     ViewerLoad::TooLarge | ViewerLoad::Binary | ViewerLoad::NotDecodable
                 )
             });
+            let rendered = root
+                .viewer_tab(PHONE_VIEWER_ID)
+                .is_some_and(|tab| tab.markdown() == Some(MarkdownMode::Rendered));
             let (banner, lines) = root
                 .viewer_body(PHONE_VIEWER_ID, false, cx)
                 .unwrap_or_default();
+            // The numbered lines sit inside the side inset; rendered
+            // Markdown and the banner keep their own padding.
+            let lines = lines.map(|lines| {
+                if rendered {
+                    lines
+                } else {
+                    lines.pl(px(super::home_view::SIDE_PADDING))
+                }
+            });
             (banner, lines, not_text)
         });
         let stale = viewer.stale.then(|| {

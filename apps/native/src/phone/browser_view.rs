@@ -419,8 +419,16 @@ impl PhoneRoot {
                 .flex()
                 .flex_col()
                 .child(Self::browser_header_row(page, &host_label, &t, cx))
-                .children(result_line(&page.state, &t))
-                .child(Self::browser_list(page, waiting, &t, cx)),
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(Self::browser_list(page, waiting, &t, cx))
+                        .children(result_line(&page.state, &t)),
+                ),
         )
     }
 
@@ -508,6 +516,7 @@ impl PhoneRoot {
             .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| this.browser_next_page(cx)))
             .children(parent)
             .children(rows)
+            .children(result_room(&page.state))
     }
 
     /// The parent row, which lists the folder holding the one shown.
@@ -581,24 +590,50 @@ impl PhoneRoot {
     }
 }
 
-/// The result line under the header, while `state` shows one: muted, or in
+/// The result line over the bottom of the list, while `state` shows one, on
+/// the page's own ground so no row moves when it comes or goes: muted, or in
 /// the danger colour when it says why a fetch failed.
+/// A tap or a long press on it stops there; a scroll reaches the list.
 fn result_line(state: &Browser, t: &UiTheme) -> Option<Div> {
-    let line = state.fetch_line()?;
     let color = if state.fetch_failed_line() {
         t.danger_text
     } else {
         t.muted
     };
     Some(
-        div()
+        result_frame(state)?
             .driver_id(|| "phone-browser-result".to_owned())
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.ground))
+            .text_color(gpui::rgb(color))
+            .block_mouse_except_scroll(),
+    )
+}
+
+/// The room at the end of the list while `state` shows a result line: an
+/// unseen copy of the line, so the list's last row scrolls clear of it.
+fn result_room(state: &Browser) -> Option<Div> {
+    Some(
+        result_frame(state)?
             .flex_none()
+            .border_color(gpui::transparent_black())
+            .text_color(gpui::transparent_black()),
+    )
+}
+
+/// The result line's text and box, which the line and its room share so
+/// the two are always one height.
+fn result_frame(state: &Browser) -> Option<Div> {
+    let line = state.fetch_line()?;
+    Some(
+        div()
             .px(px(SIDE_PADDING))
             .py(px(8.0))
-            .border_b_1()
-            .border_color(gpui::rgb(t.line))
-            .text_color(gpui::rgb(color))
+            .border_t_1()
             .child(line),
     )
 }
