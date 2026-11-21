@@ -55,6 +55,8 @@ function Assert-LastExit([string] $Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)" }
 }
 
+. (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'mac', 'keychain.ps1')
+
 function Get-WorkspaceVersion {
     $inSection = $false
     foreach ($line in Get-Content (Join-Path $RepoRoot 'Cargo.toml')) {
@@ -285,34 +287,19 @@ function Set-ExtensionSignature([string] $Appex, [string] $Identity, [string] $K
     Write-Output "RustlingTulipNotify.appex entitlement keys: $($keys -join ', ')"
 }
 
-# Always an array, even of one keychain: a lone string splatted into `security list-keychains -s`
-# would pass each character as a keychain path and wreck the user's search list (yaat's pack-macos.ps1).
-function Get-UserKeychainList {
-    $list = @(security list-keychains -d user | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
-    $missing = @($list | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
-    if (($list.Count -eq 0) -or ($missing.Count -gt 0)) { throw "unexpected user keychain search list ($($list -join ', ')); fix it before signing" }
-    return , $list
-}
-
-# The distribution .p12 into a temporary keychain added beside the user's keychains.
-function Import-SigningIdentity([string] $WorkDir, [string] $Keychain, [string[]] $KeychainList) {
+# The distribution .p12 into a temporary keychain added first in the user's keychain search list.
+function Import-SigningIdentity([string] $WorkDir, [string] $Keychain) {
     $keychainSecret = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(24))
     $cert = Join-Path $WorkDir 'apple-distribution.p12'
     [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($Signing['IOS_DIST_CERT_P12_BASE64']))
     $certPassword = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Signing['IOS_DIST_CERT_PASSWORD_BASE64']))
     try {
-        security create-keychain -p $keychainSecret $Keychain
-        Assert-LastExit 'security create-keychain'
-        security set-keychain-settings -lut 21600 $Keychain
-        Assert-LastExit 'security set-keychain-settings'
-        security unlock-keychain -p $keychainSecret $Keychain
-        Assert-LastExit 'security unlock-keychain'
+        Initialize-SigningKeychain $Keychain $keychainSecret
         security import $cert -P $certPassword -A -t cert -f pkcs12 -k $Keychain | Out-Host
         Assert-LastExit 'security import apple-distribution.p12'
         security set-key-partition-list -S 'apple-tool:,apple:' -k $keychainSecret $Keychain | Out-Null
         Assert-LastExit 'security set-key-partition-list'
-        security list-keychains -d user -s $Keychain @KeychainList
-        Assert-LastExit 'security list-keychains'
+        Add-SigningKeychain $Keychain
     }
     finally {
         Remove-Item -LiteralPath $cert -Force -ErrorAction SilentlyContinue
@@ -346,11 +333,12 @@ function Invoke-AppStoreSigning([string] $App) {
         Write-BuildMachineKey $plist
     }
 
-    $workDir = Join-Path ([IO.Path]::GetTempPath()) "rustling-tulip-ios-signing-$([guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path $workDir | Out-Null
-    $keychain = Join-Path $workDir 'signing.keychain-db'
-    $originalList = Get-UserKeychainList
+    $workDir = $null
+    $keychain = $null
     try {
+        $workDir = Join-Path ([IO.Path]::GetTempPath()) "rustling-tulip-ios-signing-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $workDir | Out-Null
+        $keychain = Join-Path (Resolve-RealPath $workDir) 'signing.keychain-db'
         Build-AppIcon $App $workDir
         # The profile stays in the work folder until it is checked; it ships inside the signed app.
         $profilePath = Join-Path $workDir 'phone-appstore.mobileprovision'
@@ -364,7 +352,7 @@ function Invoke-AppStoreSigning([string] $App) {
         Write-Entitlement 'apps/ios-notify/notify.entitlements' $notifyEntitlements
         Test-NotifyProfileEntitlement $notifyProfile $workDir
 
-        Import-SigningIdentity $workDir $keychain $originalList
+        Import-SigningIdentity $workDir $keychain
         Import-WwdrIntermediate $workDir $keychain
         $identity = Get-SigningIdentity $keychain
         Copy-Item -LiteralPath $notifyProfile -Destination (Join-Path $appex 'embedded.mobileprovision')
@@ -386,11 +374,7 @@ function Invoke-AppStoreSigning([string] $App) {
         Assert-LastExit 'ditto (ipa)'
     }
     finally {
-        security list-keychains -d user -s @originalList
-        if (Test-Path -LiteralPath $keychain) { security delete-keychain $keychain }
-        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
-        $restoredList = Get-UserKeychainList
-        if (Compare-Object $originalList $restoredList) { Write-Warning "the user keychain search list differs from before the run: $($restoredList -join ', ')" }
+        Clear-SigningKeychain $keychain $workDir
     }
     Write-Output $ipa
 }

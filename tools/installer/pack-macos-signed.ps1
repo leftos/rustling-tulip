@@ -27,30 +27,38 @@ foreach ($file in 'devid-application.p12', 'p12-password.txt', 'ids.env') {
 $p8 = @(Get-ChildItem -LiteralPath $signing -Filter 'AuthKey_*.p8' -File)
 if ($p8.Count -ne 1) { throw "expected one AuthKey_*.p8 in $signing, found $($p8.Count)" }
 
-# yaat's names (release-macos.yml's secrets), the Application certificate and the notary key only.
-$env:MACOS_DEVID_APP_CERT_P12_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $signing 'devid-application.p12')))
-$env:MACOS_DEVID_CERT_PASSWORD = (Get-Content -LiteralPath (Join-Path $signing 'p12-password.txt') -Raw).Trim()
-$env:MACOS_NOTARY_API_KEY_P8_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p8[0].FullName))
-foreach ($line in Get-Content -LiteralPath (Join-Path $signing 'ids.env')) {
-  if ($line -match '^\s*(NOTARY_API_KEY_ID|NOTARY_API_ISSUER_ID|SIGN_APP_IDENTITY)\s*=\s*(.+?)\s*$') {
-    $key = $Matches[1]
-    $value = $Matches[2]
-    if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") { $value = $Matches[1] }
-    [Environment]::SetEnvironmentVariable("MACOS_$key", $value)
-  }
-}
-
 $names = 'MACOS_DEVID_APP_CERT_P12_BASE64', 'MACOS_DEVID_CERT_PASSWORD', 'MACOS_SIGN_APP_IDENTITY',
   'MACOS_NOTARY_API_KEY_P8_BASE64', 'MACOS_NOTARY_API_KEY_ID', 'MACOS_NOTARY_API_ISSUER_ID'
-foreach ($name in $names) {
-  if (-not [Environment]::GetEnvironmentVariable($name)) { throw "$name is empty after reading $signing (check ids.env)" }
+$gateExit = 1
+# The variables live from here to the end of the gate run alone, whatever happens.
+try {
+  # yaat's names (release-macos.yml's secrets), the Application certificate and the notary key only.
+  $env:MACOS_DEVID_APP_CERT_P12_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $signing 'devid-application.p12')))
+  $env:MACOS_DEVID_CERT_PASSWORD = (Get-Content -LiteralPath (Join-Path $signing 'p12-password.txt') -Raw).Trim()
+  $env:MACOS_NOTARY_API_KEY_P8_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p8[0].FullName))
+  foreach ($line in Get-Content -LiteralPath (Join-Path $signing 'ids.env')) {
+    if ($line -match '^\s*(NOTARY_API_KEY_ID|NOTARY_API_ISSUER_ID|SIGN_APP_IDENTITY)\s*=\s*(.+?)\s*$') {
+      $key = $Matches[1]
+      $value = $Matches[2]
+      if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") { $value = $Matches[1] }
+      [Environment]::SetEnvironmentVariable("MACOS_$key", $value)
+    }
+  }
+
+  foreach ($name in $names) {
+    if (-not [Environment]::GetEnvironmentVariable($name)) { throw "$name is empty after reading $signing (check ids.env)" }
+  }
+
+  # Names only on the gate's command line; the gate reads each value from this process's environment.
+  $gateArguments = @('run', '--cd', $root.Replace('\', '/'), '--log', '.tmp/pack-macos.log', '--timeout', '3600', '--slot', 'heavy',
+    '--builder', $macBuilder, '--lock', 'mac-signing')
+  foreach ($name in $names) { $gateArguments += '--env', $name }
+  $gateArguments += '--', 'pwsh', '-NoProfile', '-File', 'tools/installer/pack-macos.ps1', '-Sign'
+
+  & pwsh -NoProfile -File (Join-Path $root 'tools/gate.ps1') @gateArguments
+  $gateExit = $LASTEXITCODE
 }
-
-# Names only on the gate's command line; the gate reads each value from this process's environment.
-$gateArguments = @('run', '--cd', $root.Replace('\', '/'), '--log', '.tmp/pack-macos.log', '--timeout', '3600', '--slot', 'heavy',
-  '--builder', $macBuilder, '--lock', 'mac-signing')
-foreach ($name in $names) { $gateArguments += '--env', $name }
-$gateArguments += '--', 'pwsh', '-NoProfile', '-File', 'tools/installer/pack-macos.ps1', '-Sign'
-
-& pwsh -NoProfile -File (Join-Path $root 'tools/gate.ps1') @gateArguments
-exit $LASTEXITCODE
+finally {
+  foreach ($name in $names) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+}
+exit $gateExit

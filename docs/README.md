@@ -52,7 +52,7 @@ tools/
   folder-bench/ - the dev-only harness that generates folder fixtures and times folder-transfer candidates to the builder; never shipped
   ios/          - `build.ps1` (the phone app's `.app`, on a Mac) `sim-run.ps1` (the gated simulator run from this PC) `sim-notify.ps1` (the same for the notification extension) and `sim-share.ps1` (the same for the viewer's share sheet)
   installer/    - the NSIS installer script, and `pack-macos.ps1`, which builds the macOS app bundle and disk image on a Mac
-  mac/          - `desktop-test.ps1`, which runs the daemon's Keychain test in the Mac mini builder's logged-on desktop session, from this PC
+  mac/          - `desktop-test.ps1`, which runs the daemon's Keychain test in the Mac mini builder's logged-on desktop session, from this PC; `keychain.ps1`, the temporary signing keychain helper the macOS and iOS signing scripts dot-source, with its Pester tests
   protocol-ts/  - the generator that writes the wire types as TypeScript into `apps/pwa/src/protocol.ts`, with its staleness test; never shipped
   rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
 docs/

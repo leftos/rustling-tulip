@@ -18,8 +18,9 @@
   stapled, the disk image is signed, notarized and stapled, and Gatekeeper's verdict on both is
   checked before the paths are printed. The signing material arrives in environment variables
   named as yaat's release-macos.yml secrets (tools/installer/README.md "macOS code signing"); it
-  is decoded into a temporary keychain added beside the user's keychain list, which is put back,
-  and the keychain and decoded files deleted, whatever happens.
+  is decoded into a temporary keychain added first in the user's keychain search list (entries
+  whose keychain file is gone dropped), and whatever happens that entry alone is taken out of the
+  list again and the keychain and decoded files deleted (tools/mac/keychain.ps1).
 
 .PARAMETER OutDir
   Where the staging folder and the three assets go. Default: target/installer under the repo root.
@@ -45,6 +46,8 @@ if (-not $IsMacOS) { throw 'pack-macos.ps1 builds a macOS app bundle and runs on
 function Assert-LastExit([string]$What) {
   if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
 }
+
+. (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'mac', 'keychain.ps1')
 
 # yaat's names for the Application certificate and the notary key (its release-macos.yml secrets).
 $signingNames = 'MACOS_DEVID_APP_CERT_P12_BASE64', 'MACOS_DEVID_CERT_PASSWORD', 'MACOS_SIGN_APP_IDENTITY',
@@ -90,33 +93,18 @@ function Build-InfoPlist([string]$Version, [string]$Destination) {
   [IO.File]::WriteAllText($Destination, $plist.Replace("`r`n", "`n"))
 }
 
-# Always an array, even of one keychain: a lone string splatted into `security list-keychains -s`
-# would pass each character as a keychain path and wreck the user's search list (yaat's pack-macos.ps1).
-function Get-UserKeychainList {
-  $list = @(security list-keychains -d user | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
-  $missing = @($list | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
-  if (($list.Count -eq 0) -or ($missing.Count -gt 0)) { throw "unexpected user keychain search list ($($list -join ', ')); fix it before signing" }
-  return , $list
-}
-
-# The Application .p12 into a temporary keychain added beside the user's keychains.
-function Import-SigningIdentity([string]$WorkDir, [string]$Keychain, [string[]]$KeychainList) {
+# The Application .p12 into a temporary keychain added first in the user's keychain search list.
+function Import-SigningIdentity([string]$WorkDir, [string]$Keychain) {
   $keychainSecret = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(24))
   $cert = Join-Path $WorkDir 'devid-application.p12'
   [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:MACOS_DEVID_APP_CERT_P12_BASE64))
   try {
-    security create-keychain -p $keychainSecret $Keychain
-    Assert-LastExit 'security create-keychain'
-    security set-keychain-settings -lut 21600 $Keychain
-    Assert-LastExit 'security set-keychain-settings'
-    security unlock-keychain -p $keychainSecret $Keychain
-    Assert-LastExit 'security unlock-keychain'
+    Initialize-SigningKeychain $Keychain $keychainSecret
     security import $cert -P $env:MACOS_DEVID_CERT_PASSWORD -A -t cert -f pkcs12 -k $Keychain
     Assert-LastExit 'security import devid-application.p12'
     security set-key-partition-list -S 'apple-tool:,apple:' -k $keychainSecret $Keychain | Out-Null
     Assert-LastExit 'security set-key-partition-list'
-    security list-keychains -d user -s $Keychain @KeychainList
-    Assert-LastExit 'security list-keychains'
+    Add-SigningKeychain $Keychain
   }
   finally {
     Remove-Item -LiteralPath $cert -Force -ErrorAction SilentlyContinue
@@ -225,16 +213,12 @@ foreach ($old in $zip, $sha, $dmg) {
 
 $signingDir = $null
 $keychain = $null
-$originalList = $null
-if ($Sign) {
-  $signingDir = Join-Path ([IO.Path]::GetTempPath()) "rustling-tulip-signing-$([guid]::NewGuid().ToString('N'))"
-  New-Item -ItemType Directory -Path $signingDir | Out-Null
-  $keychain = Join-Path $signingDir 'signing.keychain-db'
-  $originalList = Get-UserKeychainList
-}
 try {
   if ($Sign) {
-    Import-SigningIdentity $signingDir $keychain $originalList
+    $signingDir = Join-Path ([IO.Path]::GetTempPath()) "rustling-tulip-signing-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $signingDir | Out-Null
+    $keychain = Join-Path (Resolve-RealPath $signingDir) 'signing.keychain-db'
+    Import-SigningIdentity $signingDir $keychain
     $notaryKey = Join-Path $signingDir 'notary-key.p8'
     [IO.File]::WriteAllBytes($notaryKey, [Convert]::FromBase64String($env:MACOS_NOTARY_API_KEY_P8_BASE64))
 
@@ -293,13 +277,7 @@ try {
   }
 }
 finally {
-  if ($Sign) {
-    security list-keychains -d user -s @originalList
-    if (Test-Path -LiteralPath $keychain) { security delete-keychain $keychain }
-    Remove-Item -LiteralPath $signingDir -Recurse -Force -ErrorAction SilentlyContinue
-    $restoredList = Get-UserKeychainList
-    if (Compare-Object $originalList $restoredList) { Write-Warning "the user keychain search list differs from before the run: $($restoredList -join ', ')" }
-  }
+  if ($Sign) { Clear-SigningKeychain $keychain $signingDir }
 }
 
 $dmg

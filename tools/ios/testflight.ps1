@@ -97,15 +97,23 @@ function Invoke-FromPc([switch] $SkipUpload) {
         throw 'tools/ios/testflight.ps1: run it from this PC, not inside a gate job'
     }
     if (-not $IsWindows) { throw 'tools/ios/testflight.ps1 runs on this PC, which holds the signing set; the Mac side is -OnMac' }
-    Read-SigningSet
-    # Names only on the gate's command line; the gate reads each value from this process's environment.
-    $gateArguments = @('run', '--builder', $MacBuilder, '--cd', $RepoRoot.Replace('\', '/'), '--log', '.tmp/ios-testflight.log',
-        '--timeout', '3600', '--slot', 'heavy')
-    foreach ($name in $Names) { $gateArguments += '--env', $name }
-    $gateArguments += '--', 'pwsh', '-NoProfile', '-File', 'tools/ios/testflight.ps1', '-OnMac'
-    if ($SkipUpload) { $gateArguments += '-NoUpload' }
-    & pwsh -NoProfile -File (Join-Path $RepoRoot 'tools/gate.ps1') @gateArguments
-    exit $LASTEXITCODE
+    $gateExit = 1
+    # The variables live from the read to the end of the gate run alone, whatever happens.
+    try {
+        Read-SigningSet
+        # Names only on the gate's command line; the gate reads each value from this process's environment.
+        $gateArguments = @('run', '--builder', $MacBuilder, '--cd', $RepoRoot.Replace('\', '/'), '--log', '.tmp/ios-testflight.log',
+            '--timeout', '3600', '--slot', 'heavy', '--lock', 'mac-signing')
+        foreach ($name in $Names) { $gateArguments += '--env', $name }
+        $gateArguments += '--', 'pwsh', '-NoProfile', '-File', 'tools/ios/testflight.ps1', '-OnMac'
+        if ($SkipUpload) { $gateArguments += '-NoUpload' }
+        & pwsh -NoProfile -File (Join-Path $RepoRoot 'tools/gate.ps1') @gateArguments
+        $gateExit = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $Names) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+    }
+    exit $gateExit
 }
 
 # Xcode's tools this run needs, checked before any build or keychain work.
