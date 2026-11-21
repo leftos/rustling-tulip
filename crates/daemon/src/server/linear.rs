@@ -1,23 +1,29 @@
 //! The daemon's Linear wiring: the one Linear client every connection and the
 //! Dashboard share, the title scan that fetches the issues session titles and
 //! labels name, the 5-minute refresh of the issues live sessions name, the
-//! answer to [`ClientMessage::GetLinearIssues`] and the `LinearContext` and
-//! `LinearIssues` broadcasts.
+//! answer to [`ClientMessage::GetLinearIssues`], the Linear settings messages
+//! (the key, the switch and the Test) and the `LinearContext`,
+//! `LinearIssues` and `LinearStatus` broadcasts.
 //!
-//! The client, its cache and the identifiers Linear did not know are read and
-//! written only under [`LinearHub`]'s one async lock. What the clients were
-//! last sent (the context and every issue) is mirrored under a plain lock,
-//! written while the async lock is held and broadcast under the mirror's lock,
-//! so a connection's initial state, read under that lock, never lands after a
-//! newer broadcast.
+//! The client, its key, the switch, its cache and the identifiers Linear did
+//! not know are read and written only under [`LinearHub`]'s one async lock,
+//! so while the switch is off no request starts, and the key in use never
+//! changes during a fetch. What the clients were last sent (the context, the
+//! status and every issue) is mirrored under a plain lock, written while the
+//! async lock is held and broadcast under the mirror's lock, so a
+//! connection's initial state, read under that lock, never lands after a
+//! newer broadcast. The Test's request runs with neither lock held.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::BoxFuture;
-use protocol::{ClientMessage, DaemonMessage, LinearIssue, SessionSnapshot, SessionStatus};
+use protocol::{
+    ClientMessage, DaemonMessage, LinearIssue, LinearKeyState, SessionSnapshot, SessionStatus,
+};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, watch};
@@ -25,9 +31,25 @@ use tracing::{debug, error, info, warn};
 
 use super::connection::ConnCtx;
 use super::{Hub, StateEvent};
-use crate::linear::{LinearCache, LinearClient, LinearError, LinearTransport, identifiers_in};
+use crate::linear::{
+    Failure, LinearCache, LinearClient, LinearContextData, LinearError, LinearTransport,
+    ReqwestTransport, identifiers_in,
+};
+use crate::linear_key::REJECTION_ID;
 use crate::session::{SessionEvent, SessionRegistry};
+use crate::state::AppState;
+use crate::summarizer::keys::Rejections;
 use crate::user_env::Secret;
+
+/// The Test's answer when the daemon has no key to test.
+const NO_KEY_ERROR: &str = "No Linear API key is set.";
+/// The Test's answer on a daemon taken off Linear.
+const OFFLINE_ERROR: &str =
+    "Linear is turned off for this daemon (RUSTLING_TULIP_LINEAR_OFFLINE=1).";
+
+/// Where the hub chooses its key: the key and its state. It may block on the
+/// secret store, so an async caller runs it on a blocking thread.
+type KeySource = fn() -> (Option<Secret>, LinearKeyState);
 
 /// How often the issues live sessions name are fetched again.
 pub(crate) const REFRESH_TICK: Duration = Duration::from_secs(300);
@@ -85,12 +107,28 @@ impl LinearTransport for NoTransport {
 }
 
 /// The key source of a daemon that never reads one.
-fn no_key() -> Option<Secret> {
-    None
+fn no_key() -> (Option<Secret>, LinearKeyState) {
+    (None, LinearKeyState::Missing)
+}
+
+/// A copy of `key`.
+fn copy(key: &Secret) -> Secret {
+    Secret::new(key.expose().to_owned())
+}
+
+/// Run `source` on a blocking thread; `None` when that thread failed.
+async fn choose_key(source: KeySource) -> Option<(Option<Secret>, LinearKeyState)> {
+    match tokio::task::spawn_blocking(source).await {
+        Ok(chosen) => Some(chosen),
+        Err(err) => {
+            warn!(error = %err, "linear: choosing the key failed; the key in use stays");
+            None
+        }
+    }
 }
 
 /// `LinearContext` as the clients were sent it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct WireContext {
     team_keys: Vec<String>,
     workspace: Option<String>,
@@ -98,7 +136,13 @@ struct WireContext {
 }
 
 impl WireContext {
-    fn of(client: &LinearClient) -> Self {
+    /// The context to publish: empty, with no key configured, while the
+    /// switch is off, so an older client draws nothing either.
+    fn of(service: &Service) -> Self {
+        if !service.enabled {
+            return Self::default();
+        }
+        let client = &service.client;
         let data = client.context().cloned().unwrap_or_default();
         Self {
             team_keys: data.team_keys,
@@ -124,13 +168,48 @@ impl WireContext {
     }
 }
 
+/// `LinearStatus` as the clients were sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WireStatus {
+    enabled: bool,
+    key: LinearKeyState,
+    workspace_name: Option<String>,
+    team_keys: Vec<String>,
+    last_error: Option<String>,
+}
+
+impl WireStatus {
+    fn of(service: &Service) -> Self {
+        let data = service.client.context().cloned().unwrap_or_default();
+        Self {
+            enabled: service.enabled,
+            key: service.key_state(),
+            workspace_name: data.workspace_name,
+            team_keys: data.team_keys,
+            last_error: service.last_error.clone(),
+        }
+    }
+
+    fn message(&self) -> DaemonMessage {
+        DaemonMessage::LinearStatus {
+            enabled: self.enabled,
+            key: self.key,
+            workspace_name: self.workspace_name.clone(),
+            team_keys: self.team_keys.clone(),
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
 /// What the clients were last sent.
 struct Published {
     context: WireContext,
+    status: WireStatus,
     issues: HashMap<String, LinearIssue>,
 }
 
-/// The client and the identifiers Linear did not know, behind the one lock.
+/// The client, the switch, the key's state and the identifiers Linear did
+/// not know, behind the one lock.
 struct Service {
     client: LinearClient,
     /// Each identifier a batch Linear answered came back without, with when.
@@ -138,9 +217,84 @@ struct Service {
     /// Each identifier the title scan asked for in the last 5 minutes, with
     /// when; only the scan reads it.
     scan_tried: HashMap<String, DateTime<Utc>>,
+    /// The host's Linear switch; off, no request is made.
+    enabled: bool,
+    /// The state the key in use was chosen with.
+    chosen: LinearKeyState,
+    /// The key Linear refused, if it did, until the key changes or a Test
+    /// with it succeeds.
+    rejections: Rejections,
+    /// The display text of the last failed request, until the next success.
+    last_error: Option<String>,
 }
 
 impl Service {
+    fn new(client: LinearClient, chosen: LinearKeyState, enabled: bool) -> Self {
+        Self {
+            client,
+            unknown: HashMap::new(),
+            scan_tried: HashMap::new(),
+            enabled,
+            chosen,
+            rejections: Rejections::default(),
+            last_error: None,
+        }
+    }
+
+    /// Whether Linear refused the key in use.
+    fn key_rejected(&self) -> bool {
+        self.client
+            .key()
+            .is_some_and(|key| self.rejections.is_rejected(REJECTION_ID, key))
+    }
+
+    /// Whether a request may be made: the switch is on and a key Linear has
+    /// not refused is in use.
+    fn usable(&self) -> bool {
+        self.enabled && self.client.key_configured() && !self.key_rejected()
+    }
+
+    /// The key's state as clients are told it.
+    fn key_state(&self) -> LinearKeyState {
+        if self.key_rejected() {
+            LinearKeyState::Rejected
+        } else {
+            self.chosen
+        }
+    }
+
+    /// Use `key`, chosen with `state`. A different key forgets what the old
+    /// one was refused or answered without, so it is asked again.
+    fn use_key(&mut self, (key, state): (Option<Secret>, LinearKeyState)) {
+        if self.client.key().map(Secret::expose) != key.as_ref().map(Secret::expose) {
+            self.forget_tries();
+        }
+        self.client.set_key(key);
+        self.chosen = state;
+    }
+
+    /// Forget the identifiers the scan asked for and the ones Linear
+    /// answered without, so the next scan and request ask for them again.
+    fn forget_tries(&mut self) {
+        self.scan_tried.clear();
+        self.unknown.clear();
+    }
+
+    /// Record how a request ended: a success clears the last error; a
+    /// failure becomes it, and a refused key is remembered.
+    fn record(&mut self, failure: Option<&Failure>) {
+        let Some(failure) = failure else {
+            self.last_error = None;
+            return;
+        };
+        self.last_error = Some(failure.text.clone());
+        if failure.rejected
+            && let Some(key) = self.client.key()
+        {
+            self.rejections.reject(REJECTION_ID, key);
+        }
+    }
+
     /// Of the scan's `wanted`, the ones it has not asked for in the last 5
     /// minutes, each recorded as asked at `now`.
     fn scan_due(&mut self, wanted: Vec<String>, now: DateTime<Utc>) -> Vec<String> {
@@ -177,12 +331,14 @@ impl Service {
     }
 
     /// Ask Linear for `identifiers` at `now`, recording the ones a batch
-    /// answered without; nothing is asked with no key or no identifier.
+    /// answered without and how the request ended; nothing is asked while
+    /// the switch is off, with no usable key or with no identifier.
     async fn fetch(&mut self, identifiers: &[String], now: DateTime<Utc>) -> Vec<LinearIssue> {
-        if identifiers.is_empty() || !self.client.key_configured() {
+        if identifiers.is_empty() || !self.usable() {
             return Vec::new();
         }
         let outcome = self.client.fetch_issues(identifiers, now).await;
+        self.record(outcome.failure.as_ref());
         for identifier in outcome.unknown {
             self.unknown.insert(identifier, now);
         }
@@ -196,59 +352,76 @@ pub(crate) struct LinearHub {
     service: AsyncMutex<Service>,
     published: Mutex<Published>,
     clock: Clock,
-    /// Where the 5-minute tick looks for a key while none is configured.
-    key_source: fn() -> Option<Secret>,
+    /// Where the hub chooses its key after a key change, and where the
+    /// 5-minute tick looks for one while none is in use.
+    key_source: KeySource,
+    /// Whether `RUSTLING_TULIP_LINEAR_OFFLINE` took the daemon off Linear.
+    offline: bool,
 }
 
 impl LinearHub {
-    fn new(client: LinearClient, clock: Clock, key_source: fn() -> Option<Secret>) -> Arc<Self> {
-        let context = WireContext::of(&client);
+    fn new(service: Service, clock: Clock, key_source: KeySource, offline: bool) -> Arc<Self> {
+        let published = Published {
+            context: WireContext::of(&service),
+            status: WireStatus::of(&service),
+            issues: HashMap::new(),
+        };
         Arc::new(Self {
-            service: AsyncMutex::new(Service {
-                client,
-                unknown: HashMap::new(),
-                scan_tried: HashMap::new(),
-            }),
-            published: Mutex::new(Published {
-                context,
-                issues: HashMap::new(),
-            }),
+            service: AsyncMutex::new(service),
+            published: Mutex::new(published),
             clock,
             key_source,
+            offline,
         })
     }
 
-    /// The daemon's hub: the key `LINEAR_API_KEY` holds, posting over HTTPS;
-    /// with `RUSTLING_TULIP_LINEAR_OFFLINE` exactly `1`, no key is ever read.
-    pub(crate) fn live() -> Arc<Self> {
+    /// The daemon's hub: the key saved in the secret store, else the one
+    /// `LINEAR_API_KEY` holds, posting over HTTPS, with the switch at
+    /// `enabled`; with `RUSTLING_TULIP_LINEAR_OFFLINE` exactly `1`, no key is
+    /// ever read. Reads the store at once.
+    pub(crate) fn live(enabled: bool) -> Arc<Self> {
         let offline = std::env::var(crate::linear::OFFLINE_VARIABLE).ok();
-        if crate::linear::is_offline(offline.as_deref()) {
+        let offline = crate::linear::is_offline(offline.as_deref());
+        if offline {
             info!(
                 "linear offline: RUSTLING_TULIP_LINEAR_OFFLINE is 1, so this daemon reads no \
                  Linear key and never calls Linear"
             );
         }
-        match LinearClient::from_env() {
-            Ok(client) => Self::new(client, Clock::System, crate::linear::configured_key),
+        match ReqwestTransport::new() {
+            Ok(transport) => {
+                let (key, state) = crate::linear_key::current();
+                let client = LinearClient::new(key, Box::new(transport));
+                let service = Service::new(client, state, enabled);
+                Self::new(service, Clock::System, crate::linear_key::current, offline)
+            }
             Err(err) => {
                 error!(
                     error = %format!("{err:#}"),
                     "linear: the HTTP client could not start; Linear stays off until the daemon restarts"
                 );
-                Self::new(
-                    LinearClient::new(None, Box::new(NoTransport)),
-                    Clock::System,
-                    no_key,
-                )
+                let client = LinearClient::new(None, Box::new(NoTransport));
+                let service = Service::new(client, LinearKeyState::Missing, enabled);
+                Self::new(service, Clock::System, no_key, offline)
             }
         }
     }
 
-    /// A hub over `client` that never looks for another key, on tokio's
-    /// clock.
+    /// A hub over `client`, switched on, that never looks for another key,
+    /// on tokio's clock; a key it holds reads as saved.
     #[cfg(test)]
     pub(crate) fn with_client(client: LinearClient) -> Arc<Self> {
-        Self::new(client, Clock::tokio(), no_key)
+        let state = if client.key_configured() {
+            LinearKeyState::Stored
+        } else {
+            LinearKeyState::Missing
+        };
+        Self::new(
+            Service::new(client, state, true),
+            Clock::tokio(),
+            no_key,
+            false,
+        )
     }
 
     /// A test hub's: no key, so nothing is ever posted.
@@ -257,12 +430,13 @@ impl LinearHub {
         Self::with_client(LinearClient::new(None, Box::new(NoTransport)))
     }
 
-    /// Send `out_tx` the context and every issue the clients were last sent
-    /// (none when there is none), under the lock every broadcast is sent
-    /// under.
+    /// Send `out_tx` the context, the status and every issue the clients
+    /// were last sent (none when there is none), under the lock every
+    /// broadcast is sent under.
     pub(crate) fn send_current(&self, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
         let published = crate::sync::lock(&self.published);
         let _ = out_tx.send(published.context.message());
+        let _ = out_tx.send(published.status.message());
         if !published.issues.is_empty() {
             let _ = out_tx.send(DaemonMessage::LinearIssues {
                 issues: published.issues.values().cloned().collect(),
@@ -290,49 +464,160 @@ impl LinearHub {
         let _ = events.send(StateEvent::LinearIssues(issues));
     }
 
-    /// Broadcast the client's context when it differs from the one last
-    /// sent; whether it did. Called with the service lock held.
-    fn publish_context(&self, service: &Service, events: &broadcast::Sender<StateEvent>) -> bool {
-        let current = WireContext::of(&service.client);
+    /// Broadcast the context and the status, each when it differs from the
+    /// one last sent; whether the context did. Called with the service lock
+    /// held.
+    fn publish(&self, service: &Service, events: &broadcast::Sender<StateEvent>) -> bool {
+        let context = WireContext::of(service);
+        let status = WireStatus::of(service);
         let mut published = crate::sync::lock(&self.published);
-        if published.context == current {
-            return false;
+        let context_changed = published.context != context;
+        if context_changed {
+            let _ = events.send(context.event());
+            published.context = context;
         }
-        let _ = events.send(current.event());
-        published.context = current;
-        true
+        if published.status != status {
+            let _ = events.send(StateEvent::LinearStatus(Box::new(status.message())));
+            published.status = status;
+        }
+        context_changed
     }
 
-    /// Fetch the team keys when they are due, keeping the last ones when the
-    /// fetch fails, and broadcast the context on change; whether it changed.
+    /// Fetch the team keys when they are due, or at once when `force`,
+    /// keeping the last ones when the fetch fails, and broadcast the context
+    /// and status on change; whether the context changed. Nothing is asked
+    /// while the switch is off or with no usable key.
     async fn refresh_context(
         &self,
         service: &mut Service,
         events: &broadcast::Sender<StateEvent>,
+        force: bool,
     ) -> bool {
         let now = self.clock.now();
-        if service.client.key_configured()
-            && service.client.context_due(now)
-            && let Err(err) = service.client.refresh_context(now).await
-        {
-            warn!(error = %err, "linear: the team keys could not be fetched; the last ones stay");
+        if service.usable() && (force || service.client.context_due(now)) {
+            match service.client.refresh_context(now).await {
+                Ok(()) => service.record(None),
+                Err(err) => {
+                    warn!(error = %err, "linear: the team keys could not be fetched; the last ones stay");
+                    service.record(Some(&Failure::of(&err)));
+                }
+            }
         }
-        self.publish_context(service, events)
+        self.publish(service, events)
+    }
+
+    /// Save the switch at `enabled` in `state.json` and apply it, in one
+    /// critical section under the service lock, then broadcast what changed.
+    /// The caller refreshes the context and rescans when it turned on.
+    ///
+    /// # Errors
+    ///
+    /// `state.json` could not be written; the switch is left as it was, on
+    /// disk and in memory.
+    pub(crate) async fn set_enabled(
+        &self,
+        state: &AppState,
+        enabled: bool,
+        events: &broadcast::Sender<StateEvent>,
+    ) -> anyhow::Result<()> {
+        let mut service = self.service.lock().await;
+        state.set_linear_enabled(enabled)?;
+        service.enabled = enabled;
+        self.publish(&service, events);
+        Ok(())
+    }
+
+    /// Save `key`, or delete the saved key when `None`, on a blocking
+    /// thread, choose the key again and use it, all in one critical section
+    /// under the service lock, then broadcast what changed.
+    ///
+    /// # Errors
+    ///
+    /// The key is blank or too long, or the store refused the change or is
+    /// out of reach; the key in use is left as it was. No message carries
+    /// the key.
+    async fn save_key(
+        &self,
+        key: Option<Secret>,
+        events: &broadcast::Sender<StateEvent>,
+    ) -> anyhow::Result<()> {
+        let mut service = self.service.lock().await;
+        let source = self.key_source;
+        let chosen = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            match &key {
+                Some(key) => crate::linear_key::set(key)?,
+                None => crate::linear_key::delete()?,
+            }
+            Ok(source())
+        })
+        .await
+        .context("the secret store task failed")??;
+        service.use_key(chosen);
+        self.publish(&service, events);
+        Ok(())
+    }
+
+    /// Send `out_tx` the status the clients were last sent, under the lock
+    /// every broadcast is sent under: the echo of a successful Set.
+    fn send_status(&self, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+        let published = crate::sync::lock(&self.published);
+        let _ = out_tx.send(published.status.message());
+    }
+
+    /// Check the key in use against Linear now, whatever the switch and the
+    /// context cache: the workspace it reaches, or the error to show. The
+    /// request runs with no lock held; its outcome is recorded only while
+    /// the same key is still in use, and broadcast on change.
+    pub(crate) async fn test(
+        &self,
+        events: &broadcast::Sender<StateEvent>,
+    ) -> Result<LinearContextData, String> {
+        if self.offline {
+            return Err(OFFLINE_ERROR.to_owned());
+        }
+        let (key, transport) = {
+            let service = self.service.lock().await;
+            (service.client.key().map(copy), service.client.transport())
+        };
+        let Some(key) = key else {
+            return Err(NO_KEY_ERROR.to_owned());
+        };
+        let result = crate::linear::test_key(transport.as_ref(), &key).await;
+        let mut service = self.service.lock().await;
+        if service.client.key().map(Secret::expose) == Some(key.expose()) {
+            match &result {
+                Ok(_) => {
+                    if service.key_rejected() {
+                        service.forget_tries();
+                    }
+                    service.rejections = Rejections::default();
+                    service.record(None);
+                }
+                Err(err) => service.record(Some(&Failure::of(err))),
+            }
+            self.publish(&service, events);
+        }
+        result.map_err(|err| err.to_string())
     }
 
     /// Answer a request for `identifiers`: the copies missing or older than a
     /// minute are fetched. `None` when the fetch broadcast something, which
-    /// answers the requester too; else the cached copies it named, possibly
-    /// none, for the requester alone.
+    /// answers the requester too, and while the switch is off, when nothing
+    /// is answered; else the cached copies it named, possibly none, for the
+    /// requester alone.
     pub(crate) async fn request(
         &self,
         identifiers: &[String],
         events: &broadcast::Sender<StateEvent>,
     ) -> Option<Vec<LinearIssue>> {
         let mut service = self.service.lock().await;
+        if !service.enabled {
+            return None;
+        }
         let now = self.clock.now();
         let wanted = service.wanted(identifiers, now, |cache, id| cache.needs_fetch(id, now));
         let fetched = service.fetch(&wanted, now).await;
+        self.publish(&service, events);
         if !fetched.is_empty() {
             self.publish_issues(fetched, events);
             return None;
@@ -349,21 +634,133 @@ impl LinearHub {
     }
 }
 
+/// Handle the Linear messages `dispatch` routes here, each on a task of its
+/// own, so the connection never waits on Linear or on the hub's lock. No log
+/// line or reply carries a key.
+pub(super) fn handle(hub: &Hub, m: ClientMessage, ctx: &ConnCtx<'_>) {
+    match m {
+        ClientMessage::GetLinearIssues { identifiers, .. } => {
+            spawn_request(hub, ctx.out_tx.clone(), identifiers);
+        }
+        ClientMessage::SetLinearKey { key, request_id } => {
+            let key = key.map(|key| Secret::new(key.0));
+            spawn_set(hub, ctx.out_tx.clone(), Change::Key(key), request_id);
+        }
+        ClientMessage::SetLinearEnabled {
+            enabled,
+            request_id,
+        } => {
+            spawn_set(
+                hub,
+                ctx.out_tx.clone(),
+                Change::Enabled(enabled),
+                request_id,
+            );
+        }
+        ClientMessage::TestLinear { request_id } => {
+            spawn_test(hub, ctx.out_tx.clone(), request_id);
+        }
+        _ => {
+            warn!("linear::handle: a message that is not Linear's was routed here");
+        }
+    }
+}
+
+/// A Linear settings change a client asked for.
+enum Change {
+    /// Save the key, or delete the saved key when `None`.
+    Key(Option<Secret>),
+    /// Turn the switch.
+    Enabled(bool),
+}
+
+/// Make `change` on a task of its own. A success is echoed to the requester
+/// with the current status (whatever the broadcast sent everyone), then the
+/// context is refreshed and every session rescanned when Linear may now be
+/// asked; a refusal is answered to the requester alone.
+fn spawn_set(
+    hub: &Hub,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    change: Change,
+    request_id: Option<String>,
+) {
+    let state = Arc::clone(&hub.state);
+    let wiring = Wiring::of(hub);
+    tokio::spawn(async move {
+        let linear = &wiring.linear;
+        let outcome = match change {
+            Change::Key(key) => linear.save_key(key, &wiring.events).await.map(|()| true),
+            Change::Enabled(enabled) => linear
+                .set_enabled(&state, enabled, &wiring.events)
+                .await
+                .map(|()| enabled),
+        };
+        match outcome {
+            Ok(refresh) => {
+                linear.send_status(&out_tx);
+                if refresh {
+                    wiring.refresh_all().await;
+                }
+            }
+            Err(err) => answer_refusal(&out_tx, &err, request_id),
+        }
+    });
+}
+
 /// Answer [`ClientMessage::GetLinearIssues`] on a task of its own, so a slow
 /// Linear never holds up the connection: a fetch is answered by the
-/// `LinearIssues` broadcast, anything else by a `LinearIssues` to the
-/// requester alone.
-pub(super) fn handle(hub: &Hub, m: ClientMessage, ctx: &ConnCtx<'_>) {
-    let ClientMessage::GetLinearIssues { identifiers, .. } = m else {
-        return;
-    };
+/// `LinearIssues` broadcast, a request while the switch is off by nothing,
+/// anything else by a `LinearIssues` to the requester alone.
+fn spawn_request(
+    hub: &Hub,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    identifiers: Vec<String>,
+) {
     let linear = Arc::clone(&hub.linear);
     let events = hub.state_events.clone();
-    let out_tx = ctx.out_tx.clone();
     tokio::spawn(async move {
         if let Some(issues) = linear.request(&identifiers, &events).await {
             let _ = out_tx.send(DaemonMessage::LinearIssues { issues });
         }
+    });
+}
+
+/// Answer a refused Set to its requester alone with an `Error` echoing its
+/// `request_id` (`None` when it carried none) and code `linear_refused`.
+fn answer_refusal(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    err: &anyhow::Error,
+    request_id: Option<String>,
+) {
+    warn!(error = %format!("{err:#}"), request_id = request_id.as_deref().unwrap_or(""), "linear request refused");
+    let _ = out_tx.send(DaemonMessage::Error {
+        message: err.to_string(),
+        request_id,
+        code: Some(protocol::error_codes::LINEAR_REFUSED.to_owned()),
+    });
+}
+
+/// Run the Test on its own task, so a slow Linear does not hold up the
+/// connection, and answer the requester alone with its `LinearTest`.
+fn spawn_test(hub: &Hub, out_tx: mpsc::UnboundedSender<DaemonMessage>, request_id: Option<String>) {
+    let linear = Arc::clone(&hub.linear);
+    let events = hub.state_events.clone();
+    tokio::spawn(async move {
+        let reply = match linear.test(&events).await {
+            Ok(data) => DaemonMessage::LinearTest {
+                workspace_name: Some(data.workspace_name.or(data.workspace).unwrap_or_default()),
+                team_keys: data.team_keys,
+                error: None,
+                request_id,
+            },
+            Err(error) => DaemonMessage::LinearTest {
+                workspace_name: None,
+                team_keys: Vec::new(),
+                error: Some(error),
+                request_id,
+            },
+        };
+        let _ = out_tx.send(reply);
     });
 }
 
@@ -419,7 +816,7 @@ impl Wiring {
             return;
         }
         let mut service = self.linear.service.lock().await;
-        if !service.client.key_configured() {
+        if !service.usable() {
             // Nothing is asked, so nothing is recorded as tried.
             return;
         }
@@ -427,21 +824,43 @@ impl Wiring {
         let wanted = service.wanted(&identifiers, now, |cache, id| cache.get(id).is_none());
         let wanted = service.scan_due(wanted, now);
         let fetched = service.fetch(&wanted, now).await;
+        self.linear.publish(&service, &self.events);
         self.linear.publish_issues(fetched, &self.events);
     }
 
-    /// One 5-minute pass: look for a key while none is configured, refresh
+    /// After the key or the switch changed: fetch the context at once and
+    /// scan every session again; nothing while off or with no usable key.
+    async fn refresh_all(&self) {
+        {
+            let mut service = self.linear.service.lock().await;
+            self.linear
+                .refresh_context(&mut service, &self.events, true)
+                .await;
+            if !service.usable() {
+                return;
+            }
+        }
+        self.scan(&self.sessions.snapshots()).await;
+    }
+
+    /// One 5-minute pass, nothing while the switch is off: choose the key
+    /// again (the store, then the variable) while none is in use, refresh
     /// the team keys when due (scanning every session again when they
     /// changed), then fetch, in one call, every identifier a live session
     /// names whose copy is missing or older than a minute.
     async fn tick(&self) {
         let changed = {
             let mut service = self.linear.service.lock().await;
-            if !service.client.key_configured() {
-                service.client.set_key((self.linear.key_source)());
+            if !service.enabled {
+                return;
+            }
+            if !service.client.key_configured()
+                && let Some(chosen) = choose_key(self.linear.key_source).await
+            {
+                service.use_key(chosen);
             }
             self.linear
-                .refresh_context(&mut service, &self.events)
+                .refresh_context(&mut service, &self.events, false)
                 .await
         };
         if changed {
@@ -462,6 +881,7 @@ impl Wiring {
         let now = self.linear.clock.now();
         let wanted = service.wanted(&identifiers, now, |cache, id| cache.needs_fetch(id, now));
         let fetched = service.fetch(&wanted, now).await;
+        self.linear.publish(&service, &self.events);
         self.linear.publish_issues(fetched, &self.events);
     }
 }
@@ -478,7 +898,7 @@ pub(crate) fn spawn_title_scan(hub: &Hub) -> tokio::task::JoinHandle<()> {
             let mut service = wiring.linear.service.lock().await;
             wiring
                 .linear
-                .refresh_context(&mut service, &wiring.events)
+                .refresh_context(&mut service, &wiring.events, false)
                 .await
         };
         debug!(changed, "linear: title scan started");
@@ -901,6 +1321,445 @@ mod tests {
             "one batch, the exited session left out"
         );
         refresh.abort();
+    }
+
+    /// Save and apply the switch at `enabled`.
+    async fn switch(hub: &Hub, enabled: bool) {
+        hub.linear
+            .set_enabled(&hub.state, enabled, &hub.state_events)
+            .await
+            .expect("the switch saves");
+    }
+
+    /// The status the clients were last sent.
+    fn published_status(hub: &Hub) -> WireStatus {
+        crate::sync::lock(&hub.linear.published).status.clone()
+    }
+
+    /// The context the clients were last sent.
+    fn published_context(hub: &Hub) -> WireContext {
+        crate::sync::lock(&hub.linear.published).context.clone()
+    }
+
+    /// Answer `message` from a local connection and wait for the reply.
+    async fn reply_to(hub: &Hub, message: ClientMessage) -> DaemonMessage {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        dispatch_on(hub, message, 1, &out_tx).await;
+        next_message(&mut out_rx).await
+    }
+
+    fn test_linear() -> ClientMessage {
+        ClientMessage::TestLinear {
+            request_id: Some("t1".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_lists_linear_settings_and_the_initial_state_carries_the_status() {
+        let (hub, _scratch) = test_hub("linear-settings-welcome");
+        let seen = after_hello(&hub, |message| {
+            matches!(message, DaemonMessage::LinearStatus { .. })
+        })
+        .await;
+        assert!(
+            matches!(
+                &seen[0],
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_LINEAR_SETTINGS)
+            ),
+            "{seen:?}"
+        );
+        assert!(
+            matches!(
+                seen.last(),
+                Some(DaemonMessage::LinearStatus {
+                    enabled: true,
+                    key: LinearKeyState::Missing,
+                    workspace_name: None,
+                    last_error: None,
+                    ..
+                })
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn while_off_no_path_makes_a_request_and_the_context_is_empty() {
+        let (hub, _scratch, fake) = keyed_hub("linear-off").await;
+        let mut record = idle_record("s1");
+        record.terminal_title = Some("RT-1 fix".to_owned());
+        hub.sessions.insert(record);
+        switch(&hub, false).await;
+
+        assert_eq!(
+            hub.linear.request(&ids(&["RT-1"]), &hub.state_events).await,
+            None,
+            "a request while off is not answered"
+        );
+        let wiring = Wiring::of(&hub);
+        wiring.scan(&hub.sessions.snapshots()).await;
+        wiring.tick().await;
+        {
+            let mut service = hub.linear.service.lock().await;
+            hub.linear
+                .refresh_context(&mut service, &hub.state_events, true)
+                .await;
+        }
+        wiring.refresh_all().await;
+
+        assert_eq!(fake.requests().len(), 1, "only the setup's context fetch");
+        assert_eq!(published_context(&hub), WireContext::default());
+        assert!(!published_status(&hub).enabled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turning_linear_on_refreshes_the_context() {
+        let (hub, _scratch, fake) = keyed_hub("linear-on-again").await;
+        switch(&hub, false).await;
+        fake.push(Ok(context_reply(&["RT", "OPS"], "acme")));
+
+        switch(&hub, true).await;
+        Wiring::of(&hub).refresh_all().await;
+
+        assert_eq!(fake.requests().len(), 2, "the context is fetched again");
+        let context = published_context(&hub);
+        assert_eq!(context.team_keys, ids(&["RT", "OPS"]));
+        assert!(context.key_configured);
+        let status = published_status(&hub);
+        assert!(status.enabled);
+        assert_eq!(status.team_keys, ids(&["RT", "OPS"]));
+        assert_eq!(
+            status.workspace_name.as_deref(),
+            Some(crate::linear::test_support::workspace_name("acme").as_str())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_key_makes_no_further_request_until_the_key_changes() {
+        let (hub, _scratch, fake) = keyed_hub("linear-rejected").await;
+        fake.push(Err(LinearError::Rejected));
+
+        hub.linear.request(&ids(&["RT-1"]), &hub.state_events).await;
+        let status = published_status(&hub);
+        assert_eq!(status.key, LinearKeyState::Rejected);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("Linear refused the API key")
+        );
+
+        tokio::time::advance(Duration::from_secs(120)).await;
+        hub.linear.request(&ids(&["RT-2"]), &hub.state_events).await;
+        Wiring::of(&hub).tick().await;
+        assert_eq!(asked(&fake), [ids(&["RT-1"])], "nothing more is asked");
+
+        let changed = (
+            Some(Secret::new("lin_api_other".to_owned())),
+            LinearKeyState::Stored,
+        );
+        let mut service = hub.linear.service.lock().await;
+        service.use_key(changed);
+        assert!(service.usable(), "a different key may be used again");
+        assert_eq!(service.key_state(), LinearKeyState::Stored);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_fetch_sets_the_last_error_and_the_next_success_clears_it() {
+        let (hub, _scratch, fake) = keyed_hub("linear-last-error").await;
+        fake.push(Err(LinearError::Status(500)));
+        fake.push(Ok(batch_reply(&ids(&["RT-1"]))));
+
+        hub.linear.request(&ids(&["RT-1"]), &hub.state_events).await;
+        let status = published_status(&hub);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("Linear answered HTTP 500")
+        );
+        assert_eq!(status.key, LinearKeyState::Stored, "a 500 is not a refusal");
+
+        hub.linear.request(&ids(&["RT-1"]), &hub.state_events).await;
+        assert_eq!(published_status(&hub).last_error, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_linear_issues_while_off_gets_no_reply() {
+        let (hub, _scratch, fake) = keyed_hub("linear-off-get").await;
+        switch(&hub, false).await;
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        dispatch_on(&hub, get(&["RT-1"]), 1, &out_tx).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert!(out_rx.try_recv().is_err(), "nothing is answered while off");
+        assert_eq!(fake.requests().len(), 1, "only the setup's context fetch");
+    }
+
+    #[tokio::test]
+    async fn the_test_with_no_key_says_so() {
+        let (hub, _scratch) = test_hub("linear-test-no-key");
+        let reply = reply_to(&hub, test_linear()).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::LinearTest { workspace_name: None, error: Some(error), request_id: Some(id), .. }
+                    if error == "No Linear API key is set." && id == "t1"
+            ),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_test_reports_the_workspace_and_team_keys() {
+        let (hub, _scratch, fake) = keyed_hub("linear-test-ok").await;
+        switch(&hub, false).await;
+        fake.push(Ok(context_reply(&["RT", "OPS"], "acme")));
+
+        let reply = reply_to(&hub, test_linear()).await;
+        let expected = crate::linear::test_support::workspace_name("acme");
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::LinearTest { workspace_name: Some(name), team_keys, error: None, request_id: Some(id) }
+                    if *name == expected && *team_keys == ids(&["RT", "OPS"]) && id == "t1"
+            ),
+            "{reply:?}"
+        );
+        let requests = fake.requests();
+        let query = requests[1]["query"].as_str().expect("a query string");
+        assert_eq!(
+            query, "query Test { teams { nodes { key } } organization { name urlKey } }",
+            "the Test runs whatever the switch, bypassing the cached context"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_test_reports_the_error_and_the_key_reads_rejected() {
+        let (hub, _scratch, fake) = keyed_hub("linear-test-rejected").await;
+        fake.push(Err(LinearError::Rejected));
+        let mut events = hub.state_events.subscribe();
+
+        let reply = reply_to(&hub, test_linear()).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::LinearTest { workspace_name: None, error: Some(error), .. }
+                    if error == "Linear refused the API key"
+            ),
+            "{reply:?}"
+        );
+        assert_eq!(published_status(&hub).key, LinearKeyState::Rejected);
+        let broadcast = tokio::time::timeout(HANG_GUARD, async {
+            loop {
+                if let StateEvent::LinearStatus(message) =
+                    events.recv().await.expect("the state stream is open")
+                {
+                    return message;
+                }
+            }
+        })
+        .await
+        .expect("hung: no LinearStatus broadcast");
+        assert!(
+            matches!(
+                *broadcast,
+                DaemonMessage::LinearStatus {
+                    key: LinearKeyState::Rejected,
+                    ..
+                }
+            ),
+            "{broadcast:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_key_is_refused_with_the_request_id_and_linear_refused() {
+        let (hub, _scratch) = test_hub("linear-blank-key");
+        let reply = reply_to(
+            &hub,
+            ClientMessage::SetLinearKey {
+                key: Some(protocol::Secret("   ".to_owned())),
+                request_id: Some("k1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { request_id: Some(id), code: Some(code), .. }
+                    if id == "k1" && code == protocol::error_codes::LINEAR_REFUSED
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// A key the fakes below accept besides [`crate::linear::test_support::KEY`].
+    const NEW_KEY: &str = "lin_api_new";
+
+    /// The key source of a hub that reads the (mock) secret store alone.
+    fn stored_key() -> (Option<Secret>, LinearKeyState) {
+        crate::linear_key::choose(false, crate::linear_key::read_stored(), None)
+    }
+
+    /// [`keyed_hub`], but choosing its key from the secret store after a
+    /// key change, and accepting [`NEW_KEY`].
+    async fn stored_hub(tag: &str) -> (Hub, ScratchDir, Fake) {
+        let (mut hub, scratch) = test_hub(tag);
+        let fake = Fake::with(vec![Ok(context_reply(&["RT"], "acme"))]);
+        fake.accept(NEW_KEY);
+        let mut client = keyed(&fake);
+        client
+            .refresh_context(Utc::now())
+            .await
+            .expect("the context parses");
+        let service = Service::new(client, LinearKeyState::Stored, true);
+        hub.linear = LinearHub::new(service, Clock::tokio(), stored_key, false);
+        (hub, scratch, fake)
+    }
+
+    fn set_key(key: &str, request_id: &str) -> ClientMessage {
+        ClientMessage::SetLinearKey {
+            key: Some(protocol::Secret(key.to_owned())),
+            request_id: Some(request_id.to_owned()),
+        }
+    }
+
+    /// The next message on `out_rx` that is a `LinearStatus`.
+    async fn next_status(out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> DaemonMessage {
+        loop {
+            let message = next_message(out_rx).await;
+            if matches!(message, DaemonMessage::LinearStatus { .. }) {
+                return message;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn turning_linear_on_while_on_still_echoes_the_status_to_the_requester() {
+        let (hub, _scratch) = test_hub("linear-echo-enabled");
+        let reply = reply_to(
+            &hub,
+            ClientMessage::SetLinearEnabled {
+                enabled: true,
+                request_id: Some("e1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(reply, DaemonMessage::LinearStatus { enabled: true, .. }),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_a_key_while_off_echoes_the_status_to_the_requester() {
+        let (_env, _store) =
+            crate::env_secrets::test_support::scratch_async("linear-echo-key").await;
+        let (hub, _scratch, fake) = stored_hub("linear-echo-key").await;
+        crate::linear_key::set(&Secret::new(crate::linear::test_support::KEY.to_owned()))
+            .expect("the first key saves");
+        let off = reply_to(
+            &hub,
+            ClientMessage::SetLinearEnabled {
+                enabled: false,
+                request_id: Some("e1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(off, DaemonMessage::LinearStatus { enabled: false, .. }),
+            "{off:?}"
+        );
+
+        let reply = reply_to(&hub, set_key(NEW_KEY, "k1")).await;
+        assert!(
+            matches!(
+                reply,
+                DaemonMessage::LinearStatus {
+                    enabled: false,
+                    key: LinearKeyState::Stored,
+                    ..
+                }
+            ),
+            "{reply:?}"
+        );
+        assert_eq!(fake.requests().len(), 1, "nothing is asked while off");
+    }
+
+    #[tokio::test]
+    async fn a_new_key_rescans_what_the_refused_key_failed_on() {
+        let (_env, _store) = crate::env_secrets::test_support::scratch_async("linear-rescan").await;
+        let (hub, _scratch, fake) = stored_hub("linear-rescan").await;
+        let mut record = idle_record("s1");
+        record.terminal_title = Some("RT-5 fix".to_owned());
+        hub.sessions.insert(record);
+        fake.push(Err(LinearError::Rejected));
+        Wiring::of(&hub).scan(&hub.sessions.snapshots()).await;
+        assert_eq!(asked(&fake), [ids(&["RT-5"])]);
+        assert_eq!(published_status(&hub).key, LinearKeyState::Rejected);
+
+        fake.push(Ok(context_reply(&["RT"], "acme")));
+        fake.push(Ok(batch_reply(&ids(&["RT-5"]))));
+        let mut events = hub.state_events.subscribe();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        dispatch_on(&hub, set_key(NEW_KEY, "k1"), 1, &out_tx).await;
+        let issues = next_broadcast(&mut events).await;
+
+        assert_eq!(identifiers_of(&issues), ids(&["RT-5"]));
+        assert_eq!(asked(&fake), [ids(&["RT-5"]), ids(&["RT-5"])]);
+        assert_eq!(fake.keys().last().map(String::as_str), Some(NEW_KEY));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_change_asks_again_for_an_identifier_linear_answered_without() {
+        let (hub, _scratch, fake) = keyed_hub("linear-unknown-key-change").await;
+        fake.accept(NEW_KEY);
+        fake.push(Ok(json!({ "data": { "i0": null } })));
+        hub.linear
+            .request(&ids(&["RT-404"]), &hub.state_events)
+            .await;
+        assert_eq!(asked(&fake), [ids(&["RT-404"])]);
+
+        hub.linear.service.lock().await.use_key((
+            Some(Secret::new(NEW_KEY.to_owned())),
+            LinearKeyState::Stored,
+        ));
+        fake.push(Ok(json!({ "data": { "i0": null } })));
+        hub.linear
+            .request(&ids(&["RT-404"]), &hub.state_events)
+            .await;
+        assert_eq!(
+            asked(&fake),
+            [ids(&["RT-404"]), ids(&["RT-404"])],
+            "a new key asks again"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_saved_keys_leave_the_store_and_the_key_in_use_agreeing() {
+        let (_env, _store) =
+            crate::env_secrets::test_support::scratch_async("linear-two-keys").await;
+        let (hub, _scratch, fake) = stored_hub("linear-two-keys").await;
+        fake.push(Ok(context_reply(&["RT"], "acme")));
+        fake.push(Ok(context_reply(&["RT"], "acme")));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        dispatch_on(
+            &hub,
+            set_key(crate::linear::test_support::KEY, "k1"),
+            1,
+            &out_tx,
+        )
+        .await;
+        dispatch_on(&hub, set_key(NEW_KEY, "k2"), 1, &out_tx).await;
+        let _ = next_status(&mut out_rx).await;
+        let _ = next_status(&mut out_rx).await;
+
+        let stored = crate::linear_key::read_stored()
+            .expect("the store is within reach")
+            .map(|key| key.expose().to_owned());
+        let service = hub.linear.service.lock().await;
+        let in_use = service.client.key().map(|key| key.expose().to_owned());
+        assert!(stored.is_some(), "a key is saved");
+        assert_eq!(stored, in_use, "the saved key is the key in use");
     }
 
     #[test]

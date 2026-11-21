@@ -261,6 +261,16 @@ export const FEATURE_CHAT_MODEL = "chat_model";
 export const FEATURE_LINEAR_LINKS = "linear_links";
 
 /**
+ * `Welcome.features` entry: the daemon keeps a Linear API key in its secret
+ * store and an on/off switch for Linear: it takes
+ * [`ClientMessage::SetLinearKey`], [`ClientMessage::SetLinearEnabled`] and
+ * [`ClientMessage::TestLinear`], and sends [`DaemonMessage::LinearStatus`] at
+ * connect and whenever any of it changes. A client offers its Linear
+ * settings page only on a host that lists it.
+ */
+export const FEATURE_LINEAR_SETTINGS = "linear_settings";
+
+/**
  * `Welcome.features` entry: the daemon resumes a session from one
  * [`ClientMessage::ResumeSession`], choosing by the session's state how. A
  * client talking to a daemon without it sends the older recipe:
@@ -1277,6 +1287,25 @@ export type KeyState =
    * A key may be stored, but the daemon cannot read Windows Credential
    * Manager: it was started from an SSH login.
    */
+  | "unreachable";
+
+/**
+ * The state of the Linear API key a host uses, on
+ * [`DaemonMessage::LinearStatus`].
+ */
+export type LinearKeyState =
+  /**
+   * No key is saved and `LINEAR_API_KEY` is not set, or the daemon is
+   * off Linear (`RUSTLING_TULIP_LINEAR_OFFLINE=1`).
+   */
+  | "missing"
+  /** A key is saved in the host's secret store. */
+  | "stored"
+  /** No key is saved; `LINEAR_API_KEY` is set and used. */
+  | "environment"
+  /** Linear refused the key in use. */
+  | "rejected"
+  /** The secret store is out of reach and `LINEAR_API_KEY` is not set. */
   | "unreachable";
 
 /** The sample summary [`DaemonMessage::SummaryTest`] carries. */
@@ -5166,6 +5195,28 @@ export type ClientMessage =
    */
   | { type: "get_linear_issues"; identifiers: string[]; request_id?: string | null }
   /**
+   * Save the host's Linear API key in its secret store, replacing any
+   * saved before, or delete it when `key` is `None`. Local-only. Success
+   * is the [`DaemonMessage::LinearStatus`] broadcast; a refusal is an
+   * `Error` carrying the `request_id` and code `linear_refused`. The key
+   * redacts itself in `Debug` and is never logged. Sent only to a daemon
+   * that lists [`FEATURE_LINEAR_SETTINGS`].
+   */
+  | { type: "set_linear_key"; key?: Secret | null; request_id?: string | null }
+  /**
+   * Turn Linear on or off for the host. Success is the
+   * [`DaemonMessage::LinearStatus`] broadcast. Sent only to a daemon that
+   * lists [`FEATURE_LINEAR_SETTINGS`].
+   */
+  | { type: "set_linear_enabled"; enabled: boolean; request_id?: string | null }
+  /**
+   * Check the key the host would use now against Linear, whatever the
+   * switch. The daemon answers the requester alone with
+   * [`DaemonMessage::LinearTest`] carrying the `request_id`. Sent only to
+   * a daemon that lists [`FEATURE_LINEAR_SETTINGS`].
+   */
+  | { type: "test_linear"; request_id?: string | null }
+  /**
    * Load a session's summary for this connection: every stretch line as
    * it stands, answered with [`DaemonMessage::Summary`] carrying this
    * `request_id`, then the changed lines as
@@ -6452,6 +6503,21 @@ export type DaemonMessage =
    */
   | { type: "linear_issues"; issues?: LinearIssue[] }
   /**
+   * The host's Linear settings and connection status, sent to every
+   * client at connect and again whenever any of it changes: whether
+   * Linear is on, the state of the key in use, the workspace's name and
+   * team keys it reaches, and the display text of the last failed Linear
+   * request (cleared by the next success). Sent only by a daemon that
+   * lists [`FEATURE_LINEAR_SETTINGS`].
+   */
+  | { type: "linear_status"; enabled: boolean; key: LinearKeyState; workspace_name?: string | null; team_keys?: string[]; last_error?: string | null }
+  /**
+   * The answer to [`ClientMessage::TestLinear`], to the requester alone:
+   * exactly one of `workspace_name` (with the `team_keys` the key reaches)
+   * and `error` is set.
+   */
+  | { type: "linear_test"; workspace_name?: string | null; team_keys?: string[]; error?: string | null; request_id?: string | null }
+  /**
    * The answer to [`ClientMessage::LoadSummary`], sent to the requester
    * with its `request_id`: every stretch line of the session's chat as it
    * stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
@@ -6874,6 +6940,12 @@ export const ErrorCode = {
   WORKTREES_ROOT_REFUSED: "worktrees_root_refused",
   /** A summarizer settings change or test summary was refused. */
   SUMMARIZER_REFUSED: "summarizer_refused",
+  /**
+   * A Linear settings change was refused: a blank or over-long key, a secret
+   * store that failed or is out of reach, or a switch that could not be
+   * saved.
+   */
+  LINEAR_REFUSED: "linear_refused",
   /** Resuming a session failed. */
   RESUME_FAILED: "resume_failed",
   /**

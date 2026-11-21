@@ -522,6 +522,8 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         | ClientMessage::StartAccountLogin { .. }
         | ClientMessage::CancelAccountLogin { .. } => Some("account administration is local-only"),
         ClientMessage::SetGateSlotCount { .. } => Some("gate slot counts are local-only"),
+        // The Linear switch and Test stay open to every origin.
+        ClientMessage::SetLinearKey { .. } => Some("the Linear key is set on this host's own PC"),
         // Asking for a host update stays open to every origin.
         ClientMessage::CancelHostUpdate { .. } => Some("cancelling a host update is local-only"),
         // Telling every client of the host to update stays on this PC.
@@ -1523,6 +1525,37 @@ mod tests {
             *local.borrow_and_update(),
             "a local Shutdown still flips the watch"
         );
+    }
+
+    #[tokio::test]
+    async fn the_linear_key_is_local_only_and_the_switch_and_test_are_open() {
+        let (hub, _scratch) = test_hub("linear-local-only");
+        let set_key = ClientMessage::SetLinearKey {
+            key: Some(protocol::Secret("lin_api_remote".to_owned())),
+            request_id: Some("k1".to_owned()),
+        };
+        let reply = dispatch_one_as(&hub, set_key.clone(), &AuthKind::Tailnet(test_peer())).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, code: Some(code), .. }
+                    if message == "the Linear key is set on this host's own PC"
+                        && code == protocol::error_codes::LOCAL_ONLY
+            ),
+            "{reply:?}"
+        );
+        for auth in [AuthKind::Local, AuthKind::Tailnet(test_peer())] {
+            for msg in [
+                ClientMessage::SetLinearEnabled {
+                    enabled: false,
+                    request_id: None,
+                },
+                ClientMessage::TestLinear { request_id: None },
+            ] {
+                assert_eq!(host_only_refusal(&msg, &auth), None, "{auth:?} {msg:?}");
+            }
+        }
+        assert_eq!(host_only_refusal(&set_key, &AuthKind::Local), None);
     }
 
     #[tokio::test]

@@ -446,6 +446,10 @@ pub enum StateEvent {
     /// Broadcast by the Linear wiring after a fetch, for every client, since
     /// the cache is shared. Mirrors [`protocol::DaemonMessage::LinearIssues`].
     LinearIssues(Vec<protocol::LinearIssue>),
+    /// Broadcast by the Linear wiring when the switch, the key's state, the
+    /// workspace, the team keys or the last error changed: a
+    /// [`protocol::DaemonMessage::LinearStatus`], forwarded to every client.
+    LinearStatus(Box<protocol::DaemonMessage>),
 }
 
 #[derive(Debug, Clone)]
@@ -659,6 +663,7 @@ pub async fn run(
         dispatch_runs.as_ref().map(|hub| Arc::clone(&hub.runs)),
     );
     let (fallback_push, fallback_rx) = tokio::sync::mpsc::channel(4);
+    let linear_enabled = state.linear_enabled();
     let hub = Hub {
         state,
         sessions,
@@ -708,7 +713,7 @@ pub async fn run(
         subagent_tails,
         perf: crate::perf::Perf::new(crate::perf::os::machine_source()),
         host_update: Arc::new(HostUpdate::for_this_daemon()?),
-        linear: linear::LinearHub::live(),
+        linear: linear::LinearHub::live(linear_enabled),
     };
     start_hub_tasks(&hub, client_count_rx, fallback_rx);
     let resume_ids = start_logins(&hub, &login_hub, resume_ids).await;
@@ -1291,7 +1296,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::FollowTranscript { .. } | ClientMessage::UnfollowTranscript { .. }) => {
             transcripts::handle(hub, m, ctx);
         }
-        m @ ClientMessage::GetLinearIssues { .. } => linear::handle(hub, m, ctx),
+        m @ (ClientMessage::GetLinearIssues { .. }
+        | ClientMessage::SetLinearKey { .. }
+        | ClientMessage::SetLinearEnabled { .. }
+        | ClientMessage::TestLinear { .. }) => linear::handle(hub, m, ctx),
     }
     Ok(())
 }

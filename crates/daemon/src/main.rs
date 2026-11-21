@@ -51,6 +51,7 @@ mod instance_lock;
 mod integrity;
 mod keep_awake;
 mod linear;
+mod linear_key;
 mod lock_finder;
 mod logging;
 mod login_path;

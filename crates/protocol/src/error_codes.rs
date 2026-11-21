@@ -42,6 +42,10 @@ pub const LAUNCH_ARGS_REFUSED: &str = "launch_args_refused";
 pub const WORKTREES_ROOT_REFUSED: &str = "worktrees_root_refused";
 /// A summarizer settings change or test summary was refused.
 pub const SUMMARIZER_REFUSED: &str = "summarizer_refused";
+/// A Linear settings change was refused: a blank or over-long key, a secret
+/// store that failed or is out of reach, or a switch that could not be
+/// saved.
+pub const LINEAR_REFUSED: &str = "linear_refused";
 /// Resuming a session failed.
 pub const RESUME_FAILED: &str = "resume_failed";
 /// A repo's or workspace's preset list could not be read: an unknown repo or
@@ -99,6 +103,7 @@ pub const ALL: &[&str] = &[
     LAUNCH_ARGS_REFUSED,
     WORKTREES_ROOT_REFUSED,
     SUMMARIZER_REFUSED,
+    LINEAR_REFUSED,
     RESUME_FAILED,
     PRESETS_FAILED,
     BUSY,

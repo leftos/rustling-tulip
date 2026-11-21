@@ -208,6 +208,14 @@ pub const FEATURE_CHAT_MODEL: &str = "chat_model";
 /// A client detects Linear issues only on a host that lists it.
 pub const FEATURE_LINEAR_LINKS: &str = "linear_links";
 
+/// `Welcome.features` entry: the daemon keeps a Linear API key in its secret
+/// store and an on/off switch for Linear: it takes
+/// [`ClientMessage::SetLinearKey`], [`ClientMessage::SetLinearEnabled`] and
+/// [`ClientMessage::TestLinear`], and sends [`DaemonMessage::LinearStatus`] at
+/// connect and whenever any of it changes. A client offers its Linear
+/// settings page only on a host that lists it.
+pub const FEATURE_LINEAR_SETTINGS: &str = "linear_settings";
+
 /// `Welcome.features` entry: the daemon resumes a session from one
 /// [`ClientMessage::ResumeSession`], choosing by the session's state how. A
 /// client talking to a daemon without it sends the older recipe:
@@ -1557,6 +1565,27 @@ pub enum KeyState {
     Rejected,
     /// A key may be stored, but the daemon cannot read Windows Credential
     /// Manager: it was started from an SSH login.
+    Unreachable,
+    /// Forward-compat fallback: a state the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The state of the Linear API key a host uses, on
+/// [`DaemonMessage::LinearStatus`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearKeyState {
+    /// No key is saved and `LINEAR_API_KEY` is not set, or the daemon is
+    /// off Linear (`RUSTLING_TULIP_LINEAR_OFFLINE=1`).
+    Missing,
+    /// A key is saved in the host's secret store.
+    Stored,
+    /// No key is saved; `LINEAR_API_KEY` is set and used.
+    Environment,
+    /// Linear refused the key in use.
+    Rejected,
+    /// The secret store is out of reach and `LINEAR_API_KEY` is not set.
     Unreachable,
     /// Forward-compat fallback: a state the current build does not know.
     #[serde(other)]
@@ -6481,6 +6510,34 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Save the host's Linear API key in its secret store, replacing any
+    /// saved before, or delete it when `key` is `None`. Local-only. Success
+    /// is the [`DaemonMessage::LinearStatus`] broadcast; a refusal is an
+    /// `Error` carrying the `request_id` and code `linear_refused`. The key
+    /// redacts itself in `Debug` and is never logged. Sent only to a daemon
+    /// that lists [`FEATURE_LINEAR_SETTINGS`].
+    SetLinearKey {
+        #[serde(default)]
+        key: Option<Secret>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Turn Linear on or off for the host. Success is the
+    /// [`DaemonMessage::LinearStatus`] broadcast. Sent only to a daemon that
+    /// lists [`FEATURE_LINEAR_SETTINGS`].
+    SetLinearEnabled {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Check the key the host would use now against Linear, whatever the
+    /// switch. The daemon answers the requester alone with
+    /// [`DaemonMessage::LinearTest`] carrying the `request_id`. Sent only to
+    /// a daemon that lists [`FEATURE_LINEAR_SETTINGS`].
+    TestLinear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Load a session's summary for this connection: every stretch line as
     /// it stands, answered with [`DaemonMessage::Summary`] carrying this
     /// `request_id`, then the changed lines as
@@ -8134,6 +8191,35 @@ pub enum DaemonMessage {
     LinearIssues {
         #[serde(default)]
         issues: Vec<LinearIssue>,
+    },
+    /// The host's Linear settings and connection status, sent to every
+    /// client at connect and again whenever any of it changes: whether
+    /// Linear is on, the state of the key in use, the workspace's name and
+    /// team keys it reaches, and the display text of the last failed Linear
+    /// request (cleared by the next success). Sent only by a daemon that
+    /// lists [`FEATURE_LINEAR_SETTINGS`].
+    LinearStatus {
+        enabled: bool,
+        key: LinearKeyState,
+        #[serde(default)]
+        workspace_name: Option<String>,
+        #[serde(default)]
+        team_keys: Vec<String>,
+        #[serde(default)]
+        last_error: Option<String>,
+    },
+    /// The answer to [`ClientMessage::TestLinear`], to the requester alone:
+    /// exactly one of `workspace_name` (with the `team_keys` the key reaches)
+    /// and `error` is set.
+    LinearTest {
+        #[serde(default)]
+        workspace_name: Option<String>,
+        #[serde(default)]
+        team_keys: Vec<String>,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
     /// with its `request_id`: every stretch line of the session's chat as it
@@ -19115,6 +19201,147 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_linear_settings_feature_is_linear_settings() {
+        assert_eq!(FEATURE_LINEAR_SETTINGS, "linear_settings");
+    }
+
+    #[test]
+    fn linear_settings_requests_round_trip() {
+        let set = ClientMessage::SetLinearKey {
+            key: Some(Secret("lin_api_very_secret".to_string())),
+            request_id: Some("req-l1".to_string()),
+        };
+        let debug = format!("{set:?}");
+        assert!(!debug.contains("lin_api_very_secret"), "{debug}");
+        let json = serde_json::to_string(&set).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"set_linear_key","key":"lin_api_very_secret","request_id":"req-l1"}"#
+        );
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::SetLinearKey { key, request_id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(key, Some(Secret("lin_api_very_secret".to_string())));
+        assert_eq!(request_id.as_deref(), Some("req-l1"));
+        let clear: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_linear_key"}"#).expect("a clear decodes");
+        assert!(matches!(
+            clear,
+            ClientMessage::SetLinearKey {
+                key: None,
+                request_id: None
+            }
+        ));
+
+        let enabled = ClientMessage::SetLinearEnabled {
+            enabled: false,
+            request_id: Some("req-l2".to_string()),
+        };
+        let json = serde_json::to_string(&enabled).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"set_linear_enabled","enabled":false,"request_id":"req-l2"}"#
+        );
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(
+            back,
+            ClientMessage::SetLinearEnabled { enabled: false, request_id: Some(id) } if id == "req-l2"
+        ));
+
+        let test = ClientMessage::TestLinear {
+            request_id: Some("req-l3".to_string()),
+        };
+        let json = serde_json::to_string(&test).expect("serialize");
+        assert_eq!(json, r#"{"type":"test_linear","request_id":"req-l3"}"#);
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(
+            back,
+            ClientMessage::TestLinear { request_id: Some(id) } if id == "req-l3"
+        ));
+    }
+
+    #[test]
+    fn linear_status_and_test_round_trip() {
+        let status = DaemonMessage::LinearStatus {
+            enabled: true,
+            key: LinearKeyState::Environment,
+            workspace_name: Some("Acme".to_string()),
+            team_keys: vec!["RT".to_string()],
+            last_error: Some("Linear answered HTTP 500".to_string()),
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert!(json.contains(r#""type":"linear_status""#), "{json}");
+        assert!(json.contains(r#""key":"environment""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::LinearStatus {
+            enabled,
+            key,
+            workspace_name,
+            team_keys,
+            last_error,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert!(enabled);
+        assert_eq!(key, LinearKeyState::Environment);
+        assert_eq!(workspace_name.as_deref(), Some("Acme"));
+        assert_eq!(team_keys, vec!["RT".to_string()]);
+        assert_eq!(last_error.as_deref(), Some("Linear answered HTTP 500"));
+
+        let reply = DaemonMessage::LinearTest {
+            workspace_name: None,
+            team_keys: Vec::new(),
+            error: Some("Linear refused the API key".to_string()),
+            request_id: Some("req-l4".to_string()),
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        assert!(json.contains(r#""type":"linear_test""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::LinearTest {
+            workspace_name,
+            team_keys,
+            error,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(workspace_name, None);
+        assert_eq!(team_keys, Vec::<String>::new());
+        assert_eq!(error.as_deref(), Some("Linear refused the API key"));
+        assert_eq!(request_id.as_deref(), Some("req-l4"));
+    }
+
+    #[test]
+    fn a_bare_linear_status_decodes_with_the_defaults() {
+        let bare = r#"{"type":"linear_status","enabled":false,"key":"stored"}"#;
+        let DaemonMessage::LinearStatus {
+            enabled,
+            key,
+            workspace_name,
+            team_keys,
+            last_error,
+        } = serde_json::from_str::<DaemonMessage>(bare).expect("deserialize")
+        else {
+            panic!("decoded as another message: {bare}");
+        };
+        assert!(!enabled);
+        assert_eq!(key, LinearKeyState::Stored);
+        assert_eq!(workspace_name, None);
+        assert_eq!(team_keys, Vec::<String>::new());
+        assert_eq!(last_error, None);
+    }
+
+    #[test]
+    fn an_unknown_linear_key_state_decodes_as_unknown() {
+        let state: LinearKeyState =
+            serde_json::from_str(r#""later""#).expect("an unknown state decodes");
+        assert_eq!(state, LinearKeyState::Unknown);
     }
 
     #[test]

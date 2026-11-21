@@ -85,6 +85,11 @@ pub struct PersistedState {
     /// and a state.json without the field log at the default level.
     #[serde(default)]
     pub detailed_logging: bool,
+    /// Host setting: whether the daemon makes Linear requests at all. Absent
+    /// reads on (Linear spends nothing of the user's subscription), so every
+    /// released state.json reads on; read through [`AppState::linear_enabled`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_enabled: Option<bool>,
     /// Host setting: the command each agent's interactive spawns launch,
     /// keyed by the agent's id. Holds only agents whose command is set; an
     /// absent agent launches its plugin's own program. Read at spawn through
@@ -338,6 +343,21 @@ impl AppState {
     pub fn set_detailed_logging(&self, enabled: bool) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.detailed_logging = enabled;
+        })
+    }
+
+    /// Whether Linear is on for this host; a state.json without the field
+    /// reads on.
+    pub fn linear_enabled(&self) -> bool {
+        self.with_persisted(|s| s.linear_enabled.unwrap_or(true))
+    }
+
+    /// Persist the Linear switch; a write that fails leaves the switch as it
+    /// was, in memory too. The caller applies it to the Linear hub.
+    pub fn set_linear_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        self.try_mutate(|s| {
+            s.linear_enabled = Some(enabled);
+            Ok(())
         })
     }
 
@@ -1539,6 +1559,57 @@ mod tests {
             !released.detailed_logging,
             "the oldest release's state.json logs at the default level"
         );
+    }
+
+    #[test]
+    fn a_state_json_without_the_linear_switch_reads_on() {
+        let dirs = scratch_dirs("linear-switch-absent");
+        std::fs::write(&dirs.state_file, r#"{"repos": [], "workspaces": []}"#)
+            .expect("write the state.json");
+        let state = AppState::load_or_default(&dirs).expect("the state.json loads");
+        assert!(state.linear_enabled(), "a missing switch reads on");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_state_json_written_with_linear_off_reads_off() {
+        let dirs = scratch_dirs("linear-switch-off");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state.set_linear_enabled(false).expect("persist the switch");
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert!(!reloaded.linear_enabled(), "the switch survives a reload");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        assert!(
+            text.contains("\"linear_enabled\": false"),
+            "state.json holds the switch: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_linear_switch_that_cannot_be_saved_leaves_the_switch_as_it_was() {
+        let dirs = scratch_dirs("linear-switch-unsaved");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let _ = std::fs::remove_file(&dirs.state_file);
+        std::fs::create_dir_all(dirs.state_file.join("blocker"))
+            .expect("a folder where state.json goes");
+        state
+            .set_linear_enabled(false)
+            .expect_err("state.json cannot be written");
+        assert!(state.linear_enabled(), "the switch reads as before");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn the_v0_5_1_state_json_reads_linear_on() {
+        let dirs = scratch_dirs("linear-switch-v0-5-1");
+        std::fs::write(&dirs.state_file, V0_5_1_STATE_JSON).expect("write the v0.5.1 state.json");
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        assert!(
+            state.linear_enabled(),
+            "the oldest release's state.json reads Linear on"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

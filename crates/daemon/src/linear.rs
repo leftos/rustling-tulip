@@ -6,6 +6,7 @@
 //! fixed times. With no `LINEAR_API_KEY` the client makes no request at all.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -33,8 +34,13 @@ const BATCH_SIZE: usize = 50;
 const CONTEXT_MAX_AGE: TimeDelta = TimeDelta::hours(24);
 /// How long a cached issue stays current; an older copy is fetched again.
 const ISSUE_MAX_AGE: TimeDelta = TimeDelta::minutes(1);
-/// The workspace's team keys and its `urlKey`.
-const CONTEXT_QUERY: &str = "query Context { teams { nodes { key } } organization { urlKey } }";
+/// The workspace's team keys, its name and its `urlKey`.
+const CONTEXT_QUERY: &str =
+    "query Context { teams { nodes { key } } organization { name urlKey } }";
+/// The Test button's query: what the context query asks, under its own name.
+const TEST_QUERY: &str = "query Test { teams { nodes { key } } organization { name urlKey } }";
+/// The GraphQL error code Linear answers a refused API key with.
+const AUTHENTICATION_ERROR: &str = "AUTHENTICATION_ERROR";
 /// The fields one issue query asks for, for each issue.
 const ISSUE_FIELDS: &str = "identifier title url priority priorityLabel updatedAt \
      state { name type color } project { name } assignee { name } releases { nodes { name } }";
@@ -62,6 +68,42 @@ pub(crate) enum LinearError {
     /// The reply's `data` is missing or not the shape asked for.
     #[error("Linear's reply has an unexpected shape: {0}")]
     Shape(String),
+    /// Linear refused the API key: HTTP 401 or 403, or a GraphQL error
+    /// whose `extensions.code` is `AUTHENTICATION_ERROR`.
+    #[error("Linear refused the API key")]
+    Rejected,
+}
+
+impl LinearError {
+    /// Whether Linear refused the key itself.
+    pub(crate) fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected)
+    }
+}
+
+/// A failed request as the wiring keeps it: the error's display text and
+/// whether Linear refused the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Failure {
+    pub(crate) text: String,
+    pub(crate) rejected: bool,
+}
+
+impl Failure {
+    pub(crate) fn of(err: &LinearError) -> Self {
+        Self {
+            text: err.to_string(),
+            rejected: err.is_rejected(),
+        }
+    }
+}
+
+/// The error for an HTTP status outside 2xx: 401 and 403 are a refused key.
+fn status_error(status: u16) -> LinearError {
+    match status {
+        401 | 403 => LinearError::Rejected,
+        other => LinearError::Status(other),
+    }
 }
 
 /// How a request reaches Linear's GraphQL endpoint: posts `body` (a JSON
@@ -111,7 +153,7 @@ impl LinearTransport for ReqwestTransport {
                 .map_err(LinearError::Transport)?;
             let status = response.status();
             if !status.is_success() {
-                return Err(LinearError::Status(status.as_u16()));
+                return Err(status_error(status.as_u16()));
             }
             response.json().await.map_err(LinearError::Transport)
         })
@@ -126,11 +168,12 @@ fn header_value(key: &Secret) -> Result<HeaderValue, LinearError> {
     Ok(value)
 }
 
-/// The workspace's team keys and `urlKey`.
+/// The workspace's team keys, `urlKey` and name.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct LinearContextData {
     pub(crate) team_keys: Vec<String>,
     pub(crate) workspace: Option<String>,
+    pub(crate) workspace_name: Option<String>,
 }
 
 /// The context with the time it was fetched.
@@ -185,27 +228,23 @@ impl LinearCache {
 /// The Linear client: the key, the transport, the context and the cache.
 pub(crate) struct LinearClient {
     key: Option<Secret>,
-    transport: Box<dyn LinearTransport>,
+    transport: Arc<dyn LinearTransport>,
     context: Option<FetchedContext>,
     cache: LinearCache,
 }
 
 impl LinearClient {
-    /// A client with the key `LINEAR_API_KEY` holds (see
-    /// [`user_env::resolve`]), posting over HTTPS.
-    ///
-    /// # Errors
-    ///
-    /// The HTTP client's TLS setup failed.
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
-        Ok(Self::new(
-            configured_key(),
-            Box::new(ReqwestTransport::new()?),
-        ))
-    }
-
-    /// Replace the key, as when one was set after the daemon started.
+    /// Replace the key, as when one was set after the daemon started. A
+    /// different key drops the context the old one fetched.
     pub(crate) fn set_key(&mut self, key: Option<Secret>) {
+        let same = match (&self.key, &key) {
+            (Some(old), Some(new)) => old.expose() == new.expose(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.context = None;
+        }
         self.key = key;
     }
 
@@ -214,7 +253,7 @@ impl LinearClient {
     pub(crate) fn new(key: Option<Secret>, transport: Box<dyn LinearTransport>) -> Self {
         Self {
             key,
-            transport,
+            transport: Arc::from(transport),
             context: None,
             cache: LinearCache::default(),
         }
@@ -223,6 +262,16 @@ impl LinearClient {
     /// Whether the daemon has a Linear API key.
     pub(crate) fn key_configured(&self) -> bool {
         self.key.is_some()
+    }
+
+    /// The key in use, if any.
+    pub(crate) fn key(&self) -> Option<&Secret> {
+        self.key.as_ref()
+    }
+
+    /// The transport, for a request made without the client's lock held.
+    pub(crate) fn transport(&self) -> Arc<dyn LinearTransport> {
+        Arc::clone(&self.transport)
     }
 
     /// The team keys and `urlKey`, once fetched.
@@ -274,6 +323,15 @@ impl LinearClient {
             return outcome;
         };
         for batch in identifiers.chunks(BATCH_SIZE) {
+            if outcome
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.rejected)
+            {
+                // Linear refused the key: no further batch is asked with it.
+                outcome.issues.extend(self.cache.mark_stale(batch));
+                continue;
+            }
             match fetch_batch(self.transport.as_ref(), key, batch, now).await {
                 Ok(issues) => {
                     outcome.unknown.extend(
@@ -292,6 +350,7 @@ impl LinearClient {
                         "linear: an issue batch failed; its cached copies are stale"
                     );
                     outcome.issues.extend(self.cache.mark_stale(batch));
+                    outcome.failure = Some(Failure::of(&err));
                 }
             }
         }
@@ -312,6 +371,23 @@ pub(crate) struct FetchOutcome {
     /// The identifiers a batch Linear answered came back without: Linear
     /// does not know them, or they cannot be read with this key.
     pub(crate) unknown: Vec<String>,
+    /// The last batch failure; `None` when every batch Linear was asked for
+    /// succeeded.
+    pub(crate) failure: Option<Failure>,
+}
+
+/// Ask Linear, through `transport` with `key`, for the team keys and the
+/// workspace with the Test button's query, bypassing any cached context.
+///
+/// # Errors
+///
+/// See [`LinearError`].
+pub(crate) async fn test_key(
+    transport: &dyn LinearTransport,
+    key: &Secret,
+) -> Result<LinearContextData, LinearError> {
+    let body = json!({ "query": TEST_QUERY, "variables": {} });
+    parse_context(transport.post(key, body).await?)
 }
 
 /// Whether `offline`, the value of `RUSTLING_TULIP_LINEAR_OFFLINE`, takes the
@@ -357,6 +433,8 @@ struct Team {
 #[serde(rename_all = "camelCase")]
 struct Organization {
     url_key: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -479,13 +557,33 @@ fn take_data(reply: &mut Value) -> Value {
     reply.get_mut("data").map_or(Value::Null, Value::take)
 }
 
+/// Whether any of `errors` carries `extensions.code` `AUTHENTICATION_ERROR`.
+fn is_authentication_error(errors: &[Value]) -> bool {
+    errors.iter().any(|error| {
+        error.pointer("/extensions/code").and_then(Value::as_str) == Some(AUTHENTICATION_ERROR)
+    })
+}
+
+/// The error a non-empty `errors` array stands for: a refused key when any
+/// is an authentication error, else their messages.
+fn graphql_error(errors: &[Value]) -> LinearError {
+    if is_authentication_error(errors) {
+        LinearError::Rejected
+    } else {
+        LinearError::GraphQl(error_text(errors))
+    }
+}
+
 fn parse_context(mut reply: Value) -> Result<LinearContextData, LinearError> {
     let errors = error_list(&reply);
     if !errors.is_empty() {
-        return Err(LinearError::GraphQl(error_text(errors)));
+        return Err(graphql_error(errors));
     }
     let parsed: ContextReply =
         serde_json::from_value(take_data(&mut reply)).map_err(|err| shape(&err))?;
+    let (workspace, workspace_name) = parsed.organization.map_or((None, None), |organization| {
+        (Some(organization.url_key), organization.name)
+    });
     Ok(LinearContextData {
         team_keys: parsed
             .teams
@@ -493,7 +591,8 @@ fn parse_context(mut reply: Value) -> Result<LinearContextData, LinearError> {
             .into_iter()
             .map(|team| team.key)
             .collect(),
-        workspace: parsed.organization.map(|organization| organization.url_key),
+        workspace,
+        workspace_name,
     })
 }
 
@@ -557,6 +656,9 @@ fn parse_batch(
     now: DateTime<Utc>,
 ) -> Result<BatchReply, LinearError> {
     let errors = error_list(&reply);
+    if is_authentication_error(errors) {
+        return Err(LinearError::Rejected);
+    }
     if !errors.is_empty() {
         return alias_errors(errors, asked.len())
             .map(BatchReply::Unknown)
@@ -732,23 +834,39 @@ pub(crate) mod test_support {
     use crate::user_env::Secret;
 
     /// The key [`keyed`] gives a client; the fake checks every request
-    /// carries it.
+    /// carries it, or a key [`Fake::accept`] added.
     pub(crate) const KEY: &str = "lin_api_test";
 
-    /// Canned replies, handed out in order, and every request body posted.
-    /// A request with no reply left fails the test.
+    /// Canned replies, handed out in order, every request body posted and
+    /// the key each was posted with. A request with no reply left fails the
+    /// test.
     #[derive(Clone, Default)]
     pub(crate) struct Fake {
         replies: Arc<Mutex<VecDeque<Result<Value, LinearError>>>>,
         requests: Arc<Mutex<Vec<Value>>>,
+        accepted: Arc<Mutex<Vec<String>>>,
+        keys: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
         pub(crate) fn with(replies: Vec<Result<Value, LinearError>>) -> Self {
             Self {
                 replies: Arc::new(Mutex::new(replies.into())),
-                requests: Arc::default(),
+                ..Self::default()
             }
+        }
+
+        /// Accept requests posted with `key` too, besides [`KEY`].
+        pub(crate) fn accept(&self, key: &str) {
+            self.accepted
+                .lock()
+                .expect("accepted lock")
+                .push(key.to_owned());
+        }
+
+        /// The key each request was posted with, in order.
+        pub(crate) fn keys(&self) -> Vec<String> {
+            self.keys.lock().expect("keys lock").clone()
         }
 
         /// Queue `reply` after the ones already queued.
@@ -767,7 +885,18 @@ pub(crate) mod test_support {
             key: &'a Secret,
             body: Value,
         ) -> BoxFuture<'a, Result<Value, LinearError>> {
-            assert_eq!(key.expose(), KEY, "the client posts with its key");
+            let accepted = key.expose() == KEY
+                || self
+                    .accepted
+                    .lock()
+                    .expect("accepted lock")
+                    .iter()
+                    .any(|other| other == key.expose());
+            assert!(accepted, "the client posts with its key");
+            self.keys
+                .lock()
+                .expect("keys lock")
+                .push(key.expose().to_owned());
             self.requests.lock().expect("requests lock").push(body);
             let reply = self
                 .replies
@@ -809,12 +938,21 @@ pub(crate) mod test_support {
         json!({ "data": data })
     }
 
-    /// The context query's reply: `team_keys` and the workspace `url_key`.
+    /// The context query's reply: `team_keys` and the workspace `url_key`,
+    /// whose name is [`workspace_name`] of it.
     pub(crate) fn context_reply(team_keys: &[&str], url_key: &str) -> Value {
         let nodes: Vec<Value> = team_keys.iter().map(|key| json!({ "key": key })).collect();
         json!({
-            "data": { "teams": { "nodes": nodes }, "organization": { "urlKey": url_key } }
+            "data": {
+                "teams": { "nodes": nodes },
+                "organization": { "name": workspace_name(url_key), "urlKey": url_key }
+            }
         })
+    }
+
+    /// The workspace name [`context_reply`] gives the workspace `url_key`.
+    pub(crate) fn workspace_name(url_key: &str) -> String {
+        format!("{url_key} workspace")
     }
 }
 
@@ -885,7 +1023,7 @@ mod tests {
         let fake = Fake::with(vec![Ok(json!({
             "data": {
                 "teams": { "nodes": [ { "key": "RT" }, { "key": "OPS" } ] },
-                "organization": { "urlKey": "acme" }
+                "organization": { "name": "Acme Inc", "urlKey": "acme" }
             }
         }))]);
         let mut client = keyed(&fake);
@@ -898,13 +1036,71 @@ mod tests {
             Some(&LinearContextData {
                 team_keys: ids(&["RT", "OPS"]),
                 workspace: Some("acme".to_owned()),
+                workspace_name: Some("Acme Inc".to_owned()),
             })
         );
         let requests = fake.requests();
         assert_eq!(requests.len(), 1);
         let query = requests[0]["query"].as_str().expect("a query string");
         assert!(query.contains("teams { nodes { key } }"), "{query}");
-        assert!(query.contains("organization { urlKey }"), "{query}");
+        assert!(query.contains("organization { name urlKey }"), "{query}");
+    }
+
+    #[test]
+    fn http_401_and_403_are_a_rejected_key_and_500_is_not() {
+        assert!(status_error(401).is_rejected());
+        assert!(status_error(403).is_rejected());
+        let server = status_error(500);
+        assert!(!server.is_rejected());
+        assert!(matches!(server, LinearError::Status(500)), "{server:?}");
+        assert_eq!(
+            LinearError::Rejected.to_string(),
+            "Linear refused the API key"
+        );
+    }
+
+    /// Linear's reply to a request with a revoked or invalid key.
+    fn authentication_error() -> Value {
+        json!({
+            "data": null,
+            "errors": [ {
+                "message": "Authentication required, not authenticated",
+                "extensions": { "code": "AUTHENTICATION_ERROR" }
+            } ]
+        })
+    }
+
+    #[tokio::test]
+    async fn a_graphql_authentication_error_is_a_rejected_key() {
+        let fake = Fake::with(vec![Ok(authentication_error()), Ok(authentication_error())]);
+        let mut client = keyed(&fake);
+        let err = client
+            .refresh_context(t0())
+            .await
+            .expect_err("the context fetch fails");
+        assert!(err.is_rejected(), "{err:?}");
+
+        let all: Vec<String> = (1..=60).map(|n| format!("RT-{n}")).collect();
+        let outcome = client.fetch_issues(&all, t0()).await;
+        let failure = outcome.failure.expect("the fetch failed");
+        assert!(failure.rejected, "{failure:?}");
+        assert_eq!(failure.text, "Linear refused the API key");
+        assert_eq!(
+            fake.requests().len(),
+            2,
+            "no second batch is asked with a refused key"
+        );
+
+        let fake = Fake::with(vec![Ok(json!({
+            "data": null,
+            "errors": [ { "message": "Internal error", "extensions": { "code": "INTERNAL" } } ]
+        }))]);
+        let mut client = keyed(&fake);
+        let err = client
+            .refresh_context(t0())
+            .await
+            .expect_err("the context fetch fails");
+        assert!(!err.is_rejected(), "{err:?}");
     }
 
     #[tokio::test]
