@@ -34,11 +34,11 @@ It is alpha software.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer, its folder or Follow in tab, a tab that tails the file live on any host, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
-- Linear issue identifiers such as RT-12 and linear.app issue links are underlined in the terminal: resting on one shows the issue's card, and Ctrl+click opens it in the Linear app or your browser. A session title naming an issue shows it as a chip in its state colour. Identifiers and issue details need a Linear API key in `LINEAR_API_KEY`.
+- Linear issue identifiers such as RT-12 and linear.app issue links are underlined in the terminal: resting on one shows the issue's card, and Ctrl+click opens it in the Linear app or your browser. A session title naming an issue shows it as a chip in its state colour, on the Dashboard and on subagent and run rows too. Settings › Linear saves the Linear API key on each host (or reads `LINEAR_API_KEY`), turns the links off, and tests the key.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Start Claude yourself in a plain shell, by name, an alias or a wrapper, and the pane gets Chat and Summary while it runs. Settings › Claude can install the app's hooks in Claude Code's own settings, so such a Claude reports its conversation and status too.
 - On macOS hosts, programs that ask the terminal for its colours, such as bat and delta, get your theme's.
-- Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
+- Secret environment values you give a session are stored in Windows Credential Manager, or a Mac's login Keychain, never in a settings file.
 
 ![The Dashboard tab's Compact view: a queue of the sessions waiting on you, then every session by repo with its state, what it is doing now and its running subagents and background work](docs/images/dashboard.png)
 
@@ -49,10 +49,11 @@ It is alpha software.
 - The message box lists the session's commands and skills as you type /, marking those that open in the terminal, and its files to mention as you type @. Paste an image, drop files on the chat or pick them with Attach, and their paths join your message.
 - Under the message box, the session's model and effort, such as Opus 5.5 · high, open a model picker in the chat that switches this session's model or steps its effort, and Quick replies such as "continue" or "yes" send in one click.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
-- A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows, wherever the file is. A file link in an answer opens the file, and Ctrl+Shift+click on it offers the same menu as the terminal's.
+- A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows, wherever the file is. A file path in an answer or a question card is a link in its own colour that opens the file, and Ctrl+Shift+click on it offers the same menu as the terminal's.
 - Pull a draft left in the terminal's prompt box into the message box to edit, send it as it stands or clear it once you confirm, and send or edit Claude's suggested next prompt with one click.
 - Each Code Mode script shows as one line with its description, time and the calls it ran, and a failed script's error under it.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
+- The pane header shows how much of the session's context is used, coloured as the Dashboard colours it.
 - Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
 - Compact mode, on by default, folds a run of reads, searches and commands into one line you can open. The chat column keeps a readable width on wide panes, and each turn's final answer sits in its own box.
 
@@ -164,7 +165,6 @@ On a Mac with Apple silicon (there is no build for Intel Macs):
 1. Install [Claude Code](https://github.com/anthropics/claude-code) and check that `claude` runs from a terminal.
 2. Download `rustling-tulip-<version>-macos-arm64.dmg` from the [latest release](https://github.com/leftos/rustling-tulip/releases/latest), open it and drag rustling-tulip into Applications. The app is signed and notarized, so it opens without a warning.
 3. Run it from Applications: a copy run from the disk image or from Downloads cannot update itself.
-4. Secret environment rows need Windows Credential Manager, so on a Mac a session with a secret row will not start; give it the secret through an `${env:NAME}` row instead.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
