@@ -72,6 +72,7 @@ mod ui_phone_rotation;
 mod ui_phone_session;
 mod ui_phone_settings;
 mod ui_phone_terminal;
+mod ui_phone_text_edit;
 mod ui_phone_two_pane;
 mod ui_phone_viewer;
 mod ui_popout;

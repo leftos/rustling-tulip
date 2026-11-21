@@ -215,6 +215,7 @@ pub mod toast_activation;
 mod toast_stack;
 mod toast_view;
 mod toast_window;
+mod touch_edit;
 mod transcript_view;
 pub mod ui_theme;
 mod undo;

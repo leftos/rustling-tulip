@@ -13,18 +13,26 @@
 //! and refuses copy and cut.
 
 use std::ops::Range;
+use std::time::Instant;
 
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, CursorStyle,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, Image, ImageFormat, KeyBinding, KeyContext, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style,
-    TextAlign, TextInputConfiguration, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    AnyElement, App, AvailableSpace, Bounds, ClickEvent, ClipboardEntry, ClipboardItem,
+    ContentMask, Context, CursorStyle, DispatchPhase, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GestureTuning, GlobalElementId,
+    Hitbox, HitboxBehavior, Image, ImageFormat, KeyBinding, KeyContext, LayoutId, LongPressEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollEvent, SharedString, Style, TextAlign, TextInputConfiguration, TextRun, TouchDragEvent,
+    TouchPhase, UTF16Selection, UnderlineStyle, WeakEntity, Window, WrappedLine, actions, canvas,
+    deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::completion::{Token, token_at};
+use crate::driver_id::DriverId as _;
+use crate::touch_edit::{
+    BarItem, SelectionBox, bar_items, bar_origin, drag_handle, near_caret, word_range,
+};
 use crate::ui_theme::{UiTheme, theme};
 
 /// The key context a single-line input's bindings apply in.
@@ -237,6 +245,115 @@ pub struct TextInput {
     completion: CompletionHook,
     /// What a paste of an image does ([`Self::with_image_paste`]).
     image_paste: ImagePaste,
+    /// Touch editing's state while it is on ([`Self::with_touch_editing`]);
+    /// none keeps the input as a desktop one.
+    touch: Option<TouchEditing>,
+}
+
+/// The side of a hit area that takes a finger, in px.
+const TOUCH_TARGET: f32 = 44.0;
+/// A selection handle's stem width, in px, as the phone chat's.
+const HANDLE_STEM: f32 = 2.0;
+/// A selection handle's knob diameter, in px, as the phone chat's.
+const HANDLE_KNOB: f32 = 10.0;
+/// The edit bar's padding around its buttons, and the gap between them, in px.
+const BAR_PAD: f32 = 4.0;
+/// The edit bar's corner radius, in px.
+const BAR_RADIUS: f32 = 10.0;
+
+/// An input's touch editing: the edit bar, the drag a finger holds and
+/// what the last render drew.
+#[derive(Debug, Default)]
+struct TouchEditing {
+    /// Whether the edit bar is open.
+    bar_open: bool,
+    /// The caret or handle drag a finger holds.
+    drag: Option<TouchDrag>,
+    /// The spots the last render drew the handles and the bar from.
+    drawn: Option<TouchSpots>,
+    /// Where the last render drew the edit bar, in window px.
+    bar: Option<Bounds<Pixels>>,
+    /// When and where the last tap landed, which a tap on the caret pairs
+    /// with into a double tap.
+    last_tap: Option<(Instant, Point<Pixels>)>,
+}
+
+/// What a finger's touch drag moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragKind {
+    /// The caret, from a touch that started on it.
+    Caret,
+    /// A selection handle's end; `fixed` is the other end, and `aim` the
+    /// vector added to the finger to find the text the end goes to.
+    Handle { fixed: usize, aim: Point<Pixels> },
+}
+
+/// A touch drag the input holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TouchDrag {
+    kind: DragKind,
+    /// Where the touch started, in window px.
+    start: Point<Pixels>,
+    /// Whether it has moved past the tap slop.
+    strayed: bool,
+}
+
+/// Which end of the selection a handle marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleSide {
+    Start,
+    End,
+}
+
+impl HandleSide {
+    /// The handle's driver id.
+    fn key(self) -> &'static str {
+        match self {
+            HandleSide::Start => "text-edit-handle-start",
+            HandleSide::End => "text-edit-handle-end",
+        }
+    }
+}
+
+/// Where the selection's ends draw, in window px: each end's caret top-left,
+/// the rows' height and the input's box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TouchSpots {
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+    line_height: Pixels,
+    field: Bounds<Pixels>,
+}
+
+impl TouchSpots {
+    /// The caret top-left of the `side` end.
+    fn of(self, side: HandleSide) -> Point<Pixels> {
+        match side {
+            HandleSide::Start => self.start,
+            HandleSide::End => self.end,
+        }
+    }
+
+    /// Whether the row of the caret at `caret` shows inside the input.
+    fn shows(self, caret: Point<Pixels>) -> bool {
+        caret.y + self.line_height > self.field.top() && caret.y < self.field.bottom()
+    }
+
+    /// The selection the edit bar serves: its first row's top and its last
+    /// row's bottom, kept inside the input, and the middle of a one-row
+    /// selection, else the input's middle.
+    fn selection_box(self) -> SelectionBox {
+        let top = self.start.y.max(self.field.top());
+        let bottom = (self.end.y + self.line_height)
+            .min(self.field.bottom())
+            .max(top);
+        let x = if self.start.y == self.end.y {
+            (self.start.x + self.end.x) / 2.0
+        } else {
+            self.field.center().x
+        };
+        SelectionBox { top, bottom, x }
+    }
 }
 
 /// What a paste of a clipboard holding an image does in an input.
@@ -374,7 +491,20 @@ impl TextInput {
             platform_report: PlatformReport::None,
             completion: CompletionHook::default(),
             image_paste: ImagePaste::Text,
+            touch: None,
         }
+    }
+
+    /// Turns on touch editing, as a phone's text field edits: a double tap
+    /// selects the word under it; a long press selects the word under it,
+    /// or places the caret where there is none, and opens the edit bar
+    /// (Cut, Copy, Paste, Select All); a selection draws a handle at each
+    /// end that a finger drags; a touch drag starting on the caret moves it;
+    /// a tap on the caret opens the bar. Off by default.
+    #[must_use]
+    pub fn with_touch_editing(mut self) -> Self {
+        self.touch = Some(TouchEditing::default());
+        self
     }
 
     /// Turns on image paste: a paste whose clipboard holds an image emits
@@ -440,6 +570,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.goal_x = None;
+        self.close_edit_bar();
         self.report_to_platform(PlatformReport::Content);
         cx.emit(TextChanged);
         self.check_token(cx);
@@ -686,6 +817,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.goal_x = None;
+        self.close_edit_bar();
         self.report_to_platform(PlatformReport::Content);
         self.check_token(cx);
         cx.notify();
@@ -807,9 +939,13 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let focused = self.focus_handle.is_focused(window);
         self.focus_handle.focus(window, cx);
         if !self.read_only {
             crate::keyboard::raise(window);
+        }
+        if self.touch.is_some() && self.touch_tap(event, focused, cx) {
+            return;
         }
         self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);
@@ -941,8 +1077,7 @@ impl TextInput {
         if self.content.is_empty() {
             return 0;
         }
-        let (Some(bounds), Some(layout)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
+        let (Some(bounds), Some(_)) = (self.last_bounds.as_ref(), self.last_layout.as_ref()) else {
             return 0;
         };
         if position.y < bounds.top() {
@@ -950,6 +1085,20 @@ impl TextInput {
         }
         if position.y > bounds.bottom() {
             return self.content.len();
+        }
+        self.index_at(position)
+    }
+
+    /// The caret offset closest to window point `position` in the drawn
+    /// rows, a point above or below the input taking the rows scrolled out
+    /// past its edge, clamped to the first and the last.
+    fn index_at(&self, position: Point<Pixels>) -> usize {
+        let (Some(bounds), Some(layout)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
+        else {
+            return 0;
+        };
+        if self.content.is_empty() {
+            return 0;
         }
         let row = layout.row_at_y(position.y - bounds.top() + self.scroll_y);
         let x = position.x - bounds.left() + self.scroll_x;
@@ -1033,6 +1182,7 @@ impl TextInput {
         self.splice(&range, new_text);
         self.selected_range = caret..caret;
         self.marked_range = marked;
+        self.close_edit_bar();
         cx.emit(TextChanged);
         self.check_token(cx);
         cx.notify();
@@ -1116,6 +1266,592 @@ impl TextInput {
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.goal_x = None;
     }
+}
+
+/// Touch editing ([`TextInput::with_touch_editing`]).
+impl TextInput {
+    /// Closes the edit bar, if touch editing has one open.
+    fn close_edit_bar(&mut self) {
+        if let Some(touch) = self.touch.as_mut() {
+            touch.bar_open = false;
+        }
+    }
+
+    /// Whether the edit bar is open.
+    fn bar_open(&self) -> bool {
+        self.touch.as_ref().is_some_and(|touch| touch.bar_open)
+    }
+
+    /// Opens or closes the edit bar and draws again.
+    fn set_bar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if let Some(touch) = self.touch.as_mut()
+            && touch.bar_open != open
+        {
+            touch.bar_open = open;
+            cx.notify();
+        }
+    }
+
+    /// Where the selection's ends draw, from the last drawn frame.
+    fn touch_spots(&self) -> Option<TouchSpots> {
+        let layout = self.last_layout.as_ref()?;
+        let field = self.last_bounds?;
+        let origin = point(field.left() - self.scroll_x, field.top() - self.scroll_y);
+        let at = |offset| origin + layout.position(self.to_shown(offset));
+        Some(TouchSpots {
+            start: at(self.selected_range.start),
+            end: at(self.selected_range.end),
+            line_height: layout.line_height,
+            field,
+        })
+    }
+
+    /// Whether a touch at window point `at` lands on the caret: the
+    /// selection is empty and `at` lies within reach of it.
+    fn on_caret(&self, at: Point<Pixels>) -> bool {
+        self.selected_range.is_empty()
+            && self
+                .touch_spots()
+                .is_some_and(|spots| near_caret(spots.start, spots.line_height, at))
+    }
+
+    /// The byte offset of the character under window point `position`;
+    /// none outside the input or past a row's end.
+    fn char_under(&self, position: Point<Pixels>) -> Option<usize> {
+        let local = self.last_bounds?.localize(&position)?;
+        let layout = self.last_layout.as_ref()?;
+        let row = layout.row_at_y(local.y + self.scroll_y);
+        let shown = layout.index_in_row(row, local.x + self.scroll_x)?;
+        Some(self.clamp_offset(self.offset_of_shown(shown)))
+    }
+
+    /// Selects the word ([`word_range`]) under window point `position`;
+    /// false, changing nothing, when no word is there.
+    fn select_word_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        self.commit_composition(cx);
+        let Some(word) = self
+            .char_under(position)
+            .and_then(|offset| word_range(&self.content, offset))
+        else {
+            return false;
+        };
+        self.selected_range = word;
+        self.selection_reversed = false;
+        self.goal_x = None;
+        self.report_to_platform(PlatformReport::Selection);
+        self.check_token(cx);
+        cx.notify();
+        true
+    }
+
+    /// Takes a tap (a left press) with touch editing on, before the caret
+    /// moves to it: a double tap on a word selects it; a tap on the caret
+    /// of the input that already had the keyboard (`focused`) opens the
+    /// edit bar and leaves the caret; any other tap closes the bar. True
+    /// when the tap is spent and the caret must not move.
+    fn touch_tap(&mut self, event: &MouseDownEvent, focused: bool, cx: &mut Context<Self>) -> bool {
+        let now = cx.background_executor().now();
+        if let Some(touch) = self.touch.as_mut() {
+            touch.last_tap = Some((now, event.position));
+        }
+        if event.click_count == 2 && self.select_word_at(event.position, cx) {
+            self.set_bar_open(false, cx);
+            return true;
+        }
+        let on_caret = focused && self.on_caret(event.position);
+        self.set_bar_open(on_caret, cx);
+        on_caret
+    }
+
+    /// A long press at window point `at`: the input takes the keyboard,
+    /// the word under it is selected, or the caret placed there when there
+    /// is none, and the edit bar opens.
+    fn long_press(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_composition(cx);
+        self.focus_handle.focus(window, cx);
+        if !self.read_only {
+            crate::keyboard::raise(window);
+        }
+        if !self.select_word_at(at, cx) {
+            self.move_to(self.index_for_mouse_position(at), cx);
+        }
+        if let Some(touch) = self.touch.as_mut() {
+            touch.drag = None;
+        }
+        self.set_bar_open(true, cx);
+    }
+
+    /// Whether a touch drag starting at window point `at` takes the caret:
+    /// touch editing is on, no drag is held and the touch lands on the
+    /// caret.
+    fn wants_caret_drag(&self, at: Point<Pixels>) -> bool {
+        self.touch
+            .as_ref()
+            .is_some_and(|touch| touch.drag.is_none())
+            && self.on_caret(at)
+    }
+
+    /// Commits an IME composition the platform still marks, as
+    /// [`EntityInputHandler::unmark_text`] does, and tells the platform the
+    /// text anew: a touch edit then acts on the selection the input shows,
+    /// never on the marked range.
+    fn commit_composition(&mut self, cx: &mut Context<Self>) {
+        if self.marked_range.take().is_some() {
+            self.report_to_platform(PlatformReport::Content);
+            self.check_token(cx);
+            cx.notify();
+        }
+    }
+
+    /// A finger took the caret at window point `at`: a caret drag starts,
+    /// and should the finger stay put for the long-press time, it becomes a
+    /// long press there ([`Self::caret_held`]), since the drag keeps gpui
+    /// from seeing one.
+    fn start_caret_drag(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_drag(DragKind::Caret, at);
+        let delay = GestureTuning::default().long_press_duration;
+        cx.spawn_in(window, async move |input, cx| {
+            cx.background_executor().timer(delay).await;
+            // Fails only when the input or its window is gone.
+            cx.update(|window, cx| {
+                input
+                    .update(cx, |input, cx| input.caret_held(at, window, cx))
+                    .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The long-press time passed on a caret drag that started at window
+    /// point `at`: while that drag is still held and never strayed past the
+    /// slop, it is a long press there ([`Self::long_press`]), which ends it.
+    fn caret_held(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let held = self
+            .touch
+            .as_ref()
+            .and_then(|touch| touch.drag)
+            .is_some_and(|drag| drag.kind == DragKind::Caret && !drag.strayed && drag.start == at);
+        if held {
+            self.long_press(at, window, cx);
+        }
+    }
+
+    /// Starts `kind`'s drag at window point `at`.
+    fn start_drag(&mut self, kind: DragKind, at: Point<Pixels>) {
+        if let Some(touch) = self.touch.as_mut() {
+            touch.drag = Some(TouchDrag {
+                kind,
+                start: at,
+                strayed: false,
+            });
+        }
+    }
+
+    /// A finger took the `side` handle at window point `at`: that end
+    /// becomes the moving one (the caret end) and the edit bar hides until
+    /// the drag ends.
+    fn start_handle_drag(&mut self, side: HandleSide, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.commit_composition(cx);
+        let Some(spots) = self.touch_spots() else {
+            return;
+        };
+        let caret = spots.of(side);
+        let stem_middle = point(
+            caret.x + px(HANDLE_STEM / 2.0),
+            caret.y + spots.line_height / 2.0,
+        );
+        let fixed = match side {
+            HandleSide::Start => self.selected_range.end,
+            HandleSide::End => self.selected_range.start,
+        };
+        self.selection_reversed = side == HandleSide::Start;
+        let aim = stem_middle - at;
+        self.start_drag(DragKind::Handle { fixed, aim }, at);
+        self.close_edit_bar();
+        cx.notify();
+    }
+
+    /// The finger of the held drag moved to window point `at`: once past
+    /// the tap slop, the caret or the dragged end follows it, through the
+    /// handle rule ([`drag_handle`]); the input scrolls to keep it in view.
+    fn touch_drag_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.touch.as_mut().and_then(|touch| touch.drag.as_mut()) else {
+            return;
+        };
+        if !drag.strayed {
+            let (dx, dy) = (
+                (at.x - drag.start.x) / px(1.0),
+                (at.y - drag.start.y) / px(1.0),
+            );
+            if dx.hypot(dy) <= GestureTuning::default().touch_slop / px(1.0) {
+                return;
+            }
+            drag.strayed = true;
+        }
+        let kind = drag.kind;
+        match kind {
+            DragKind::Caret => self.move_to(self.index_at(at), cx),
+            DragKind::Handle { fixed, aim } => {
+                let to = self.index_at(at + aim);
+                let dragged = drag_handle(&self.content, fixed, to, !self.selection_reversed);
+                self.selected_range = dragged.range;
+                self.selection_reversed = dragged.reversed;
+                self.goal_x = None;
+                self.report_to_platform(PlatformReport::Selection);
+                self.check_token(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// The held drag ended (`ended`) or was cancelled at window point `at`:
+    /// a caret touch that ended without straying is a tap on the caret,
+    /// which opens the edit bar, or with the tap before it a double tap,
+    /// which selects the word under it; both ask for the soft keyboard, as
+    /// a tap does. A handle drag opens the bar again.
+    fn touch_drag_end(
+        &mut self,
+        at: Point<Pixels>,
+        ended: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now = cx.background_executor().now();
+        let Some(touch) = self.touch.as_mut() else {
+            return;
+        };
+        let Some(drag) = touch.drag.take() else {
+            return;
+        };
+        let tuning = GestureTuning::default();
+        let double = touch.last_tap.is_some_and(|(time, place)| {
+            let (dx, dy) = ((at.x - place.x) / px(1.0), (at.y - place.y) / px(1.0));
+            now.saturating_duration_since(time) <= tuning.multi_tap_interval
+                && dx.hypot(dy) <= tuning.multi_tap_slop / px(1.0)
+        });
+        if !ended {
+            return;
+        }
+        match drag.kind {
+            DragKind::Caret if !drag.strayed => {
+                touch.last_tap = Some((now, at));
+                if !self.read_only {
+                    crate::keyboard::raise(window);
+                }
+                let word = double && self.select_word_at(at, cx);
+                self.set_bar_open(!word, cx);
+            }
+            DragKind::Caret => {}
+            DragKind::Handle { .. } => self.set_bar_open(true, cx),
+        }
+    }
+
+    /// Runs the edit bar's `item` through the input's own Cut, Copy, Paste
+    /// and Select All; every item but Select All closes the bar, which
+    /// stays open without its Select All.
+    fn bar_action(&mut self, item: BarItem, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_composition(cx);
+        match item {
+            BarItem::Cut => self.cut(&Cut, window, cx),
+            BarItem::Copy => self.copy(&Copy, window, cx),
+            BarItem::Paste => self.paste_clipboard(window, cx),
+            BarItem::SelectAll => self.select_all(&SelectAll, window, cx),
+        }
+        if item != BarItem::SelectAll {
+            self.set_bar_open(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether window point `at` lies on the edit bar the last render drew.
+    fn in_bar(&self, at: Point<Pixels>) -> bool {
+        self.touch
+            .as_ref()
+            .and_then(|touch| touch.bar)
+            .is_some_and(|bar| bar.contains(&at))
+    }
+
+    /// What touch editing draws over the input: the selection's handles
+    /// and the edit bar, from the last drawn frame; none while the input
+    /// does not have the keyboard, which also closes the bar and drops a
+    /// drag.
+    fn touch_overlay(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let focused = self.focus_handle.is_focused(window);
+        let spots = self.touch_spots();
+        let Some(touch) = self.touch.as_mut() else {
+            return Vec::new();
+        };
+        if !focused {
+            touch.bar_open = false;
+            touch.drag = None;
+        }
+        touch.drawn = spots;
+        touch.bar = None;
+        let bar_open = touch.bar_open;
+        let Some(spots) = spots.filter(|_| focused) else {
+            return Vec::new();
+        };
+        let mut overlay = Vec::new();
+        if !self.selected_range.is_empty() {
+            let color = gpui::rgb(theme(cx).accent).into();
+            let input = cx.entity().downgrade();
+            for side in [HandleSide::Start, HandleSide::End] {
+                if spots.shows(spots.of(side)) {
+                    overlay.push(handle_element(side, spots, color, input.clone()));
+                }
+            }
+        }
+        if bar_open {
+            overlay.push(self.edit_bar(spots, window, cx));
+        }
+        overlay
+    }
+
+    /// The edit bar for the selection at `spots`, placed by [`bar_origin`]
+    /// in the window, with [`bar_items`]' buttons in the phone's button
+    /// style; it records where it draws.
+    fn edit_bar(
+        &mut self,
+        spots: TouchSpots,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let look = button_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            ButtonKind::Outlined,
+            ButtonSize::Large,
+            true,
+            Layer::Floating,
+            &t,
+        );
+        let items = bar_items(self.content.len(), &self.selected_range);
+        let widths: Vec<Pixels> = items
+            .iter()
+            .map(|item| label_width(item.label(), look.text_size, cx) + px(2.0 * look.pad_x + 2.0))
+            .collect();
+        let inner = widths.iter().fold(px(0.), |sum, width| sum + *width)
+            + px(BAR_PAD) * widths.len().saturating_sub(1);
+        let bar = size(
+            inner + px(2.0 * BAR_PAD + 2.0),
+            px(TOUCH_TARGET + 2.0 * BAR_PAD + 2.0),
+        );
+        let origin = bar_origin(spots.selection_box(), bar, window.viewport_size());
+        if let Some(touch) = self.touch.as_mut() {
+            touch.bar = Some(Bounds::new(origin, bar));
+        }
+        let local = origin - spots.field.origin;
+        let buttons = items.into_iter().zip(widths).map(|(item, width)| {
+            button(item.selector(), look)
+                .flex_none()
+                .w(width)
+                .h(px(TOUCH_TARGET))
+                .child(item.label())
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.bar_action(item, window, cx);
+                }))
+        });
+        deferred(
+            div()
+                .id("text-edit-bar")
+                .driver_id(|| "text-edit-bar".to_owned())
+                .occlude()
+                .absolute()
+                .left(local.x)
+                .top(local.y)
+                .w(bar.width)
+                .h(bar.height)
+                .flex()
+                .items_center()
+                .gap(px(BAR_PAD))
+                .p(px(BAR_PAD))
+                .rounded(px(BAR_RADIUS))
+                .bg(rgb(t.popover))
+                .border_1()
+                .border_color(rgb(t.popover_edge))
+                .children(buttons),
+        )
+        .into_any_element()
+    }
+}
+
+/// The width of `label` at `text_size` in the UI font; a face without one
+/// of its glyphs counts a full em for each character.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a bar label is a few characters, far inside f32's exact integer range"
+)]
+fn label_width(label: &str, text_size: Pixels, cx: &App) -> Pixels {
+    let text = cx.text_system();
+    let id = text.resolve_font(&gpui::font(crate::fonts::ui_family(cx)));
+    let measured: anyhow::Result<f32> = label
+        .chars()
+        .map(|ch| {
+            text.advance(id, text_size, ch)
+                .map(|advance| advance.width / px(1.0))
+        })
+        .sum();
+    let width = measured.unwrap_or(label.chars().count() as f32 * (text_size / px(1.0)));
+    // Room for the label's weight shift.
+    px(width.ceil() + 4.0)
+}
+
+/// The `side` handle of the selection at `spots`, as the phone chat's
+/// handles draw: a stem the caret's height and a round knob above the start
+/// or below the end, in `color`, inside a touch-target square centred on
+/// the knob that takes a finger's drag for `input`. Placed in the input's
+/// own box and drawn over everything else.
+fn handle_element(
+    side: HandleSide,
+    spots: TouchSpots,
+    color: gpui::Hsla,
+    input: WeakEntity<TextInput>,
+) -> AnyElement {
+    let caret = spots.of(side);
+    let knob_x = caret.x + px(HANDLE_STEM / 2.0);
+    let knob = match side {
+        HandleSide::Start => point(knob_x, caret.y - px(HANDLE_KNOB / 2.0)),
+        HandleSide::End => point(knob_x, caret.y + spots.line_height + px(HANDLE_KNOB / 2.0)),
+    };
+    let half = px(TOUCH_TARGET / 2.0);
+    let hit = point(knob.x - half, knob.y - half);
+    let local = hit - spots.field.origin;
+    deferred(
+        div()
+            .id(side.key())
+            .driver_id(move || side.key().to_owned())
+            .occlude()
+            .absolute()
+            .left(local.x)
+            .top(local.y)
+            .size(px(TOUCH_TARGET))
+            .child(
+                div()
+                    .absolute()
+                    .left(caret.x - hit.x)
+                    .top(caret.y - hit.y)
+                    .w(px(HANDLE_STEM))
+                    .h(spots.line_height)
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(knob.x - hit.x - px(HANDLE_KNOB / 2.0))
+                    .top(knob.y - hit.y - px(HANDLE_KNOB / 2.0))
+                    .size(px(HANDLE_KNOB))
+                    .rounded_full()
+                    .bg(color),
+            )
+            .child(handle_area(side, input)),
+    )
+    .into_any_element()
+}
+
+/// An area over a handle's whole square that claims a touch drag starting
+/// on it for the `side` handle of `input`, so the touch neither pans nor
+/// long-presses (as `phone/long_press.rs`'s `touch_drag_area` claims one).
+fn handle_area(side: HandleSide, input: WeakEntity<TextInput>) -> impl IntoElement {
+    canvas(
+        |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
+            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        },
+        move |_, hitbox: Hitbox, window: &mut Window, _: &mut App| {
+            window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                let claims = event.phase == TouchPhase::Started
+                    && phase.bubble()
+                    && !window.default_prevented()
+                    && hitbox.is_hovered(window);
+                if claims {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    let at = event.start_position;
+                    // Fails only when the input is gone.
+                    input
+                        .update(cx, |input, cx| input.start_handle_drag(side, at, cx))
+                        .ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// Registers a touch-editing input's own touch listeners for the frame,
+/// `hitbox` its box: a long press on it, a touch drag that starts on its
+/// caret and the moves and end of a drag it holds, and while its edit bar
+/// is open, a scroll or a press outside the input and the bar, which close
+/// the bar.
+fn touch_listeners(
+    input: &Entity<TextInput>,
+    hitbox: &Hitbox,
+    bar_open: bool,
+    window: &mut Window,
+) {
+    let (target, area) = (input.clone(), hitbox.clone());
+    window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
+        let claims = event.phase == TouchPhase::Started
+            && phase.bubble()
+            && !window.default_prevented()
+            && area.is_hovered(window);
+        if claims {
+            window.prevent_default();
+            cx.stop_propagation();
+            let at = event.start_position;
+            target.update(cx, |input, cx| input.long_press(at, window, cx));
+        }
+    });
+    let (target, area) = (input.clone(), hitbox.clone());
+    window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+        if !phase.bubble() {
+            return;
+        }
+        match event.phase {
+            TouchPhase::Started => {
+                let at = event.start_position;
+                let claims = !window.default_prevented()
+                    && area.is_hovered(window)
+                    && target.read(cx).focus_handle.is_focused(window)
+                    && target.read(cx).wants_caret_drag(at);
+                if claims {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    target.update(cx, |input, cx| input.start_caret_drag(at, window, cx));
+                }
+            }
+            TouchPhase::Moved => {
+                target.update(cx, |input, cx| input.touch_drag_move(event.position, cx));
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let ended = event.phase == TouchPhase::Ended;
+                target.update(cx, |input, cx| {
+                    input.touch_drag_end(event.position, ended, window, cx);
+                });
+            }
+        }
+    });
+    if !bar_open {
+        return;
+    }
+    let target = input.clone();
+    window.on_mouse_event(move |_: &ScrollEvent, phase, _, cx| {
+        if phase == DispatchPhase::Capture {
+            target.update(cx, |input, cx| input.set_bar_open(false, cx));
+        }
+    });
+    let (target, area) = (input.clone(), hitbox.clone());
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        let outside = !area.is_hovered(window) && !target.read(cx).in_bar(event.position);
+        if phase == DispatchPhase::Capture && outside {
+            target.update(cx, |input, cx| input.set_bar_open(false, cx));
+        }
+    });
 }
 
 /// Where the IME's marked range lands once `replaced` holds `new_len` bytes in
@@ -1547,6 +2283,7 @@ impl EntityInputHandler for TextInput {
                 .map_or(end..end, |selected| {
                     range.start + selected.start..range.start + selected.end
                 });
+            self.close_edit_bar();
             cx.emit(TextChanged);
             self.check_token(cx);
             cx.notify();
@@ -1626,7 +2363,12 @@ impl Render for TextInput {
                 PlatformReport::None => {}
             }
         }
+        let overlay = self.touch_overlay(window, cx);
+        let touch = self.touch.is_some();
         div()
+            .when(touch, |input| {
+                input.relative().driver_id(|| "text-edit-field".to_owned())
+            })
             .flex()
             .w_full()
             .key_context(self.key_context())
@@ -1660,6 +2402,7 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextElement { input: cx.entity() })
+            .children(overlay)
     }
 }
 
@@ -1674,6 +2417,9 @@ struct PrepaintState {
     origin: Point<Pixels>,
     cursor: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
+    /// The input's box as a hitbox, for touch editing's gestures; none
+    /// while touch editing is off.
+    hitbox: Option<Hitbox>,
 }
 
 impl IntoElement for TextElement {
@@ -1860,8 +2606,13 @@ impl Element for TextElement {
                 origin: bounds.origin,
                 cursor: None,
                 selection: Vec::new(),
+                hitbox: None,
             };
         };
+        let hitbox = input
+            .touch
+            .is_some()
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
         let layout = TextLayout::new(lines, line_height);
         let caret = layout.position(input.to_shown(input.cursor_offset()));
         let painted = input.painted_selection(input.focus_handle.is_focused(window));
@@ -1904,6 +2655,7 @@ impl Element for TextElement {
             origin,
             cursor,
             selection,
+            hitbox,
         }
     }
 
@@ -1925,6 +2677,9 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        if let Some(hitbox) = prepaint.hitbox.take() {
+            touch_listeners(&self.input, &hitbox, input.bar_open(), window);
+        }
         let Some(layout) = prepaint.layout.take() else {
             return;
         };
@@ -1938,10 +2693,19 @@ impl Element for TextElement {
                 window.paint_quad(cursor);
             }
         });
-        self.input.update(cx, |input, _| {
+        let moved = self.input.update(cx, |input, _| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
+            input
+                .touch
+                .as_ref()
+                .is_some_and(|touch| touch.drawn != input.touch_spots())
         });
+        if moved {
+            // The handles and the bar drew from the frame before: draw again
+            // once this frame is done, as a refresh while drawing is ignored.
+            window.defer(cx, |window, _| window.refresh());
+        }
     }
 }
 
@@ -2377,6 +3141,27 @@ mod tests {
         let marked = cx.update(|_, cx| input.read(cx).marked_range.clone());
         assert_eq!(marked, None);
         assert_eq!(*seen.borrow(), [TextInputEvent::Submit]);
+    }
+
+    #[gpui::test]
+    fn an_edit_bar_cut_during_a_composition_cuts_the_selected_word(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "hello ");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "wor", None, window, cx);
+                input.selected_range = 0..5;
+                input.bar_action(super::BarItem::Cut, window, cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), " wor", "the selected word goes");
+        let marked = cx.update(|_, cx| input.read(cx).marked_range.clone());
+        assert_eq!(marked, None, "the composition is committed");
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("hello")
+        );
     }
 
     #[gpui::test]

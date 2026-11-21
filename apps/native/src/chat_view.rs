@@ -2634,7 +2634,8 @@ impl RootView {
             let mut input = if phone {
                 let mut input = TextInput::multi_line("", PHONE_COMPOSER_PLACEHOLDER, cx)
                     .with_rows(PHONE_COMPOSER_MIN_ROWS, PHONE_COMPOSER_MAX_ROWS)
-                    .with_completion_triggers(COMPLETION_TRIGGERS);
+                    .with_completion_triggers(COMPLETION_TRIGGERS)
+                    .with_touch_editing();
                 input.set_text_input_configuration(phone_composer_configuration(), cx);
                 input
             } else {
@@ -4685,13 +4686,15 @@ pub(crate) fn composer_line_disables(line: Option<&ComposerLine>) -> bool {
 }
 
 /// The soft keyboard the phone's composer asks for: Send as its action key,
-/// with autocorrect and sentence autocapitalization on.
+/// with autocorrect and sentence autocapitalization on. Word suggestions
+/// stay off: the platform's inline predictions arrive as marked text, which
+/// a Send could carry.
 fn phone_composer_configuration() -> TextInputConfiguration {
     TextInputConfiguration {
         autocorrect: true,
+        suggestions: false,
         autocapitalize: Autocapitalize::Sentences,
         input_action: TextInputAction::Send,
-        ..TextInputConfiguration::default()
     }
 }
 
@@ -5642,6 +5645,18 @@ fn span(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_phone_composer_keyboard_has_autocorrect_and_sentence_caps_without_predictions() {
+        let config = phone_composer_configuration();
+        assert!(config.autocorrect, "autocorrect");
+        assert!(
+            !config.suggestions,
+            "no predictive text: its inline predictions arrive as marked text"
+        );
+        assert_eq!(config.autocapitalize, Autocapitalize::Sentences);
+        assert_eq!(config.input_action, TextInputAction::Send);
+    }
 
     /// A scroll area from 100 to 700 px, as the edge scroll sees it.
     const TOP: f32 = 100.0;

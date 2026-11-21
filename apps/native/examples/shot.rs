@@ -76,6 +76,10 @@
 //! `phone-session-sheet` shows that page, no dock open, with the `chat`
 //! view's question pending: its prompt sheet raised over a scrim, the
 //! desktop's question card in it over the Esc, up and down keys.
+//! `phone-composer-edit` shows that page, no dock open, with
+//! [`COMPOSER_EDIT_TEXT`] typed into the composer and its first word held
+//! down: the word selected between its two handles and the edit bar (Cut,
+//! Copy, Paste, Select All) open above it.
 //! `phone-terminal` shows the same Home's idle session as a shell with no
 //! agent, opened on its Terminal page: the shell's screen in the live
 //! terminal at the phone's width, the key bar under it. The width the
@@ -420,6 +424,7 @@ enum View {
     PhoneSheet,
     PhoneSession,
     PhoneSessionSheet,
+    PhoneComposerEdit,
     PhoneTerminal,
     PhoneSettings,
     PhoneSettingsAppearance,
@@ -437,7 +442,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 71] = [
+    const ALL: [Self; 72] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -495,6 +500,7 @@ impl View {
         Self::PhoneSheet,
         Self::PhoneSession,
         Self::PhoneSessionSheet,
+        Self::PhoneComposerEdit,
         Self::PhoneTerminal,
         Self::PhoneSettings,
         Self::PhoneSettingsAppearance,
@@ -520,6 +526,7 @@ impl View {
                 | Self::PhoneSheet
                 | Self::PhoneSession
                 | Self::PhoneSessionSheet
+                | Self::PhoneComposerEdit
                 | Self::PhoneTerminal
                 | Self::PhoneSettings
                 | Self::PhoneSettingsAppearance
@@ -550,7 +557,10 @@ impl View {
     fn opens_session(self) -> bool {
         matches!(
             self,
-            Self::PhoneSession | Self::PhoneSessionSheet | Self::PhoneLandscapeTerminal
+            Self::PhoneSession
+                | Self::PhoneSessionSheet
+                | Self::PhoneComposerEdit
+                | Self::PhoneLandscapeTerminal
         ) || self.is_two_pane()
     }
 
@@ -646,6 +656,7 @@ impl View {
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
+            Self::PhoneComposerEdit => "phone-composer-edit",
             Self::PhoneTerminal => "phone-terminal",
             Self::PhoneSettings => "phone-settings",
             Self::PhoneSettingsAppearance => "phone-settings-appearance",
@@ -711,6 +722,7 @@ impl View {
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
+            | Self::PhoneComposerEdit
             | Self::PhoneTerminal
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
@@ -768,6 +780,7 @@ impl View {
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
+            | Self::PhoneComposerEdit
             | Self::PhoneTerminal
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
@@ -1066,6 +1079,7 @@ impl Shot {
             | View::PhoneSheet
             | View::PhoneSession
             | View::PhoneSessionSheet
+            | View::PhoneComposerEdit
             | View::PhoneTerminal
             | View::PhoneSettings
             | View::PhoneSettingsAppearance
@@ -1911,6 +1925,9 @@ async fn capture_phone_home(
             handle.update(cx, |phone, _, cx| phone.tap_composer_keys(cx))?;
             cx.background_executor().timer(DRIVE_WAIT).await;
         }
+        if shot.view == View::PhoneComposerEdit {
+            edit_phone_composer(handle, cx).await?;
+        }
     }
     let layout = handle.update(cx, |phone, _, _| phone.layout())?;
     check_phone_layout(shot.view, layout)?;
@@ -1931,6 +1948,112 @@ async fn capture_phone_home(
     }
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
+}
+
+/// What the `phone-composer-edit` shot types into the composer.
+const COMPOSER_EDIT_TEXT: &str = "Retry the flaky upload test";
+
+/// A point on the `phone-composer-edit` shot's composer field, in the
+/// phone's window: its text's left plus `x`, and the middle of its one row.
+/// The field's row sits over the composer's buttons row at the bottom of
+/// the window's drawn area (`height`, which the desktop can make shorter
+/// than the phone's), its middle [`COMPOSER_ROW_RISE`] above the bottom
+/// inset, as the `phone-session` shot draws it. [`edit_phone_composer`]
+/// checks the text it typed there, so a moved field fails the shot.
+fn composer_point(x: f32, height: gpui::Pixels) -> gpui::Point<gpui::Pixels> {
+    // The side padding, the field's border and its own padding.
+    let text_left = 16.0 + 1.0 + 11.0;
+    gpui::point(
+        px(text_left + x),
+        height - px(PHONE_INSET_BOTTOM + COMPOSER_ROW_RISE),
+    )
+}
+
+/// How far above the bottom inset the composer field's row has its middle:
+/// the composer's padding, its buttons row, the gap and half the field.
+const COMPOSER_ROW_RISE: f32 = 80.0;
+
+/// Taps the shown session's composer, types [`COMPOSER_EDIT_TEXT`] into it
+/// and holds its first word down, as a finger does: the word is selected
+/// and the edit bar opens. Fails when the text or the selection is not
+/// what the shot drew.
+async fn edit_phone_composer(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    let height = handle.update(cx, |_, window, _| window.viewport_size().height)?;
+    let tap = composer_point(4.0, height);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let down = gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: tap,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        };
+        let up = gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: tap,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        };
+        window.dispatch_event(gpui::PlatformInput::MouseDown(down), cx);
+        window.dispatch_event(gpui::PlatformInput::MouseUp(up), cx);
+    })?;
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    cx.update_window(handle.into(), |_, window, cx| -> Result<()> {
+        for c in COMPOSER_EDIT_TEXT.chars() {
+            let key = if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_lowercase().to_string()
+            };
+            let key = if c.is_uppercase() {
+                format!("shift-{key}")
+            } else {
+                key
+            };
+            press(&key, window, cx)?;
+        }
+        Ok(())
+    })??;
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    let text = handle.update(cx, |phone, _, cx| {
+        phone
+            .root()
+            .read(cx)
+            .chat_composer_text(PHONE_SHEET_SESSION, cx)
+    })?;
+    if text.as_deref() != Some(COMPOSER_EDIT_TEXT) {
+        bail!("the phone-composer-edit view's composer holds {text:?}, not {COMPOSER_EDIT_TEXT:?}");
+    }
+    let held = composer_point(6.0, height);
+    cx.update_window(handle.into(), |_, window, cx| {
+        // The typing left the window's last input a keyboard's, under which
+        // nothing counts as hovered: the finger lands first, as a touch does.
+        let lands = gpui::MouseMoveEvent {
+            position: held,
+            pressed_button: None,
+            modifiers: gpui::Modifiers::default(),
+        };
+        window.dispatch_event(gpui::PlatformInput::MouseMove(lands), cx);
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Ended] {
+            let press = gpui::LongPressEvent {
+                phase,
+                start_position: held,
+                position: held,
+            };
+            window.dispatch_event(gpui::PlatformInput::LongPress(press), cx);
+        }
+    })?;
+    cx.background_executor().timer(DRIVE_WAIT).await;
+    let selected = handle.update(cx, |phone, _, cx| {
+        phone
+            .root()
+            .read(cx)
+            .chat_composer_selection(PHONE_SHEET_SESSION, cx)
+    })?;
+    if selected != Some(0..5) {
+        bail!("the phone-composer-edit view's composer selects {selected:?}, not its first word");
+    }
+    Ok(())
 }
 
 /// Fails when a two-pane `view` lays out as one pane, or a landscape one
@@ -2323,6 +2446,7 @@ fn drive(
         | View::PhoneSheet
         | View::PhoneSession
         | View::PhoneSessionSheet
+        | View::PhoneComposerEdit
         | View::PhoneTerminal
         | View::PhoneSettings
         | View::PhoneSettingsAppearance

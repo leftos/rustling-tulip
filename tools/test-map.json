@@ -1230,7 +1230,14 @@
       "paths": [
         "apps/native/src/text_input.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^text_input::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^text_input::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_phone_text_edit::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/touch_edit.rs",
+        "apps/native/tests/ui/ui_phone_text_edit.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & (test(/^touch_edit::/) | test(/^text_input::/))) | (binary_id(rustling-tulip-native::ui) & test(/^ui_phone_text_edit::/))"
     },
     {
       "paths": [
