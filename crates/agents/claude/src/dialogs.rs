@@ -688,8 +688,9 @@ fn listed_row(row: &str) -> Option<Listed> {
     let description_column = if column_text.is_empty() {
         None
     } else {
-        let start = row.len() - column.trim_start().len();
-        Some(row[..start].chars().count())
+        let trimmed = row.trim_end();
+        let start = trimmed.len() - column.trim_start().len();
+        Some(trimmed[..start].chars().count())
     };
     let name = name.trim();
     let (label, current) = match name.strip_suffix(CURRENT_TICK) {
@@ -2592,6 +2593,32 @@ mod tests {
                 5,
                 "Haiku",
                 Some("Haiku 5.5 · Fastest for quick answers"),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn a_padded_picker_row_reads_its_description_column() {
+        let mut rows = capture(PICKER_W80);
+        let padded = rows
+            .iter_mut()
+            .find(|row| row.trim_start().starts_with("3. Fable"))
+            .expect("the Fable row");
+        assert!(
+            padded.ends_with("hardest and"),
+            "the Fable row ends where its description wraps"
+        );
+        padded.push_str("    ");
+        let prompt = read(&rows).prompt.expect("the capture shows a prompt");
+        let options = &prompt.options;
+        assert_eq!(options.len(), 5, "one option per model row");
+        assert_eq!(
+            options[2],
+            model(
+                3,
+                "Fable",
+                Some("Fable 5.2 · Most capable for your hardest and longest-running tasks"),
                 false
             )
         );
