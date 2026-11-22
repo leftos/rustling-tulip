@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.
 - Answering one question of a multi-question card from the phone or the chat keeps the session waiting on you until the card is submitted.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
 

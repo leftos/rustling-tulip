@@ -76,7 +76,7 @@ export function replyKey(state: KeyBarState, sessionId: string, text: string): K
 const TERMINAL_REPLIES: readonly RegExp[] = [
   /^\x1b\[\?[\d;]*c$/,
   /^\x1b\[>[\d;]*c$/,
-  /^\x1b\[\d+;\d+R$/,
+  /^\x1b\[\??\d+;\d+R$/,
   /^\x1b\[\d*n$/,
   /^\x1b\[\??[\d;]+\$y$/,
   /^\x1b\[[\d;]*t$/,

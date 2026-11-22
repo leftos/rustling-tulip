@@ -106,6 +106,7 @@ test("keys_the_terminal_answering_the_child_is_a_reply", () => {
     "\x1b[?62;22c",
     "\x1b[>0;276;0c",
     "\x1b[12;40R",
+    "\x1b[?12;40R",
     "\x1b[0n",
     "\x1b[?1;2$y",
     "\x1b[2004;1$y",
@@ -122,6 +123,7 @@ test("keys_the_terminal_answering_the_child_is_a_reply", () => {
   for (const reply of replies) {
     expect(isTerminalReply(reply), JSON.stringify(reply)).toBe(true);
   }
+  expect(isTerminalReply("\x1b[?R")).toBe(false);
 });
 
 test("keys_keys_the_user_pressed_are_not_a_reply", () => {
