@@ -637,12 +637,15 @@ pub enum PaneEvent {
     /// Ctrl+click picked `link`; a path in it resolves against
     /// `base_dirs`, the folders of `session`, the pane's session.
     /// `action`: what to do with a path: its app on a Ctrl+click, or the
-    /// link menu's pick.
+    /// link menu's pick. `at`: where the click landed, in window
+    /// coordinates, where a path found in several folders offers the menu
+    /// that picks among them.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
         session: Option<String>,
         action: LinkAction,
+        at: Point<Pixels>,
     },
     /// Ctrl+Shift+click picked the path `link`: the root opens the link menu at
     /// `at`, in window coordinates, whose pick opens it as
@@ -2021,6 +2024,7 @@ impl TerminalPane {
                 base_dirs: self.base_dirs.clone(),
                 session: self.session_id().map(str::to_owned),
                 action: LinkAction::Viewer,
+                at: event.position,
             }),
         }
         true
@@ -2546,6 +2550,7 @@ impl TerminalPane {
             return;
         };
         let mut link = shown.link.clone();
+        let at = shown.at;
         if let Some(card) = &self.card.model {
             link.target.clone_from(&card.open_url);
         }
@@ -2554,6 +2559,7 @@ impl TerminalPane {
             base_dirs: self.base_dirs.clone(),
             session: self.session_id().map(str::to_owned),
             action: LinkAction::DefaultApp,
+            at,
         });
     }
 
@@ -3363,6 +3369,7 @@ impl TerminalPane {
             base_dirs,
             session,
             action: LinkAction::DefaultApp,
+            at: event.position,
         }
     }
 

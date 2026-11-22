@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Div, Keystroke, MouseButton, MouseDownEvent, ScrollEvent, Stateful,
-    Window, WindowId, anchored, deferred, div, prelude::*,
+    AnyElement, Context, Div, Keystroke, MouseButton, MouseDownEvent, ScrollEvent, SharedString,
+    Stateful, Window, WindowId, anchored, deferred, div, prelude::*,
 };
 use protocol::FEATURE_FILE_TAIL;
 
@@ -16,7 +16,7 @@ use crate::fetch_link;
 use crate::link_menu::{self, LinkMenu, RowPick};
 use crate::links;
 use crate::open::{self, LinkAction};
-use crate::open_view::{LinkFolders, LinkSource};
+use crate::open_view::{LinkFolders, LinkSource, Opening, Origin};
 use crate::overlay_owner::Overlay;
 use crate::remote_mode::Capabilities;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item};
@@ -93,6 +93,8 @@ impl RootView {
                 run_folders: false,
                 host,
                 follow,
+                choices: Vec::new(),
+                action: LinkAction::DefaultApp,
                 at: window.mouse_position(),
                 selected: 0,
                 max_height: window.viewport_size().height * MENU_MAX_SHARE,
@@ -105,6 +107,7 @@ impl RootView {
             session: Some(session_id),
             action: LinkAction::DefaultApp,
             folders: LinkFolders::Session,
+            at: None,
         };
         self.open_link(&terminal, base_dirs, &source, window, cx);
     }
@@ -120,11 +123,11 @@ impl RootView {
     /// while the menu is closed, for a row it does not offer, or for any
     /// other id.
     #[must_use]
-    pub fn link_menu_row_label(&self, id: &str) -> Option<&'static str> {
+    pub fn link_menu_row_label(&self, id: &str) -> Option<SharedString> {
         let menu = self.link_menu.as_ref()?;
         menu.rows()
             .into_iter()
-            .find(|row| row.id == id)
+            .find(|row| row.id.as_ref() == id)
             .map(|row| row.label)
     }
 
@@ -165,21 +168,32 @@ impl RootView {
         Some(menu)
     }
 
-    /// Closes the menu and opens its link as row `index` asks.
+    /// Closes the menu and opens what its row `index` asks: the action menu's
+    /// link as that row's action says, a follow tab, or the file a pick row
+    /// names.
     fn pick_link_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.take_link_menu(window, cx) else {
             return;
         };
-        let Some(row) = menu.rows().get(index).copied() else {
+        let Some(row) = menu.rows().get(index).cloned() else {
             return;
         };
-        let action = match row.pick {
-            RowPick::Open(action) => action,
-            RowPick::Follow => {
-                self.follow_link(menu, window, cx);
-                return;
-            }
-        };
+        match row.pick {
+            RowPick::Open(action) => self.open_menu_action(menu, action, window, cx),
+            RowPick::Follow => self.follow_link(menu, window, cx),
+            RowPick::Choice(choice) => self.open_chosen(&menu, choice, window, cx),
+        }
+    }
+
+    /// Opens `menu`'s link as its row's action `action` asks, resolving the
+    /// path afresh as a single click does.
+    fn open_menu_action(
+        &mut self,
+        menu: LinkMenu,
+        action: LinkAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let LinkMenu {
             link,
             base_dirs,
@@ -194,8 +208,33 @@ impl RootView {
             session: session.as_deref(),
             action,
             folders: LinkFolders::of(run_folders, &dirs),
+            at: None,
         };
         self.open_link(&link, base_dirs, &source, window, cx);
+    }
+
+    /// Opens the choice at `index` of `menu`'s files as the click that found
+    /// them asked: in the viewer for a viewer click, else externally, and
+    /// never outside the folder for fetched files.
+    fn open_chosen(
+        &mut self,
+        menu: &LinkMenu,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(action) = menu.choices.get(index).cloned() else {
+            return;
+        };
+        let opening = Opening {
+            origin: Origin::Link,
+            action: menu.action,
+            at: None,
+        };
+        if self.refuses_outside_the_download_folder(&action, opening, cx) {
+            return;
+        }
+        self.open_text_or_external(action, opening, window, cx);
     }
 
     /// Whether a link menu on a pane of `host` showing `session` offers
@@ -362,7 +401,7 @@ impl RootView {
             .into_iter()
             .enumerate()
             .map(|(index, row)| {
-                menu_item(row.id, row.label, false, &t)
+                menu_item(row.id.as_ref(), row.label.clone(), false, &t)
                     .when(index == menu.selected, |item| {
                         item.bg(gpui::rgb(t.popover_hover))
                     })

@@ -1361,7 +1361,10 @@ impl RootView {
         let pick = if matches!(link.kind, LinkKind::Path) && event.modifiers.shift {
             LinkPick::Menu(event.position)
         } else {
-            LinkPick::Open(LinkAction::DefaultApp)
+            LinkPick::Open {
+                action: LinkAction::DefaultApp,
+                at: None,
+            }
         };
         let click = LinkClick {
             host: Some(host),

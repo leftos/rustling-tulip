@@ -556,6 +556,10 @@ fn open_linear_issue(opener: &dyn Opener, app_url: &str, web_url: &str) -> Resul
 pub enum Resolution {
     /// A reading exists; this is how to open it.
     Open(OpenAction),
+    /// Several readings exist: the same path, found in more than one of the
+    /// session's folders, and not in its current one. One action per file,
+    /// in folder order, for the click to pick among.
+    Several(Vec<OpenAction>),
     /// No reading exists, for the reason given.
     NotFound(String),
     /// The link names a network host that is neither mapped nor listed, so
@@ -687,13 +691,50 @@ pub fn resolve_link(
     page_only_for_a_file(resolution, |path| opener.is_file(path))
 }
 
+/// [`resolve_link`], but a path the session's current folder does not hold
+/// and two or more of the session's other folders do resolves to
+/// [`Resolution::Several`], one action per file, for the click to pick
+/// among instead of opening the first. A network host that is neither
+/// listed under `unc_hosts` in the layout file in `ui_dir`, read afresh
+/// here, nor behind a drive `opener` reports refuses the link before any
+/// reading is looked up. Touches the file system and the network, so it
+/// runs off the UI thread.
+#[must_use]
+pub fn resolve_link_choices(
+    candidates: &[TerminalLinkCandidate],
+    base_dirs: &[String],
+    ui_dir: Option<&Path>,
+    opener: &dyn Opener,
+) -> Resolution {
+    let resolution = resolve_choices_with(
+        candidates,
+        base_dirs,
+        || ui_dir.map(load_unc_hosts).unwrap_or_default(),
+        || opener.mapped_unc_hosts(),
+        |reading| opener.existing(reading),
+    );
+    page_only_for_a_file(resolution, |path| opener.is_file(path))
+}
+
 /// `resolution`, but a page that `is_file` says is no file — a folder named
 /// like a page — opens as a plain path, as it did before pages.
 fn page_only_for_a_file(resolution: Resolution, is_file: impl Fn(&Path) -> bool) -> Resolution {
     match resolution {
-        Resolution::Open(OpenAction::Page { path, .. }) if !is_file(&path) => {
-            Resolution::Open(OpenAction::DefaultApp(path))
-        }
+        Resolution::Open(action) => Resolution::Open(without_a_page_for_a_folder(action, &is_file)),
+        Resolution::Several(actions) => Resolution::Several(
+            actions
+                .into_iter()
+                .map(|action| without_a_page_for_a_folder(action, &is_file))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// `action`, but a page that `is_file` says is no file opens as a plain path.
+fn without_a_page_for_a_folder(action: OpenAction, is_file: &impl Fn(&Path) -> bool) -> OpenAction {
+    match action {
+        OpenAction::Page { path, .. } if !is_file(&path) => OpenAction::DefaultApp(path),
         other => other,
     }
 }
@@ -771,6 +812,84 @@ fn resolve_with(
         }
     }
     Resolution::NotFound(last_error)
+}
+
+/// [`resolve_link_choices`] with the listed and mapped host lookups and the
+/// existence check named.
+fn resolve_choices_with(
+    candidates: &[TerminalLinkCandidate],
+    base_dirs: &[String],
+    listed_hosts: impl FnOnce() -> Vec<String>,
+    mapped_hosts: impl FnOnce() -> Vec<String>,
+    mut existing: impl FnMut(&Path) -> Option<Result<PathBuf, String>>,
+) -> Resolution {
+    let all: Vec<Vec<PathBuf>> = candidates
+        .iter()
+        .map(|candidate| readings(&candidate.path, base_dirs))
+        .collect();
+    if let Some(host) = refused_host(all.iter().flatten(), listed_hosts, mapped_hosts) {
+        return Resolution::Refused { host };
+    }
+    let mut last_error = "no path candidates to open".to_owned();
+    for (candidate, readings) in candidates.iter().zip(&all) {
+        let found = existing_readings(readings, &mut existing);
+        if found.paths.is_empty() {
+            last_error = found
+                .error
+                .unwrap_or_else(|| format!("path does not exist: {}", candidate.path));
+            continue;
+        }
+        let mut actions: Vec<OpenAction> = found
+            .paths
+            .into_iter()
+            .map(|path| open_action(candidate, path))
+            .collect();
+        if actions.len() == 1 {
+            return Resolution::Open(actions.remove(0));
+        }
+        return Resolution::Several(actions);
+    }
+    Resolution::NotFound(last_error)
+}
+
+/// One candidate's readings, checked against the disk.
+struct Found {
+    /// The files that exist, in reading order and each once: one file
+    /// reached through two folders is one file.
+    paths: Vec<PathBuf>,
+    /// The error the first reading to give one reported, for a candidate
+    /// that settles on it.
+    error: Option<String>,
+}
+
+/// The files `readings` found, settled as a single open settles them: a
+/// file in the first folder (the session's current one) wins alone, and so
+/// does a reading that reports an error, each with no reading after it
+/// looked at. Only a first hit in a later folder keeps looking, for the
+/// files beside it; a later error there is passed over.
+fn existing_readings(
+    readings: &[PathBuf],
+    existing: &mut impl FnMut(&Path) -> Option<Result<PathBuf, String>>,
+) -> Found {
+    let mut found = Found {
+        paths: Vec::new(),
+        error: None,
+    };
+    for (index, reading) in readings.iter().enumerate() {
+        match existing(reading) {
+            Some(Ok(path)) if index == 0 => {
+                found.paths.push(path);
+                return found;
+            }
+            Some(Err(err)) if found.paths.is_empty() => {
+                found.error = Some(err);
+                return found;
+            }
+            Some(Ok(path)) if !found.paths.contains(&path) => found.paths.push(path),
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Every place `path` may be: itself when absolute, else joined to each of
@@ -1521,8 +1640,9 @@ mod tests {
         ClassRoot, JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget,
         base_dirs, browser_command, browser_page_url, copy_path, existing_on_disk, linear_app_url,
         macos_vscode_commands, open_action, opener_for, page_only_for_a_file, page_url,
-        page_url_of, repo_folder, resolve_with, runs_code, scheme_registered_by, simplify_path,
-        unc_host, validate_http_url, validate_linear_url, workspace_vscode_target,
+        page_url_of, repo_folder, resolve_choices_with, resolve_with, runs_code,
+        scheme_registered_by, simplify_path, unc_host, validate_http_url, validate_linear_url,
+        workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
     use crate::temp_dir::TempDir;
@@ -2454,6 +2574,241 @@ mod tests {
         assert!(matches!(resolution, Resolution::Open(_)), "{resolution:?}");
         assert!(!listed.get(), "a local path reads no host list");
         assert!(!mapped.get(), "a local path needs no drive lookup");
+    }
+
+    /// The three session folders the choice tests resolve against: the
+    /// current folder, then two worktrees.
+    fn session_folders() -> Vec<String> {
+        ["C:/cwd", "C:/a", "C:/b"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// An existence check over the paths in `there`, finding each as it was
+    /// asked about and nothing else.
+    fn only_at(there: &[&str]) -> impl FnMut(&Path) -> Option<Result<PathBuf, String>> {
+        let there: Vec<PathBuf> = there.iter().map(PathBuf::from).collect();
+        move |reading| {
+            there
+                .iter()
+                .any(|known| known == reading)
+                .then(|| Ok(reading.to_path_buf()))
+        }
+    }
+
+    #[test]
+    fn resolve_link_choices_lists_a_path_found_in_two_worktrees() {
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            only_at(&[r"C:/a/src/lib.rs", r"C:/b/src/lib.rs"]),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Several(vec![
+                OpenAction::DefaultApp(PathBuf::from(r"C:/a/src/lib.rs")),
+                OpenAction::DefaultApp(PathBuf::from(r"C:/b/src/lib.rs")),
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_opens_the_current_folders_file_alone() {
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            only_at(&[r"C:/cwd/src/lib.rs", r"C:/a/src/lib.rs", r"C:/b/src/lib.rs"]),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/cwd/src/lib.rs")))
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_opens_a_path_found_in_one_worktree() {
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            only_at(&[r"C:/a/src/lib.rs"]),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/a/src/lib.rs")))
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_opens_one_file_reached_through_two_folders_once() {
+        let shared = |reading: &Path| {
+            (reading != Path::new(r"C:/cwd/src/lib.rs"))
+                .then(|| Ok(PathBuf::from(r"C:/shared/lib.rs")))
+        };
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            shared,
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/shared/lib.rs"))),
+            "one file behind two folders is one file"
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_keeps_the_longest_candidate() {
+        let resolution = resolve_choices_with(
+            &[
+                candidate("src/lib.rs", None, None),
+                candidate("lib.rs", None, None),
+            ],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            only_at(&[r"C:/a/src/lib.rs", r"C:/a/lib.rs", r"C:/b/lib.rs"]),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/a/src/lib.rs"))),
+            "the first candidate that exists wins, alone"
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_opens_an_absolute_path() {
+        let every_folder = only_at(&[r"C:/x/y.txt", r"C:/cwd/C:/x/y.txt"]);
+        let resolution = resolve_choices_with(
+            &[candidate(r"C:/x/y.txt", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            every_folder,
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/x/y.txt"))),
+            "an absolute path has one reading"
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_reports_a_missing_path() {
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            only_at(&[]),
+        );
+        assert_eq!(
+            resolution,
+            Resolution::NotFound("path does not exist: src/lib.rs".to_owned())
+        );
+    }
+
+    /// The four session folders one choice test resolves against: the
+    /// current folder, then three worktrees.
+    fn four_folders() -> Vec<String> {
+        ["C:/cwd", "C:/a", "C:/b", "C:/c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The reading in the session's current folder found unreadable, and
+    /// every other reading found.
+    fn unreadable(reading: &Path) -> Result<PathBuf, String> {
+        if reading == Path::new(r"C:/cwd/src/lib.rs") {
+            return Err("access denied".to_owned());
+        }
+        Ok(reading.to_path_buf())
+    }
+
+    /// An existence check finding a file in the first and third worktrees,
+    /// which reports an error for the second worktree's reading.
+    fn error_in_the_middle(reading: &Path) -> Option<Result<PathBuf, String>> {
+        if reading == Path::new(r"C:/b/src/lib.rs") {
+            return Some(Err("access denied".to_owned()));
+        }
+        [r"C:/a/src/lib.rs", r"C:/c/src/lib.rs"]
+            .iter()
+            .any(|known| reading == Path::new(known))
+            .then(|| Ok(reading.to_path_buf()))
+    }
+
+    #[test]
+    fn resolve_link_choices_does_not_look_past_a_current_folder_hit() {
+        let calls = Cell::new(0usize);
+        let all = |reading: &Path| {
+            calls.set(calls.get() + 1);
+            Some(Ok(reading.to_path_buf()))
+        };
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            all,
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Open(OpenAction::DefaultApp(PathBuf::from(r"C:/cwd/src/lib.rs")))
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "the current folder's file is the only reading checked"
+        );
+    }
+
+    #[test]
+    fn resolve_link_choices_treats_an_unreadable_first_hit_as_resolve_with_does() {
+        let unreadable_first = |reading: &Path| Some(unreadable(reading));
+        let choices = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            unreadable_first,
+        );
+        let single = resolve_with(
+            &[candidate("src/lib.rs", None, None)],
+            &session_folders(),
+            Vec::new,
+            Vec::new,
+            unreadable_first,
+        );
+        assert_eq!(choices, single, "the same resolution a single open gives");
+        assert_eq!(choices, Resolution::NotFound("access denied".to_owned()));
+    }
+
+    #[test]
+    fn resolve_link_choices_ignores_a_later_error_among_worktree_hits() {
+        let resolution = resolve_choices_with(
+            &[candidate("src/lib.rs", None, None)],
+            &four_folders(),
+            Vec::new,
+            Vec::new,
+            error_in_the_middle,
+        );
+        assert_eq!(
+            resolution,
+            Resolution::Several(vec![
+                OpenAction::DefaultApp(PathBuf::from(r"C:/a/src/lib.rs")),
+                OpenAction::DefaultApp(PathBuf::from(r"C:/c/src/lib.rs")),
+            ]),
+            "a later error among the hits is ignored"
+        );
     }
 
     #[cfg(windows)]

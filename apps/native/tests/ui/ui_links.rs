@@ -873,6 +873,211 @@ fn ctrl_click_on_a_text_path_opens_the_default_app(cx: &mut TestAppContext) {
     assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
 }
 
+/// A shell in a folder holding nothing, whose session also has the two
+/// worktrees `wt-a` and `wt-b`, each holding `src/lib.rs`, with the link to
+/// it on screen; returns the harness and the two files, as the opener
+/// resolved them.
+fn two_worktrees<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf, PathBuf) {
+    let cwd = dir.path().join("cwd");
+    let worktree = dir.path().join("wt-a");
+    let other = dir.path().join("wt-b");
+    let first = write_file(&worktree, "src/lib.rs");
+    let second = write_file(&other, "src/lib.rs");
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let a_text = worktree.to_string_lossy().into_owned();
+    let b_text = other.to_string_lossy().into_owned();
+    let s = session("s1")
+        .shell(&cwd_text)
+        .members(&[("r1", "wt-a", &a_text), ("r2", "wt-b", &b_text)])
+        .build();
+    let mut h = attached(cx, dir, s);
+    h.pty("s1", b"wrote src/lib.rs");
+    (h, first, second)
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_path_in_two_worktrees_shows_a_pick_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, first, second) = two_worktrees(cx, &dir);
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl());
+    assert!(
+        h.in_model("link-menu"),
+        "the click picks instead of opening"
+    );
+    assert_eq!(h.opened(), [], "nothing opens before the pick");
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
+    for id in ["link-menu-pick-0", "link-menu-pick-1"] {
+        assert!(h.in_model(id), "{id} is in the menu");
+    }
+    assert_eq!(
+        row_text(&mut h, "link-menu-pick-0"),
+        Some(first.display().to_string())
+    );
+    assert_eq!(
+        row_text(&mut h, "link-menu-pick-1"),
+        Some(second.display().to_string())
+    );
+    let tops: Vec<_> = ["link-menu-pick-0", "link-menu-pick-1"]
+        .iter()
+        .map(|id| h.bounds(id).origin.y)
+        .collect();
+    assert!(
+        tops.windows(2).all(|pair| pair[0] < pair[1]),
+        "the rows are in folder order: {tops:?}"
+    );
+    h.click_on("link-menu-pick-1");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(second)],
+        "the picked file opens"
+    );
+    assert!(!h.in_model("link-menu"), "the pick closes the menu");
+}
+
+#[gpui::test]
+fn ctrl_click_on_a_path_in_the_current_folder_opens_it_without_a_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let cwd = dir.path().join("cwd");
+    let worktree = dir.path().join("wt-a");
+    let file = write_file(&cwd, "docs/notes.md");
+    write_file(&worktree, "docs/notes.md");
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let a_text = worktree.to_string_lossy().into_owned();
+    let s = session("s1")
+        .shell(&cwd_text)
+        .members(&[("r1", "wt-a", &a_text)])
+        .build();
+    let mut h = attached(cx, &dir, s);
+    h.pty("s1", b"wrote docs/notes.md");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl());
+    assert!(
+        !h.in_model("link-menu"),
+        "the current folder's file opens alone"
+    );
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn escape_on_the_pick_menu_opens_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _, _) = two_worktrees(cx, &dir);
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl());
+    assert!(h.in_model("link-menu"), "the pick menu is open");
+    h.keys("escape");
+    assert!(!h.in_model("link-menu"), "Esc closes the menu");
+    assert_eq!(h.opened(), [], "and opens nothing");
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
+}
+
+/// A tab `t1` with `p1` on `s1`, a shell in `dir`'s folder, and `p2` on
+/// `s2`, a shell in a folder holding nothing whose session also has the two
+/// worktrees `wt-a` and `wt-b`, each holding `src/lib.rs`; `p1` holds the
+/// keyboard. Returns the harness and the two files, as the opener resolved
+/// them.
+fn two_panes_two_worktrees<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+) -> (Harness<'a>, PathBuf, PathBuf) {
+    let here = dir.path().to_string_lossy().into_owned();
+    let cwd = dir.path().join("cwd");
+    let worktree = dir.path().join("wt-a");
+    let other = dir.path().join("wt-b");
+    let first = write_file(&worktree, "src/lib.rs");
+    let second = write_file(&other, "src/lib.rs");
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let a_text = worktree.to_string_lossy().into_owned();
+    let b_text = other.to_string_lossy().into_owned();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").shell(&here).build(),
+            session("s2")
+                .shell(&cwd_text)
+                .members(&[("r1", "wt-a", &a_text), ("r2", "wt-b", &b_text)])
+                .build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    (h, first, second)
+}
+
+#[gpui::test]
+fn the_pick_menu_hands_focus_back_to_the_clicked_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _, _) = two_panes_two_worktrees(cx, &dir);
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p1"),
+        "p1 starts with the keyboard"
+    );
+    h.pty("s2", b"wrote src/lib.rs");
+    let on = h.cell_center("p2", 9, 0);
+    h.click(on, ctrl());
+    assert!(
+        h.in_model("link-menu"),
+        "the click picks instead of opening"
+    );
+    h.keys("escape");
+    assert!(!h.in_model("link-menu"), "Esc closes the menu");
+    assert_eq!(
+        focused_pane(&mut h).as_deref(),
+        Some("p2"),
+        "the keyboard is back in the pane the click was in"
+    );
+}
+
+#[gpui::test]
+fn a_popouts_pick_menu_opens_in_the_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _, _) = two_panes_two_worktrees(cx, &dir);
+    let key = PopoutKey::Pane {
+        tab_id: "t1".to_owned(),
+        pane_id: "p2".to_owned(),
+    };
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened
+    );
+    h.pty("s2", b"wrote src/lib.rs");
+    h.cx.run_until_parked();
+    let root = h.root.clone();
+    let mut popout = h.popout_window();
+    let at = popout
+        .update(|_, cx| root.read(cx).pane_cell_center("p2", 9, 0, cx))
+        .expect("p2 is laid out in the pop-out");
+    popout.simulate_click(at, ctrl());
+    popout.run_until_parked();
+    assert!(
+        popout.debug_bounds("link-menu").is_some(),
+        "the pop-out, where the click was, draws the pick menu"
+    );
+    for id in ["link-menu-pick-0", "link-menu-pick-1"] {
+        assert!(
+            popout.debug_bounds(id).is_some(),
+            "{id} is drawn in the pop-out"
+        );
+    }
+    assert!(
+        !drawn(&mut h, "link-menu"),
+        "the main window draws no menu of its own"
+    );
+}
+
 /// A shell in a fresh folder holding `docs/notes.md`, with a Ctrl+Shift+click
 /// on the link to it made; returns the harness, the file and the click point.
 fn notes_menu<'a>(
@@ -888,8 +1093,13 @@ fn notes_menu<'a>(
 }
 
 /// The text of the open link menu's row `id`.
-fn row_label(h: &mut Harness<'_>, id: &'static str) -> Option<&'static str> {
+fn row_label(h: &mut Harness<'_>, id: &'static str) -> Option<gpui::SharedString> {
     h.root(move |root, _| root.link_menu_row_label(id))
+}
+
+/// The text of the open link menu's row `id`, as a plain string.
+fn row_text(h: &mut Harness<'_>, id: &'static str) -> Option<String> {
+    row_label(h, id).map(|label| label.to_string())
 }
 
 /// Reports This PC's connection as a daemon that follows files.
@@ -995,16 +1205,19 @@ fn ctrl_shift_click_on_a_path_shows_four_entries(cx: &mut TestAppContext) {
     );
     assert_eq!(
         row_label(&mut h, "link-menu-default"),
-        Some("Open in default app")
+        Some("Open in default app".into())
     );
     assert_eq!(
         row_label(&mut h, "link-menu-viewer"),
-        Some("Open in viewer")
+        Some("Open in viewer".into())
     );
-    assert_eq!(row_label(&mut h, "link-menu-follow"), Some("Follow in tab"));
+    assert_eq!(
+        row_label(&mut h, "link-menu-follow"),
+        Some("Follow in tab".into())
+    );
     assert_eq!(
         row_label(&mut h, "link-menu-folder"),
-        Some("Open containing folder")
+        Some("Open containing folder".into())
     );
 }
 
@@ -1019,15 +1232,15 @@ fn a_link_on_a_host_without_file_tail_shows_three_entries(cx: &mut TestAppContex
     assert_eq!(row_label(&mut h, "link-menu-follow"), None);
     assert_eq!(
         row_label(&mut h, "link-menu-default"),
-        Some("Open in default app")
+        Some("Open in default app".into())
     );
     assert_eq!(
         row_label(&mut h, "link-menu-viewer"),
-        Some("Open in viewer")
+        Some("Open in viewer".into())
     );
     assert_eq!(
         row_label(&mut h, "link-menu-folder"),
-        Some("Open containing folder")
+        Some("Open containing folder".into())
     );
 }
 
@@ -1041,7 +1254,7 @@ fn ctrl_shift_click_on_a_path_with_a_line_names_vscode(cx: &mut TestAppContext) 
     h.click(on, ctrl_shift());
     assert_eq!(
         row_label(&mut h, "link-menu-default"),
-        Some("Open in VS Code")
+        Some("Open in VS Code".into())
     );
 }
 
@@ -2180,16 +2393,19 @@ fn a_shift_click_on_a_chat_file_link_opens_the_link_menu(cx: &mut TestAppContext
     }
     assert_eq!(
         row_label(&mut h, "link-menu-default"),
-        Some("Open in default app")
+        Some("Open in default app".into())
     );
     assert_eq!(
         row_label(&mut h, "link-menu-viewer"),
-        Some("Open in viewer")
+        Some("Open in viewer".into())
     );
-    assert_eq!(row_label(&mut h, "link-menu-follow"), Some("Follow in tab"));
+    assert_eq!(
+        row_label(&mut h, "link-menu-follow"),
+        Some("Follow in tab".into())
+    );
     assert_eq!(
         row_label(&mut h, "link-menu-folder"),
-        Some("Open containing folder")
+        Some("Open containing folder".into())
     );
     h.click_on("link-menu-follow");
     let path = dir

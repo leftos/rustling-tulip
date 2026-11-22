@@ -28,7 +28,7 @@ use crate::links::{self, IssueContext, TerminalLinkCandidate};
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::{LinkAction, OpenJob};
-use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Then};
+use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, PathLink, Then};
 use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
@@ -1323,8 +1323,18 @@ impl RootView {
                 } else {
                     LinkAction::DefaultApp
                 };
-                let opening = Opening { origin, action };
-                self.resolve_path(vec![candidate], base_dirs, opening, window, cx);
+                let opening = Opening {
+                    origin,
+                    action,
+                    at: None,
+                };
+                let path = PathLink {
+                    candidates: vec![candidate],
+                    base_dirs,
+                    opening,
+                    menu: None,
+                };
+                self.resolve_path(path, window, cx);
             }
             LinkTarget::Anchor(slug) => self.scroll_to_md_anchor(tab_id, &slug, cx),
             LinkTarget::Stretchtext { .. } => {

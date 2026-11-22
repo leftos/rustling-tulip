@@ -73,10 +73,15 @@ pub(crate) struct LinkClick {
 }
 
 /// What a link click asks for: the link opened as the action says, or the
-/// link menu at a window point.
+/// link menu at a window point. A link opened from a click that landed at a
+/// point (a terminal pane's Ctrl+click) offers the menu that picks among
+/// several files when it finds them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LinkPick {
-    Open(LinkAction),
+    Open {
+        action: LinkAction,
+        at: Option<Point<Pixels>>,
+    },
     Menu(Point<Pixels>),
 }
 
@@ -1107,13 +1112,21 @@ impl RootView {
             return;
         };
         let at = match pick {
-            LinkPick::Open(action) => {
+            LinkPick::Open { action, at } => {
+                // A plain click's menu opens once the readings are checked,
+                // and takes the keyboard before the pane's focus-in would
+                // run, so the pane the click was in takes it here and gets
+                // it back when the menu closes.
+                if at.is_some() {
+                    self.pane_focused(pane_id, window, cx);
+                }
                 let dirs = base_dirs.clone();
                 let source = LinkSource {
                     host: &host,
                     session: session.as_deref(),
                     action,
                     folders: LinkFolders::of(run_folders, &dirs),
+                    at,
                 };
                 self.open_link(&link, base_dirs, &source, window, cx);
                 return;
@@ -1128,6 +1141,8 @@ impl RootView {
             run_folders,
             host,
             follow,
+            choices: Vec::new(),
+            action: LinkAction::DefaultApp,
             at,
             selected: 0,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
@@ -1186,6 +1201,7 @@ impl RootView {
                 base_dirs,
                 session,
                 action,
+                at,
             } => {
                 let click = LinkClick {
                     host,
@@ -1193,7 +1209,10 @@ impl RootView {
                     base_dirs: base_dirs.clone(),
                     session: session.clone(),
                     run_folders: false,
-                    pick: LinkPick::Open(*action),
+                    pick: LinkPick::Open {
+                        action: *action,
+                        at: Some(*at),
+                    },
                 };
                 self.open_link_click(slot_id, click, window, cx);
             }

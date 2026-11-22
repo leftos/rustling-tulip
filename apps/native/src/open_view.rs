@@ -6,16 +6,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, FontWeight, Keystroke, Pixels, Point, Window, div, prelude::*,
+    px,
+};
 
 use crate::file_fetch_view::OUTSIDE_FETCH_FOLDER;
+use crate::link_menu::LinkMenu;
 use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, LinkAction, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::remote_mode::Capabilities;
 use crate::run_confirm::{RunButton, RunConfirm};
-use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::session_menu::{MENU_MAX_SHARE, backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
 use crate::term_view::SpacedCheck;
 use crate::ui_theme::theme;
@@ -26,13 +30,19 @@ use crate::{RootView, file_fetch};
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
 
 /// The terminal a link was Ctrl+clicked in: the host its slot sends to,
-/// and the session it shows; what the click asked a path to do; and the
-/// folders a path fetched from a remote host is searched in.
+/// and the session it shows; what the click asked a path to do; the
+/// folders a path fetched from a remote host is searched in; and where the
+/// click landed.
 pub(crate) struct LinkSource<'a> {
     pub(crate) host: &'a HostKey,
     pub(crate) session: Option<&'a str>,
     pub(crate) action: LinkAction,
     pub(crate) folders: LinkFolders<'a>,
+    /// Where a plain Ctrl+click landed, in window coordinates: a path found
+    /// in several of the session's folders opens the menu that picks among
+    /// them there. `None` for a click from anywhere else, which opens the
+    /// first file it finds.
+    pub(crate) at: Option<Point<Pixels>>,
 }
 
 /// The folders a remote host's path link is searched in: its session's
@@ -55,6 +65,11 @@ impl<'a> LinkFolders<'a> {
             Self::Session
         }
     }
+
+    /// Whether these are a dispatch run's own folders.
+    pub(crate) fn is_a_run(&self) -> bool {
+        matches!(self, Self::Run(_))
+    }
 }
 
 /// How a file opens: by `origin`'s route, and as `action` asks: in the
@@ -64,6 +79,29 @@ impl<'a> LinkFolders<'a> {
 pub(crate) struct Opening {
     pub(crate) origin: Origin,
     pub(crate) action: LinkAction,
+    /// Where the click that asked landed, when it came from a terminal
+    /// pane: a path found in several of the session's folders then offers
+    /// the menu that picks among them.
+    pub(crate) at: Option<Point<Pixels>>,
+}
+
+/// A path link on its way to the file system: the candidates to check, the
+/// folders they resolve against, how it opens, and the menu a click at a
+/// point opens when several files are found.
+pub(crate) struct PathLink {
+    pub(crate) candidates: Vec<TerminalLinkCandidate>,
+    pub(crate) base_dirs: Vec<String>,
+    pub(crate) opening: Opening,
+    pub(crate) menu: Option<LinkMenu>,
+}
+
+/// What is left of a path link once its readings were checked: the path it
+/// was clicked as, how it opens, and the menu a click at a point opens when
+/// several files were found.
+struct Checked {
+    first: String,
+    opening: Opening,
+    menu: Option<LinkMenu>,
 }
 
 /// The toast of a file over the viewer's size cap, sent out instead.
@@ -102,7 +140,7 @@ fn with_spaced_first(link: &TerminalLink) -> TerminalLink {
 }
 
 /// The file `action` opens.
-fn action_path(action: &OpenAction) -> &Path {
+pub(crate) fn action_path(action: &OpenAction) -> &Path {
     match action {
         OpenAction::VsCode { path, .. }
         | OpenAction::DefaultApp(path)
@@ -192,8 +230,18 @@ impl RootView {
                 let opening = Opening {
                     origin: Origin::Link,
                     action: source.action,
+                    at: source.at,
                 };
-                self.resolve_path(candidates, base_dirs, opening, window, cx);
+                let menu = source
+                    .at
+                    .map(|at| self.pick_menu(link, &base_dirs, source, at, window));
+                let path = PathLink {
+                    candidates,
+                    base_dirs,
+                    opening,
+                    menu,
+                };
+                self.resolve_path(path, window, cx);
             }
         }
     }
@@ -304,64 +352,117 @@ impl RootView {
         .detach();
     }
 
+    /// The menu a click at `at` opens when the path link `link`, clicked as
+    /// `source` asks, is found in several of the session's folders: its
+    /// choices are filled in once the readings are checked.
+    fn pick_menu(
+        &self,
+        link: &TerminalLink,
+        base_dirs: &[String],
+        source: &LinkSource<'_>,
+        at: Point<Pixels>,
+        window: &Window,
+    ) -> LinkMenu {
+        LinkMenu {
+            link: link.clone(),
+            base_dirs: base_dirs.to_vec(),
+            session: source.session.map(str::to_owned),
+            run_folders: source.folders.is_a_run(),
+            host: source.host.clone(),
+            follow: self.link_menu_follows(source.host, source.session),
+            choices: Vec::new(),
+            action: source.action,
+            at,
+            selected: 0,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
+        }
+    }
+
     /// Checks the path's readings on a background thread, then opens the
-    /// first that exists as `opening` says.
+    /// first that exists as `path` says, or the menu that picks among
+    /// several when the click came with a point.
     pub(crate) fn resolve_path(
         &mut self,
-        candidates: Vec<TerminalLinkCandidate>,
-        base_dirs: Vec<String>,
-        opening: Opening,
+        path: PathLink,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let PathLink {
+            candidates,
+            base_dirs,
+            opening,
+            menu,
+        } = path;
         let first = candidates
             .first()
             .map(|candidate| candidate.path.clone())
             .unwrap_or_default();
+        let choices = opening.at.is_some();
         let ui_dir = self.ui_dir.clone();
         let opener = Arc::clone(&self.opener);
         let resolve = cx.background_executor().spawn(async move {
-            open::resolve_link(&candidates, &base_dirs, ui_dir.as_deref(), opener.as_ref())
+            if choices {
+                open::resolve_link_choices(
+                    &candidates,
+                    &base_dirs,
+                    ui_dir.as_deref(),
+                    opener.as_ref(),
+                )
+            } else {
+                open::resolve_link(&candidates, &base_dirs, ui_dir.as_deref(), opener.as_ref())
+            }
         });
         cx.spawn_in(window, async move |this, cx| {
             let resolution = resolve.await;
+            let checked = Checked {
+                first,
+                opening,
+                menu,
+            };
+            // The menu that picks among several files sits at the click,
+            // whose point is in the coordinates of the window the click was
+            // in: a pop-out's draws there, not in the main window.
+            if matches!(resolution, Resolution::Several(_)) && checked.menu.is_some() {
+                RootView::update_in_task_window(&this, cx, |root, window, cx| {
+                    root.after_resolve(resolution, checked, window, cx);
+                })
+                .ok();
+                return;
+            }
             // Fails only when the view or the main window is gone,
             // leaving nowhere to report.
             RootView::update_in_main_window(&this, cx, |root, window, cx| {
-                root.after_resolve(resolution, &first, opening, window, cx);
+                root.after_resolve(resolution, checked, window, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    /// Opens the file a link resolved to as `opening` says; a link from a
-    /// fetched file opens only a file in the folder for fetched files.
+    /// Opens the file a link resolved to as `checked` says, or the menu that
+    /// picks among several; a link from a fetched file opens only a file in
+    /// the folder for fetched files.
     fn after_resolve(
         &mut self,
         resolution: Resolution,
-        first: &str,
-        opening: Opening,
+        checked: Checked,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Checked {
+            first,
+            opening,
+            menu,
+        } = checked;
         match resolution {
             Resolution::Open(action) => {
-                if opening.origin == Origin::Fetched && !self.is_fetched_copy(action_path(&action))
-                {
-                    tracing::warn!(
-                        ?action,
-                        "refusing a fetched file's link outside the download folder"
-                    );
-                    self.push_toast(
-                        ToastKind::Error,
-                        COULD_NOT_OPEN,
-                        Some(OUTSIDE_FETCH_FOLDER.to_owned()),
-                        cx,
-                    );
+                if self.refuses_outside_the_download_folder(&action, opening, cx) {
                     return;
                 }
                 self.open_text_or_external(action, opening, window, cx);
+            }
+            Resolution::Several(actions) => {
+                self.after_several(actions, opening, menu, window, cx);
             }
             Resolution::NotFound(err) => {
                 tracing::warn!("no file found for link {first}: {err}");
@@ -391,6 +492,54 @@ impl RootView {
                 );
             }
         }
+    }
+
+    /// `actions` open through `menu`, the pick menu the click at a point
+    /// opens; without one the first file opens as a single reading does.
+    fn after_several(
+        &mut self,
+        actions: Vec<OpenAction>,
+        opening: Opening,
+        menu: Option<LinkMenu>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut menu) = menu else {
+            if let Some(action) = actions.into_iter().next()
+                && !self.refuses_outside_the_download_folder(&action, opening, cx)
+            {
+                self.open_text_or_external(action, opening, window, cx);
+            }
+            return;
+        };
+        menu.choices = actions;
+        menu.selected = 0;
+        self.open_link_menu(menu, window, cx);
+    }
+
+    /// Whether `action`, opened as `opening` says, is refused because a
+    /// fetched file's link names a file outside the download folder; says
+    /// so in a toast.
+    pub(crate) fn refuses_outside_the_download_folder(
+        &mut self,
+        action: &OpenAction,
+        opening: Opening,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if opening.origin != Origin::Fetched || self.is_fetched_copy(action_path(action)) {
+            return false;
+        }
+        tracing::warn!(
+            ?action,
+            "refusing a fetched file's link outside the download folder"
+        );
+        self.push_toast(
+            ToastKind::Error,
+            COULD_NOT_OPEN,
+            Some(OUTSIDE_FETCH_FOLDER.to_owned()),
+            cx,
+        );
+        true
     }
 
     /// Opens `action`'s file as `opening` says: for the viewer, a text file

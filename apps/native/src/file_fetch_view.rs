@@ -2279,6 +2279,7 @@ impl RootView {
         let opening = Opening {
             origin: Origin::Fetched,
             action: request.action,
+            at: None,
         };
         self.open_text_or_external(action, opening, window, cx);
     }
