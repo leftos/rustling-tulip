@@ -53,20 +53,28 @@ pub(crate) fn card_at(
     deferred(card).with_priority(1).into_any_element()
 }
 
+/// The gap added under a title chip's height before its card, in px: the card,
+/// a tooltip at the pointer, starts this far plus the chip's height below it.
+pub(crate) const CARD_GAP: f32 = 4.0;
+
 /// The card of title chip `chip`, tagged `owner`, as the chip's tooltip:
 /// the same card, drawn where gpui draws a tooltip and read from `root`'s
-/// cache at each render, so an open card follows a reply. It takes no
+/// cache at each render, so an open card follows a reply. A transparent
+/// spacer `below` tall (the chip's height and [`CARD_GAP`]) tops it, so
+/// the card starts under the chip rather than at the pointer. It takes no
 /// pointer: a press on it reaches the chip under it.
 pub(crate) fn card_tooltip(
     owner: String,
     root: WeakEntity<RootView>,
     chip: TitleChip,
+    below: Pixels,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_, cx| {
         let tip = CardTip {
             owner: owner.clone(),
             root: root.clone(),
             chip: chip.clone(),
+            below,
         };
         cx.new(|cx| {
             if let Some(root) = tip.root.upgrade() {
@@ -78,11 +86,12 @@ pub(crate) fn card_tooltip(
     }
 }
 
-/// A title chip's card, drawn as its tooltip.
+/// A title chip's card, drawn as its tooltip under a spacer `below` tall.
 struct CardTip {
     owner: String,
     root: WeakEntity<RootView>,
     chip: TitleChip,
+    below: Pixels,
 }
 
 impl Render for CardTip {
@@ -91,7 +100,9 @@ impl Render for CardTip {
             || self.chip.card.clone(),
             |root| root.read(cx).chip_card(&self.chip),
         );
-        card_frame(&self.owner, &card, None, cx)
+        div()
+            .pt(self.below)
+            .child(card_frame(&self.owner, &card, None, cx))
     }
 }
 
@@ -205,6 +216,8 @@ pub(crate) fn issue_target(
     let (tag, text_tag) = (selector.clone(), format!("{selector}={}", issue.identifier));
     let (url, host) = (issue.open_url().to_owned(), issue.host.clone());
     let root = cx.entity().downgrade();
+    let below =
+        crate::sidebar_view::ChipSize::Row.drawn_height(fonts::ui_text_size(cx)) + px(CARD_GAP);
     div()
         .id(SharedString::from(selector.clone()))
         .driver_id(move || tag)
@@ -214,7 +227,7 @@ pub(crate) fn issue_target(
         .gap(px(5.0))
         .cursor_pointer()
         .on_hover(RootView::ask_on_chip_hover(issue, cx))
-        .tooltip(card_tooltip(selector, root, issue.clone()))
+        .tooltip(card_tooltip(selector, root, issue.clone(), below))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {

@@ -4455,7 +4455,7 @@ impl RootView {
                     offset,
                     shift,
                     "chat-model",
-                    ButtonSize::Compact,
+                    ButtonSize::Quick,
                     enabled,
                     Layer::Base,
                     &t,
@@ -4501,7 +4501,7 @@ impl RootView {
                         offset,
                         shift,
                         &selector,
-                        ButtonSize::Compact,
+                        ButtonSize::Quick,
                         enabled,
                         Layer::Base,
                         &t,
@@ -4691,13 +4691,14 @@ const DISABLED_OPACITY: f32 = 0.5;
 
 /// The gap between the composer's Quick reply groups, and between the chips
 /// of one group.
-const QUICK_GROUP_GAP: f32 = 12.0;
+const QUICK_GROUP_GAP: f32 = 8.0;
 const QUICK_CHIP_GAP: f32 = 4.0;
 
-/// The model pill's least height and label size, in px: a Quick reply
-/// chip's, which is a compact button's.
+/// The model pill's least height, side padding and label size, in px: a
+/// Quick reply chip's, which is a quick button's.
 const MODEL_PILL_HEIGHT: f32 = 28.0;
-const MODEL_PILL_TEXT_SIZE: f32 = 12.0;
+const MODEL_PILL_PAD_X: f32 = 7.0;
+const MODEL_PILL_TEXT_SIZE: f32 = 11.0;
 
 /// The chat's model pill: its label, read-only, muted and chip-sized, at
 /// the start of the composer's Quick replies line.
@@ -4708,8 +4709,8 @@ fn model_pill(offset: i8, label: &str, t: &UiTheme) -> AnyElement {
         .flex()
         .items_center()
         .h(ui_px_at(offset, MODEL_PILL_HEIGHT))
-        .px(px(12.0))
-        .rounded(px(ButtonSize::Compact.radius()))
+        .px(px(MODEL_PILL_PAD_X))
+        .rounded(px(ButtonSize::Quick.radius()))
         .border_1()
         .border_color(gpui::rgb(t.line_strong))
         .text_size(ui_px_at(offset, MODEL_PILL_TEXT_SIZE))

@@ -414,8 +414,8 @@ fn a_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(cx: &mut
     ] {
         assert!(!never_painted(&mut h, line), "the hover card shows {line}");
     }
-    // The card sits a pixel from where the pointer rested; a press a few
-    // pixels on, still on the chip, lands on the card's corner.
+    // The card opens below the chip; a press a few pixels on lands on the
+    // chip, under the card.
     h.click(
         gpui::point(at.x + px(4.0), at.y + px(4.0)),
         Modifiers::none(),
@@ -430,6 +430,29 @@ fn a_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(cx: &mut
         h.root(|root, _| root.focused_pane()),
         focused,
         "a click on the chip focuses no pane"
+    );
+}
+
+#[gpui::test]
+fn a_title_chip_card_opens_below_the_chip_not_over_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    let chip = h.bounds("pane-chip-p2-issue");
+    let title = h.bounds("pane-title-p2");
+    h.hover(chip.center(), Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    assert!(
+        !never_painted(&mut h, "linear-card-id-pane-chip-p2-issue=RT-139"),
+        "the card is up"
+    );
+    let card = h.bounds("linear-card");
+    assert!(
+        card.top() >= chip.bottom(),
+        "the card {card:?} starts below the chip {chip:?}"
+    );
+    assert!(
+        !card.intersects(&title),
+        "the card {card:?} leaves the title {title:?} clear"
     );
 }
 

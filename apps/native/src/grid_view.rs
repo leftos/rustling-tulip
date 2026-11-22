@@ -32,7 +32,7 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, FontSettings};
 use crate::header_tip::SHOW_DELAY as HEADER_TIP_DELAY;
 use crate::linear_card::TitleChip;
-use crate::linear_card_view::{card_tooltip, issue_dot};
+use crate::linear_card_view::{CARD_GAP, card_tooltip, issue_dot};
 use crate::link_menu::LinkMenu;
 use crate::links::TerminalLink;
 use crate::mouse::ClickThrough;
@@ -3903,7 +3903,12 @@ fn title_issue_chip(pane_id: &str, chip: &TitleChip, cx: &mut Context<RootView>)
             }),
         )
         .on_hover(RootView::ask_on_chip_hover(chip, cx))
-        .tooltip(card_tooltip(name, root, chip.clone()))
+        .tooltip(card_tooltip(
+            name,
+            root,
+            chip.clone(),
+            ui_px(cx, CHIP_HEIGHT) + px(CARD_GAP),
+        ))
         .flex()
         .flex_none()
         .items_center()

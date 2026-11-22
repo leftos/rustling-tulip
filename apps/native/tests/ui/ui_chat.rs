@@ -3402,6 +3402,53 @@ fn the_pill_shows_with_no_quick_replies(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn quick_replies_stay_on_one_line_in_a_narrow_pane(cx: &mut TestAppContext) {
+    // The harness's fixed-advance glyphs run wider than Inter, so a 680 px
+    // pane here stands for the 640 px pane with real text.
+    const NARROW: f32 = 680.0;
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    h.send(chat_model(
+        "s1",
+        Some("claude-opus-5-5"),
+        Some("Opus 5.5"),
+        Some("high"),
+    ));
+    assert!(painted(&mut h, "chat-model"), "the pill is drawn");
+    let pane = h.bounds("pane-chat-p1").size.width / px(1.0);
+    let (width, height) = (h.window_width(), h.window_height());
+    h.cx.simulate_resize(gpui::size(px(width + NARROW - pane), px(height)));
+    h.cx.run_until_parked();
+
+    let pane = h.bounds("pane-chat-p1").size.width / px(1.0);
+    assert!(
+        (pane - NARROW).abs() <= 1.0,
+        "the pane is {NARROW} px wide: {pane}"
+    );
+    // Within a pixel: the read-only pill's box and a chip's may round
+    // differently, while a wrapped chip sits a whole line lower.
+    let row = (
+        h.bounds("chat-quick"),
+        h.bounds("chat-model"),
+        h.bounds("chat-quick-group-0"),
+        h.bounds("chat-quick-group-1"),
+    );
+    let top = h.bounds("chat-model").top() / px(1.0);
+    let chips = (0..2)
+        .map(|reply| (0, reply))
+        .chain((0..5).map(|reply| (1, reply)));
+    for (group, reply) in chips {
+        let chip = format!("chat-quick-{group}-{reply}");
+        let chip_top = h.bounds(&chip).top() / px(1.0);
+        assert!(
+            (chip_top - top).abs() <= 1.0,
+            "{chip} is on the pill's line: {chip_top} against {top}; row, pill, groups: {row:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn a_permission_cards_box_allows_or_denies_with_its_text(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

@@ -11,6 +11,7 @@ use protocol::LinearIssue;
 
 use crate::dashboard_rows::{DASH, format_age};
 use crate::links::{IssueContext, LinkKind, tip_text, title_issue};
+use crate::sidebar::ContainerKind;
 use crate::target::HostKey;
 
 /// The no-key notice.
@@ -165,6 +166,20 @@ impl TitleChips<'_> {
             card,
         })
     }
+
+    /// The chip of `host`'s sidebar heading of `kind` named `name`: only a
+    /// lone shell's heading, whose name is its session's title, takes one;
+    /// a repo, workspace or folder heading names a folder.
+    pub(crate) fn container_chip(
+        &self,
+        kind: ContainerKind,
+        host: &HostKey,
+        name: &str,
+    ) -> Option<TitleChip> {
+        (kind == ContainerKind::Shell)
+            .then(|| self.chip(host, name))
+            .flatten()
+    }
 }
 
 /// The card a pane shows: the pane, its host, the identifier and the
@@ -309,9 +324,7 @@ pub(crate) fn card(issue: Option<&LinearIssue>, lookup: &Lookup<'_>, now: DateTi
 fn issue_card(bare: Card, issue: &LinearIssue, now: DateTime<Utc>) -> Card {
     let or_dash = |value: Option<String>| value.unwrap_or_else(|| DASH.to_owned());
     let releases = (!issue.releases.is_empty()).then(|| issue.releases.join(", "));
-    let updated = issue
-        .updated_at
-        .map(|at| format!("{} ago", format_age(at, now)));
+    let updated = issue.updated_at.map(|at| age_ago(at, now));
     let priority = if issue.priority_label.is_empty() {
         "No priority".to_owned()
     } else {
@@ -332,9 +345,26 @@ fn issue_card(bare: Card, issue: &LinearIssue, now: DateTime<Utc>) -> Card {
         ],
         notice: issue
             .stale
-            .then(|| Notice::Unreachable(format_age(issue.fetched_at, now))),
+            .then(|| Notice::Unreachable(card_age(issue.fetched_at, now))),
         open_url: issue.url.clone(),
         ..bare
+    }
+}
+
+/// How long ago `at` was at `now`, as the card reads it: "1d ago" from a
+/// day on, else the daemon's wording ("<1m ago", "12m ago", "23h59m ago").
+fn age_ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    format!("{} ago", card_age(at, now))
+}
+
+/// The card's age of `at` at `now`, without "ago": whole days from a day
+/// on, else [`format_age`]'s.
+fn card_age(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let days = (now - at).num_days();
+    if days >= 1 {
+        format!("{days}d")
+    } else {
+        format_age(at, now)
     }
 }
 
@@ -484,6 +514,38 @@ mod tests {
         assert!(
             card.lines()
                 .contains(&"Couldn't reach Linear · as of 25m ago".to_owned())
+        );
+    }
+
+    #[test]
+    fn ages_read_in_days_past_a_day() {
+        let updated = |age: TimeDelta| {
+            let mut copy = issue();
+            copy.updated_at = Some(now() - age);
+            let card = card(Some(&copy), &lookup(true, false), now());
+            card.fields
+                .iter()
+                .find(|(label, _)| *label == "Updated")
+                .map(|(_, value)| value.clone())
+        };
+        let hours_minutes = |h: i64, m: i64| TimeDelta::hours(h) + TimeDelta::minutes(m);
+        assert_eq!(
+            updated(hours_minutes(23, 59)).as_deref(),
+            Some("23h59m ago")
+        );
+        assert_eq!(updated(TimeDelta::hours(24)).as_deref(), Some("1d ago"));
+        assert_eq!(updated(hours_minutes(45, 37)).as_deref(), Some("1d ago"));
+        assert_eq!(updated(TimeDelta::hours(49)).as_deref(), Some("2d ago"));
+
+        let mut stale = issue();
+        stale.stale = true;
+        stale.fetched_at = now() - TimeDelta::days(3);
+        let card = card(Some(&stale), &lookup(true, false), now());
+        assert!(
+            card.lines()
+                .contains(&"Couldn't reach Linear · as of 3d ago".to_owned()),
+            "{:?}",
+            card.lines()
         );
     }
 
@@ -690,5 +752,42 @@ mod tests {
         let unknown = HostKey::Remote("elsewhere".to_owned());
         assert_eq!(chips.chip(&unknown, "RT-7 x"), None);
         assert_eq!(chips.chip(&unknown, "YAAT-3 x"), None);
+    }
+
+    #[test]
+    fn only_a_lone_shell_container_takes_a_title_chip() {
+        let (contexts, issues) = two_hosts();
+        let chips = TitleChips {
+            contexts: &contexts,
+            issues: &issues,
+            now: now(),
+        };
+        let name = "RT-133 smoke chip";
+        let shell = chips.container_chip(ContainerKind::Shell, &HostKey::Local, name);
+        assert_eq!(
+            shell.map(|chip| (chip.identifier, chip.rest)),
+            Some(("RT-133".to_owned(), "smoke chip".to_owned())),
+            "a lone shell's heading is its session's title"
+        );
+        for kind in [
+            ContainerKind::Workspace,
+            ContainerKind::Repo,
+            ContainerKind::Dir,
+            ContainerKind::Detached,
+            ContainerKind::Tab,
+            ContainerKind::Unbound,
+        ] {
+            assert_eq!(
+                chips.container_chip(kind, &HostKey::Local, name),
+                None,
+                "{kind:?} names no session"
+            );
+        }
+        let unknown = HostKey::Remote("elsewhere".to_owned());
+        assert_eq!(
+            chips.container_chip(ContainerKind::Shell, &unknown, name),
+            None,
+            "no Linear context, no chip"
+        );
     }
 }

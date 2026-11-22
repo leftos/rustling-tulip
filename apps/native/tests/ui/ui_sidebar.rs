@@ -123,8 +123,8 @@ fn a_leaf_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(
     ] {
         assert!(painted(&mut h, line), "the hover card shows {line}");
     }
-    // The card sits a pixel from where the pointer rested; a press a few
-    // pixels on, still on the chip, lands on the card's corner.
+    // The card opens below the chip; a press a few pixels on lands on the
+    // chip, under the card.
     h.click(point(at.x + px(4.0), at.y + px(4.0)), Modifiers::none());
     assert_eq!(
         h.opened(),
@@ -136,6 +136,24 @@ fn a_leaf_title_identifier_is_a_chip_that_shows_its_card_and_opens_its_issue(
         h.root(|root, _| root.focused_pane()),
         focused,
         "a click on the chip selects no leaf"
+    );
+}
+
+#[gpui::test]
+fn a_leaf_chip_card_opens_below_the_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_rt_139(cx, &dir, true);
+    let chip = h.bounds("leaf-s2-issue");
+    h.hover(chip.center(), Modifiers::none());
+    h.advance(std::time::Duration::from_millis(600));
+    assert!(
+        painted(&mut h, "linear-card-id-leaf-s2-issue=RT-139"),
+        "the card is up"
+    );
+    let card = h.bounds("linear-card");
+    assert!(
+        card.top() >= chip.bottom(),
+        "the card {card:?} starts below the chip {chip:?}"
     );
 }
 
@@ -2427,6 +2445,74 @@ fn a_renamed_plain_shell_keeps_its_add_repo_banner(cx: &mut TestAppContext) {
         home_of(&mut h, "renamed").map(|(_, name, _, _)| name),
         Some("build box".to_owned()),
         "the group header reads the name the user gave it"
+    );
+}
+
+/// A lone plain shell `sh` the user named "RT-133 smoke chip"; with
+/// `linear`, This PC's daemon has a key and the team `RT`.
+fn lone_shell_rt_133<'a>(cx: &'a mut TestAppContext, dir: &TestDir, linear: bool) -> Harness<'a> {
+    #[cfg(debug_assertions)]
+    rustling_tulip_native::ellipsis::enable_probe();
+    let fixture = Fixture {
+        sessions: vec![
+            session("sh")
+                .shell("D:/scratch/x")
+                .user_label("RT-133 smoke chip")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    if linear {
+        h.send(DaemonMessage::LinearContext {
+            team_keys: vec!["RT".to_owned()],
+            workspace: Some("acme".to_owned()),
+            key_configured: true,
+        });
+    }
+    h
+}
+
+#[gpui::test]
+fn a_lone_shell_named_for_an_issue_draws_its_chip_in_the_heading(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = lone_shell_rt_133(cx, &dir, true);
+    assert!(
+        painted(&mut h, "container-standalone:sh-issue"),
+        "the heading leads with the chip"
+    );
+    assert!(
+        painted(&mut h, "container-standalone:sh-issue=RT-133"),
+        "the chip holds the identifier"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("container-standalone:sh-name").as_deref(),
+        Some("smoke chip"),
+        "the heading's name shows the rest"
+    );
+    assert!(
+        h.bounds("container-standalone:sh-issue").right()
+            <= h.bounds("container-standalone:sh-tag").left(),
+        "the chip is before the kind tag, where the name sits"
+    );
+}
+
+#[gpui::test]
+fn a_lone_shell_on_a_host_with_no_linear_context_has_no_heading_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = lone_shell_rt_133(cx, &dir, false);
+    assert!(painted(&mut h, "container-standalone:sh"));
+    assert!(
+        !painted(&mut h, "container-standalone:sh-issue"),
+        "no Linear context, no chip"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("container-standalone:sh-name").as_deref(),
+        Some("RT-133 smoke chip"),
+        "the name is whole"
     );
 }
 

@@ -22,7 +22,7 @@ use crate::fonts::{ui_px, ui_px_at};
 use crate::grid_view::{ADD_REPO_TIP, HostLabel, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::linear_card::{TitleChip, TitleChips};
-use crate::linear_card_view::{card_tooltip, issue_dot};
+use crate::linear_card_view::{CARD_GAP, card_tooltip, issue_dot};
 use crate::palette::ROW_GAP;
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
@@ -1631,8 +1631,12 @@ fn container_rows(
     let payload =
         drag::container_payload(container).filter(|_| ctx.chrome == SidebarChrome::Desktop);
     let dragged = payload.is_some() && ctx.dragged == payload;
+    let issue = ctx
+        .title_chips
+        .container_chip(container.kind, &container.host, &container.name);
+    let marks = RowMarks { focused, hovered };
     let row = draggable_row(
-        container_row(container, focused, hovered, ctx.chrome, cx),
+        container_row(container, issue.as_ref(), marks, ctx.chrome, cx),
         payload,
         &header,
         &container.name,
@@ -2445,6 +2449,12 @@ impl ChipSize {
         }
     }
 
+    /// The chip's drawn height at UI text offset `offset`, as [`chip`]
+    /// sizes it.
+    pub(crate) fn drawn_height(self, offset: i8) -> Pixels {
+        ui_px_at(offset, self.height())
+    }
+
     const fn padding(self) -> f32 {
         match self {
             Self::Subline => 5.0,
@@ -2735,15 +2745,59 @@ fn kind_icon(
     }
 }
 
-/// A container row's parts after the chevron: the kind icon, the name, the
-/// attention badge, the kind tag and the session count, each tagged
-/// `container-<key>-<part>`.
-fn container_parts(offset: i8, shift: i8, container: &Container, t: &UiTheme) -> Vec<AnyElement> {
+/// Whether a container row holds the keyboard and the pointer.
+#[derive(Debug, Clone, Copy)]
+struct RowMarks {
+    focused: bool,
+    hovered: bool,
+}
+
+/// What a one-line container row draws before its badge: a lone shell's
+/// Linear chip, if its name leads with an issue, and the name to show.
+struct ContainerHead {
+    lead: Option<AnyElement>,
+    name: String,
+}
+
+/// `container`'s head: with title chip `issue`, the chip, tagged
+/// `container-<key>-issue`, and the name's rest; else the whole name.
+fn container_head(
+    container: &Container,
+    issue: Option<&TitleChip>,
+    cx: &mut Context<RootView>,
+) -> ContainerHead {
+    let Some(issue) = issue else {
+        return ContainerHead {
+            lead: None,
+            name: container.name.clone(),
+        };
+    };
+    let offset = crate::fonts::ui_text_size(cx);
+    let selector = format!("container-{}-issue", container.key);
+    ContainerHead {
+        lead: Some(issue_chip(offset, selector, issue, cx)),
+        name: issue.rest.clone(),
+    }
+}
+
+/// A container row's parts after the chevron: the kind icon, `head`'s chip,
+/// the name, the attention badge, the kind tag and the session count, each
+/// tagged `container-<key>-<part>`.
+fn container_parts(
+    offset: i8,
+    shift: i8,
+    container: &Container,
+    head: ContainerHead,
+    t: &UiTheme,
+) -> Vec<AnyElement> {
     let mut parts = Vec::new();
     if let Some(icon) = container_icon(container, t) {
         parts.push(icon);
     }
-    parts.extend(container_info_parts(offset, shift, container, t));
+    parts.extend(head.lead);
+    parts.extend(container_info_parts(
+        offset, shift, container, &head.name, t,
+    ));
     parts
 }
 
@@ -2762,17 +2816,18 @@ fn container_icon(container: &Container, t: &UiTheme) -> Option<AnyElement> {
     )
 }
 
-/// The row's name, badge, tag and count.
+/// The row's name, drawn as `name`, then its badge, tag and count.
 fn container_info_parts(
     offset: i8,
     shift: i8,
     container: &Container,
+    name: &str,
     t: &UiTheme,
 ) -> Vec<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let mut parts = Vec::new();
     parts.push(
-        truncating(&part("name"), StyledText::new(container.name.clone()))
+        truncating(&part("name"), StyledText::new(name.to_owned()))
             .flex_1()
             .text_size(ui_px_at(offset, 12.5))
             .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
@@ -2840,11 +2895,12 @@ fn row_height(offset: i8, two_line: bool) -> Pixels {
 /// summary is two lines.
 fn container_row(
     container: &Container,
-    focused: bool,
-    hovered: bool,
+    issue: Option<&TitleChip>,
+    marks: RowMarks,
     chrome: SidebarChrome,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let RowMarks { focused, hovered } = marks;
     let t = theme(cx);
     let desktop = chrome == SidebarChrome::Desktop;
     let key = container.key.clone();
@@ -2898,10 +2954,12 @@ fn container_row(
             &t,
         ))
     } else {
+        let head = container_head(container, issue, cx);
         row.child(chevron(container, &t)).children(container_parts(
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
             container,
+            head,
             &t,
         ))
     };
@@ -3031,7 +3089,13 @@ fn container_lines(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .children(container_info_parts(offset, shift, container, t));
+        .children(container_info_parts(
+            offset,
+            shift,
+            container,
+            &container.name,
+            t,
+        ));
     let selector = part("summary");
     div()
         .flex()
@@ -3279,18 +3343,28 @@ fn titled_head(
     parts
 }
 
-/// A session label's Linear chip, tagged `leaf-<key>-issue`: the identifier
-/// behind a 6 px dot in its state's colour, in the leaf chips' look.
-/// Hovering it shows the issue's card; a left press opens the issue and
-/// goes no further, so it neither selects nor drags the leaf.
+/// A session label's Linear chip, tagged `leaf-<key>-issue`, as
+/// [`issue_chip`] draws it.
 fn leaf_issue_chip(
     offset: i8,
     key: &str,
     issue: &TitleChip,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    issue_chip(offset, format!("leaf-{key}-issue"), issue, cx)
+}
+
+/// A sidebar Linear title chip, tagged `name`: the identifier behind a 6 px
+/// dot in its state's colour, in the leaf chips' look. Hovering it shows
+/// the issue's card; a left press opens the issue and goes no further, so
+/// it neither selects, drags nor folds the row under it.
+fn issue_chip(
+    offset: i8,
+    name: String,
+    issue: &TitleChip,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
     let t = theme(cx);
-    let name = format!("leaf-{key}-issue");
     let (selector, text_tag) = (name.clone(), format!("{name}={}", issue.identifier));
     let (url, host) = (issue.open_url().to_owned(), issue.host.clone());
     let root = cx.entity().downgrade();
@@ -3304,7 +3378,12 @@ fn leaf_issue_chip(
     .gap(px(5.0))
     .cursor_pointer()
     .on_hover(RootView::ask_on_chip_hover(issue, cx))
-    .tooltip(card_tooltip(name, root, issue.clone()))
+    .tooltip(card_tooltip(
+        name,
+        root,
+        issue.clone(),
+        ChipSize::Row.drawn_height(offset) + px(CARD_GAP),
+    ))
     .on_mouse_down(
         MouseButton::Left,
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {

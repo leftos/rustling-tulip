@@ -49,6 +49,8 @@ pub(crate) enum ButtonSize {
     Large,
     /// 30 px tall: the sessions panel's toolbar.
     Toolbar,
+    /// 28 px tall, tighter: the chat composer's quick replies and model pill.
+    Quick,
 }
 
 impl ButtonSize {
@@ -60,6 +62,7 @@ impl ButtonSize {
             Self::Compact => (28.0, 12.0, 6.0, 12.0),
             Self::Large => (36.0, 16.0, 8.0, 13.0),
             Self::Toolbar => (30.0, 10.0, 6.0, 12.5),
+            Self::Quick => (28.0, 7.0, 6.0, 11.0),
         }
     }
 

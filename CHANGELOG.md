@@ -25,6 +25,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A failed account login no longer shows the CLI's "Login successful." line above its failure.
 - With a terminal draft's buttons showing, the composer's note stays on one line.
 - A slash command's result, such as /model's "Set model to …", shows in the chat instead of a bare command bubble.
+- The chat's quick replies and model pill fit on one line in a narrower pane.
+- A Linear issue card opens below its title chip instead of covering the chip and the title beside it.
+- A Linear issue card reads an update older than a day in days, such as "2d ago".
+- A lone shell renamed with an issue's identifier shows its Linear chip in the sidebar folder heading too.
 
 ## v0.18.2-alpha
 
