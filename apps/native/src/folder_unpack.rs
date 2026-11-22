@@ -11,7 +11,9 @@ use std::sync::mpsc::Receiver;
 
 use tar::{Archive, EntryType};
 
-use crate::file_fetch::{WriteOutcome, WriteStep, is_under, part_path, rel_segments};
+use crate::file_fetch::{
+    NewFolderStep, WriteOutcome, WriteStep, in_new_folder, is_under, part_path, rel_segments,
+};
 
 /// How much of the decompressed stream one read takes, and how many bytes of
 /// a file pass between progress reports.
@@ -70,12 +72,13 @@ pub(crate) fn run_unpacker(
     let Some(parent) = target.parent() else {
         return WriteOutcome::Failed(format!("{} has no folder", target.display()));
     };
-    if let Err(err) = fs::create_dir_all(parent) {
-        return WriteOutcome::Failed(format!("creating {}: {err}", parent.display()));
-    }
     let stage = part_path(target, id);
-    if let Err(err) = fs::create_dir(&stage) {
-        return WriteOutcome::Failed(format!("creating {}: {err}", stage.display()));
+    if let Err((step, err)) = in_new_folder(parent, || fs::create_dir(&stage)) {
+        let message = match step {
+            NewFolderStep::Folder => format!("creating {}: {err}", parent.display()),
+            NewFolderStep::Entry => format!("creating {}: {err}", stage.display()),
+        };
+        return WriteOutcome::Failed(message);
     }
     let aside = target.with_file_name(format!(".{id}.old"));
     let mut unpacker = Unpacker {
@@ -451,7 +454,7 @@ mod tests {
     use tar::{Builder, EntryType, Header};
 
     use super::{Announced, run_unpacker};
-    use crate::file_fetch::{WriteOutcome, WriteStep, part_path};
+    use crate::file_fetch::{WriteOutcome, WriteStep, in_new_folder, part_path};
     use crate::temp_dir::TempDir;
 
     /// How much of the compressed stream one step carries.
@@ -936,6 +939,28 @@ mod tests {
             b"keep"
         );
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_stage_survives_its_folder_pruned_before_it_is_made() {
+        let dir = TempDir::new("pruned-stage");
+        let target = dir.0.join("repo").join("checkout");
+        let parent = target.parent().expect("the target has a folder");
+        let stage = part_path(&target, "fetch-1");
+        let mut first = true;
+
+        // A prune on another thread removes the new folder while it is still
+        // empty, so the first stage creation fails as it would in the app.
+        let made = in_new_folder(parent, || {
+            if first {
+                first = false;
+                fs::remove_dir(parent).expect("prune the empty folder");
+            }
+            fs::create_dir(&stage)
+        });
+
+        made.expect("the folder is made again");
+        assert!(stage.is_dir(), "the stage is there");
     }
 
     #[test]

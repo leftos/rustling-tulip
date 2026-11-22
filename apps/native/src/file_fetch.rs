@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -390,6 +390,38 @@ pub fn part_path(target: &Path, id: &str) -> PathBuf {
     target.with_file_name(format!(".{id}.part"))
 }
 
+/// Which step of [`in_new_folder`] failed: making the folder, or the entry
+/// made in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewFolderStep {
+    /// Making the folder, before the entry.
+    Folder,
+    /// The entry the caller's closure makes in the folder.
+    Entry,
+}
+
+/// Makes `folder` and then runs `create` in it, which may run twice.
+///
+/// A prune of empty folders on another thread removes a new folder while it
+/// is still empty, so between this call's folder and the first entry `create`
+/// makes in it. A `create` that fails with [`io::ErrorKind::NotFound`] gets
+/// the folder made again and is tried once more. The step that failed comes
+/// back with the error, so each caller names the path it made.
+pub(crate) fn in_new_folder<T>(
+    folder: &Path,
+    mut create: impl FnMut() -> io::Result<T>,
+) -> Result<T, (NewFolderStep, io::Error)> {
+    fs::create_dir_all(folder).map_err(|err| (NewFolderStep::Folder, err))?;
+    match create() {
+        Ok(value) => Ok(value),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(folder).map_err(|err| (NewFolderStep::Folder, err))?;
+            create().map_err(|err| (NewFolderStep::Entry, err))
+        }
+        Err(err) => Err((NewFolderStep::Entry, err)),
+    }
+}
+
 /// [`is_under`] with both paths as the filesystem resolves them on this
 /// platform, so a file reached through a symlinked folder (`/tmp` is
 /// `/private/tmp` on macOS) counts as under a root named by its other
@@ -545,14 +577,14 @@ impl PartFile {
         let parent = target
             .parent()
             .ok_or_else(|| format!("{} has no folder", target.display()))?;
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("creating {}: {err}", parent.display()))?;
         let part = part_path(target, id);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&part)
-            .map_err(|err| format!("creating {}: {err}", part.display()))?;
+        let file = in_new_folder(parent, || {
+            OpenOptions::new().write(true).create_new(true).open(&part)
+        })
+        .map_err(|(step, err)| match step {
+            NewFolderStep::Folder => format!("creating {}: {err}", parent.display()),
+            NewFolderStep::Entry => format!("creating {}: {err}", part.display()),
+        })?;
         Ok(Self {
             part,
             target: target.to_path_buf(),
@@ -1668,6 +1700,7 @@ impl FetchRegistry {
 )]
 mod tests {
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
 
@@ -1677,10 +1710,10 @@ mod tests {
 
     use super::{
         AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
-        WriteOutcome, WriteStep, display_host_path, download_path, fetch_name, file_message,
-        folder_download_path, folder_message, host_download_path, host_folder, host_label,
-        is_under, outside_detail, parent_folder_request, part_path, run_writer, sanitize_segment,
-        stat_message,
+        NewFolderStep, WriteOutcome, WriteStep, display_host_path, download_path, fetch_name,
+        file_message, folder_download_path, folder_message, host_download_path, host_folder,
+        host_label, in_new_folder, is_under, outside_detail, parent_folder_request, part_path,
+        run_writer, sanitize_segment, stat_message,
     };
     use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
@@ -1941,6 +1974,52 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(first, Path::new("root").join(".fetch-ab12-1.part"));
+    }
+
+    #[test]
+    fn a_part_file_survives_its_folder_pruned_before_the_open() {
+        let dir = TempDir::new("pruned-part");
+        let folder = dir.0.join("nested");
+        let part = folder.join(".fetch-1.part");
+        let mut first = true;
+
+        // A prune on another thread removes the new folder while it is still
+        // empty, so the first open fails as it would in the app.
+        let made = in_new_folder(&folder, || {
+            if first {
+                first = false;
+                fs::remove_dir(&folder).expect("prune the empty folder");
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&part)
+        });
+
+        drop(made.expect("the folder is made again"));
+        assert!(part.exists(), "the part file is there");
+    }
+
+    #[test]
+    fn in_new_folder_returns_a_second_not_found() {
+        let dir = TempDir::new("always-pruned");
+        let folder = dir.0.join("nested");
+        let part = folder.join(".fetch-1.part");
+        let mut calls = 0u32;
+
+        let made = in_new_folder(&folder, || {
+            calls += 1;
+            fs::remove_dir(&folder).expect("prune the empty folder");
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&part)
+        });
+
+        let (step, err) = made.expect_err("the folder is pruned again");
+        assert_eq!(step, NewFolderStep::Entry);
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(calls, 2, "the create is tried twice");
     }
 
     fn entry(host: &str, rel: &str) -> FetchEntry {
