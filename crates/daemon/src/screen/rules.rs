@@ -129,6 +129,7 @@ struct CompiledRule {
 enum CompiledMatcher {
     Contains(String),
     Line(Regex),
+    FollowedOnlyBy { hit: Regex, allowed: Vec<Regex> },
 }
 
 impl CompiledRules {
@@ -441,7 +442,33 @@ fn compile_matcher(
                 None
             }
         },
+        LineMatcher::MatchFollowedOnlyBy { pattern, allowed } => {
+            let hit = compile_regex(what, pattern, problems);
+            let allowed: Vec<Option<Regex>> = allowed
+                .iter()
+                .enumerate()
+                .map(|(index, regex)| {
+                    compile_regex(&format!("{what}'s allowed row {index}"), regex, problems)
+                })
+                .collect();
+            Some(CompiledMatcher::FollowedOnlyBy {
+                hit: hit?,
+                allowed: allowed.into_iter().collect::<Option<_>>()?,
+            })
+        }
         LineMatcher::Unknown => None,
+    }
+}
+
+/// Compiles one regex, named `what` in a problem it adds to `problems` when
+/// it does not compile.
+fn compile_regex(what: &str, pattern: &str, problems: &mut Vec<String>) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(error) => {
+            problems.push(format!("{what} does not compile: {error}"));
+            None
+        }
     }
 }
 
@@ -476,12 +503,23 @@ impl CompiledRule {
 }
 
 impl CompiledMatcher {
-    /// Whether the matcher hits any of `lines`.
+    /// Whether the matcher hits `lines`, which run top to bottom: any of
+    /// them for a row matcher; for [`Self::FollowedOnlyBy`], a row matching
+    /// `hit` with every non-empty row below the last such one matching one
+    /// of `allowed`.
     fn hits(&self, lines: &[String]) -> bool {
-        lines.iter().any(|line| match self {
-            Self::Contains(needle) => line.contains(needle.as_str()),
-            Self::Line(regex) => regex.is_match(line),
-        })
+        match self {
+            Self::Contains(needle) => lines.iter().any(|line| line.contains(needle.as_str())),
+            Self::Line(regex) => lines.iter().any(|line| regex.is_match(line)),
+            Self::FollowedOnlyBy { hit, allowed } => lines
+                .iter()
+                .rposition(|line| hit.is_match(line))
+                .is_some_and(|last| {
+                    lines.iter().skip(last + 1).all(|line| {
+                        line.trim().is_empty() || allowed.iter().any(|regex| regex.is_match(line))
+                    })
+                }),
+        }
     }
 }
 
@@ -627,7 +665,7 @@ mod tests {
             .find(|rule| &*rule.name == name)
             .and_then(|rule| match &rule.matcher {
                 CompiledMatcher::Line(regex) => Some(regex.clone()),
-                CompiledMatcher::Contains(_) => None,
+                CompiledMatcher::Contains(_) | CompiledMatcher::FollowedOnlyBy { .. } => None,
             })
             .expect("a compiled line rule")
     }
@@ -1731,6 +1769,122 @@ mod tests {
         let reading = read_claude(&screen_from(&frame));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
         assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// `capture` with `rows` drawn above its effort indicator, where Claude
+    /// draws the transcript's last rows.
+    fn with_rows_above_the_effort_row(capture: &str, rows: &[&str]) -> String {
+        let lines: Vec<&str> = capture.lines().collect();
+        let effort = lines
+            .iter()
+            .rposition(|line| line.trim_end().ends_with("· /effort"))
+            .expect("the effort row");
+        let mut built: Vec<&str> = lines[..effort].to_vec();
+        built.extend_from_slice(rows);
+        built.extend_from_slice(&lines[effort..]);
+        built.join("\r\n")
+    }
+
+    /// A fresh Esc interrupt reads as the turn's end in the main view, under
+    /// the effort indicator and a task panel, and in a subagent's view.
+    #[test]
+    fn a_fresh_interrupt_row_reads_as_the_interrupt() {
+        for (name, capture) in [
+            ("v26-deny", include_str!("fixtures/v26-deny.txt")),
+            (
+                "v163-agent-view-esc-interrupted",
+                include_str!("fixtures/v163-agent-view-esc-interrupted.txt"),
+            ),
+        ] {
+            assert!(
+                capture.contains("Interrupted ·"),
+                "{name} holds the interrupt row"
+            );
+            let reading = read_claude(&screen_from(capture));
+            assert_eq!(reading.rule.as_deref(), Some("idle_interrupted"), "{name}");
+        }
+        let ready = include_str!("fixtures/v03-ready.txt");
+        for rows in [
+            &[INTERRUPT, "", "✻ Worked for 12s"][..],
+            &[
+                INTERRUPT,
+                "",
+                "✻ Worked for 11s",
+                "",
+                "  2 tasks (0 done, 2 open)",
+                "  ◻ check div",
+                "  ◻ write docs",
+            ][..],
+            &[
+                INTERRUPT,
+                "",
+                "  1/2 tasks done",
+                "  ✔ check div",
+                "  ◻ write docs",
+            ][..],
+        ] {
+            let reading = read_claude(&screen_from(&with_rows_above_the_effort_row(ready, rows)));
+            assert_eq!(
+                reading.rule.as_deref(),
+                Some("idle_interrupted"),
+                "{rows:?}"
+            );
+        }
+    }
+
+    /// An interrupt row with a later turn's rows under it, a subagent's
+    /// message or a finished background command, is not the screen's end.
+    #[test]
+    fn an_interrupt_row_above_a_later_turn_does_not_read_as_the_interrupt() {
+        let capture = include_str!("fixtures/v81-bang-out.txt");
+        assert!(
+            capture.contains("Interrupted ·"),
+            "v81 holds the interrupt row"
+        );
+        let reading = read_claude(&screen_from(capture));
+        assert_ne!(reading.rule.as_deref(), Some("idle_interrupted"));
+        let ready = include_str!("fixtures/v03-ready.txt");
+        let rows = [INTERRUPT, "", "● Background command \"x\" completed"];
+        let reading = read_claude(&screen_from(&with_rows_above_the_effort_row(ready, &rows)));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// An interrupt row with a prompt echo under it belongs to an earlier
+    /// turn: the screen reads the idle box.
+    #[test]
+    fn a_stale_interrupt_row_reads_the_idle_box() {
+        let ready = include_str!("fixtures/v03-ready.txt");
+        let rows = [INTERRUPT, "", "❯ next task"];
+        let reading = read_claude(&screen_from(&with_rows_above_the_effort_row(ready, &rows)));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
+    }
+
+    /// The interrupt row Claude draws under an interrupted turn.
+    const INTERRUPT: &str = "  ⎿  Interrupted · What should Claude do instead?";
+
+    #[test]
+    fn the_interrupt_matcher_reads_only_rows_below_its_last_hit() {
+        let matcher = CompiledMatcher::FollowedOnlyBy {
+            hit: Regex::new("^hit").expect("the hit compiles"),
+            allowed: vec![
+                Regex::new("^ok").expect("an allowed row compiles"),
+                Regex::new("fine$").expect("an allowed row compiles"),
+            ],
+        };
+        let cases: [(&[&str], bool); 7] = [
+            (&["other", "ok"], false),
+            (&["before", "hit", "ok", "also fine"], true),
+            (&["hit", "", "   "], true),
+            (&["hit"], true),
+            (&["hit", "ok", "other"], false),
+            (&["hit", "other", "hit", "ok"], true),
+            (&["a hit", "ok"], false),
+        ];
+        for (rows, hits) in cases {
+            let lines: Vec<String> = rows.iter().map(|row| (*row).to_owned()).collect();
+            assert_eq!(matcher.hits(&lines), hits, "{rows:?}");
+        }
     }
 
     /// A question's footer quoted in a reply above the idle box is

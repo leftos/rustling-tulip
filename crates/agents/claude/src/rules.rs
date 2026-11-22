@@ -227,7 +227,20 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "idle_interrupted".to_string(),
             priority: 950,
             region: ScreenRegion::AbovePromptBox { rows: 12 },
-            matcher: LineMatcher::Contains("⎿  Interrupted ·".to_string()),
+            // Claude's own interrupt row (`⎿`, a space and a no-break space),
+            // fresh only while nothing but its chrome sits below it: the
+            // turn's "✻ … for" line, a task panel and the effort indicator.
+            // Any other row below is a later turn's, and the idle box reads.
+            matcher: LineMatcher::MatchFollowedOnlyBy {
+                pattern: r"^\s*⎿[\s\u{00A0}]+Interrupted ·".to_string(),
+                allowed: vec![
+                    r"^\s*✻ \S+ for \d".to_string(),
+                    r"^\s*[◻◼✔✓☐☒] ".to_string(),
+                    r"^\s*\d+/\d+ tasks? done\b".to_string(),
+                    r"^\s*\d+ tasks? \(\d+ done, \d+ open\)".to_string(),
+                    r"·\s*/effort\s*$".to_string(),
+                ],
+            },
             not: Vec::new(),
             verdict: ScreenVerdict::Idle,
         },

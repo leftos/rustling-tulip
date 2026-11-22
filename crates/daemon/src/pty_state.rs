@@ -89,7 +89,8 @@ const CONFIRM_CAP: Duration = Duration::from_millis(700);
 /// row no rule reads for a little over a second, and a window of
 /// [`CONFIRM_CAP`] would publish `Idle` under it. A `Stop` that was lost still
 /// ends the turn once this has passed, unless a working title holds it past
-/// that (see [`TITLE_QUIET_LIMIT`]).
+/// that (see [`TITLE_QUIET_LIMIT`]). A `Stop` that came and was dropped at
+/// [`TURN_END_CEILING`] on the title alone is not held by the title.
 const IDLE_WITHOUT_STOP: Duration = Duration::from_secs(3);
 
 /// How long a working title holds a turn no `Stop` has ended: a CLI that goes
@@ -121,7 +122,8 @@ const LAUNCH_HOLD: Duration = crate::inject::MIN_STARTUP_CAP;
 /// The longest a turn end stays held. Past it a settled frame showing a turn
 /// that runs, by its spinner or its title, drops the turn end; an overlay that
 /// hides the screen keeps it until the overlay closes; anything else lands
-/// `Idle`.
+/// `Idle`. After a drop on the title alone, the idle box that follows ends
+/// the turn after [`IDLE_WITHOUT_STOP`] whatever the title says.
 const TURN_END_CEILING: Duration = Duration::from_secs(60);
 
 /// How soon the view switch reads the screen again after another writer
@@ -184,7 +186,10 @@ struct Sight {
 /// [`CONFIRM_CHECKS`] agreeing checks at least [`CONFIRM_SPACING`] apart, or on
 /// the first agreeing check [`CONFIRM_CAP`] after the window opened, all read
 /// against the same record. A reading taken from the title alone, an overlay,
-/// or a screen no rule matches never writes and breaks any open window.
+/// or a screen no rule matches never writes. In an agent session it breaks
+/// any open window, as an overlay does in a shell running an agent; there a
+/// title-only or unmatched frame parks the window instead ([`Confirm::park`]),
+/// which keeps its count until a check can read it again.
 ///
 /// Beside an `Idle` record whose screen body reads `Idle`, the agent's
 /// background rules ([`CompiledRules::read_background`]) set the record's
@@ -337,6 +342,13 @@ struct ScreenWatch {
     screen_set_background: bool,
     /// What the checks have read of the turn end the record holds.
     turn_end: TurnEndWatch,
+    /// [`TURN_END_CEILING`] dropped a held `Stop` on a working title over a
+    /// body no rule reads: the turn did end, so the working title no longer
+    /// holds the idle box ([`Self::title_holds_turn`]), which ends the turn
+    /// after [`IDLE_WITHOUT_STOP`]. A drop on a spinner row leaves it false.
+    /// Cleared by this watcher's next status write, by any other writer's
+    /// move of the record, and by a new held turn end.
+    stop_dropped: bool,
     /// Takes the terminal back to main for a prompt seen in an agent's view.
     view_return: ViewReturn,
     /// The session's typing lane, held by the view return from the reading
@@ -463,6 +475,10 @@ struct Window {
     opened_hook: u128,
     /// When the last check that counted ran.
     counted: Instant,
+    /// A check read a frame the window cannot count ([`Confirm::park`]):
+    /// no timer wakes for its next confirmation until a check matches it
+    /// again, and output still schedules checks as usual.
+    parked: bool,
 }
 
 impl Confirm {
@@ -487,12 +503,14 @@ impl Confirm {
         at <= now
     }
 
-    /// The next check due: the debounced one, the window's next confirmation,
-    /// or a held turn end's `ceiling`, whichever comes first.
+    /// The next check due: the debounced one, the window's next confirmation
+    /// unless it is parked, or a held turn end's `ceiling`, whichever comes
+    /// first.
     fn next_check(&self, ceiling: Option<Instant>) -> Option<Instant> {
         let confirm = self
             .window
             .as_ref()
+            .filter(|window| !window.parked)
             .map(|window| window.counted + CONFIRM_SPACING);
         [self.check_at, confirm, ceiling]
             .into_iter()
@@ -516,12 +534,12 @@ impl Confirm {
         self.check_at = Some(self.hold_until);
     }
 
-    /// A check that read nothing the open window can count: its next
-    /// confirmation waits [`CONFIRM_SPACING`] from `now`, its agreeing
-    /// checks as they were.
-    fn postpone(&mut self, now: Instant) {
+    /// A check that read nothing the open window can count: the window stays
+    /// open with its agreeing checks as they were, but no timer wakes for its
+    /// next confirmation; the check the next output schedules reads it again.
+    fn park(&mut self) {
         if let Some(window) = self.window.as_mut() {
-            window.counted = window.counted.max(now);
+            window.parked = true;
         }
     }
 
@@ -554,6 +572,8 @@ impl Confirm {
     ) -> bool {
         let due = match self.window.as_mut() {
             Some(window) if window.target == target && window.from == read => {
+                // A check that matches again takes the window off its park.
+                window.parked = false;
                 if now >= window.counted + CONFIRM_SPACING {
                     window.agreeing += 1;
                     window.counted = now;
@@ -572,6 +592,7 @@ impl Confirm {
                     opened: now,
                     opened_hook: hook_clock_now(),
                     counted: now,
+                    parked: false,
                 });
                 false
             }
@@ -626,6 +647,7 @@ impl ScreenWatch {
             prompt_raise: None,
             screen_set_background: false,
             turn_end: TurnEndWatch::default(),
+            stop_dropped: false,
             view_return: ViewReturn::default(),
             view_turn: None,
             view_turn_since: None,
@@ -789,11 +811,11 @@ impl ScreenWatch {
             Mode::ShellAgent if !shows_agent(&reading) => {
                 // An agent screen no rule knows, or the agent's title alone, with
                 // the shell's prompt not back: the agent may still run. Nothing
-                // writes, and an open window waits [`CONFIRM_SPACING`] from now
-                // for its next check, so a frame it cannot count never spins the
-                // watcher at full speed.
+                // writes, and an open window is parked: it keeps its count, and
+                // only the next output wakes the watcher to read it again, so a
+                // frame it cannot count never re-runs the check on a timer.
                 self.confirm.candidate = None;
-                self.confirm.postpone(now);
+                self.confirm.park();
                 Checked::Done
             }
             Mode::Agent | Mode::ShellAgent => {
@@ -1053,7 +1075,9 @@ impl ScreenWatch {
             self.publish_as(read, SessionStatus::Idle, "ceiling", shown);
             return true;
         }
-        self.drop_held_turn_end(read, "ceiling_spinner");
+        let dropped = self.drop_held_turn_end(read, "ceiling_spinner").is_some();
+        // Only a title-only reading: a spinner row is a turn that went on.
+        self.stop_dropped = dropped && reading.from_title;
         true
     }
 
@@ -1099,6 +1123,7 @@ impl ScreenWatch {
             self.turn_end = TurnEndWatch::default();
             return false;
         };
+        self.stop_dropped = false;
         self.turn_end.track(held.event_time);
         let sign = TurnEndSign::of(reading);
         let first_read = quiet && !self.turn_end.read;
@@ -1325,12 +1350,13 @@ impl ScreenWatch {
 
     /// Whether a working title still holds a turn no `Stop` has ended: true
     /// until the terminal has been quiet for [`TITLE_QUIET_LIMIT`], when the
-    /// check it schedules lets the idle screen's window open.
+    /// check it schedules lets the idle screen's window open. Never once the
+    /// ceiling dropped a held `Stop` on the title alone ([`Self::stop_dropped`]).
     fn title_holds_turn(&mut self, now: Instant) -> bool {
         let Some(limit) = self
             .last_output
             .map(|at| at + TITLE_QUIET_LIMIT)
-            .filter(|&limit| self.title_working && now < limit)
+            .filter(|&limit| self.title_working && !self.stop_dropped && now < limit)
         else {
             return false;
         };
@@ -1467,6 +1493,7 @@ impl ScreenWatch {
             &self.attention_tx,
         );
         if wrote {
+            self.stop_dropped = false;
             debug!(
                 target: "status_trace",
                 session = %self.session_id,
@@ -1508,6 +1535,7 @@ impl ScreenWatch {
     /// the move touched neither the status nor the flag
     /// ([`moves_status_or_background`]).
     fn record_moved(&mut self, before: Option<StatusRead>, mode: Mode, now: Instant) -> Moved {
+        self.stop_dropped = false;
         if moves_status_or_background(before, self.wake.seen) {
             self.screen_set_background = false;
         }
@@ -1535,6 +1563,7 @@ impl ScreenWatch {
     /// The chat mirror still gets the grid at the next settle point inside
     /// the hold: at once when the output is already quiet.
     fn foreign_write(&mut self, before: Option<StatusRead>, now: Instant) {
+        self.stop_dropped = false;
         self.note_held_off_dialog();
         let awaiting = |read: Option<StatusRead>| {
             read.is_some_and(|read| read.status == SessionStatus::AwaitingInput)
@@ -2671,7 +2700,7 @@ mod tests {
 
 #[cfg(test)]
 mod confirm_tests {
-    use super::{CONFIRM_SPACING, Confirm, Instant, StatusRead, Target};
+    use super::{CHECK_DEBOUNCE, CONFIRM_SPACING, Confirm, Instant, StatusRead, Target};
     use protocol::SessionStatus;
 
     /// A record read no window can be moved by.
@@ -2689,25 +2718,56 @@ mod confirm_tests {
     }
 
     #[test]
-    fn a_postponed_window_is_not_due_at_once() {
+    fn a_parked_window_is_not_due() {
         let t0 = Instant::now();
         let mut confirm = Confirm::new(t0);
         assert!(!confirm.agree(read(), Target::AgentShown, t0));
         let now = t0 + CONFIRM_SPACING * 3;
         // The spin's precondition: a window past its spacing is due at once.
         assert!(confirm.next_check(None) <= Some(now));
-        confirm.postpone(now);
-        assert_eq!(confirm.next_check(None), Some(now + CONFIRM_SPACING));
+        confirm.park();
+        assert_eq!(confirm.check_at, None, "no check is scheduled");
+        assert_eq!(confirm.next_check(None), None);
         assert_eq!(confirm.window.map(|window| window.agreeing), Some(1));
     }
 
     #[test]
-    fn postponing_without_a_window_changes_nothing() {
+    fn a_parked_window_counts_again_on_a_matching_check() {
+        let t0 = Instant::now();
+        let mut confirm = Confirm::new(t0);
+        assert!(!confirm.agree(read(), Target::AgentShown, t0));
+        let now = t0 + CONFIRM_SPACING * 3;
+        confirm.park();
+        assert!(!confirm.agree(read(), Target::AgentShown, now));
+        assert_eq!(
+            confirm.window.as_ref().map(|window| window.agreeing),
+            Some(2)
+        );
+        assert_eq!(
+            confirm.next_check(None),
+            Some(now + CONFIRM_SPACING),
+            "the count cleared the park"
+        );
+    }
+
+    #[test]
+    fn a_parked_window_still_wakes_for_a_new_frame() {
+        let t0 = Instant::now();
+        let mut confirm = Confirm::new(t0);
+        assert!(!confirm.agree(read(), Target::AgentShown, t0));
+        let now = t0 + CONFIRM_SPACING * 3;
+        confirm.park();
+        confirm.schedule(now);
+        assert_eq!(confirm.next_check(None), Some(now + CHECK_DEBOUNCE));
+    }
+
+    #[test]
+    fn parking_without_a_window_changes_nothing() {
         let t0 = Instant::now();
         let mut confirm = Confirm::new(t0);
         confirm.schedule(t0);
         let before = confirm.next_check(None);
-        confirm.postpone(t0);
+        confirm.park();
         assert_eq!(confirm.next_check(None), before);
     }
 }
@@ -4069,6 +4129,124 @@ mod hysteresis_tests {
             h.status(),
             SessionStatus::Idle,
             "the title lengthened the interrupt's window"
+        );
+    }
+
+    /// The interrupt row as Claude draws it: a no-break space after the `⎿`.
+    const DRAWN_INTERRUPT_ROW: &str = "  ⎿ \u{a0}Interrupted · What should Claude do instead?";
+
+    /// A subagent's message starts a turn with no prompt echo: the interrupt
+    /// row above it is an earlier turn's.
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_row_above_a_subagent_message_does_not_end_the_turn() {
+        let h = start_record(
+            "interrupt-subagent-message",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[
+            DRAWN_INTERRUPT_ROW,
+            "",
+            "› Message from @general-purpose (ctrl+o to expand)",
+            "",
+            "● The README agent is done.",
+            "",
+            "✽ Build the thing and check it by hand…",
+        ]));
+        advance(ms(1100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "an old interrupt row ended a subagent's turn"
+        );
+    }
+
+    /// A tool's output quoting an interrupt row is no interrupt.
+    #[tokio::test(start_paused = true)]
+    async fn a_quoted_interrupt_row_in_tool_output_does_not_end_the_turn() {
+        let h = start_record(
+            "interrupt-quoted",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[
+            "❯ go",
+            "",
+            "● Bash(rg -n \"Interrupted ·\" crates/daemon/src/screen/fixtures)",
+            "  ⎿  …/v26-deny.txt:46:  ⎿  Interrupted · What should Claude do instead?",
+            "     … +19 lines (ctrl+o to expand)",
+            "",
+            "✽ Build the thing and check it by hand…",
+        ]));
+        advance(ms(1100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a quoted interrupt row ended the turn"
+        );
+    }
+
+    /// The rows above the box after an interrupted turn and a follow-up
+    /// prompt: the old interrupt row, the prompt's echo and the new turn's
+    /// spinner, wrapped over rows no rule reads.
+    const STALE_INTERRUPT_ROWS: [&str; 6] = [
+        INTERRUPT_ROW,
+        "",
+        "❯ next task",
+        "",
+        WRAPPED_SPINNER_ROWS[0],
+        WRAPPED_SPINNER_ROWS[1],
+    ];
+
+    /// An interrupt row the follow-up turn has scrolled up is not that
+    /// turn's end: the working title holds it as for any turn with no `Stop`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_interrupt_row_under_a_working_title_does_not_end_a_new_turn() {
+        let h = start_record(
+            "stale-interrupt-title",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&STALE_INTERRUPT_ROWS),
+        ));
+        advance(ms(850)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a stale interrupt row ended the new turn"
+        );
+    }
+
+    /// The same frame from a CLI that went quiet still ends once the title's
+    /// quiet limit has passed.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_interrupt_row_under_a_dead_cli_title_ends_after_the_quiet_limit() {
+        let h = start_record(
+            "stale-interrupt-quiet",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(under_title(
+            WORKING_TITLE,
+            idle_frame(&STALE_INTERRUPT_ROWS),
+        ));
+        advance(TITLE_QUIET_LIMIT.saturating_sub(IDLE_WITHOUT_STOP)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the title let go of the turn before its quiet limit"
+        );
+        advance(IDLE_WITHOUT_STOP + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a dead CLI's title held the turn past its quiet limit"
         );
     }
 
@@ -6554,6 +6732,81 @@ mod hysteresis_tests {
         advance(Duration::from_secs(60)).await;
         assert_eq!(h.status(), SessionStatus::Working, "the ceiling landed it");
         assert!(!h.holds_turn_end(), "the ceiling drops it");
+    }
+
+    /// A held `Stop` the ceiling dropped over a working title and a body no
+    /// rule reads, with the session left `Working`.
+    async fn drop_a_stop_under_a_working_title(tag: &str) -> Harness {
+        let h = start_record(tag, false, hook_record(SessionStatus::Working));
+        h.chunk(under_title(
+            WORKING_TITLE,
+            frame(&["something no rule reads"]),
+        ));
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        pass_hold().await;
+        advance(Duration::from_secs(61)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the ceiling landed it");
+        assert!(!h.holds_turn_end(), "the ceiling drops it");
+        h
+    }
+
+    /// The `Stop` came: once the ceiling dropped it, the working title no
+    /// longer holds the idle box, which ends the turn in the window of a turn
+    /// with no `Stop`.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_box_after_a_dropped_stop_lands_idle_under_a_working_title() {
+        let h = drop_a_stop_under_a_working_title("dropped-stop-idle").await;
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[])));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the working title held a turn whose Stop the ceiling dropped"
+        );
+    }
+
+    /// A drop on a real spinner row is a turn that went on and fires its own
+    /// `Stop`: the working title still holds its idle box.
+    #[tokio::test(start_paused = true)]
+    async fn a_spinner_dropped_stop_keeps_the_title_hold() {
+        let h = start_record(
+            "spinner-dropped-stop",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[SPINNER_ROW])));
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        advance(Duration::from_secs(61)).await;
+        assert!(!h.holds_turn_end(), "the ceiling drops the held turn end");
+        assert_eq!(h.status(), SessionStatus::Working);
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[])));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a drop on a spinner let go of the title's hold"
+        );
+    }
+
+    /// A main hook after the drop is a turn that runs on: the working title
+    /// holds its idle box again.
+    #[tokio::test(start_paused = true)]
+    async fn a_main_hook_after_a_dropped_stop_restores_the_title_hold() {
+        let h = drop_a_stop_under_a_working_title("dropped-stop-hook").await;
+        h.hook(
+            3,
+            &serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Read"}),
+        );
+        pass_hold().await;
+        h.chunk(under_title(WORKING_TITLE, idle_frame(&[])));
+        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the dropped Stop outlived a main hook"
+        );
     }
 
     #[tokio::test(start_paused = true)]

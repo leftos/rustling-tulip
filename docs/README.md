@@ -466,6 +466,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 
   The boot picks it from `native-ui.json`'s `theme` through `ThemeStore` (`theme_store.rs`; user themes are `<config dir>/themes/<slug>.json`); its `terminal` part is the terminal's palette (`TerminalPalette`, `theme.rs`).
 - **Unbound**: a session that is running with no pane showing it in this client's tabs; the Tabs view lists it in its Unbound container, and a host's Unbind action leaves every one of that host's sessions so.
+- **Turn-end hold**: a main `Stop` the screen watcher holds (`SessionRecord.turn_end`, `TurnEnd`) until the screen confirms the idle box or `TURN_END_CEILING` decides it (`docs/session-runtime.md` "Session status").
 - **Unconfirmed turn**: a `Working` the screen promoted on a hook-driven session while no main-agent hook has confirmed it, such as a `/compact`'s spinner; `SessionSnapshot.turn_unconfirmed` carries it to the `Idle` that ends it, and the Finished toast and push skip that `Idle` (`docs/session-runtime.md` "Session status").
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
@@ -488,4 +489,5 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Work area**: the part of a Windows monitor the taskbar leaves free (`rcWork`), where the app's toast stack sits; macOS's counterpart is the visible frame (`docs/native-client.md` "The app's own toasts").
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
 - **Working refresh**: the summary refresh of a working session while the Dashboard is watched, made from the transcript's last assistant text.
+- **Working title**: the terminal title Claude sets while a turn runs (a `Title`-region rule with verdict `Working`), which holds a turn no `Stop` has ended (`docs/session-runtime.md` "Session status").
 - **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).

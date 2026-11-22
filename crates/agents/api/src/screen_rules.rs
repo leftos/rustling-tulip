@@ -131,12 +131,21 @@ fn part_problems(rule: &ScreenRule) -> Vec<String> {
 
 /// What is wrong with one matcher, named `what` in the message, if anything.
 fn pattern_problem(what: &str, matcher: &LineMatcher) -> Option<String> {
-    let pattern = match matcher {
-        LineMatcher::Contains(pattern) | LineMatcher::Regex(pattern) => pattern,
-        LineMatcher::Unknown => {
-            return Some(format!("{what} is a kind this build does not know"));
-        }
-    };
+    match matcher {
+        LineMatcher::Contains(pattern) | LineMatcher::Regex(pattern) => text_problem(what, pattern),
+        LineMatcher::MatchFollowedOnlyBy { pattern, allowed } => text_problem(what, pattern)
+            .or_else(|| {
+                allowed.iter().enumerate().find_map(|(index, regex)| {
+                    text_problem(&format!("{what}'s allowed row {index}"), regex)
+                })
+            }),
+        LineMatcher::Unknown => Some(format!("{what} is a kind this build does not know")),
+    }
+}
+
+/// What is wrong with one of a matcher's strings, named `what` in the
+/// message, if anything.
+fn text_problem(what: &str, pattern: &str) -> Option<String> {
     let chars = pattern.chars().count();
     if chars == 0 {
         Some(format!("{what} is empty and would match every row"))
@@ -226,6 +235,16 @@ pub enum LineMatcher {
     Contains(String),
     /// A regex matched against each row.
     Regex(String),
+    /// Some row of the region matches the regex `pattern`, and every
+    /// non-empty row below the last such row in the region matches at least
+    /// one of the regexes in `allowed`. A row below that none allows fails
+    /// the matcher, so an unknown row never makes it hit.
+    MatchFollowedOnlyBy {
+        /// The regex a row must match.
+        pattern: String,
+        /// The regexes the rows below the last hit may match.
+        allowed: Vec<String>,
+    },
     /// A matcher this build does not know, carried from a newer plugin.
     Unknown,
 }
@@ -252,8 +271,33 @@ impl<'de> Deserialize<'de> for LineMatcher {
         Ok(match (fields.kind.as_str(), fields.pattern) {
             ("contains", Some(serde_json::Value::String(pattern))) => Self::Contains(pattern),
             ("regex", Some(serde_json::Value::String(pattern))) => Self::Regex(pattern),
+            ("match_followed_only_by", Some(serde_json::Value::Object(fields))) => {
+                followed_only_by(&fields)
+            }
             _ => Self::Unknown,
         })
+    }
+}
+
+/// A [`LineMatcher::MatchFollowedOnlyBy`] from its `pattern` object;
+/// [`LineMatcher::Unknown`] when `pattern` is not a string or `allowed` is
+/// not a list of strings.
+fn followed_only_by(fields: &serde_json::Map<String, serde_json::Value>) -> LineMatcher {
+    let pattern = fields.get("pattern").and_then(serde_json::Value::as_str);
+    let allowed = fields
+        .get("allowed")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .map(|row| row.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    match (pattern, allowed) {
+        (Some(pattern), Some(allowed)) => LineMatcher::MatchFollowedOnlyBy {
+            pattern: pattern.to_owned(),
+            allowed,
+        },
+        _ => LineMatcher::Unknown,
     }
 }
 
