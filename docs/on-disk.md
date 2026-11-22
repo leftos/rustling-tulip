@@ -66,6 +66,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   A successful push or clear round logs nothing at info, so the log cannot show that a clear was sent; only failures appear. A phone `peer admitted … device=<phone>` line 1 to 3 s after a wait ends is a clear's background wake cold-launching the app. Desk presence changes are not logged.
 
+  To date when a question asked from a script (Claude Code's Code Mode) was answered, read the session transcript's `repl-eval` events with `status="settled"`: they give the true answer time, which the hook and screen status lines can miss.
+
   A client update rotates `daemon.log` and `native.log`, and a second restart loses the run before it, so copy the `.old` file early. With no debug lines in `daemon.log` (Detailed logging off), `activity/session-<id>.jsonl` still gives each status change's exact time. With Detailed logging off, `symphonia_format_ogg` `serial=` lines date every bundled toast sound, and the serial names which one.
 
   Its filter is `info`, plus `status_trace=debug` with `native-ui.json`'s `general.detailed_logging` on (a reload layer in `apps/native/src/logging.rs`; a `RUST_LOG` set at launch wins). Settings → General's Open logs folder opens this folder.

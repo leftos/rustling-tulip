@@ -823,7 +823,7 @@ impl ScreenWatch {
         let mut refused = false;
         let mut ended = false;
         self.registry
-            .clear_answered_prompt_if(&self.session_id, |record| {
+            .clear_answered_prompt_if(&self.session_id, "subagent view", |record| {
                 refused = moved_since(record, read);
                 ended = !refused && subagent_edge_ends(record, seen);
                 ended
@@ -1693,6 +1693,7 @@ fn hand_shell_back(
     let mut after = None;
     let mut agent_exited = false;
     let mut promoted = false;
+    let mut written = None;
     registry.update_if_changed_then(session_id, |rec| {
         if moved_since(rec, from) {
             return None;
@@ -1717,6 +1718,7 @@ fn hand_shell_back(
         }
         if in_turn {
             apply_watcher_status(rec, SessionStatus::Idle);
+            written = Some(rec.status);
         }
         after = Some(StatusRead {
             status: rec.status,
@@ -1731,6 +1733,15 @@ fn hand_shell_back(
         let alert = held.and_then(|held| held.alert);
         changed.then(|| alert.map(|alert| alert.event(session_id)))
     });
+    if let Some(to) = written {
+        debug!(
+            target: "status_trace",
+            session = %session_id,
+            from = ?from.status,
+            to = ?to,
+            "status changed by a shell hand-back"
+        );
+    }
     if agent_exited {
         // A promoted shell's waiter lives only while its agent runs.
         if promoted {
@@ -5917,7 +5928,8 @@ mod hysteresis_tests {
         );
         h.chunk(permission_frame());
         pass_hold().await;
-        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        h.registry
+            .clear_answered_prompt_if(SESSION, "test", |_| true);
         settle().await;
         advance(CHECK_DEBOUNCE + ms(10)).await;
         // Arrow keys move the cursor in the dialog Claude still paints, past
@@ -5945,7 +5957,8 @@ mod hysteresis_tests {
         );
         h.chunk(permission_frame());
         pass_hold().await;
-        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        h.registry
+            .clear_answered_prompt_if(SESSION, "test", |_| true);
         settle().await;
         for _ in 0..20 {
             h.chunk(permission_frame());
@@ -6701,7 +6714,8 @@ mod hysteresis_tests {
         let mut h = start_record(tag, false, hook_record(SessionStatus::AwaitingInput));
         h.chunk(frame());
         pass_hold().await;
-        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        h.registry
+            .clear_answered_prompt_if(SESSION, "test", |_| true);
         settle().await;
         pass_hold().await;
         h.hook(2, &main_tool());
@@ -8065,7 +8079,8 @@ mod hysteresis_tests {
     /// Returns once the second prompt's own hold has passed.
     async fn answer_then_raise_another_inside_the_hold(tag: &str) -> Harness {
         let h = start_on_a_subagents_dialog_from(tag, subagent_pending_record()).await;
-        h.registry.clear_answered_prompt_if(SESSION, |_| true);
+        h.registry
+            .clear_answered_prompt_if(SESSION, "test", |_| true);
         settle().await;
         assert_eq!(
             h.status(),

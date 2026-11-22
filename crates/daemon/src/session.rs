@@ -1419,11 +1419,13 @@ impl SessionRegistry {
     /// share one registry update, so a hook event cannot slip between them; a
     /// session without hooks is left alone. The same update counts the clear
     /// in [`SessionRecord::chat_answers`], which tells the status watcher the
-    /// move was a chat answer's.
-    pub fn clear_answered_prompt_if<F>(&self, id: &str, still: F)
+    /// move was a chat answer's. A clear that moves the status logs `cause`
+    /// on the `status_trace` target.
+    pub fn clear_answered_prompt_if<F>(&self, id: &str, cause: &'static str, still: F)
     where
         F: FnOnce(&SessionRecord) -> bool,
     {
+        let mut left_awaiting = false;
         self.update_if_changed(id, |rec| {
             let waiting = rec.status == SessionStatus::AwaitingInput || rec.pending_input.is_some();
             if !rec.hook_driven || !waiting || !still(rec) {
@@ -1431,11 +1433,22 @@ impl SessionRegistry {
             }
             if rec.status == SessionStatus::AwaitingInput {
                 rec.status = SessionStatus::Idle;
+                left_awaiting = true;
             }
             rec.clear_pending();
             rec.chat_answers = rec.chat_answers.wrapping_add(1);
             true
         });
+        if left_awaiting {
+            debug!(
+                target: "status_trace",
+                session = %id,
+                from = ?SessionStatus::AwaitingInput,
+                to = ?SessionStatus::Idle,
+                cause,
+                "status changed by a prompt clear"
+            );
+        }
     }
 
     /// [`Self::update`], where `f` also answers an event to send right after

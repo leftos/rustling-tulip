@@ -396,6 +396,15 @@ fn keeps_pending(answered: &ChatPromptKind, now: &ChatScreen) -> bool {
         })
 }
 
+/// Whether answering a question of `kind` leaves the card `pending` names
+/// going on: the hook named several questions, so one answered is never the
+/// card's end, whatever the screen shows after the key; its next question or
+/// its review follows. A review answered, or a card of one question, ends it.
+fn card_goes_on(kind: &ChatPromptKind, pending: &PendingInput) -> bool {
+    *kind == ChatPromptKind::Question
+        && matches!(pending, PendingInput::Question { questions } if questions.len() > 1)
+}
+
 /// Whether `now`, typed on `before`, holds `step`'s expectation; `gone` is
 /// whether it shows the answered prompt gone.
 fn step_holds(
@@ -552,13 +561,16 @@ impl Answerer<'_> {
         self.cleared = true;
         let kind = self.answered.kind.clone();
         let captured = self.answered.pending.take();
-        self.target
-            .sessions
-            .clear_answered_prompt_if(&self.target.session_id, |record| {
+        self.target.sessions.clear_answered_prompt_if(
+            &self.target.session_id,
+            "chat answer",
+            |record| {
                 record.pending_input.as_ref().is_some_and(|pending| {
                     answers(&kind, pending)
                         && (captured.is_none() || record.pending_input == captured)
+                        && !card_goes_on(&kind, pending)
                 })
-            });
+            },
+        );
     }
 }

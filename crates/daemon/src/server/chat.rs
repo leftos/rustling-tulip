@@ -4891,6 +4891,42 @@ mod tests {
                 );
             }
 
+            /// A question prompt the record waits on, with one question per
+            /// header, as the hook of a card of several questions names them.
+            fn questions_prompt(headers: &[&str]) -> PendingInput {
+                PendingInput::Question {
+                    questions: headers
+                        .iter()
+                        .map(|header| protocol::PendingQuestion {
+                            question: format!("Which {header}?"),
+                            header: (*header).to_owned(),
+                            options: vec!["Red".to_owned(), "Blue".to_owned()],
+                            option_descriptions: Vec::new(),
+                            multi_select: false,
+                            preview: false,
+                        })
+                        .collect(),
+                }
+            }
+
+            #[tokio::test]
+            async fn a_question_answer_on_a_card_of_several_questions_keeps_it_pending() {
+                // The hook named three questions, so answering one step is
+                // never the card's end: its next question or its review
+                // follows. A reading after the key that shows no dialog is not
+                // the card answered.
+                let pending = questions_prompt(&["Next fn", "Tests", "Style"]);
+                let mut a = answer_question_pending("answer-card-goes-on", &pending).await;
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(pending)),
+                    "a card of three questions waits on until its review is answered \
+                     or its own tool's PostToolUse ends it"
+                );
+            }
+
             #[tokio::test]
             async fn a_heads_up_answer_leaves_mains_pending_prompt() {
                 let pending = bash_prompt("python -c");
