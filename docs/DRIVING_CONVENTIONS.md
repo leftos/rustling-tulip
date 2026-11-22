@@ -66,7 +66,7 @@ When a request's time passes, the server should send the endpoint a cancel for i
 
 Then diagnose the timeout: a short `ping` tells a busy client (it answers) from a stuck UI thread, and a stuck one's error adds the client process's CPU over a short sample, its thread count and the last lines of its log, sampled from the client's own pid. With a debugger attached (`CheckRemoteDebuggerPresent`) a call should fail at once as "most likely paused at a breakpoint".
 
-The endpoint's side is met: `cancel` ends a pending request and a closed connection cancels its pending ones. Not met: the server sends no cancel when a request's time passes or its connection is lost, a timed-out call is not diagnosed, and the debugger check is not built.
+The endpoint's side is met: `cancel` ends a pending request and a closed connection cancels its pending ones. The server's side is met on Windows: when the reply guard fires it cancels its own blocked read, sends the cancel on the same connection and drops it. Not met: a timed-out call is not diagnosed, and the debugger check is not built.
 Source: `tools/rt-driver-mcp/src/pipe.rs`, `apps/native/src/driver/pipe.rs`; other projects' decision records, changelog fixes and pipe-client tests; Windows docs for CheckRemoteDebuggerPresent. Seen: 0 here (seeded from godot-mcp, yaat).
 
 ### Bound every wait on both sides, and return its outcome as data with the last values seen

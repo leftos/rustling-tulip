@@ -5,10 +5,17 @@
 //! process's one [`clock`], with a backstop of 5x their budget in wall time,
 //! so other work loading the machine does not turn them into false hangs;
 //! the poll sleeps between busy retries stay wall time.
+//!
+//! A reply that does not come is cancelled: on Windows the reader thread's
+//! blocked read is cancelled (`CancelSynchronousIo`) until it hands the
+//! connection back, a `cancel` of the request goes out on that connection,
+//! its answer is awaited for [`CANCEL_REPLY_GUARD`], and the connection is
+//! dropped, so the next call opens a fresh one.
 
 use std::fs::File;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::sync::{Arc, OnceLock, mpsc};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use load_clock::{Deadline, Expiry, LoadClock};
@@ -26,6 +33,19 @@ const BUSY_GUARD: Duration = Duration::from_secs(5);
 
 /// The longest a reply wait blocks before checking its deadline again.
 const SLICE: Duration = Duration::from_secs(1);
+
+/// How long a timed-out call keeps cancelling its reader's pending read, in
+/// wall time: it bounds an OS call, not work the machine's load slows.
+#[cfg(windows)]
+const CANCEL_READ_GUARD: Duration = Duration::from_secs(5);
+
+/// How long each cancel of a pending read waits for the reader's hand-back.
+#[cfg(windows)]
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
+/// How long a timed-out call waits for the endpoint's answer to its cancel,
+/// in load-adjusted time with a 5x wall backstop.
+const CANCEL_REPLY_GUARD: Duration = Duration::from_secs(3);
 
 /// The process's one load-adjusted clock, which every ceiling counts on.
 #[must_use]
@@ -82,6 +102,8 @@ pub struct PipeClient {
     path: String,
     connection: Option<BufReader<File>>,
     next_id: u64,
+    /// How long a call waits for its reply: [`REPLY_GUARD`] but in specs.
+    reply_guard: Duration,
 }
 
 impl PipeClient {
@@ -93,6 +115,16 @@ impl PipeClient {
             path,
             connection: None,
             next_id: 1,
+            reply_guard: REPLY_GUARD,
+        }
+    }
+
+    /// A client whose calls wait `reply_guard` for their reply.
+    #[cfg(all(test, windows))]
+    fn with_reply_guard(path: String, reply_guard: Duration) -> Self {
+        Self {
+            reply_guard,
+            ..Self::new(path)
         }
     }
 
@@ -103,29 +135,70 @@ impl PipeClient {
 
     /// Writes `line` and reads lines until the reply to `id` (or to the
     /// reserved id 0, a refusal of the line itself). A failure drops the
-    /// connection, so a late reply is never read as the next call's.
+    /// connection, so a late reply is never read as the next call's; a reply
+    /// that does not come is first cancelled on the connection, when the
+    /// reader hands it back.
     fn exchange(&mut self, line: &str, id: u64) -> Result<Value, String> {
         let mut connection = match self.connection.take() {
             Some(connection) => connection,
             None => open(&self.path)?,
         };
-        let pipe = connection.get_mut();
-        pipe.write_all(line.as_bytes())
-            .and_then(|()| pipe.flush())
+        send_line(connection.get_mut(), line)
             .map_err(|err| format!("writing to {}: {err}", self.path))?;
-        let deadline = Deadline::start(clock(), REPLY_GUARD);
+        let deadline = Deadline::start(clock(), self.reply_guard);
         loop {
-            let (back, text) = read_line_by(connection, &deadline)?;
-            connection = back;
-            let reply: Value = serde_json::from_str(&text)
-                .map_err(|err| format!("the endpoint's reply is not JSON ({err}): {text}"))?;
-            match reply.get("id").and_then(Value::as_u64) {
-                Some(got) if got == id || got == 0 => {
-                    self.connection = Some(connection);
-                    return Ok(reply);
+            connection = match read_line_by(connection, &deadline) {
+                ReadEnd::Line(back, text) => match reply_to(&text, id)? {
+                    Some(reply) => {
+                        self.connection = Some(back);
+                        return Ok(reply);
+                    }
+                    None => back,
+                },
+                ReadEnd::Timeout { connection, expiry } => {
+                    if let Some(connection) = connection {
+                        self.cancel(connection, id);
+                    }
+                    return Err(no_reply(&expiry));
                 }
-                other => tracing::warn!(?other, id, "dropping a reply to another request"),
-            }
+                ReadEnd::Failed(why) => return Err(why),
+            };
+        }
+    }
+
+    /// Asks the endpoint to cancel `request` on the connection it was sent
+    /// on, waits up to [`CANCEL_REPLY_GUARD`] for the answer, and drops the
+    /// connection, whose close cancels whatever is still pending there.
+    fn cancel(&mut self, mut connection: BufReader<File>, request: u64) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut line =
+            json!({"id": id, "method": "cancel", "params": {"request": request}}).to_string();
+        line.push('\n');
+        if let Err(err) = send_line(connection.get_mut(), &line) {
+            tracing::debug!(request, %err, "writing the cancel of a timed-out request");
+            return;
+        }
+        let deadline = Deadline::start(clock(), CANCEL_REPLY_GUARD);
+        loop {
+            connection = match read_line_by(connection, &deadline) {
+                ReadEnd::Line(back, text) => match reply_to(&text, id) {
+                    Ok(Some(reply)) => {
+                        let cancelled = reply["result"]["cancelled"].as_bool();
+                        tracing::debug!(request, ?cancelled, "the endpoint answered the cancel");
+                        return;
+                    }
+                    Ok(None) => back,
+                    Err(why) => {
+                        tracing::debug!(request, why, "the answer to the cancel");
+                        return;
+                    }
+                },
+                ReadEnd::Timeout { .. } | ReadEnd::Failed(_) => {
+                    tracing::debug!(request, "no answer to the cancel");
+                    return;
+                }
+            };
         }
     }
 }
@@ -177,14 +250,51 @@ fn open(path: &str) -> Result<BufReader<File>, String> {
     }
 }
 
-/// One line read on a thread of its own, so the wait ends at `deadline`; a
-/// read still pending then keeps the connection, which is dropped.
-fn read_line_by(
-    mut connection: BufReader<File>,
-    deadline: &Deadline,
-) -> Result<(BufReader<File>, String), String> {
+/// Writes `line` whole and flushes it.
+fn send_line(pipe: &mut File, line: &str) -> io::Result<()> {
+    pipe.write_all(line.as_bytes())?;
+    pipe.flush()
+}
+
+/// The reply in `text` when it answers `id` (or the reserved id 0), `None`
+/// for a reply to another request, which is dropped.
+fn reply_to(text: &str, id: u64) -> Result<Option<Value>, String> {
+    let reply: Value = serde_json::from_str(text)
+        .map_err(|err| format!("the endpoint's reply is not JSON ({err}): {text}"))?;
+    match reply.get("id").and_then(Value::as_u64) {
+        Some(got) if got == id || got == 0 => Ok(Some(reply)),
+        other => {
+            tracing::warn!(?other, id, "dropping a reply to another request");
+            Ok(None)
+        }
+    }
+}
+
+/// What a reader thread hands back: the connection, the read's result and
+/// the line it read.
+type HandBack = (BufReader<File>, io::Result<usize>, String);
+
+/// How a [`read_line_by`] ended.
+enum ReadEnd {
+    /// A line, and the connection to read the next one from.
+    Line(BufReader<File>, String),
+    /// No line by the deadline; on Windows the reader's read was cancelled
+    /// and `connection` is the connection it handed back, if it did.
+    Timeout {
+        connection: Option<BufReader<File>>,
+        expiry: Expiry,
+    },
+    /// The pipe closed or the read failed; the connection is gone.
+    Failed(String),
+}
+
+/// One line read on a thread of its own, so the wait ends at `deadline`. On
+/// Windows a read still pending then is cancelled and the connection comes
+/// back in [`ReadEnd::Timeout`] (or, when the reply raced the cancel, as its
+/// line); elsewhere the pending read keeps the connection, which is dropped.
+fn read_line_by(mut connection: BufReader<File>, deadline: &Deadline) -> ReadEnd {
     let (send, receive) = mpsc::channel();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut line = String::new();
         let read = connection.read_line(&mut line);
         let _ = send.send((connection, read, line));
@@ -196,11 +306,75 @@ fn read_line_by(
         Err(mpsc::RecvTimeoutError::Disconnected) => Some(None),
     };
     match await_reply(deadline, wait) {
-        Ok(Some((connection, Ok(read), line))) if read > 0 => Ok((connection, line)),
-        Ok(Some((_, Ok(_), _))) => Err("the pipe closed before the reply".to_owned()),
-        Ok(Some((_, Err(err), _))) => Err(format!("reading the reply: {err}")),
-        Ok(None) => Err("the reply reader ended without a line".to_owned()),
-        Err(expiry) => Err(no_reply(&expiry)),
+        Ok(Some((connection, Ok(read), line))) if read > 0 => ReadEnd::Line(connection, line),
+        Ok(Some((_, Ok(_), _))) => ReadEnd::Failed("the pipe closed before the reply".to_owned()),
+        Ok(Some((_, Err(err), _))) => ReadEnd::Failed(format!("reading the reply: {err}")),
+        Ok(None) => ReadEnd::Failed("the reply reader ended without a line".to_owned()),
+        Err(expiry) => reclaim(&reader, &receive, expiry),
+    }
+}
+
+/// Cancels `reader`'s pending read until it hands the connection back, for
+/// at most [`CANCEL_READ_GUARD`] of wall time: a cancel made before the
+/// thread entered its read does nothing, so it is repeated. A line handed
+/// back is the reply, which came before the cancel took effect.
+#[cfg(windows)]
+fn reclaim(reader: &JoinHandle<()>, receive: &mpsc::Receiver<HandBack>, expiry: Expiry) -> ReadEnd {
+    let started = std::time::Instant::now();
+    loop {
+        cancel_read(reader);
+        match receive.recv_timeout(CANCEL_POLL) {
+            Ok((connection, Ok(read), line)) if read > 0 => return ReadEnd::Line(connection, line),
+            Ok((connection, _, _)) => {
+                return ReadEnd::Timeout {
+                    connection: Some(connection),
+                    expiry,
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) if started.elapsed() >= CANCEL_READ_GUARD => {
+                tracing::warn!(
+                    "the reply reader kept its read past every cancel; dropping the connection"
+                );
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    ReadEnd::Timeout {
+        connection: None,
+        expiry,
+    }
+}
+
+/// Off Windows the pending read keeps the connection, which is dropped.
+#[cfg(not(windows))]
+fn reclaim(
+    _reader: &JoinHandle<()>,
+    _receive: &mpsc::Receiver<HandBack>,
+    expiry: Expiry,
+) -> ReadEnd {
+    ReadEnd::Timeout {
+        connection: None,
+        expiry,
+    }
+}
+
+/// Cancels the synchronous read `reader` has pending, if it has one yet.
+#[cfg(windows)]
+fn cancel_read(reader: &JoinHandle<()>) {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::{ERROR_NOT_FOUND, HANDLE};
+    use windows::Win32::System::IO::CancelSynchronousIo;
+
+    // SAFETY: the handle is the reader thread's, owned by `reader`, which the
+    // caller holds across this call, so it is open; std opens a thread with
+    // THREAD_TERMINATE access, which the call needs.
+    let cancelled = unsafe { CancelSynchronousIo(HANDLE(reader.as_raw_handle())) };
+    if let Err(err) = cancelled
+        && err.code() != ERROR_NOT_FOUND.to_hresult()
+    {
+        tracing::debug!(%err, "cancelling the reply reader's read");
     }
 }
 
@@ -411,6 +585,166 @@ pub(crate) mod tests {
         assert_eq!(
             stalled(&expiry(ExpiryKind::Stall, 120, 120, 120)),
             "the client stalled: no log line and no CPU for 120 s"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+#[expect(
+    clippy::expect_used,
+    reason = "a spec fails with the message of the step it lost"
+)]
+mod cancel_tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    use super::{CallError, PipeClient, Transport as _};
+
+    /// How long a spec waits on the server's next event before it fails as hung.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    /// The reply ceiling of a spec's client, so a call times out soon.
+    const SHORT_REPLY_GUARD: Duration = Duration::from_millis(500);
+
+    /// What the server saw, by connection index.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Accepted(u32),
+        Line(u32, Value),
+        Eof(u32),
+    }
+
+    /// A pipe path no other spec uses.
+    fn unique_path() -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        format!(r"\\.\pipe\rt-driver-mcp-test-{}-{n}", std::process::id())
+    }
+
+    /// Serves a byte-mode pipe on a thread of its own and returns its path
+    /// and what it sees. It answers `ping`, and `cancel` when
+    /// `answer_cancel`, and nothing else.
+    fn serve(answer_cancel: bool) -> (String, mpsc::Receiver<Seen>) {
+        let path = unique_path();
+        let (seen, events) = mpsc::channel();
+        let (ready, is_ready) = mpsc::channel();
+        let name = path.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(accept(name, answer_cancel, seen, ready));
+        });
+        is_ready
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the server did not start");
+        (path, events)
+    }
+
+    async fn accept(
+        path: String,
+        answer_cancel: bool,
+        seen: mpsc::Sender<Seen>,
+        ready: mpsc::Sender<()>,
+    ) {
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("the pipe is created");
+        let _ = ready.send(());
+        let mut index = 0;
+        loop {
+            server.connect().await.expect("a client connects");
+            let next = ServerOptions::new()
+                .create(&path)
+                .expect("the next instance is created");
+            let _ = seen.send(Seen::Accepted(index));
+            tokio::spawn(answer(server, index, answer_cancel, seen.clone()));
+            server = next;
+            index += 1;
+        }
+    }
+
+    /// Reports each line of one connection and its end, answering as
+    /// [`serve`] says.
+    async fn answer(
+        pipe: NamedPipeServer,
+        index: u32,
+        answer_cancel: bool,
+        seen: mpsc::Sender<Seen>,
+    ) {
+        let (read, mut write) = tokio::io::split(pipe);
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: Value = serde_json::from_str(&line).expect("a request line is JSON");
+            let _ = seen.send(Seen::Line(index, request.clone()));
+            let result = match request["method"].as_str() {
+                Some("ping") => json!({"pong": true}),
+                Some("cancel") if answer_cancel => json!({"cancelled": true}),
+                _ => continue,
+            };
+            let mut reply = json!({"id": request["id"], "result": result}).to_string();
+            reply.push('\n');
+            if write.write_all(reply.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+        let _ = seen.send(Seen::Eof(index));
+    }
+
+    fn next(events: &mpsc::Receiver<Seen>) -> Seen {
+        events
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the server saw nothing more")
+    }
+
+    /// Calls `hold`, which the server never answers, and checks the call
+    /// timed out and its cancel went out on the same connection.
+    fn timed_out_hold(client: &mut PipeClient, events: &mpsc::Receiver<Seen>) {
+        let got = client.call("hold", json!({}));
+        assert!(
+            matches!(&got, Err(CallError::Transport(why)) if why.starts_with("hung: no reply")),
+            "{got:?}"
+        );
+        assert_eq!(next(events), Seen::Accepted(0));
+        assert_eq!(
+            next(events),
+            Seen::Line(0, json!({"id": 1, "method": "hold", "params": {}}))
+        );
+        assert_eq!(
+            next(events),
+            Seen::Line(
+                0,
+                json!({"id": 2, "method": "cancel", "params": {"request": 1}})
+            )
+        );
+    }
+
+    #[test]
+    fn a_timed_out_call_sends_its_cancel_on_the_same_connection() {
+        let (path, events) = serve(false);
+        let mut client = PipeClient::with_reply_guard(path, SHORT_REPLY_GUARD);
+        timed_out_hold(&mut client, &events);
+        assert_eq!(next(&events), Seen::Eof(0));
+    }
+
+    #[test]
+    fn a_cancel_answer_is_read_and_the_connection_still_closes() {
+        let (path, events) = serve(true);
+        let mut client = PipeClient::with_reply_guard(path, SHORT_REPLY_GUARD);
+        timed_out_hold(&mut client, &events);
+        assert_eq!(next(&events), Seen::Eof(0));
+        assert_eq!(client.call("ping", json!({})), Ok(json!({"pong": true})));
+        assert_eq!(next(&events), Seen::Accepted(1));
+        assert_eq!(
+            next(&events),
+            Seen::Line(1, json!({"id": 3, "method": "ping", "params": {}}))
         );
     }
 }

@@ -34,9 +34,11 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # The client's creation time (`GetProcessTimes`), matched against its
-# discovery file's `started_at`.
+# discovery file's `started_at`; `CancelSynchronousIo` on a timed-out call's
+# reply reader, so its cancel can go out on the same connection.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_IO",
     "Win32_System_Threading",
 ] }
 # Credential-store API: `src/token.rs` reads the driver token from one
@@ -45,3 +47,7 @@ keyring-core = "1.0"
 # Windows Credential Manager as the `keyring-core` store. Default features off
 # drops its regex-backed credential search: the token is looked up by name.
 windows-native-keyring-store = { version = "1.1", default-features = false }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The byte-mode named pipe server the cancel specs in `src/pipe.rs` talk to.
+tokio = { workspace = true }
