@@ -699,6 +699,34 @@ fn a_token_error_shows_the_failure_hint_and_sends_nothing(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_failed_reregister_marks_home_and_the_notifications_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    let asked = open_with_relay_push(&mut h);
+    assert!(
+        !drawn(&mut h, "phone-settings-open-mark"),
+        "no hint, no mark"
+    );
+
+    // The daemon holds another token, and this phone's token read fails on
+    // the re-register it asks for.
+    platform.set_token(Err("no APNs token".to_owned()));
+    h.host(&saved_remote())
+        .send(status(Some("ffff0000"), &asked));
+
+    assert!(
+        drawn(&mut h, "phone-settings-open-mark"),
+        "the failed re-register marks Home's Settings button"
+    );
+    h.click_on("phone-settings-open");
+    assert!(
+        drawn(&mut h, "phone-settings-row-notifications-mark"),
+        "and the Notifications row"
+    );
+}
+
+#[gpui::test]
 fn a_daemon_refusal_shows_its_text_and_files_no_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));

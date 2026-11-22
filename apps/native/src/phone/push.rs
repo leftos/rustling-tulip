@@ -487,6 +487,17 @@ impl PushState {
         matches!(self.status, Status::On | Status::Registering)
     }
 
+    /// The line under the switch, if any: the blocked text, a failure's
+    /// text, or the refusal the switch still holds.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        match &self.status {
+            Status::Blocked => Some(BLOCKED.to_owned()),
+            Status::Failed(text) => Some(text.clone()),
+            _ => self.refusal.clone(),
+        }
+    }
+
     /// A fresh request id for `kind`, remembered as the one a reply must
     /// carry; anything but a re-check clears the last refusal.
     fn issue(&mut self, kind: Request) -> String {
@@ -673,15 +684,10 @@ pub struct SwitchView {
 /// What `state`'s switch draws; a host with no state yet shows off.
 #[must_use]
 pub fn switch_view(state: Option<&PushState>) -> SwitchView {
-    let status = state.map(|state| &state.status);
     SwitchView {
         on: state.is_some_and(PushState::switched_on),
         busy: state.is_some_and(PushState::busy),
-        hint: match status {
-            Some(Status::Blocked) => Some(BLOCKED.to_owned()),
-            Some(Status::Failed(text)) => Some(text.clone()),
-            _ => state.and_then(|state| state.refusal.clone()),
-        },
+        hint: state.and_then(PushState::hint),
     }
 }
 
@@ -765,6 +771,12 @@ impl PushHosts {
     #[must_use]
     pub fn state(&self, host: &HostKey) -> Option<&PushState> {
         self.hosts.get(host)
+    }
+
+    /// Whether any open host's switch carries a hint.
+    #[must_use]
+    pub fn any_hint(&self) -> bool {
+        self.hosts.values().any(|state| state.hint().is_some())
     }
 
     /// This phone's device token, once known.
@@ -1326,6 +1338,56 @@ mod tests {
         let reopened = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
         assert_ne!(&reopened, request_id, "a new switch reuses no request id");
         assert_ne!(reopened, asked);
+    }
+
+    #[test]
+    fn no_host_has_a_hint_when_every_switch_is_clear() {
+        let mut hosts = PushHosts::default();
+        let asked = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(!hosts.any_hint(), "a status request out is no hint");
+        assert!(hosts.on_message(&host(), &push_status(None, &asked)));
+        assert!(!hosts.any_hint(), "a switch off carries no hint");
+
+        let mut hosts = PushHosts::default();
+        hosts.set_current(MINE);
+        let asked = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(hosts.on_message(&host(), &push_status(Some(MINE), &asked)));
+        assert!(!hosts.any_hint(), "a switch on carries no hint");
+    }
+
+    #[test]
+    fn a_failed_register_gives_a_hint() {
+        let mut hosts = PushHosts::default();
+        let asked = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(hosts.on_message(&host(), &push_status(None, &asked)));
+        hosts.step(&host(), |state, _| state.switch_on(Authorization::Granted));
+        let effects = hosts.take_effects();
+        let [(_, Effect::Register { request_id })] = effects.as_slice() else {
+            panic!("one register: {effects:?}");
+        };
+        assert!(hosts.failed(&host(), request_id));
+
+        assert!(hosts.any_hint(), "the failed register marks");
+        let state = hosts.state(&host()).expect("the host has a switch");
+        assert_eq!(state.hint(), Some(NOT_REGISTERED.to_owned()));
+        assert_eq!(switch_view(Some(state)).hint, state.hint());
+    }
+
+    #[test]
+    fn a_forgotten_host_takes_its_hint_with_it() {
+        let mut hosts = PushHosts::default();
+        let asked = host_status_id(&hosts.hosts_open(&[(host(), 1)]));
+        assert!(hosts.on_message(&host(), &push_status(None, &asked)));
+        hosts.step(&host(), |state, _| state.switch_on(Authorization::Granted));
+        let effects = hosts.take_effects();
+        let [(_, Effect::Register { request_id })] = effects.as_slice() else {
+            panic!("one register: {effects:?}");
+        };
+        assert!(hosts.failed(&host(), request_id));
+        assert!(hosts.any_hint());
+
+        assert_eq!(hosts.hosts_open(&[]), Vec::new());
+        assert!(!hosts.any_hint(), "the forgotten host's hint is gone");
     }
 
     #[test]

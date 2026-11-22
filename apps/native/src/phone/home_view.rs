@@ -271,7 +271,7 @@ fn has_room(handle: &ScrollHandle, delta: Pixels) -> bool {
 }
 
 /// A dot of `color`.
-fn dot(color: u32) -> Div {
+pub(super) fn dot(color: u32) -> Div {
     div()
         .flex_none()
         .size(px(DOT))

@@ -475,7 +475,8 @@ impl PhoneRoot {
     /// Add stays above the keyboard the SSH form raises.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
-        let header = Self::home_header_row(false, &t, cx);
+        let marked = self.root.read(cx).push_hosts().any_hint();
+        let header = Self::home_header_row(false, marked, &t, cx);
         div().size_full().flex().flex_col().child(header).child(
             div()
                 .id("phone-hosts-body")
@@ -541,7 +542,8 @@ impl PhoneRoot {
     pub(super) fn list_body(&self, cx: &mut Context<Self>) -> Div {
         let (panel, pinned) = self.home_list(cx);
         let t = theme(cx);
-        let header = Self::home_header_row(true, &t, cx);
+        let marked = self.root.read(cx).push_hosts().any_hint();
+        let header = Self::home_header_row(true, marked, &t, cx);
         let tap_lines = self.tap_lines(&t);
         let over = (!tap_lines.is_empty()).then(|| {
             div()

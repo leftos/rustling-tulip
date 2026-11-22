@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::PhoneRoot;
-use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
+use super::home_view::{SIDE_PADDING, TOUCH_TARGET, dot};
 use super::hosts_view::phone_button;
 use super::keys_view::key_sub_page_stands;
 use super::quick_replies::ReplySet;
@@ -210,12 +210,22 @@ impl PhoneRoot {
     }
 
     /// The header over Home and the hosts screen: the `Settings` button at
-    /// its right end, and over Home (`sort`) the sort button before it.
-    pub(super) fn home_header_row(sort: bool, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+    /// its right end, and over Home (`sort`) the sort button before it. A
+    /// host whose switch carries a hint marks the button (`marked`).
+    pub(super) fn home_header_row(
+        sort: bool,
+        marked: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let open = phone_button("phone-settings-open", ButtonKind::Outlined, cx)
             .min_h(px(TOUCH_TARGET))
             .flex_none()
             .child(OPEN_LABEL)
+            .when(marked, |open| {
+                open.gap(px(6.0))
+                    .child(dot(t.asking).driver_id(|| "phone-settings-open-mark".to_owned()))
+            })
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_settings(cx)));
         header_frame(t)
             .justify_end()
@@ -237,7 +247,10 @@ impl PhoneRoot {
                 self.key_editor_page(&t, cx)
             }
             None => match settings.page {
-                None => Self::category_list(&t, cx),
+                None => {
+                    let marked = self.root.read(cx).push_hosts().any_hint();
+                    Self::category_list(marked, &t, cx)
+                }
                 Some(Page::Notifications) => self.notifications_page(&t, cx),
                 Some(Page::Hosts) => self.hosts_content(&t, cx),
                 Some(Page::Appearance) => self.appearance_page(&t, cx),
@@ -290,17 +303,25 @@ impl PhoneRoot {
         )
     }
 
-    /// The category list: one row per category, in [`Page::ALL`]'s order.
-    fn category_list(t: &UiTheme, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .children(Page::ALL.map(|page| Self::category_row(page, t, cx)))
+    /// The category list: one row per category, in [`Page::ALL`]'s order. A
+    /// hint on a host's switch marks the Notifications row
+    /// (`notifications_marked`).
+    fn category_list(notifications_marked: bool, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        div().flex().flex_col().children(Page::ALL.map(|page| {
+            let marked = notifications_marked && page == Page::Notifications;
+            Self::category_row(page, marked, t, cx)
+        }))
     }
 
     /// `page`'s row: its name and a chevron, a touch target tall; a tap
-    /// opens its page.
-    fn category_row(page: Page, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// opens its page. A row whose page carries a hint (`marked`) draws the
+    /// dot before its chevron.
+    fn category_row(
+        page: Page,
+        marked: bool,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = format!("phone-settings-row-{}", page.key());
         div()
             .id(SharedString::from(id.clone()))
@@ -321,6 +342,11 @@ impl PhoneRoot {
                     .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
                     .child(page.label()),
             )
+            .when(marked, |row| {
+                row.child(
+                    dot(t.asking).driver_id(|| "phone-settings-row-notifications-mark".to_owned()),
+                )
+            })
             .child(
                 div()
                     .flex_none()
