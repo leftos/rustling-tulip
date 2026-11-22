@@ -19,9 +19,7 @@
 - [ ] RT-777 Stop the daemon's screen losing output when its watcher lags · release vNext
 - [ ] RT-850 Read background counts on a default-mode Claude footer · release vNext
 - [ ] RT-866 Log the remaining status writers under status_trace
-- [ ] RT-947 User hooks: let a hand-typed agent report after an injected run ends in the same shell · release vNext
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
-- [ ] RT-1263 Don't notify Finished for a /compact with nothing running · release vNext
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open · release vNext
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
 - [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading · release vNext
@@ -35,6 +33,7 @@
 - [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
+- [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
 
 ## Updates and installer
 
@@ -211,7 +210,6 @@
 - [ ] RT-1226 End a turn's live answers in Chat when its prompt line had no prompt id
 - [ ] RT-1227 Order live and confirmed Chat rows the same on an append and on a reload
 - [ ] RT-1231 Clear a pending Chat send whose transcript text does not match it
-- [ ] RT-1233 Offer the rest of a tool result Chat cut · release vNext
 - [ ] RT-1234 Show a long plan uncut in the Chat plan card
 - [ ] RT-1235 Count a transcript record as a prompt only when it makes a prompt entry
 - [ ] RT-1238 Drop the Markdown heading marker from a filled plan card's title
@@ -223,6 +221,7 @@
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
+- [ ] RT-2143 Show messages from other agents in Chat as agent messages, not as the user's · release vNext
 
 ## Settings and themes
 
@@ -294,7 +293,6 @@
 - [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
 - [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
-- [ ] RT-99 Pick between candidates when a clicked path matches several files · release vNext
 - [ ] RT-121 Peek at a path's lines on hover, without opening
 - [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
 - [ ] RT-575 Compact the pane header's view switch so titles and branch chips keep their room
@@ -498,16 +496,13 @@
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
 - [ ] RT-1681 Polish the phone's add-host form and Pair dialog: Return, keys, scrim, Cancel
 - [ ] RT-1709 Find why the notification extension does not launch for a simulator push · release vNext
-- [ ] RT-1726 Answer the right host from the phone tray, let a tap through after a swipe, and clear an ended card after Open · release vNext
 - [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
-- [ ] RT-1768 Let a tap on the phone terminal's command gutter toggle the keyboard · release vNext
 - [ ] RT-1773 Show on the phone's Home that a host's notifications need attention · release vNext
 - [ ] RT-1774 Tidy the phone Settings › Notifications page: hint wording, offline hosts and specs
-- [ ] RT-1782 Let the phone's hosts screen scroll so Add stays above the keyboard · release vNext
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
 - [ ] RT-1785 Even out the phone Appearance page: theme row spacing and the text size label · release vNext
@@ -530,6 +525,8 @@
 - [ ] RT-2098 Keep the phone edit bar off the keyboard when both placements reach under it · release vNext
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
 - [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
+- [ ] RT-2136 Let a tap through right after a fast swipe on the phone's Needs you tray
+- [ ] RT-2141 Show a shell command dot's menu when tapped on the phone's Terminal page
 
 ## Dashboard, Gates and Linear
 
@@ -585,6 +582,7 @@
 - [ ] RT-1479 Keep the Dashboard's subagent name uncut while its row has room
 - [ ] RT-1509 Nest a dispatch run under its session by the live-run file's session id (DB.21)
 - [ ] RT-1574 Keep a finished dispatch run's Dashboard node and track while its session's turn lasts
+- [ ] RT-2137 Key the Dashboard's rows and ask answers by host and session
 
 ## Repos, workspaces and worktrees
 
@@ -801,6 +799,8 @@
 - [ ] RT-2133 Match gpui's unclamped row offset and place a start handle on its own row in phone Chat selection
 - [ ] RT-2134 Fix aligned selection highlights, underlines and link hit tests in the gpui fork
 - [ ] RT-2135 Say on the phone when a tapped path's file fetch fails or is refused
+- [ ] RT-2138 Read a tray card's facts, labels and held prompt by host and session
+- [ ] RT-2140 Show a tool output Claude Code saved outside the transcript in Chat
 
 ## Design files
 
@@ -820,7 +820,7 @@
 - [hook-status.md](hook-status.md) — RT-277
 - [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-363, RT-369, RT-881, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
 - [perf-monitor.md](perf-monitor.md) — RT-1089, RT-1091, RT-1093, RT-1597
 - [phone-text-controls.md](phone-text-controls.md) — RT-2039
