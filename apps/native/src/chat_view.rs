@@ -689,7 +689,9 @@ impl TextRegistry {
             .find(|text| text.entry == pos.entry && text.unit == pos.unit)?;
         let layout = &text.layout;
         let at = layout.position_for_index(pos.byte)?;
-        let caret = point(at.x + align_shift(layout, text.align), at.y);
+        // The middle of the caret's row picks the row whose offset it takes.
+        let row_y = at.y + layout.line_height() / 2.0;
+        let caret = point(at.x + align_shift(layout, text.align, row_y), at.y);
         if !viewport.is_none_or(|view| view.contains(&caret)) {
             return None;
         }

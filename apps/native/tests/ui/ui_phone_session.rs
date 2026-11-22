@@ -3271,6 +3271,34 @@ fn a_tap_on_a_centred_cell_hits_its_own_bytes(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn a_tap_on_a_wrapped_right_aligned_cells_last_row_hits_its_own_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let cell = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi 42";
+    let table = format!("| k | n |\n| --- | ---: |\n| a | {cell} |\n");
+    let mut h = chat_loaded_on_a_phone(cx, &dir, vec![answer_with("a1", &table)]);
+    let (_, left, right) = second_cell(&mut h);
+    let reply = h.bounds("chat-row-phone-a1");
+    // Up from the table's bottom, the first y on the cell's text is on its
+    // last row, which the cell's wrapping leaves narrower than the cell.
+    let mut y = reply.bottom();
+    while y > reply.top() && hit(&mut h, point(left + px(2.0), y)) == Some(pos("a1", 3, cell.len()))
+    {
+        y -= px(1.0);
+    }
+    let line = y - px(3.0);
+    assert!(
+        hit(&mut h, point(left + px(2.0), line)) > Some(pos("a1", 3, 0)),
+        "the cell wraps, so its last row starts past its first byte"
+    );
+
+    assert_eq!(
+        hit(&mut h, point(right - px(2.0), line)),
+        Some(pos("a1", 3, cell.len() - 1)),
+        "over the last 2, drawn at the cell's right edge, not past the row's end"
+    );
+}
+
 /// An answer `id` whose text is `text`.
 fn answer_with(id: &str, text: &str) -> ChatEntry {
     ChatEntry::Answer {

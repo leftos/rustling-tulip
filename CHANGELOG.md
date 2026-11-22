@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - On the phone, a file or folder fetch no longer fails when Storage's Clear runs at the moment it starts.
+- In the phone's Chat, tapping or holding on a wrapped right- or centre-aligned table cell selects the character under your finger.
 - On the phone, leaving Settings › Hosts with the add-host form open closes it, so the keyboard no longer rises over an old half-typed form.
 - On the phone, a key-bar key pressed after a typed accent such as ´ sends the accent first instead of losing it.
 - On the phone's Needs you tray, the options of a question it cannot answer no longer flash as if pressed when tapped.

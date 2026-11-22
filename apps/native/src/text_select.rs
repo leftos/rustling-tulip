@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui::{
     Bounds, HighlightStyle, Hsla, IntoElement, Pixels, Point, SharedString, Styled as _,
-    StyledText, TextAlign, TextLayout, canvas, point, px,
+    StyledText, TextAlign, TextLayout, WrappedLineLayout, canvas, point, px,
 };
 
 use crate::chat_select::{self, SelectedSpan, TextPos, UnitSource, Units};
@@ -136,7 +136,7 @@ fn byte_at(text: &DrawnText, at: Point<Pixels>) -> usize {
     } else if at.y > bounds.bottom() {
         drawn.len()
     } else {
-        let shifted = point(at.x - align_shift(layout, text.align), at.y);
+        let shifted = point(at.x - align_shift(layout, text.align, at.y), at.y);
         match layout.index_for_position(shifted) {
             Ok(index) | Err(index) => index,
         }
@@ -155,27 +155,71 @@ fn glyph_at(text: &DrawnText, at: Point<Pixels>) -> Option<usize> {
     if at.y < bounds.top() || at.y > bounds.bottom() {
         return None;
     }
-    let shifted = point(at.x - align_shift(layout, text.align), at.y);
+    let shifted = point(at.x - align_shift(layout, text.align, at.y), at.y);
     let index = layout.index_for_position(shifted).ok()?;
     Some(chat_select::char_floor(&layout.text(), index))
 }
 
 /// How far right of its bounds' left edge a centred or right-aligned text
-/// draws its line, which the layout's own position lookup does not apply;
-/// zero for a left-aligned text and for one that takes more than one line,
-/// which keeps the left-edge measure.
-pub(crate) fn align_shift(layout: &TextLayout, align: TextAlign) -> Pixels {
+/// draws the visual row that window y `y` falls in, which the layout's own
+/// position lookup does not apply: GPUI draws each wrapped row of each line
+/// at that row's own offset. Zero for a left-aligned text and for a `y`
+/// above or below the text's lines.
+pub(crate) fn align_shift(layout: &TextLayout, align: TextAlign, y: Pixels) -> Pixels {
     if matches!(align, TextAlign::Left) {
         return px(0.0);
     }
-    let lines = layout.line_layouts();
-    let [line] = lines.as_slice() else {
-        return px(0.0);
-    };
-    if !line.wrap_boundaries.is_empty() {
+    let bounds = layout.bounds();
+    let line_height = layout.line_height();
+    if y < bounds.top() || line_height <= px(0.0) {
         return px(0.0);
     }
-    let room = (layout.bounds().size.width - line.unwrapped_layout.width).max(px(0.0));
+    // As GPUI's own lookup: a y on a line's bottom edge is on that line,
+    // one on an inner row's bottom edge is on the row below it.
+    let mut row_bottom = bounds.top();
+    for line in layout.line_layouts() {
+        let widths = row_widths(&line);
+        let last = widths.len().saturating_sub(1);
+        for row in 0..widths.len() {
+            row_bottom += line_height;
+            if y < row_bottom || (row == last && y <= row_bottom) {
+                return row_shift(bounds.size.width, &widths, row, align);
+            }
+        }
+    }
+    px(0.0)
+}
+
+/// The width of each visual row of `line`, as GPUI aligns it: from the x
+/// of the glyph the row starts at (zero for the first) to the x of the
+/// glyph the next row starts at (the line's width for the last).
+fn row_widths(line: &WrappedLineLayout) -> Vec<Pixels> {
+    let layout = &line.unwrapped_layout;
+    let breaks: Vec<Pixels> = line
+        .wrap_boundaries
+        .iter()
+        .map(|boundary| {
+            layout
+                .runs
+                .get(boundary.run_ix)
+                .and_then(|run| run.glyphs.get(boundary.glyph_ix))
+                .map_or(layout.width, |glyph| glyph.position.x)
+        })
+        .collect();
+    let starts = std::iter::once(px(0.0)).chain(breaks.iter().copied());
+    let ends = breaks.iter().copied().chain(std::iter::once(layout.width));
+    starts.zip(ends).map(|(start, end)| end - start).collect()
+}
+
+/// How far right of a `width`-wide text's left edge row `row` of `rows`
+/// (each row's width) is drawn when aligned by `align`: the room beside it
+/// for a right-aligned text, half that for a centred one, never below
+/// zero; zero for a left-aligned text and for a row past the last.
+fn row_shift(width: Pixels, rows: &[Pixels], row: usize, align: TextAlign) -> Pixels {
+    let Some(&row_width) = rows.get(row) else {
+        return px(0.0);
+    };
+    let room = (width - row_width).max(px(0.0));
     match align {
         TextAlign::Right => room,
         TextAlign::Center => room / 2.0,
@@ -269,4 +313,50 @@ pub(crate) fn painted_mark(registry: Rc<RefCell<TextRegistry>>) -> impl IntoElem
     )
     .absolute()
     .size_0()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TextAlign, px};
+
+    use super::row_shift;
+
+    #[test]
+    fn a_wrapped_right_aligned_row_shifts_by_its_own_width() {
+        let rows = [px(90.0), px(30.0), px(55.0)];
+        assert_eq!(row_shift(px(100.0), &rows, 0, TextAlign::Right), px(10.0));
+        assert_eq!(row_shift(px(100.0), &rows, 1, TextAlign::Right), px(70.0));
+        assert_eq!(row_shift(px(100.0), &rows, 2, TextAlign::Right), px(45.0));
+    }
+
+    #[test]
+    fn a_wrapped_centred_row_shifts_by_half_its_room() {
+        let rows = [px(90.0), px(30.0)];
+        assert_eq!(row_shift(px(100.0), &rows, 0, TextAlign::Center), px(5.0));
+        assert_eq!(row_shift(px(100.0), &rows, 1, TextAlign::Center), px(35.0));
+    }
+
+    #[test]
+    fn a_one_line_aligned_text_keeps_its_shift() {
+        let rows = [px(40.0)];
+        assert_eq!(row_shift(px(100.0), &rows, 0, TextAlign::Right), px(60.0));
+        assert_eq!(row_shift(px(100.0), &rows, 0, TextAlign::Center), px(30.0));
+        assert_eq!(
+            row_shift(px(100.0), &[px(120.0)], 0, TextAlign::Right),
+            px(0.0),
+            "a line wider than its bounds is drawn from the left edge"
+        );
+    }
+
+    #[test]
+    fn a_left_aligned_wrapped_text_has_no_shift() {
+        let rows = [px(90.0), px(30.0)];
+        assert_eq!(row_shift(px(100.0), &rows, 0, TextAlign::Left), px(0.0));
+        assert_eq!(row_shift(px(100.0), &rows, 1, TextAlign::Left), px(0.0));
+        assert_eq!(
+            row_shift(px(100.0), &rows, 2, TextAlign::Right),
+            px(0.0),
+            "a row past the last has no shift"
+        );
+    }
 }
