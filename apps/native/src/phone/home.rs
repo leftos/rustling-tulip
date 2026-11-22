@@ -12,6 +12,7 @@ use crate::session_actions::{self, ActionState};
 use crate::sidebar::{
     Container, ContainerKind, HostGroup, Leaf, LeafKind, LeafState, SidebarModel,
 };
+use crate::tabs::SessionRef;
 use crate::target::HostKey;
 use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus};
 
@@ -36,6 +37,13 @@ pub(crate) struct HomeRow {
     /// The status in a word or two.
     pub(crate) status: &'static str,
     pub(crate) tone: Tone,
+    /// The name of the repo, workspace, shell or folder the row is listed
+    /// under; `None` for a Detached session.
+    pub(crate) container: Option<String>,
+    /// The name an unnamed tab reads for this session
+    /// ([`SidebarModel::session_group_name`]): its repo or workspace, or the
+    /// one a shell's folder files under; `None` where it adds no name.
+    pub(crate) tab_group: Option<String>,
 }
 
 /// One repo, workspace, shell, folder or Detached group and its rows.
@@ -50,6 +58,10 @@ pub(crate) struct HomeGroup {
     /// How many of its sessions need the owner; the heading's mark shows
     /// while it is above zero.
     pub(crate) needs_you: usize,
+    /// Whether its rows name the repo or workspace they sit under: on under
+    /// Desktop tabs, whose headings name a tab, off where the heading
+    /// already names the repo or workspace.
+    pub(crate) show_container: bool,
     pub(crate) rows: Vec<HomeRow>,
 }
 
@@ -117,17 +129,22 @@ pub(crate) fn pinned_host(header_tops: &[f32], scrolled: f32) -> Option<usize> {
 
 /// Home over `model`'s host groups in their manual order.
 pub(crate) fn from_sidebar(model: &SidebarModel) -> Home {
-    home(model.host_groups_in_place())
+    home(model, model.host_groups_in_place())
 }
 
 /// Home over `groups`, kept in their order, every host listed whether its
 /// connection is open or not, so a dropped connection moves no row. A
-/// container with no session row is left out.
-pub(crate) fn home(groups: Vec<HostGroup>) -> Home {
+/// container with no session row is left out. Each row's tab name is
+/// `model`'s, so a tab heads itself as the desktop's pill does.
+pub(crate) fn home(model: &SidebarModel, groups: Vec<HostGroup>) -> Home {
     let hosts: Vec<HomeHost> = groups
         .into_iter()
         .map(|group| HomeHost {
-            groups: group.containers.iter().filter_map(home_group).collect(),
+            groups: group
+                .containers
+                .iter()
+                .filter_map(|container| home_group(container, model))
+                .collect(),
             host: group.host,
             label: group.label,
             note: None,
@@ -140,12 +157,13 @@ pub(crate) fn home(groups: Vec<HostGroup>) -> Home {
 }
 
 /// `container`'s group, or `None` when it lists no session row.
-fn home_group(container: &Container) -> Option<HomeGroup> {
+fn home_group(container: &Container, model: &SidebarModel) -> Option<HomeGroup> {
+    let listed_under = (container.kind != ContainerKind::Detached).then(|| container.name.clone());
     let rows: Vec<HomeRow> = container
         .leaves
         .iter()
         .filter(|leaf| listed(leaf))
-        .map(home_row)
+        .map(|leaf| home_row(leaf, listed_under.clone(), model))
         .collect();
     if rows.is_empty() {
         return None;
@@ -154,6 +172,7 @@ fn home_group(container: &Container) -> Option<HomeGroup> {
         key: container.key.clone(),
         name: container.name.clone(),
         detached: container.kind == ContainerKind::Detached,
+        show_container: false,
         needs_you: rows.iter().filter(|row| row.tone == Tone::NeedsYou).count(),
         rows,
     })
@@ -165,13 +184,15 @@ fn listed(leaf: &Leaf) -> bool {
     leaf.kind == LeafKind::Session && leaf.depth == 0
 }
 
-fn home_row(leaf: &Leaf) -> HomeRow {
+fn home_row(leaf: &Leaf, container: Option<String>, model: &SidebarModel) -> HomeRow {
     HomeRow {
         host: leaf.host.clone(),
         session_id: leaf.id.clone(),
         label: leaf.label.clone(),
         status: status_word(leaf),
         tone: tone(leaf),
+        container,
+        tab_group: model.session_group_name(&SessionRef::new(leaf.host.clone(), leaf.id.clone())),
     }
 }
 
@@ -506,6 +527,22 @@ mod tests {
     }
 
     #[test]
+    fn a_detached_rows_container_is_none_while_the_tab_names_its_repo() {
+        let model = model(&[BOX], &[session("gone", "unregistered", "idle")]);
+        let home = from_sidebar(&model);
+        let row = home
+            .rows()
+            .find(|row| row.session_id == "gone")
+            .expect("the row is listed");
+        assert_eq!(row.container, None, "Detached names no container");
+        assert_eq!(
+            row.tab_group.as_deref(),
+            Some("unregistered"),
+            "while a tab names the session's repo, as the desktop's pill does"
+        );
+    }
+
+    #[test]
     fn one_host_has_no_host_header() {
         let home = from_sidebar(&model(&[BOX], &working_and_idle()));
         assert!(!home.host_headers);
@@ -582,7 +619,8 @@ mod tests {
 
     #[test]
     fn subagent_rows_are_not_listed() {
-        let mut groups = model(&[BOX], &working_and_idle()).host_groups_in_place();
+        let model = model(&[BOX], &working_and_idle());
+        let mut groups = model.host_groups_in_place();
         let container = &mut groups[0].containers[0];
         let mut nested = container.leaves[0].clone();
         nested.id = "sub".to_owned();
@@ -591,7 +629,7 @@ mod tests {
         nested.host_session = Some(container.leaves[0].id.clone());
         container.leaves.insert(1, nested);
 
-        let home = home(groups);
+        let home = home(&model, groups);
         assert!(
             home.rows().all(|row| row.session_id != "sub"),
             "no nested row is listed"

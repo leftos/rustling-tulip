@@ -252,6 +252,8 @@ mod tests {
             label: "Alpha".to_owned(),
             status: "Working",
             tone: Tone::Working,
+            container: None,
+            tab_group: None,
         };
         assert_eq!(
             Header::new("s", Some(&row), false, true),
@@ -283,6 +285,8 @@ mod tests {
             label: label.to_owned(),
             status: "Working",
             tone: Tone::Working,
+            container: None,
+            tab_group: None,
         };
         let issues = LinearCache::default();
         let contexts = rt_contexts(&host, true);

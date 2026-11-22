@@ -63,9 +63,10 @@
 //! the Needs you tray above the list shows as its one card, the other with
 //! a working session and an idle one.
 //! `phone-home-sorted` shows the same Home in the Desktop tabs order, "box"
-//! listing `host_layouts`: its own layout's two tabs, `Relay` (the waiting
-//! relay session, then the working one) and `Release` (the other waiting
-//! session), as groups, then `Not in a tab` holding the idle session.
+//! listing `host_layouts`: its own layout's tabs, `Relay` (the waiting relay
+//! session, then the working one), a tab nobody named (the idle scrollback
+//! session, headed by its repo) and `Release` (the other waiting session),
+//! as groups, each row naming its repo.
 //! `phone-home-hosts` shows the same Home with a second saved host, "lab",
 //! listing one repo of fourteen sessions under it, scrolled to its end:
 //! "lab"'s header pinned over the list's top, and each row's host chip.
@@ -4863,12 +4864,12 @@ fn shot_reply(view: View, msg: &ClientMessage) -> Result<Vec<DaemonMessage>> {
 }
 
 /// The tab groups the `phone-home-sorted` view's Home shows, in order.
-const PHONE_SORTED_GROUPS: [&str; 3] = ["Relay", "Release", "Not in a tab"];
+const PHONE_SORTED_GROUPS: [&str; 3] = ["Relay", "harbour", "Release"];
 
 /// "box"'s answer to the `phone-home-sorted` view's `ListHostLayouts`: its
-/// own layout, tab "Relay" splitting the relay and service-worker sessions
-/// and tab "Release" showing the plan check, which leaves the scrollback
-/// session in no tab; and the laptop's layout.
+/// own layout, tab "Relay" splitting the relay and service-worker sessions,
+/// a tab nobody named showing the scrollback session, which heads it by its
+/// repo, and tab "Release" showing the plan check; and the laptop's layout.
 fn phone_sorted_layouts(request_id: Option<&str>) -> Result<DaemonMessage> {
     let relay = GridNode::Split {
         direction: SplitDirection::Horizontal,
@@ -4885,6 +4886,11 @@ fn phone_sorted_layouts(request_id: Option<&str>) -> Result<DaemonMessage> {
                 "name": "box",
                 "tabs": [
                     grid_tab("box-relay", "Relay", &relay),
+                    grid_tab(
+                        "box-unnamed",
+                        "",
+                        &pane("p-scrollback", PHONE_TERMINAL_SESSION),
+                    ),
                     grid_tab("box-release", "Release", &pane("p-plans", "b-plans")),
                 ],
             },

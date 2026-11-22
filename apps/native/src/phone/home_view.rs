@@ -391,10 +391,24 @@ fn host_head(host: &HomeHost, state: HostHeaderState, kind: &str, t: &UiTheme, c
 }
 
 /// A row's second line: its status word in its tone's colour, then, while
-/// more than one host is listed, its host's `chip`, tagged by the row's
-/// `leaf`.
-fn status_line(row: &HomeRow, leaf: &str, chip: Option<&str>, t: &UiTheme, cx: &App) -> Div {
-    let chip = chip.map(|label| host_chip(format!("phone-home-row-host-{leaf}"), label, t, cx));
+/// `look.container`, the repo or workspace it sits under, unless it only
+/// repeats the row's title, then, while more than one host is listed, its
+/// host's `look.chip`, tagged by the row's `leaf`.
+fn status_line(row: &HomeRow, leaf: &str, look: &RowLook<'_>, t: &UiTheme, cx: &App) -> Div {
+    let chip = look
+        .chip
+        .map(|label| host_chip(format!("phone-home-row-host-{leaf}"), label, t, cx));
+    let container = if look.container {
+        row.container.clone().filter(|name| *name != row.label)
+    } else {
+        None
+    };
+    let container = container.map(|name| {
+        line(&format!("phone-home-row-container-{leaf}"), name)
+            .flex_1()
+            .text_size(ui_px(cx, STATUS_TEXT_SIZE))
+            .text_color(gpui::rgb(t.muted))
+    });
     div()
         .flex()
         .items_center()
@@ -408,6 +422,7 @@ fn status_line(row: &HomeRow, leaf: &str, chip: Option<&str>, t: &UiTheme, cx: &
                 .text_color(gpui::rgb(tone_color(row.tone, t)))
                 .child(row.status),
         )
+        .children(container)
         .children(chip)
 }
 
@@ -484,15 +499,17 @@ fn refreshing_line(host: &HostKey, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div 
         .child(REFRESHING_TEXT)
 }
 
-/// How a host's rows draw: its chip while more than one host is listed, and
+/// How a host's rows draw: its chip while more than one host is listed,
 /// whether the rows are the ones it listed before the phone came to the
-/// foreground; with them, the Linear chip the row's title draws, while it
-/// names one of its host's teams' identifiers.
+/// foreground, and whether they name the repo or workspace they sit under;
+/// with them, the Linear chip the row's title draws, while it names one of
+/// its host's teams' identifiers.
 #[derive(Clone)]
 struct RowLook<'a> {
     chip: Option<&'a str>,
     refreshing: bool,
     issue: Option<TitleChip>,
+    container: bool,
 }
 
 /// The line between two rows of a group, inset by the side padding.
@@ -554,6 +571,7 @@ impl PhoneRoot {
                 chip: home.host_chip(&host.host),
                 refreshing,
                 issue: None,
+                container: false,
             };
             for group in &host.groups {
                 let selected = self.selected_in(group);
@@ -971,6 +989,7 @@ impl PhoneRoot {
             chip: None,
             refreshing: false,
             issue: None,
+            container: false,
         };
         self.row_look(row, &look, cx)
             .issue
@@ -1009,7 +1028,8 @@ impl PhoneRoot {
                 body = body.child(hairline(t));
             }
             let chosen = selected == Some(row.session_id.as_str());
-            let row_look = self.row_look(row, look, cx);
+            let mut row_look = self.row_look(row, look, cx);
+            row_look.container = group.show_container;
             body = body.child(Self::session_row(row, chosen, &row_look, t, cx));
         }
         body
@@ -1023,6 +1043,7 @@ impl PhoneRoot {
             chip: look.chip,
             refreshing: look.refreshing,
             issue,
+            container: look.container,
         }
     }
 
@@ -1274,7 +1295,7 @@ impl PhoneRoot {
                                     )),
                             ),
                     )
-                    .child(status_line(row, &leaf, look.chip, t, cx)),
+                    .child(status_line(row, &leaf, look, t, cx)),
             )
             .child(
                 div()

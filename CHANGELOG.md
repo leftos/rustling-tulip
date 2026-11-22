@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Markdown link to another file's heading, such as `notes.md#setup`, opens that file in the viewer at the heading.
 - Ctrl+clicking a path that is in two or more of a session's worktrees, and not in its current folder, shows a menu to pick which file to open.
 - Ctrl+clicking a path that ends in a GitHub-style line anchor, such as `#L4` or `#L4C2`, opens the file at that line.
+- On the phone, the Desktop tabs order heads a tab you never named with the same name the desktop's tab shows, and each row shows its repo or workspace.
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 
 ### Fixed

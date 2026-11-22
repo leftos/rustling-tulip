@@ -2049,6 +2049,97 @@ fn desktop_tabs_asks_a_host_listing_host_layouts_and_groups_its_rows_by_tab(
     );
 }
 
+/// The selector of the repo or workspace label on `target`'s row for `id`.
+fn row_container(target: &Target, id: &str) -> String {
+    format!("phone-home-row-container-{}::{id}", wire(target))
+}
+
+/// The headings of Home's groups now, in list order.
+fn group_names(h: &mut Harness<'_>) -> Vec<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .map(|phone| phone.read(cx).home_group_names(cx))
+            .unwrap_or_default()
+    })
+}
+
+/// The host's `HostLayouts` answering `request_id` for the unnamed-tab
+/// spec: its own layout ("box", named after the host) with one tab nobody
+/// named holding `c`, which leaves `a` and `b` in no tab; and a laptop's
+/// layout.
+fn unnamed_tab_layouts(request_id: &str) -> DaemonMessage {
+    let pane =
+        |id: &str, session: &str| json!({ "kind": "pane", "pane_id": id, "session_id": session });
+    let tab = |id: &str, name: &str, grid: serde_json::Value| {
+        json!({
+            "id": id,
+            "name": name,
+            "content": { "kind": "grid", "grid": grid },
+            "created_at": "2026-01-01T00:00:00Z",
+        })
+    };
+    serde_json::from_value(json!({
+        "type": "host_layouts",
+        "host_name": "box",
+        "layouts": [
+            { "client_id": "desk", "name": "box", "tabs": [tab("t2", "", pane("p3", "c"))] },
+            { "client_id": "laptop", "name": "laptop", "tabs": [tab("t9", "Other", pane("p9", "b"))] },
+        ],
+        "request_id": request_id,
+    }))
+    .expect("a host layouts reply")
+}
+
+#[gpui::test]
+fn desktop_tabs_rows_show_their_repo_and_an_unnamed_tab_its_automatic_name(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let remote = saved_remote();
+    open_host_with(&mut h, &remote, &[FEATURE_HOST_LAYOUTS]);
+    h.cx.run_until_parked();
+
+    for id in ["a", "b", "c"] {
+        assert!(
+            !drawn(&mut h, &row_container(&remote, id)),
+            "Manual's heading already names the repo"
+        );
+    }
+
+    sort_by(&mut h, "desktop-tabs");
+    let request_id = h
+        .host(&remote)
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::ListHostLayouts { request_id } => request_id,
+            _ => None,
+        })
+        .expect("the phone asks for the host's layout");
+    h.host(&remote).send(unnamed_tab_layouts(&request_id));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        group_names(&mut h),
+        ["r2", "Not in a tab"],
+        "the tab nobody named heads itself by its session's repo"
+    );
+    for id in ["a", "b", "c"] {
+        assert!(
+            drawn(&mut h, &row_container(&remote, id)),
+            "{id} names the repo it sits under, in a tab or in Not in a tab"
+        );
+    }
+}
+
 /// The selector of the host chip on `target`'s row for session `id`.
 fn row_chip(target: &Target, id: &str) -> String {
     format!("phone-home-row-host-{}::{id}", wire(target))
