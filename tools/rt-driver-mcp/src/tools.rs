@@ -10,6 +10,7 @@ use daemon_client::isolation::under_tmp;
 use dev_daemon::TestShell;
 use serde_json::{Map, Value, json};
 
+use crate::diagnose::{Probe, breakpoint, diagnose};
 use crate::launch::{LaunchSpec, launch};
 use crate::pipe::{CallError, Transport};
 use crate::session::{Session, Sessions};
@@ -278,7 +279,8 @@ impl Tools {
             params,
         };
         refuse_add_repo_in_checkout(std::slice::from_ref(&step), session.repo_root())?;
-        Ok(match session.pipe().call(method, step.params) {
+        let outcome = checked(session, |pipe| pipe.call(method, step.params));
+        Ok(match outcome {
             Ok(result) => ToolResult::text(result.to_string()),
             Err(err) => ToolResult::error(session.with_feed(&call_error(method, &err))),
         })
@@ -289,7 +291,7 @@ impl Tools {
         let session = self.session(args)?;
         let steps = parse_steps(args).map_err(|err| session.with_feed(&err))?;
         refuse_add_repo_in_checkout(&steps, session.repo_root())?;
-        let outcome = run_batch(session.pipe(), &steps);
+        let outcome = checked(session, |pipe| run_batch(pipe, &steps));
         let passed = outcome["passed"] == json!(true);
         let mut result = ToolResult::text(outcome.to_string());
         if !passed {
@@ -303,7 +305,7 @@ impl Tools {
     fn screenshot(&mut self, args: &Map<String, Value>) -> Result<ToolResult, String> {
         check_args(args, &["session"], &["session"])?;
         let session = self.session(args)?;
-        let shot = match session.pipe().call("screenshot", json!({})) {
+        let shot = match checked(session, |pipe| pipe.call("screenshot", json!({}))) {
             Ok(shot) => shot,
             Err(err) => return Err(session.with_feed(&call_error("screenshot", &err))),
         };
@@ -340,6 +342,40 @@ impl Tools {
             ));
         }
         Ok(name.to_owned())
+    }
+}
+
+/// Runs `run` on `session`'s pipe behind [`Checked`].
+fn checked<T>(session: &mut Session, run: impl FnOnce(&mut dyn Transport) -> T) -> T {
+    let (pipe, mut probe, pid) = session.call_parts();
+    run(&mut Checked {
+        transport: pipe,
+        probe: &mut probe,
+        pid,
+    })
+}
+
+/// A transport that refuses a call at once, sending nothing, while a
+/// debugger holds the client, and appends a diagnosis of the client to a
+/// call whose reply never came.
+struct Checked<'a> {
+    transport: &'a mut dyn Transport,
+    probe: &'a mut dyn Probe,
+    pid: u32,
+}
+
+impl Transport for Checked<'_> {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        if self.probe.debugger_attached() == Some(true) {
+            return Err(CallError::Transport(breakpoint(self.pid)));
+        }
+        match self.transport.call(method, params) {
+            Err(CallError::Transport(why)) if why.starts_with("hung: no reply") => {
+                let diagnosis = diagnose(self.probe, self.pid);
+                Err(CallError::Transport(format!("{why}\n{diagnosis}")))
+            }
+            outcome => outcome,
+        }
     }
 }
 
@@ -550,8 +586,10 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        Step, Tools, launch_env, list, optional_bool, refuse_add_repo_in_checkout, run_batch,
+        Checked, Step, Tools, call_error, launch_env, list, optional_bool,
+        refuse_add_repo_in_checkout, run_batch,
     };
+    use crate::diagnose::tests::ScriptedProbe;
     use crate::pipe::{CallError, Transport};
     use crate::token::MemoryStore;
 
@@ -663,6 +701,113 @@ mod tests {
             method: method.to_owned(),
             params: json!({}),
         }
+    }
+
+    /// What [`Unanswered`] returns for a call whose reply never came.
+    const HUNG: &str = "hung: no reply: did not finish within 70 s of load-adjusted time \
+                        (wall 70 s, machine free 100% on average)";
+
+    /// Leaves `hold` unanswered, closes the pipe on `closed`, answers the rest,
+    /// and records the calls.
+    struct Unanswered {
+        calls: Vec<String>,
+    }
+
+    impl Transport for Unanswered {
+        fn call(&mut self, method: &str, _params: Value) -> Result<Value, CallError> {
+            self.calls.push(method.to_owned());
+            match method {
+                "hold" => Err(CallError::Transport(HUNG.to_owned())),
+                "closed" => Err(CallError::Transport(
+                    "the pipe closed before the reply".to_owned(),
+                )),
+                _ => Ok(json!({"answered": method})),
+            }
+        }
+    }
+
+    #[test]
+    fn a_hung_call_appends_its_diagnosis() {
+        let mut transport = Unanswered { calls: Vec::new() };
+        let mut probe = ScriptedProbe::stuck(Some(93.4), Some(41));
+        let stuck = "diagnosis: stuck: no answer to ping within 2 s; the client used 93% of a \
+                     core over 1 s and runs 41 threads";
+        let mut checked = Checked {
+            transport: &mut transport,
+            probe: &mut probe,
+            pid: 42,
+        };
+
+        let err = checked
+            .call("hold", json!({}))
+            .expect_err("the reply never came");
+        assert_eq!(
+            call_error("hold", &err),
+            format!("hold failed: transport: {HUNG}\n{stuck}")
+        );
+
+        let outcome = run_batch(&mut checked, &[step("ping"), step("hold"), step("state")]);
+        assert_eq!(outcome["failedAt"], json!(1), "{outcome}");
+        assert_eq!(
+            outcome["steps"][1]["error"],
+            json!(format!("transport: {HUNG}\n{stuck}")),
+            "{outcome}"
+        );
+        assert_eq!(
+            transport.calls,
+            ["hold", "ping", "hold"],
+            "the batch stops at the hung step"
+        );
+    }
+
+    #[test]
+    fn a_call_fails_at_once_while_a_debugger_is_attached() {
+        let mut transport = Unanswered { calls: Vec::new() };
+        let mut probe = ScriptedProbe {
+            debugger: Some(true),
+            ..ScriptedProbe::stuck(None, None)
+        };
+        let mut checked = Checked {
+            transport: &mut transport,
+            probe: &mut probe,
+            pid: 42,
+        };
+
+        let err = checked
+            .call("ping", json!({}))
+            .expect_err("a debugger holds the client");
+        assert_eq!(
+            call_error("ping", &err),
+            "ping failed: transport: the client is most likely paused at a breakpoint: \
+             a debugger is attached to pid 42"
+        );
+        let outcome = run_batch(&mut checked, &[step("ping"), step("state")]);
+        assert_eq!(outcome["failedAt"], json!(0), "{outcome}");
+        assert!(transport.calls.is_empty(), "sent {:?}", transport.calls);
+        assert!(!probe.pinged, "no ping goes to a client a debugger holds");
+    }
+
+    #[test]
+    fn an_answered_or_not_hung_call_gets_no_diagnosis() {
+        let mut transport = Unanswered { calls: Vec::new() };
+        let mut probe = ScriptedProbe::stuck(Some(0.0), Some(41));
+        let mut checked = Checked {
+            transport: &mut transport,
+            probe: &mut probe,
+            pid: 42,
+        };
+
+        assert_eq!(
+            checked.call("ping", json!({})),
+            Ok(json!({"answered": "ping"}))
+        );
+        assert_eq!(
+            checked.call("closed", json!({})),
+            Err(CallError::Transport(
+                "the pipe closed before the reply".to_owned()
+            ))
+        );
+        assert!(!probe.pinged, "only a hung call is diagnosed");
     }
 
     #[test]

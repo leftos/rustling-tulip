@@ -11,6 +11,7 @@ use std::process::Child;
 use dev_daemon::IsolatedDaemon;
 use serde_json::{Value, json};
 
+use crate::diagnose::ClientProbe;
 use crate::pipe::PipeClient;
 
 /// How many of `native.log`'s last lines an error carries.
@@ -186,6 +187,13 @@ impl Session {
 
     pub fn pipe(&mut self) -> &mut PipeClient {
         &mut self.pipe
+    }
+
+    /// The pipe, a probe of the client and the client's pid, borrowed
+    /// together for one checked call.
+    pub fn call_parts(&mut self) -> (&mut PipeClient, ClientProbe<'_>, u32) {
+        let probe = ClientProbe::new(&self.client, self.pipe.path().to_owned());
+        (&mut self.pipe, probe, self.client.id())
     }
 
     /// The checkout the session runs from.

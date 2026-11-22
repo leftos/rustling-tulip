@@ -102,8 +102,12 @@ pub struct PipeClient {
     path: String,
     connection: Option<BufReader<File>>,
     next_id: u64,
-    /// How long a call waits for its reply: [`REPLY_GUARD`] but in specs.
+    /// How long a call waits for its reply: [`REPLY_GUARD`] but in specs
+    /// and a diagnosis's ping.
     reply_guard: Duration,
+    /// The clock the reply wait counts on: the process's [`clock`], or wall
+    /// time for a diagnosis's ping.
+    reply_clock: Arc<LoadClock>,
 }
 
 impl PipeClient {
@@ -116,6 +120,7 @@ impl PipeClient {
             connection: None,
             next_id: 1,
             reply_guard: REPLY_GUARD,
+            reply_clock: clock(),
         }
     }
 
@@ -124,6 +129,18 @@ impl PipeClient {
     fn with_reply_guard(path: String, reply_guard: Duration) -> Self {
         Self {
             reply_guard,
+            ..Self::new(path)
+        }
+    }
+
+    /// A client whose calls wait `reply_guard` of wall time for their reply,
+    /// for a diagnosis's ping, which must not stretch with the machine's load.
+    #[cfg(windows)]
+    #[must_use]
+    pub(crate) fn with_wall_reply_guard(path: String, reply_guard: Duration) -> Self {
+        Self {
+            reply_guard,
+            reply_clock: LoadClock::wall(),
             ..Self::new(path)
         }
     }
@@ -145,7 +162,7 @@ impl PipeClient {
         };
         send_line(connection.get_mut(), line)
             .map_err(|err| format!("writing to {}: {err}", self.path))?;
-        let deadline = Deadline::start(clock(), self.reply_guard);
+        let deadline = Deadline::start(Arc::clone(&self.reply_clock), self.reply_guard);
         loop {
             connection = match read_line_by(connection, &deadline) {
                 ReadEnd::Line(back, text) => match reply_to(&text, id)? {

@@ -35,9 +35,13 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 # The client's creation time (`GetProcessTimes`), matched against its
 # discovery file's `started_at`; `CancelSynchronousIo` on a timed-out call's
-# reply reader, so its cancel can go out on the same connection.
+# reply reader, so its cancel can go out on the same connection; a hung
+# call's diagnosis: the client's CPU (`GetProcessTimes`), its thread count
+# (ToolHelp) and whether a debugger holds it (`CheckRemoteDebuggerPresent`).
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_Threading",
 ] }

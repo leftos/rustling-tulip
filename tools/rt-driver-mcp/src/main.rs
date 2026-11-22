@@ -8,6 +8,7 @@
 //! `rt-driver-mcp set-token` instead stores the one line on stdin as the
 //! driver token (`token.rs`) and exits.
 
+mod diagnose;
 mod launch;
 mod pipe;
 mod rpc;
