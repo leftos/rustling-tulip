@@ -19,16 +19,9 @@
 - [ ] RT-850 Read background counts on a default-mode Claude footer · release vNext
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-947 User hooks: let a hand-typed agent report after an injected run ends in the same shell · release vNext
-- [ ] RT-948 User hooks: promote a plain shell from a held user-settings SessionStart, and stop discovery on replay · release vNext
-- [ ] RT-949 User hooks: make the hook shim refresh safe against concurrent calls, stale temps and read-only copies · release vNext
 - [ ] RT-950 User hooks: release a shell's conversation pin when its agent dies without SessionEnd · release vNext
-- [ ] RT-952 Read no agent in view from a dialog with no agent panel under a named session's rule · release vNext
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
-- [ ] RT-955 User hooks: refresh matchers and prune dropped events on install, and read a settings file with a BOM · release vNext
-- [ ] RT-957 User hooks: write the settings backup without a torn window · release vNext
-- [ ] RT-966 User hooks: keep the Hooks switch truthful after a failed write · release vNext
 - [ ] RT-1131 Make Finished toasts and every status marker use the agent-up rule, and cache it per session · release vNext
-- [ ] RT-1230 Tell a session's own name from a subagent's when the screen has no title yet · release vNext
 - [ ] RT-1263 Don't notify Finished for a /compact with nothing running · release vNext
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open · release vNext
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
@@ -43,6 +36,7 @@
 - [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
 - [ ] RT-2100 Slice the model picker's description column on a character boundary · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
+- [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 
 ## Updates and installer
 
@@ -137,9 +131,6 @@
   - [ ] RT-795 Report rt-driver-mcp's and the client's versions from launch, and list sessions on an older server at install
   - [ ] RT-796 Make the driver's and rt-driver-mcp's timeouts load-adjusted instead of wall-clock · release vNext
   - [ ] RT-797 Cancel a timed-out driver request and diagnose busy or stuck after a timeout · release vNext
-    - [ ] RT-2105 Add a cancel method to the driver endpoint and cancel a closed connection's requests · release vNext
-    - [ ] RT-2106 Send a cancel from rt-driver-mcp when a request times out · release vNext
-    - [ ] RT-2107 Diagnose a timed-out driver call as busy, stuck or paused at a breakpoint · release vNext
   - [ ] RT-798 Drop a queued driver request once its connection has closed
   - [ ] RT-799 Put rt-driver-mcp's launched clients and daemons in a job object and report leftovers on stop
   - [ ] RT-800 Give rt-driver-mcp tool classes and have install.ps1 write agents' tools lines
@@ -502,7 +493,6 @@
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-142 Phone: tap a Linear identifier to see its card · release vNext
-  - [ ] RT-2110 Phone: link Linear identifiers in chat answers and session titles · release vNext
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
@@ -553,6 +543,8 @@
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2097 Keep a phone fetch from failing when Storage's Clear prunes its new folder · release vNext
 - [ ] RT-2098 Keep the phone edit bar off the keyboard when both placements reach under it · release vNext
+- [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
+- [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
 
 ## Dashboard, Gates and Linear
 
@@ -808,6 +800,8 @@
 - [ ] RT-2047 Keep a host's Linear switch across a reconnect until its new status arrives
 - [ ] RT-2077 Check whether the phone shell's chat drops the backslash before a dot in a Windows path
 - [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
+- [ ] RT-2116 Refresh a partial user-hooks install whose events need the current table
+- [ ] RT-2117 Send a driver connection's earlier replies before ending it on an over-long line
 
 ## No project
 
