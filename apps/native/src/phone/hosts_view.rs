@@ -14,6 +14,7 @@ use gpui::{
 use super::PhoneRoot;
 use super::home_view::TOUCH_TARGET;
 use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
+use super::settings::Page;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
 use crate::connection_picker::{
@@ -202,6 +203,13 @@ impl PhoneHosts {
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.command
             .update(cx, |input, cx| input.set_text(String::new(), cx));
+    }
+
+    /// Collapses the form, emptying it: the Hosts page shows its rows, and a
+    /// later Add starts from an empty form.
+    fn close_form(&mut self, cx: &mut Context<PhoneRoot>) {
+        self.reset(cx);
+        self.form_open = false;
     }
 }
 
@@ -497,6 +505,31 @@ impl PhoneRoot {
             .children(self.tap_lines(t))
             .children(row_elements)
             .child(tail)
+    }
+
+    /// Leaving Settings' Hosts page collapses its add form, so the page
+    /// shows its rows when it comes back: with no host saved the form is the
+    /// page itself, and it stays.
+    pub(super) fn leave_hosts_page(&mut self, cx: &mut Context<Self>) {
+        let on_hosts = self
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.page == Some(Page::Hosts));
+        if on_hosts && self.a_host_is_saved(cx) {
+            self.hosts.close_form(cx);
+        }
+    }
+
+    /// Whether the Hosts page draws any saved host's row: the same rows
+    /// [`Self::hosts_content`] builds.
+    fn a_host_is_saved(&self, cx: &App) -> bool {
+        let root = self.root.read(cx);
+        let not_paired = self.hosts.not_paired();
+        root.sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .any(|host| host_row(root, host, not_paired).is_some())
     }
 
     /// Home while a saved host is open: under the header with its sort and

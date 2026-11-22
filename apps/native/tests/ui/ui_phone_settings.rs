@@ -584,6 +584,82 @@ fn a_host_connecting_while_the_add_form_is_open_keeps_the_form_on_screen(cx: &mu
 }
 
 #[gpui::test]
+fn leaving_the_hosts_page_closes_the_add_form(cx: &mut TestAppContext) {
+    const TYPED: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    open_hosts(&mut h);
+    h.click_on("phone-host-add-another");
+    h.click_on("phone-host-name");
+    type_text(&mut h, TYPED);
+    assert!(drawn(&mut h, "phone-host-name"), "the form shows");
+
+    h.click_on("phone-settings-back");
+    assert!(
+        drawn(&mut h, "phone-settings-row-hosts"),
+        "Back returns to the category list"
+    );
+
+    h.click_on("phone-settings-row-hosts");
+    assert!(
+        !drawn(&mut h, "phone-host-name"),
+        "the add form did not come back on the Hosts page"
+    );
+    h.click_on("phone-host-add-another");
+    assert!(
+        drawn(&mut h, "phone-host-name"),
+        "Add a host opens the form"
+    );
+
+    h.click_on("phone-host-add");
+    assert!(
+        drawn(&mut h, "phone-host-error"),
+        "the form came back empty: Add is refused"
+    );
+    assert!(
+        !h.opened_targets().iter().any(|target| target
+            .tailnet_host()
+            .is_some_and(|host| host.name() == TYPED)),
+        "a refused form opens nothing"
+    );
+    let saved = saved_ui(&dir)["saved_hosts"].clone();
+    assert_eq!(
+        saved.as_array().map(Vec::len),
+        Some(1),
+        "a refused form saves nothing: {saved}"
+    );
+}
+
+#[gpui::test]
+fn a_notification_tap_that_cannot_open_closes_the_add_form(cx: &mut TestAppContext) {
+    const TYPED: &str = "den.tail1234.ts.net";
+    const OTHER_HOST: &str = "other.tail1234.ts.net";
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+
+    open_hosts(&mut h);
+    h.click_on("phone-host-add-another");
+    h.click_on("phone-host-name");
+    type_text(&mut h, TYPED);
+    assert!(drawn(&mut h, "phone-host-name"), "the form shows");
+
+    platform.tap(OTHER_HOST, "s1");
+    h.cx.run_until_parked();
+    assert!(
+        !drawn(&mut h, "phone-settings"),
+        "the tap's note returns Home"
+    );
+
+    open_hosts(&mut h);
+    assert!(
+        !drawn(&mut h, "phone-host-name"),
+        "the add form did not come back on the Hosts page"
+    );
+}
+
+#[gpui::test]
 fn appearance_lists_the_themes_and_marks_the_current_one(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let themes = dir.path().join(THEMES_DIR);

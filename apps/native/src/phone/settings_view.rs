@@ -105,6 +105,9 @@ impl PhoneRoot {
     /// screen's add form would otherwise leave the screen.
     pub(super) fn open_settings_on(&mut self, page: Page, cx: &mut Context<Self>) {
         self.settings_scroll_on_open();
+        if page != Page::Hosts {
+            self.leave_hosts_page(cx);
+        }
         let mut settings = Settings::default();
         settings.open(page);
         self.settings = Some(settings);
@@ -135,9 +138,17 @@ impl PhoneRoot {
 
     /// One Back step in Settings: the innermost sub-page pops, then a page
     /// goes back to the list, then the list closes Settings. A sub-page whose
-    /// item is gone closes with the step.
-    pub(super) fn settings_back(&mut self, cx: &mut Context<Self>) {
+    /// item is gone closes with the step. A step that leaves the Hosts page
+    /// collapses its add form and drops the keyboard with it.
+    pub(super) fn settings_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.forget_pending_open();
+        let leaves_hosts = self
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.page == Some(Page::Hosts) && settings.top().is_none());
+        if leaves_hosts {
+            self.leave_hosts_page(cx);
+        }
         let step = self.settings.as_mut().map(Settings::back);
         if step == Some(BackStep::ToList) {
             self.storage_error = None;
@@ -145,6 +156,9 @@ impl PhoneRoot {
         self.retain_sub_pages(cx);
         if step == Some(BackStep::Close) {
             self.settings = None;
+        }
+        if leaves_hosts {
+            window.blur(cx);
         }
         self.keep_restore_confirm();
         self.keep_keys_restore_confirm();
@@ -178,7 +192,7 @@ impl PhoneRoot {
     pub(super) fn screen_back_gesture(
         &mut self,
         event: &BackGestureEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !session::back_on(event.phase) {
@@ -187,7 +201,7 @@ impl PhoneRoot {
         // Settings is the page on top in either layout, over whatever two
         // panes left open beside or under it.
         if self.settings.is_some() {
-            self.settings_back(cx);
+            self.settings_back(window, cx);
         } else if self.viewer.is_some() {
             self.viewer_back(cx);
         } else if self.shown.is_some() {
@@ -262,7 +276,9 @@ impl PhoneRoot {
             .min_h(px(TOUCH_TARGET))
             .flex_none()
             .child(BACK_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.settings_back(cx)));
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.settings_back(window, cx);
+            }));
         header_frame(t).child(back).child(
             div()
                 .driver_id(|| "phone-settings-title".to_owned())

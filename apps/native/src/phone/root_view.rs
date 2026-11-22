@@ -867,6 +867,7 @@ impl PhoneRoot {
                         self.close_session(cx);
                     }
                 }
+                self.leave_hosts_page(cx);
                 self.settings = None;
                 self.keep_reply_editor();
                 self.keep_key_editor();
@@ -983,6 +984,7 @@ impl PhoneRoot {
         self.path_note = None;
         self.close_viewer(cx);
         self.close_browser(cx);
+        self.leave_hosts_page(cx);
         self.settings = None;
         self.keep_reply_editor();
         self.keep_key_editor();
