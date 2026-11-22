@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
 
-use crate::links::TerminalLinkCandidate;
+use crate::links::{TerminalLinkCandidate, fragment_position};
 use crate::sidebar::load_unc_hosts;
+use crate::viewer_tab;
 
 #[cfg(any(unix, test))]
 mod page_unix;
@@ -357,6 +358,10 @@ pub enum OpenAction {
     /// A web page whose link carried a `?query` and/or `#fragment`, which
     /// only the browser can honour.
     Page { path: PathBuf, suffix: String },
+    /// A Markdown file whose link carried a `#fragment` that names no line:
+    /// the slug of the heading the viewer opens it at. Anything else opens
+    /// it as [`OpenAction::DefaultApp`] does.
+    Heading { path: PathBuf, anchor: String },
 }
 
 /// What a path link's click asked for: the default app (VS Code at a line),
@@ -828,7 +833,8 @@ fn first_existing(
 
 /// How to open `path`, the resolved reading of `candidate`: at its line in
 /// VS Code, as a page at its `?query` and/or `#fragment` when it is a web
-/// page, else in its default app, any suffix dropped.
+/// page, at the heading its `#fragment` names when it is a Markdown file,
+/// else in its default app, any suffix dropped.
 fn open_action(candidate: &TerminalLinkCandidate, path: PathBuf) -> OpenAction {
     match (candidate.line, &candidate.suffix) {
         (Some(line), _) => OpenAction::VsCode {
@@ -840,8 +846,27 @@ fn open_action(candidate: &TerminalLinkCandidate, path: PathBuf) -> OpenAction {
             path,
             suffix: suffix.clone(),
         },
-        (None, _) => OpenAction::DefaultApp(path),
+        (None, Some(suffix)) => match heading_anchor(&path, suffix) {
+            Some(anchor) => OpenAction::Heading { path, anchor },
+            None => OpenAction::DefaultApp(path),
+        },
+        (None, None) => OpenAction::DefaultApp(path),
     }
+}
+
+/// The heading slug `suffix`'s `#fragment` names on Markdown file `path`:
+/// the text after the first `#`, any `?query` cut off, lower-cased as a
+/// slug is. `None` for another file, a fragment that names a line, and an
+/// empty fragment.
+fn heading_anchor(path: &Path, suffix: &str) -> Option<String> {
+    if !viewer_tab::is_markdown(&path.to_string_lossy()) || fragment_position(suffix).is_some() {
+        return None;
+    }
+    let (_, fragment) = suffix.split_once('#')?;
+    let anchor = fragment
+        .split_once('?')
+        .map_or(fragment, |(anchor, _)| anchor);
+    (!anchor.is_empty()).then(|| anchor.to_lowercase())
 }
 
 /// The extensions of a file the browser opens as a web page.
@@ -2216,6 +2241,55 @@ mod tests {
                 line: 30,
                 column: None,
             }
+        );
+    }
+
+    #[test]
+    fn a_markdown_link_with_a_heading_fragment_opens_at_the_heading() {
+        let path = PathBuf::from("X:/dir/notes.md");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\notes.md", "#intro"), path.clone()),
+            OpenAction::Heading {
+                path,
+                anchor: "intro".to_owned(),
+            }
+        );
+        let upper = PathBuf::from("X:/dir/README.MARKDOWN");
+        assert_eq!(
+            open_action(
+                &cut(r"X:\dir\README.MARKDOWN", "?plain=1#Setup"),
+                upper.clone()
+            ),
+            OpenAction::Heading {
+                path: upper,
+                anchor: "setup".to_owned(),
+            },
+            "any case of the extension, the query cut off, the slug lower-cased"
+        );
+        let empty = PathBuf::from("X:/dir/notes.md");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\notes.md", "#"), empty.clone()),
+            OpenAction::DefaultApp(empty),
+            "an empty fragment is no anchor"
+        );
+    }
+
+    #[test]
+    fn a_markdown_link_with_a_line_fragment_is_not_a_heading() {
+        let path = PathBuf::from("X:/dir/notes.md");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\notes.md", "#L4"), path.clone()),
+            OpenAction::DefaultApp(path),
+            "a line fragment the candidate did not read as a line opens as before"
+        );
+    }
+
+    #[test]
+    fn a_text_file_with_a_fragment_is_not_a_heading() {
+        let path = PathBuf::from("X:/dir/notes.txt");
+        assert_eq!(
+            open_action(&cut(r"X:\dir\notes.txt", "#intro"), path.clone()),
+            OpenAction::DefaultApp(path)
         );
     }
 

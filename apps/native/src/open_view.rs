@@ -106,7 +106,8 @@ fn action_path(action: &OpenAction) -> &Path {
     match action {
         OpenAction::VsCode { path, .. }
         | OpenAction::DefaultApp(path)
-        | OpenAction::Page { path, .. } => path,
+        | OpenAction::Page { path, .. }
+        | OpenAction::Heading { path, .. } => path,
     }
 }
 
@@ -453,7 +454,9 @@ impl RootView {
             }
         };
         match verdict {
-            Verdict::Viewer { path, line } => self.open_viewer(&path.to_string_lossy(), line),
+            Verdict::Viewer { path, target } => {
+                self.open_viewer_at(&path.to_string_lossy(), target);
+            }
             Verdict::External(reason) => {
                 tracing::debug!(?action, ?reason, "the file opens outside the viewer");
                 if reason == Some(NotText::TooLarge) {
@@ -482,7 +485,7 @@ impl RootView {
                 };
                 self.dispatch_open(&HostKey::Local, job, Then::Nothing, window, cx);
             }
-            (Origin::Link, OpenAction::DefaultApp(path)) => {
+            (Origin::Link, OpenAction::DefaultApp(path) | OpenAction::Heading { path, .. }) => {
                 self.open_in_default_app(path, Route::LINK, window, cx);
             }
             (Origin::Link, OpenAction::Page { path, suffix }) => {
@@ -492,7 +495,7 @@ impl RootView {
                 let job = file_fetch::open_job(path, Some(line), column);
                 self.open_fetched_job(job, Then::Nothing, window, cx);
             }
-            (Origin::Fetched, OpenAction::DefaultApp(path)) => {
+            (Origin::Fetched, OpenAction::DefaultApp(path) | OpenAction::Heading { path, .. }) => {
                 let job = file_fetch::open_job(path, None, None);
                 self.open_fetched_job(job, Then::Nothing, window, cx);
             }

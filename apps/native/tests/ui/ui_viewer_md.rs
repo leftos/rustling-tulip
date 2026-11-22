@@ -366,22 +366,15 @@ fn an_https_link_click_opens_the_browser_job(cx: &mut TestAppContext) {
     assert_eq!(toasts(&mut h), []);
 }
 
-#[gpui::test]
-fn a_relative_md_link_opens_another_viewer_tab(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let file = write_file(dir.path(), "docs/notes.md", "[other](other.md#part)\n");
-    let other = write_file(dir.path(), "docs/other.md", "# Other\n");
-    let mut h = showing(cx, &dir, &[&file]);
-    assert!(drawn(&mut h, "viewer-md-v1"));
-
-    follow(&mut h, "v1", "other.md#part");
-    let opens = opens_sent(&mut h);
+/// Follows `href` from tab `v1` to the one file it names, which the daemon
+/// opens as tab `v2`; returns that file's path as the open named it.
+fn open_second_tab(h: &mut Harness<'_>, href: &str) -> PathBuf {
+    follow(h, "v1", href);
+    let opens = opens_sent(h);
     let [(id, path)] = opens.as_slice() else {
         panic!("one OpenViewerTab is sent, got {opens:?}");
     };
-    assert_eq!(Path::new(path), canonical(&other), "the anchor is dropped");
     assert_eq!(h.opened(), [], "nothing goes out");
-
     h.send(DaemonMessage::TabUpdated {
         tab: viewer_tab("v2", Path::new(path)),
     });
@@ -390,8 +383,64 @@ fn a_relative_md_link_opens_another_viewer_tab(cx: &mut TestAppContext) {
         tab_id: "v2".to_owned(),
     });
     h.cx.run_until_parked();
+    PathBuf::from(path)
+}
+
+#[gpui::test]
+fn a_relative_md_link_opens_another_viewer_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", "[other](other.md#target)\n");
+    let other = write_file(dir.path(), "docs/other.md", &long_document());
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    let opened = open_second_tab(&mut h, "other.md#target");
+    assert_eq!(
+        opened,
+        canonical(&other),
+        "the file before the anchor opens"
+    );
     assert_eq!(mode(&mut h, "v2"), Some(MarkdownMode::Rendered));
     assert!(drawn(&mut h, "viewer-md-v2"), "the second tab shows");
+    assert_eq!(
+        top_row(&mut h, "v2"),
+        Some(201),
+        "the tab scrolls to the heading"
+    );
+    assert!(drawn(&mut h, "viewer-md-block-v2-201"), "the heading shows");
+}
+
+#[gpui::test]
+fn a_relative_md_link_with_an_unknown_anchor_opens_at_the_top(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", "[other](other.md#nowhere)\n");
+    write_file(dir.path(), "docs/other.md", &long_document());
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    open_second_tab(&mut h, "other.md#nowhere");
+    assert_eq!(mode(&mut h, "v2"), Some(MarkdownMode::Rendered));
+    assert!(drawn(&mut h, "viewer-md-v2"), "the second tab shows");
+    assert_eq!(top_row(&mut h, "v2"), Some(0), "the tab opens at its top");
+    assert_eq!(toasts(&mut h), []);
+}
+
+#[gpui::test]
+fn a_md_link_with_a_line_anchor_opens_at_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", "[other](other.md#L3)\n");
+    write_file(dir.path(), "docs/other.md", "# Other\n\none\n\ntwo\n");
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    open_second_tab(&mut h, "other.md#L3");
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v2").and_then(ViewerTab::line_target)),
+        Some(3),
+        "the anchor is a line"
+    );
+    assert_eq!(mode(&mut h, "v2"), Some(MarkdownMode::Source));
+    assert!(drawn(&mut h, "viewer-line-v2-3"), "the line is in view");
 }
 
 #[gpui::test]

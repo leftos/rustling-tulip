@@ -24,7 +24,7 @@ use crate::chat_view::SelectDraw;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, ui_px_at};
 use crate::link_menu_view::ChatFileLink;
-use crate::links::{IssueContext, TerminalLinkCandidate};
+use crate::links::{self, IssueContext, TerminalLinkCandidate};
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::{LinkAction, OpenJob};
@@ -32,7 +32,7 @@ use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Then};
 use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
-use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
+use crate::viewer_tab::{self, MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use crate::viewer_tab_view::PHONE_VIEWER_ID;
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
@@ -1275,10 +1275,12 @@ impl RootView {
 
     /// A link to `target` in Markdown tab `tab_id` was clicked: a URL opens
     /// in the browser; a file, resolved on this PC against the tab file's
-    /// folder and without its `#fragment`, opens by the route the tab's file
-    /// came by (from a fetched copy, only a file in the folder for fetched
-    /// files), in the viewer when `prefer_viewer` and it can show the file;
-    /// a heading anchor scrolls to its heading; a refused target says so.
+    /// folder, opens by the route the tab's file came by (from a fetched
+    /// copy, only a file in the folder for fetched files), in the viewer
+    /// when `prefer_viewer` and it can show the file, there at the line an
+    /// `#L<n>` fragment names or, for a Markdown file, at the heading
+    /// another names (any other fragment is dropped); a heading anchor
+    /// scrolls to its heading; a refused target says so.
     /// A tab whose file is not on this PC follows no link.
     pub(crate) fn follow_md_link(
         &mut self,
@@ -1313,13 +1315,8 @@ impl RootView {
                     cx,
                 );
             }
-            LinkTarget::File { path, .. } => {
-                let candidate = TerminalLinkCandidate {
-                    path: path.to_string_lossy().into_owned(),
-                    line: None,
-                    column: None,
-                    suffix: None,
-                };
+            LinkTarget::File { path, anchor } => {
+                let candidate = md_link_candidate(&path, anchor, prefer_viewer);
                 let base_dirs = vec![folder.to_string_lossy().into_owned()];
                 let action = if prefer_viewer {
                     LinkAction::Viewer
@@ -1463,6 +1460,28 @@ pub(crate) fn markdown_toggle(
     Some(div().flex().flex_none().gap(px(4.0)).children(buttons))
 }
 
+/// The link candidate a Markdown link to file `path` with `anchor` opens.
+/// Only the viewer (`prefer_viewer`) takes the anchor: an `#L<n>` one is a
+/// line on any file, any other goes on as the suffix of a Markdown file, a
+/// heading, and is dropped for every other file. The external app opens the
+/// file as it did.
+fn md_link_candidate(
+    path: &Path,
+    anchor: Option<String>,
+    prefer_viewer: bool,
+) -> TerminalLinkCandidate {
+    let anchor = anchor.filter(|_| prefer_viewer);
+    let line = anchor.as_deref().and_then(links::anchor_line);
+    TerminalLinkCandidate {
+        path: path.to_string_lossy().into_owned(),
+        line,
+        column: None,
+        suffix: anchor
+            .filter(|_| line.is_none() && viewer_tab::is_markdown(&path.to_string_lossy()))
+            .map(|anchor| format!("#{anchor}")),
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -1472,6 +1491,31 @@ pub(crate) fn markdown_toggle(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn a_markdown_link_to_a_web_page_drops_its_fragment() {
+        let page = md_link_candidate(Path::new("C:/docs/page.html"), Some("x".to_owned()), true);
+        assert_eq!(page.suffix, None, "a web page's fragment is dropped");
+        assert_eq!(page.line, None);
+
+        let notes = md_link_candidate(Path::new("C:/docs/notes.md"), Some("x".to_owned()), true);
+        assert_eq!(
+            notes.suffix.as_deref(),
+            Some("#x"),
+            "a Markdown file keeps its heading"
+        );
+
+        let line = md_link_candidate(Path::new("C:/docs/page.html"), Some("l3".to_owned()), true);
+        assert_eq!(
+            (line.line, line.suffix),
+            (Some(3), None),
+            "a line anchor is a line on any file"
+        );
+
+        let external =
+            md_link_candidate(Path::new("C:/docs/notes.md"), Some("x".to_owned()), false);
+        assert_eq!(external.suffix, None, "the external app takes no anchor");
+    }
 
     fn spans_of(text: &str) -> Vec<Span> {
         match md_blocks::parse(text, Path::new("notes"), md_blocks::SoftBreaks::Space)

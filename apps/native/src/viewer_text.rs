@@ -3,6 +3,7 @@
 //! besides [`probe_file`].
 
 use crate::open::OpenAction;
+use crate::viewer_tab::ViewerTarget;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -238,24 +239,31 @@ pub(crate) fn is_image_path(path: &Path) -> bool {
 /// Where an opened file goes: the viewer, or out to an external app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    /// The built-in viewer, at the line the link named.
-    Viewer { path: PathBuf, line: Option<u32> },
+    /// The built-in viewer, at the line or heading the link named.
+    Viewer {
+        path: PathBuf,
+        target: Option<ViewerTarget>,
+    },
     /// The external app; why the file is not text, when it is not.
     External(Option<NotText>),
 }
 
 /// Where `action` sends `probe`'s file when the viewer is asked for: the
-/// external app when the file is not text, else the viewer at its line.
+/// external app when the file is not text, else the viewer at its line or
+/// heading.
 #[must_use]
 pub(crate) fn decide(action: &OpenAction, probe: &Probe) -> Verdict {
     if let Err(not_text) = check(probe) {
         return Verdict::External(Some(not_text));
     }
-    let (path, line) = match action {
-        OpenAction::VsCode { path, line, .. } => (path.clone(), Some(*line)),
+    let (path, target) = match action {
+        OpenAction::VsCode { path, line, .. } => (path.clone(), Some(ViewerTarget::Line(*line))),
+        OpenAction::Heading { path, anchor } => {
+            (path.clone(), Some(ViewerTarget::Anchor(anchor.clone())))
+        }
         OpenAction::DefaultApp(path) | OpenAction::Page { path, .. } => (path.clone(), None),
     };
-    Verdict::Viewer { path, line }
+    Verdict::Viewer { path, target }
 }
 
 #[cfg(test)]
@@ -290,8 +298,28 @@ mod tests {
             decide(&line_ref, &text_probe()),
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/main.rs"),
-                line: Some(7),
+                target: Some(ViewerTarget::Line(7)),
             }
+        );
+    }
+
+    #[test]
+    fn a_heading_action_opens_the_viewer_at_its_anchor() {
+        let heading = OpenAction::Heading {
+            path: std::path::PathBuf::from("C:/docs/notes.md"),
+            anchor: "intro".to_owned(),
+        };
+        assert_eq!(
+            decide(&heading, &text_probe()),
+            Verdict::Viewer {
+                path: std::path::PathBuf::from("C:/docs/notes.md"),
+                target: Some(ViewerTarget::Anchor("intro".to_owned())),
+            }
+        );
+        assert_eq!(
+            decide(&heading, &probe(9, b"plain\0txt")),
+            Verdict::External(Some(NotText::Binary)),
+            "a file that is not text still goes out"
         );
     }
 
@@ -322,7 +350,7 @@ mod tests {
             decide(&plain, &cut),
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/cafe.txt"),
-                line: None,
+                target: None,
             }
         );
     }

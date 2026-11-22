@@ -34,7 +34,7 @@ use crate::viewer_find::{self, Match, Segment, Tint};
 use crate::viewer_md_view::markdown_toggle;
 use crate::viewer_tab::{
     self, Activation, FindBar, MarkdownMode, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin,
-    ViewerTab, ViewerText,
+    ViewerTab, ViewerTarget, ViewerText,
 };
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
@@ -339,6 +339,12 @@ impl RootView {
     /// `line`. The path is trimmed and made absolute first; an empty one
     /// sends nothing.
     pub fn open_viewer(&mut self, path: &str, line: Option<u32>) {
+        self.open_viewer_at(path, line.map(ViewerTarget::Line));
+    }
+
+    /// [`RootView::open_viewer`] at `target`: a line, or the heading of a
+    /// Markdown file.
+    pub(crate) fn open_viewer_at(&mut self, path: &str, target: Option<ViewerTarget>) {
         let normalised = match viewer_tab::normalise_path(path) {
             Ok(normalised) => normalised,
             Err(err) => {
@@ -346,7 +352,7 @@ impl RootView {
                 return;
             }
         };
-        let id = self.viewer_opens.open_id(line);
+        let id = self.viewer_opens.open_id(target);
         self.send_to(
             &HostKey::Local,
             ClientMessage::OpenViewerTab {
@@ -604,13 +610,18 @@ impl RootView {
         }
     }
 
-    /// Activates the tab an open named and moves its target line; a tab
-    /// whose read ended reads its file again, so the open shows the file as
-    /// it is now, and the line target applies once that read lands.
+    /// Activates the tab an open named and moves its target line or
+    /// heading; a tab whose read ended reads its file again, so the open
+    /// shows the file as it is now, and the target applies once that read
+    /// lands.
     fn activate_viewer(&mut self, activation: &Activation) {
         if let Some(tab) = self.viewer_tabs.get_mut(&activation.tab_id) {
             tab.reread();
-            tab.set_line_target(activation.line);
+            match &activation.target {
+                Some(ViewerTarget::Line(line)) => tab.set_line_target(Some(*line)),
+                Some(ViewerTarget::Anchor(slug)) => tab.set_anchor_target(slug.clone()),
+                None => {}
+            }
         }
         self.tabs.activate(&activation.tab_id);
     }

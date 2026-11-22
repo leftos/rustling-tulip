@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- A Markdown link to another file's heading, such as `notes.md#setup`, opens that file in the viewer at the heading.
 - Ctrl+clicking a path that ends in a GitHub-style line anchor, such as `#L4` or `#L4C2`, opens the file at that line.
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 

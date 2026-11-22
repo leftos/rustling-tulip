@@ -309,30 +309,38 @@ pub enum MarkdownMode {
     Source,
 }
 
-/// The tab an `OpenViewerTab` answer activates, and the line it asked for.
+/// Where a viewer tab opens: at a line of its text, or at the heading of a
+/// Markdown file whose anchor slug this is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ViewerTarget {
+    Line(u32),
+    Anchor(String),
+}
+
+/// The tab an `OpenViewerTab` answer activates, and where it asked to open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Activation {
     pub tab_id: String,
-    pub line: Option<u32>,
+    pub target: Option<ViewerTarget>,
 }
 
 /// The `OpenViewerTab`s out, and the tab one of them waits to activate.
 #[derive(Debug, Default)]
 pub(crate) struct ViewerOpens {
     next_open: u64,
-    /// The `OpenViewerTab` ids the daemon has not answered, with the line
-    /// each asked for.
-    sent: HashMap<String, Option<u32>>,
+    /// The `OpenViewerTab` ids the daemon has not answered, with where
+    /// each asked to open.
+    sent: HashMap<String, Option<ViewerTarget>>,
     /// A tab the daemon named before its `TabUpdated` arrived, and when.
     pending: Option<(Activation, Instant)>,
 }
 
 impl ViewerOpens {
-    /// A fresh `OpenViewerTab` id for an open at `line`, recorded as sent.
-    pub(crate) fn open_id(&mut self, line: Option<u32>) -> String {
+    /// A fresh `OpenViewerTab` id for an open at `target`, recorded as sent.
+    pub(crate) fn open_id(&mut self, target: Option<ViewerTarget>) -> String {
         self.next_open += 1;
         let id = format!("viewer-open-{}", self.next_open);
-        self.sent.insert(id.clone(), line);
+        self.sent.insert(id.clone(), target);
         id
     }
 
@@ -347,10 +355,10 @@ impl ViewerOpens {
         known: bool,
         now: Instant,
     ) -> Option<Activation> {
-        let line = self.sent.remove(id)?;
+        let target = self.sent.remove(id)?;
         let activation = Activation {
             tab_id: tab_id.to_owned(),
-            line,
+            target,
         };
         if known {
             self.pending = None;
@@ -448,6 +456,9 @@ pub struct ViewerTab {
     jump_pending: Cell<bool>,
     /// The line the last open asked for.
     line_target: Option<u32>,
+    /// The heading anchor an open asked for, scrolled to once the next
+    /// parse of the text lands.
+    anchor_pending: Option<String>,
     /// How a Markdown file shows; `None` for any other file.
     markdown: Option<MarkdownMode>,
     /// Whether the text read is over the render cap, so it shows as source
@@ -511,6 +522,7 @@ impl ViewerTab {
             scroll: UniformListScrollHandle::new(),
             jump_pending: Cell::new(false),
             line_target: None,
+            anchor_pending: None,
             markdown,
             markdown_too_large: false,
             md: None,
@@ -583,6 +595,8 @@ impl ViewerTab {
                 self.spans = None;
                 self.md = None;
                 self.reload = None;
+                // The cap described the text dropped; the next text sets it.
+                self.markdown_too_large = false;
                 self.load = ViewerLoad::Unread;
             }
         }
@@ -662,6 +676,7 @@ impl ViewerTab {
         self.text = None;
         self.spans = None;
         self.md = None;
+        self.anchor_pending = None;
         self.selection.clear();
     }
 
@@ -817,11 +832,15 @@ impl ViewerTab {
     }
 
     /// A Markdown text of `len` bytes over the render cap shows as source,
-    /// and its mode is locked there.
+    /// and its mode is locked there; a heading asked for is dropped, so the
+    /// file opens at its top.
     fn apply_render_cap(&mut self, len: usize) {
         self.markdown_too_large = self.markdown.is_some() && !md_blocks::renders(len);
         if self.markdown_too_large {
             self.markdown = Some(MarkdownMode::Source);
+            if let Some(slug) = self.anchor_pending.take() {
+                tracing::debug!(path = %self.path, slug, "a Markdown file over the render cap opens at its top");
+            }
         }
     }
 
@@ -917,10 +936,26 @@ impl ViewerTab {
         if line.is_some() {
             self.line_target = line;
             self.jump_pending.set(true);
+            self.anchor_pending = None;
             if self.markdown.is_some() {
                 self.markdown = Some(MarkdownMode::Source);
             }
         }
+    }
+
+    /// An open asked for heading anchor `slug`: a Markdown tab shows
+    /// rendered, where headings are, and scrolls to it once its text is
+    /// parsed; the saved default is left as it is, and the line target
+    /// goes. Any other file ignores it.
+    pub(crate) fn set_anchor_target(&mut self, slug: String) {
+        if self.markdown.is_none() {
+            tracing::debug!(path = %self.path, slug, "a file that is not Markdown has no headings");
+            return;
+        }
+        self.line_target = None;
+        self.jump_pending.set(false);
+        self.anchor_pending = Some(slug);
+        self.set_markdown(MarkdownMode::Rendered);
     }
 
     /// How a Markdown file shows; `None` for any other file.
@@ -960,7 +995,7 @@ impl ViewerTab {
     /// The parse of read `read` landed as `doc`; kept, with a fresh block
     /// list, while that read is still the one shown. A document that
     /// replaces another, a reload's, keeps its top row, clamped to the new
-    /// rows.
+    /// rows; a heading an open asked for is scrolled to the top, once.
     pub(crate) fn finish_markdown(&mut self, read: u64, doc: Arc<MdDoc>) -> bool {
         if self.read != Some(read) || !self.renders_markdown() {
             return false;
@@ -978,8 +1013,26 @@ impl ViewerTab {
                 }
             });
         }
+        self.scroll_to_pending_anchor(&doc, &list);
         self.md = Some((doc, list));
         true
+    }
+
+    /// Scrolls `list` so the heading of the pending anchor is at the top,
+    /// and forgets the anchor; a slug no heading of `doc` has leaves the
+    /// scroll.
+    fn scroll_to_pending_anchor(&mut self, doc: &MdDoc, list: &ListState) {
+        let Some(slug) = self.anchor_pending.take() else {
+            return;
+        };
+        let Some(row) = doc.anchor_row(&slug) else {
+            tracing::debug!(path = %self.path, slug, "no heading has the anchor the open asked for");
+            return;
+        };
+        list.scroll_to(ListOffset {
+            item_ix: row,
+            offset_in_item: px(0.0),
+        });
     }
 
     /// The rendered document and its block list, once parsed.
@@ -1011,8 +1064,8 @@ pub(crate) fn display_name(path: &str) -> &str {
     }
 }
 
-/// Whether `path` names a Markdown file, by its extension.
-fn is_markdown(path: &str) -> bool {
+/// Whether `path` names a Markdown file, by its extension in any case.
+pub(crate) fn is_markdown(path: &str) -> bool {
     Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1037,7 +1090,15 @@ mod tests {
     fn activation(tab_id: &str, line: Option<u32>) -> Activation {
         Activation {
             tab_id: tab_id.to_owned(),
-            line,
+            target: line.map(ViewerTarget::Line),
+        }
+    }
+
+    /// The line `activation` asked for, when it asked for one.
+    fn line_of(activation: Option<Activation>) -> Option<u32> {
+        match activation?.target? {
+            ViewerTarget::Line(line) => Some(line),
+            ViewerTarget::Anchor(_) => None,
         }
     }
 
@@ -1045,7 +1106,7 @@ mod tests {
     fn an_open_answered_before_its_tab_arrived_waits_for_it() {
         let mut opens = ViewerOpens::default();
         let now = Instant::now();
-        let id = opens.open_id(Some(12));
+        let id = opens.open_id(Some(ViewerTarget::Line(12)));
         assert_eq!(id, "viewer-open-1");
         assert_eq!(opens.opened(&id, "v9", false, now), None);
         assert_eq!(
@@ -1067,23 +1128,23 @@ mod tests {
         let now = Instant::now();
         let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         assert_eq!(tab.line_target(), None);
-        let first = opens.open_id(Some(10));
-        let second = opens.open_id(Some(42));
+        let first = opens.open_id(Some(ViewerTarget::Line(10)));
+        let second = opens.open_id(Some(ViewerTarget::Line(42)));
 
         let opened = opens.opened(&first, "v1", true, now);
         assert_eq!(opened, Some(activation("v1", Some(10))));
-        tab.set_line_target(opened.and_then(|open| open.line));
+        tab.set_line_target(line_of(opened));
         assert_eq!(tab.line_target(), Some(10));
 
         let opened = opens.opened(&second, "v1", true, now);
         assert_eq!(opened, Some(activation("v1", Some(42))));
-        tab.set_line_target(opened.and_then(|open| open.line));
+        tab.set_line_target(line_of(opened));
         assert_eq!(tab.line_target(), Some(42), "the second open moves it");
 
         let third = opens.open_id(None);
         let opened = opens.opened(&third, "v1", true, now);
         assert_eq!(opened, Some(activation("v1", None)));
-        tab.set_line_target(opened.and_then(|open| open.line));
+        tab.set_line_target(line_of(opened));
         assert_eq!(
             tab.line_target(),
             Some(42),
@@ -1693,6 +1754,108 @@ mod tests {
             list.logical_scroll_top().item_ix,
             7,
             "the scroll made while it read stays"
+        );
+    }
+
+    #[test]
+    fn a_pending_anchor_scrolls_once_after_parse() {
+        let doc = [
+            "# Top\n\n",
+            &"para\n\n".repeat(30),
+            "## Target\n\n",
+            &"para\n\n".repeat(30),
+        ]
+        .concat();
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Source);
+        tab.set_line_target(Some(4));
+        tab.set_anchor_target("target".to_owned());
+        assert_eq!(
+            tab.markdown(),
+            Some(MarkdownMode::Rendered),
+            "a heading shows rendered"
+        );
+        assert_eq!(tab.line_target(), None, "the heading replaces the line");
+
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Ok(text(&doc).with_stamp(stamp(10, 4)))));
+        let parsed = md_doc(&doc);
+        let heading = parsed.anchor_row("target").expect("the heading has a row");
+        assert!(heading > 0);
+        assert!(tab.finish_markdown(run, parsed));
+        let (_, list) = tab.markdown_doc().expect("the document");
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            heading,
+            "the heading is at the top"
+        );
+        assert_eq!(tab.anchor_pending, None, "the anchor is used once");
+
+        let reload = tab.begin_reload(None).expect("a loaded tab reloads");
+        tab.markdown_doc()
+            .expect("the old document")
+            .1
+            .scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        assert!(tab.finish_read(reload, Ok(text(&doc).with_stamp(stamp(11, 5)))));
+        assert!(tab.finish_markdown(reload, md_doc(&doc)));
+        let (_, list) = tab.markdown_doc().expect("the new document");
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            0,
+            "a reload does not scroll again"
+        );
+    }
+
+    #[test]
+    fn a_file_that_shrank_under_the_cap_opens_rendered_at_its_anchor() {
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let run = tab.begin_read().expect("an unread tab reads");
+        let huge = "a\n".repeat(RENDER_CAP / 2 + 1);
+        assert!(tab.finish_read(run, Ok(text(&huge).with_stamp(stamp(10, 4)))));
+        assert!(tab.markdown_too_large(), "the first read is over the cap");
+
+        tab.reread();
+        tab.set_anchor_target("target".to_owned());
+        let doc = ["# Top\n\n", &"para\n\n".repeat(30), "## Target\n\n"].concat();
+        let run = tab.begin_read().expect("a reread tab reads");
+        assert!(tab.finish_read(run, Ok(text(&doc).with_stamp(stamp(11, 5)))));
+        assert_eq!(
+            tab.markdown(),
+            Some(MarkdownMode::Rendered),
+            "the heading shows rendered"
+        );
+        let parsed = md_doc(&doc);
+        let heading = parsed.anchor_row("target").expect("the heading has a row");
+        assert!(tab.finish_markdown(run, parsed));
+        let (_, list) = tab.markdown_doc().expect("the document");
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            heading,
+            "the heading is at the top"
+        );
+        assert_eq!(tab.anchor_pending, None, "the anchor is used");
+    }
+
+    #[test]
+    fn a_render_capped_file_drops_its_pending_anchor() {
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        tab.set_anchor_target("target".to_owned());
+        assert_eq!(tab.anchor_pending.as_deref(), Some("target"));
+        let run = tab.begin_read().expect("an unread tab reads");
+        let huge = "a\n".repeat(RENDER_CAP / 2 + 1);
+        assert!(tab.finish_read(run, Ok(text(&huge).with_stamp(stamp(10, 4)))));
+        assert!(tab.markdown_too_large());
+        assert_eq!(tab.markdown(), Some(MarkdownMode::Source));
+        assert_eq!(tab.anchor_pending, None, "the file opens at its top");
+
+        let mut plain =
+            ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        plain.set_anchor_target("target".to_owned());
+        assert_eq!(
+            plain.anchor_pending, None,
+            "a file that is not Markdown has no headings"
         );
     }
 }
