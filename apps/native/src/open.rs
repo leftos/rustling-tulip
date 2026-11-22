@@ -848,7 +848,7 @@ fn open_action(candidate: &TerminalLinkCandidate, path: PathBuf) -> OpenAction {
 const WEB_PAGE_EXTENSIONS: &[&str] = &["html", "htm", "xhtml"];
 
 /// Whether `path` names a web page, by its extension in any case.
-fn is_web_page(path: &Path) -> bool {
+pub(crate) fn is_web_page(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| {
@@ -2198,6 +2198,23 @@ mod tests {
             OpenAction::Page {
                 path,
                 suffix: "#q1".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_html_link_with_an_explicit_line_and_a_fragment_opens_at_the_line() {
+        let path = PathBuf::from("X:/dir/report.html");
+        let reading = TerminalLinkCandidate {
+            suffix: Some("#summary".to_owned()),
+            ..candidate(r"X:\dir\report.html", Some(30), None)
+        };
+        assert_eq!(
+            open_action(&reading, path.clone()),
+            OpenAction::VsCode {
+                path,
+                line: 30,
+                column: None,
             }
         );
     }

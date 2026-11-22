@@ -843,6 +843,24 @@ fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn ctrl_click_on_a_path_with_a_line_fragment_opens_vscode_at_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "src/main.rs");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"error at src/main.rs#L4C2 here");
+    let at = h.cell_center("p1", 10, 0);
+    h.click(at, ctrl());
+    assert_eq!(
+        h.opened(),
+        [Opened::VsCode {
+            path: file,
+            line: 4,
+            column: 2,
+        }]
+    );
+}
+
+#[gpui::test]
 fn ctrl_click_on_a_text_path_opens_the_default_app(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "docs/notes.md");

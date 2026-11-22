@@ -14,9 +14,12 @@
 //! over-eager stitch degrades into the fragment that was on screen.
 
 use std::ops::Range;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
+
+use crate::open::is_web_page;
 
 /// What a link points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1664,10 +1667,17 @@ fn build_candidates(
         if reading.is_empty() {
             continue;
         }
-        let split = TerminalLinkCandidate {
+        let mut split = TerminalLinkCandidate {
             suffix: suffix.map(str::to_owned),
             ..split_path_position(reading)
         };
+        if split.line.is_none()
+            && !is_web_page(Path::new(&split.path))
+            && let Some((line, column)) = suffix.and_then(fragment_position)
+        {
+            split.line = Some(line);
+            split.column = column;
+        }
         if split.path.is_empty() || candidates.contains(&split) {
             continue;
         }
@@ -2031,15 +2041,45 @@ pub(crate) fn path_link(path: &str, line: Option<u32>, column: Option<u32>) -> T
     }
 }
 
+/// The line and column a suffix's `#fragment` names when it is a GitHub-style
+/// line fragment: the text after the first `#`, as `L<n>` with an optional
+/// `C<n>` column, then optionally `-L<n>` with an optional `C<n>` of its own
+/// for a range whose end is ignored. Every number counts from 1. `None` for
+/// any other fragment, and for a suffix with no `#`.
+#[must_use]
+pub(crate) fn fragment_position(suffix: &str) -> Option<(u32, Option<u32>)> {
+    let (_, fragment) = suffix.split_once('#')?;
+    let (start, end) = match fragment.split_once('-') {
+        Some((start, end)) => (start, Some(end)),
+        None => (fragment, None),
+    };
+    let (line, column) = line_with_column(start)?;
+    if let Some(end) = end {
+        line_with_column(end)?;
+    }
+    Some((line, column))
+}
+
+/// `text` as `L<n>` with an optional `C<n>` after it, both from 1 up.
+fn line_with_column(text: &str) -> Option<(u32, Option<u32>)> {
+    let digits = text.strip_prefix('L').or_else(|| text.strip_prefix('l'))?;
+    let (line, column) = match digits.find(['C', 'c']) {
+        Some(at) => (&digits[..at], Some(&digits[at + 1..])),
+        None => (digits, None),
+    };
+    let column = match column {
+        Some(column) => Some(positive_number(column)?),
+        None => None,
+    };
+    Some((positive_number(line)?, column))
+}
+
 /// The line a link's `#L<digits>` anchor names (`L12` is line 12, and so is
 /// `l12`, since a Markdown link's fragment arrives lowercased); `None` for
 /// any other anchor, and for line 0, since lines count from 1.
 #[must_use]
 pub(crate) fn anchor_line(anchor: &str) -> Option<u32> {
-    let digits = anchor
-        .strip_prefix('L')
-        .or_else(|| anchor.strip_prefix('l'))?;
-    positive_number(digits)
+    fragment_position(&format!("#{anchor}")).map(|(line, _)| line)
 }
 
 /// `text` as a number from 1 up, when it is only ASCII digits.
@@ -2268,6 +2308,15 @@ mod tests {
         }
     }
 
+    /// A reading cut off before `suffix`, whose fragment names `line` and
+    /// `column`.
+    fn cut_at(path: &str, suffix: &str, line: u32, column: Option<u32>) -> TerminalLinkCandidate {
+        TerminalLinkCandidate {
+            suffix: Some(suffix.to_owned()),
+            ..candidate(path, Some(line), column)
+        }
+    }
+
     fn targets(links: &[TerminalLink]) -> Vec<&str> {
         links.iter().map(|link| link.target.as_str()).collect()
     }
@@ -2283,6 +2332,59 @@ mod tests {
                 candidate(r"X:\dir\index.html#q1", None, None),
                 cut(r"X:\dir\index.html", "#q1"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_line_fragment_sets_the_cut_readings_line() {
+        let links = detect_links("open src/a.rs#L4C2 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate("src/a.rs#L4C2", None, None),
+                cut_at("src/a.rs", "#L4C2", 4, Some(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_then_line_fragment_sets_the_line() {
+        let links = detect_links("open src/a.rs?run=3#L4 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate("src/a.rs?run=3#L4", None, None),
+                cut_at("src/a.rs", "?run=3#L4", 4, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_fragment_leaves_the_cut_reading_lineless() {
+        let links = detect_links("open src/a.rs#intro now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate("src/a.rs#intro", None, None),
+                cut("src/a.rs", "#intro"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_web_pages_line_fragment_sets_no_line() {
+        let links = detect_links(r"open X:\dir\timings.html#L4 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate(r"X:\dir\timings.html#L4", None, None),
+                cut(r"X:\dir\timings.html", "#L4"),
+            ],
+            "a page may use the fragment as an id, so it keeps it and takes no line"
         );
     }
 
@@ -2410,6 +2512,19 @@ mod tests {
         assert_eq!(
             links[0].candidates,
             [candidate(r"X:\a#b\file.txt", None, None)]
+        );
+    }
+
+    #[test]
+    fn an_explicit_line_wins_over_a_fragment() {
+        let links = detect_links("open src/a.rs:12#L4 now");
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(
+            links[0].candidates,
+            [
+                candidate("src/a.rs:12#L4", None, None),
+                cut_at("src/a.rs", "#L4", 12, None),
+            ]
         );
     }
 
@@ -3394,6 +3509,20 @@ mod tests {
         assert_eq!(super::anchor_line("l12"), Some(12));
         for anchor in ["L", "l", "L1x", "heading", "L0", ""] {
             assert_eq!(super::anchor_line(anchor), None, "{anchor}");
+        }
+    }
+
+    #[test]
+    fn fragment_position_reads_github_line_fragments() {
+        let position = super::fragment_position;
+        assert_eq!(position("#L4"), Some((4, None)));
+        assert_eq!(position("#l4"), Some((4, None)));
+        assert_eq!(position("#L4-L9"), Some((4, None)));
+        assert_eq!(position("#L4C2"), Some((4, Some(2))));
+        assert_eq!(position("#L4-L9C3"), Some((4, None)));
+        assert_eq!(position("?run=3#L4"), Some((4, None)));
+        for suffix in ["#section-name", "#", "#L", "#L0", "#Lx"] {
+            assert_eq!(position(suffix), None, "{suffix}");
         }
     }
 
