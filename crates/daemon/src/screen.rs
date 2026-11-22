@@ -294,6 +294,17 @@ impl Screen {
     pub fn title(&self) -> Option<String> {
         crate::sync::lock(&self.title).clone()
     }
+
+    /// The title a session had before this screen existed, kept until the
+    /// stream sets a title or replaces one: a seed only fills a screen whose
+    /// stream has set no title yet, and `None` seeds nothing.
+    pub fn seed_title(&self, title: Option<&str>) {
+        let Some(title) = title else {
+            return;
+        };
+        let mut current = crate::sync::lock(&self.title);
+        current.get_or_insert_with(|| title.to_owned());
+    }
 }
 
 /// Whether `row` is a horizontal rule: a row that starts and ends with the
@@ -458,6 +469,41 @@ mod tests {
         // whatever it is given (`term/mod.rs` `set_title`: `self.title.clone_from(&title);`)
         // and sends `Event::ResetTitle` only for `None`. An empty title is
         // therefore stored as the empty string, not as a reset.
+        assert_eq!(screen.title(), Some(String::new()));
+    }
+
+    #[test]
+    fn a_seeded_title_reads_until_the_stream_sets_one() {
+        let mut screen = Screen::new(40, 6);
+        screen.seed_title(Some("✳ Fix login"));
+        assert_eq!(screen.title(), Some("✳ Fix login".to_owned()));
+        screen.feed("\x1b]0;✳ Other\x07".as_bytes());
+        assert_eq!(screen.title(), Some("✳ Other".to_owned()));
+    }
+
+    #[test]
+    fn a_seed_never_replaces_a_title_the_stream_set() {
+        let mut screen = Screen::new(40, 6);
+        screen.feed("\x1b]0;◐ Fixing tests\x07".as_bytes());
+        screen.seed_title(Some("✳ Fix login"));
+        assert_eq!(screen.title(), Some("◐ Fixing tests".to_owned()));
+    }
+
+    #[test]
+    fn a_seed_of_none_leaves_no_title() {
+        let screen = Screen::new(40, 6);
+        screen.seed_title(None);
+        assert_eq!(screen.title(), None);
+    }
+
+    #[test]
+    fn a_title_reset_clears_a_seed() {
+        let mut screen = Screen::new(40, 6);
+        screen.seed_title(Some("✳ Fix login"));
+        // An empty OSC 0 reaches alacritty as the empty title rather than a
+        // reset (see `osc_title_is_kept_and_reset`), so the stream's empty
+        // title is what replaces the seed.
+        screen.feed("\x1b]0;\x07".as_bytes());
         assert_eq!(screen.title(), Some(String::new()));
     }
 

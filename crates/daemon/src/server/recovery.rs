@@ -219,10 +219,10 @@ async fn reattach_one(
             // Only a shell's classifier reads input volume.
             let shell_watcher = runs_shell_watcher(&meta);
             let shell_input = shell_watcher.then(mpsc::unbounded_channel::<usize>);
-            let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
-                screen::REATTACH_COLS,
-                screen::REATTACH_ROWS,
-            )));
+            let fresh = screen::Screen::new(screen::REATTACH_COLS, screen::REATTACH_ROWS);
+            // The sidecar's title stands in until the replay or the stream paints one.
+            fresh.seed_title(meta.terminal_title.as_deref());
+            let screen: screen::SharedScreen = Arc::new(Mutex::new(fresh));
             let (restored, agent) = {
                 let mut guard = crate::sync::lock(pending.arc());
                 guard.scrollback_snapshot_req = Some(snap_tx);

@@ -1451,6 +1451,19 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_title_names_the_session_on_a_reattached_screen() {
+        let screen = screen_from(V2319);
+        screen.seed_title(Some(V2319_TITLE));
+        assert_eq!(
+            read_view(&agent_registry::default_agent(), &screen)
+                .expect("Claude's plugin reads views")
+                .agent_in_view,
+            None,
+            "the rule under the dialog names the session the seeded title names"
+        );
+    }
+
+    #[test]
     fn with_no_title_the_rules_name_stays() {
         assert_eq!(
             view_of(V2319).agent_in_view.as_deref(),
