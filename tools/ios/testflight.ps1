@@ -10,13 +10,14 @@
 # .p12 password, which `security import -P` takes as an argument on the Mac (as
 # the macOS signing path does).
 #
-# On the Mac (-OnMac) it checks Xcode's tools, moves the App Store Connect key
-# variables out of its environment, runs
-# `tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>` and uploads the
-# .ipa with `xcrun altool --upload-app`, the key decoded into the run's temp
-# folder and found through API_PRIVATE_KEYS_DIR. The upload counts only when
-# altool exits 0 and says UPLOAD SUCCEEDED. -NoUpload stops after the signed
-# build.
+# On the Mac (-OnMac) it moves the App Store Connect key variables out of its
+# environment before any tool runs, then checks Xcode's tools, runs
+# `tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>` with the build
+# signing variables, which leave the environment once that build returns (or
+# throws), and uploads the .ipa with `xcrun altool --upload-app`, the key decoded
+# into the run's temp folder and found through API_PRIVATE_KEYS_DIR. The upload
+# counts only when altool exits 0 and says UPLOAD SUCCEEDED. -NoUpload stops
+# after the signed build.
 #
 #   pwsh -NoProfile -File tools/ios/testflight.ps1 [-NoUpload]
 #
@@ -128,7 +129,9 @@ function Test-XcodeTool([switch] $SkipUpload) {
     if ($LASTEXITCODE -ne 0) { throw 'testflight: actool is missing from this Xcode' }
     if (-not $SkipUpload) {
         $help = (@(& xcrun altool --help 2>&1 | ForEach-Object { "$_" }) -join "`n")
-        if ($help -notmatch '--upload-app') { throw "testflight: this Xcode's altool cannot upload builds (no --upload-app); the upload needs Transporter" }
+        if ($help -notmatch '--upload-app') {
+            throw "testflight: this Xcode's altool cannot upload builds (no --upload-app); the upload needs Transporter"
+        }
     }
 }
 
@@ -169,20 +172,35 @@ function Invoke-Upload([string] $Ipa, [hashtable] $Key) {
 
 function Invoke-OnMac([switch] $SkipUpload) {
     foreach ($name in $Names) {
-        if (-not [Environment]::GetEnvironmentVariable($name)) { throw "tools/ios/testflight.ps1 -OnMac needs the environment variable $name, which is not set" }
+        if (-not [Environment]::GetEnvironmentVariable($name)) {
+            throw "tools/ios/testflight.ps1 -OnMac needs the environment variable $name, which is not set"
+        }
     }
-    Test-XcodeTool -SkipUpload:$SkipUpload
-    # The upload's key is this script's alone: build.ps1 and the build it starts never see it.
+    # The upload's key is this script's alone: no tool this script starts, build.ps1 and the build it
+    # starts included, ever sees it.
     $key = @{ P8 = $env:IOS_ASC_API_KEY_P8_BASE64; Id = $env:IOS_ASC_API_KEY_ID; Issuer = $env:IOS_ASC_API_ISSUER_ID }
     $env:IOS_ASC_API_KEY_P8_BASE64 = $null
     $env:IOS_ASC_API_KEY_ID = $null
     $env:IOS_ASC_API_ISSUER_ID = $null
+    Test-XcodeTool -SkipUpload:$SkipUpload
     $number = $env:IOS_BUILD_NUMBER
-    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build.ps1') -Target device -Sign -BuildNumber $number |
-        Tee-Object -Variable buildLines | Out-Host
+    # The build sees the signing set; it leaves the environment as soon as the build returns or throws.
+    try {
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build.ps1') -Target device -Sign -BuildNumber $number |
+            Tee-Object -Variable buildLines | Out-Host
+    }
+    finally {
+        $env:IOS_DIST_CERT_P12_BASE64 = $null
+        $env:IOS_DIST_CERT_PASSWORD_BASE64 = $null
+        $env:IOS_PHONE_PROFILE_GZ_BASE64 = $null
+        $env:IOS_NOTIFY_PROFILE_GZ_BASE64 = $null
+        $env:IOS_TEAM_ID = $null
+    }
     Assert-LastExit 'tools/ios/build.ps1 -Target device -Sign'
     $ipa = "$(@($buildLines)[-1])".Trim()
-    if (-not $ipa.EndsWith('.ipa') -or -not (Test-Path -LiteralPath $ipa -PathType Leaf)) { throw "tools/ios/build.ps1 printed no .ipa path last (got '$ipa')" }
+    if (-not $ipa.EndsWith('.ipa') -or -not (Test-Path -LiteralPath $ipa -PathType Leaf)) {
+        throw "tools/ios/build.ps1 printed no .ipa path last (got '$ipa')"
+    }
     if ($SkipUpload) {
         Write-Output "testflight: signed build $number at $ipa"
         return
