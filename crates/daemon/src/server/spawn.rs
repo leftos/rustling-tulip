@@ -1381,6 +1381,7 @@ fn interactive_record(
         hook_options: OptionValues::new(),
         resumed_from: new.resumed_from,
         announced: false,
+        held_events: Vec::new(),
         listed_at: None,
         chat_answers: 0,
     };
@@ -1479,6 +1480,7 @@ fn plain_shell_record(
         hook_options: new.hook_options,
         resumed_from: new.resumed_from,
         announced: false,
+        held_events: Vec::new(),
         listed_at: None,
         chat_answers: 0,
     };
@@ -2713,6 +2715,7 @@ impl HeadlessRecord<'_> {
             hook_options: OptionValues::new(),
             resumed_from: self.cfg.extras.resumed_from.clone(),
             announced: false,
+            held_events: Vec::new(),
             listed_at: None,
             chat_answers: 0,
         }

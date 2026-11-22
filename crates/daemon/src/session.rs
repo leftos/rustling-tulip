@@ -436,8 +436,15 @@ pub struct SessionRecord {
     /// Whether clients have heard of this session: false while the record
     /// is pending, set by [`PendingInsert::publish_from`] as it sends the
     /// first `SessionUpdated`. A client-facing listing skips an unannounced
-    /// record, and an update to one is applied without a broadcast.
+    /// record, an update to one is applied without a broadcast, and every
+    /// other event naming it waits in [`Self::held_events`].
     pub announced: bool,
+    /// The events about this session that arose while it was pending
+    /// (attention, turn-end alerts, notices, an agent's end), in arrival
+    /// order. The publish replays the ones still true right after the first
+    /// `SessionUpdated`; a discard drops them. Empty once announced.
+    /// Runtime-only: never mirrored into the sidecar.
+    pub held_events: Vec<SessionEvent>,
     /// The registry's listing key: when clients first heard of the session,
     /// handed out by [`PendingInsert::publish_from`] and strictly increasing
     /// within a run. A recovered session keeps the key its sidecar holds, so
@@ -1228,7 +1235,10 @@ impl SessionRegistry {
     pub fn remove(&self, id: &str) {
         {
             let mut guard = write(&self.by_id);
-            if guard.remove(id).is_some() {
+            // A record no client heard of goes without a word, as a discard does.
+            if let Some(arc) = guard.remove(id)
+                && lock(&arc).announced
+            {
                 let _ = self.events.send(SessionEvent::Removed(id.to_string()));
             }
         }
@@ -1367,19 +1377,45 @@ impl SessionRegistry {
 
     /// Tell every client that the agent inside session `id`'s shell ended.
     /// Sent after the update that recorded the end, so it follows that
-    /// update's `SessionUpdated`.
+    /// update's `SessionUpdated`. Held while the record is pending, and
+    /// dropped at its publish.
     pub fn announce_agent_exited(&self, id: &str) {
-        let _ = self.events.send(SessionEvent::AgentExited {
-            session_id: id.to_owned(),
-        });
+        self.emit_scoped(
+            id,
+            SessionEvent::AgentExited {
+                session_id: id.to_owned(),
+            },
+        );
     }
 
-    /// Tell every client `notice` about session `id`'s terminal.
+    /// Tell every client `notice` about session `id`'s terminal, or, while
+    /// the record is pending, once it is published.
     pub fn announce_notice(&self, id: &str, notice: protocol::SessionNoticeKind) {
-        let _ = self.events.send(SessionEvent::Notice {
-            session_id: id.to_owned(),
-            notice,
-        });
+        self.emit_scoped(
+            id,
+            SessionEvent::Notice {
+                session_id: id.to_owned(),
+                notice,
+            },
+        );
+    }
+
+    /// Send `event` about session `id`, or hold it on the record while the
+    /// record is pending, for its publish to replay. Decided and sent under
+    /// the record lock, which the publish holds while it flips `announced`
+    /// and replays, so nothing slips out ahead of the first
+    /// `SessionUpdated`. A record already gone sends as before.
+    fn emit_scoped(&self, id: &str, event: SessionEvent) {
+        let Some(arc) = self.get(id) else {
+            let _ = self.events.send(event);
+            return;
+        };
+        let mut rec = lock(&arc);
+        if rec.announced {
+            let _ = self.events.send(event);
+        } else {
+            rec.held_events.push(event);
+        }
     }
 
     /// [`Self::update`], its broadcast carrying `origin`. Returns whether
@@ -1554,7 +1590,7 @@ impl SessionRegistry {
         self.sync_sidecar(id);
         self.broadcast_update(snap, origin);
         if let Some(event) = follow_up {
-            let _ = self.events.send(event);
+            self.emit_scoped(id, event);
         }
         if entered_error {
             self.fan_out_attention(id.to_owned(), protocol::AttentionReason::Error);
@@ -1572,10 +1608,70 @@ impl SessionRegistry {
         }
     }
 
+    /// Tell every client session `session_id` wants attention for `reason`,
+    /// or, while the record is pending, hold it for its publish.
     pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
-        let _ = self
-            .events
-            .send(SessionEvent::Attention { session_id, reason });
+        let id = session_id.clone();
+        self.emit_scoped(&id, SessionEvent::Attention { session_id, reason });
+    }
+}
+
+/// Whether a held `reason` attention still holds for `rec` at its publish.
+/// A prompt's attention is sent once, while the session still waits: a wait
+/// the screen raised holds no `pending_input`, so the status alone decides.
+fn held_attention_due(
+    rec: &SessionRecord,
+    reason: protocol::AttentionReason,
+    prompt_sent: &mut bool,
+) -> bool {
+    match reason {
+        protocol::AttentionReason::AwaitingInput => {
+            let due = !*prompt_sent && rec.status == SessionStatus::AwaitingInput;
+            *prompt_sent |= due;
+            due
+        }
+        // An abandoned session's attention is an Error on a Stopped record.
+        protocol::AttentionReason::Error => {
+            rec.status == SessionStatus::Error
+                || (rec.status == SessionStatus::Stopped && rec.is_abandoned)
+        }
+        protocol::AttentionReason::Stopped => rec.status == SessionStatus::Stopped,
+    }
+}
+
+/// Send the events `rec` held while pending, in arrival order, keeping only
+/// those still true now: a prompt's attention once while it waits, an Error
+/// or Stopped attention while the status stands, the latest turn-end alert
+/// while the session waits, and every notice. An agent's end is dropped,
+/// since no client saw it start. Called under the record lock, right after
+/// the first `SessionUpdated`.
+fn replay_held_events(events: &broadcast::Sender<SessionEvent>, rec: &mut SessionRecord) {
+    let held = std::mem::take(&mut rec.held_events);
+    let latest_alert = held
+        .iter()
+        .rposition(|event| matches!(event, SessionEvent::WaitingAlert { .. }));
+    let mut prompt_sent = false;
+    for (at, event) in held.into_iter().enumerate() {
+        let due = match &event {
+            SessionEvent::Attention { reason, .. } => {
+                held_attention_due(rec, *reason, &mut prompt_sent)
+            }
+            SessionEvent::WaitingAlert { .. } => {
+                latest_alert == Some(at)
+                    && matches!(
+                        rec.status,
+                        SessionStatus::Idle | SessionStatus::AwaitingInput
+                    )
+            }
+            SessionEvent::AgentExited { session_id } => {
+                debug!(%session_id, "agent end held while pending dropped at publish");
+                false
+            }
+            _ => true,
+        };
+        if due {
+            let _ = events.send(event);
+        }
     }
 }
 
@@ -1585,8 +1681,11 @@ impl SessionRegistry {
 /// available after the record is reachable in the registry — calling the
 /// regular `insert()` would publish a half-wired snapshot first. Until then
 /// no client hears of the record: the daemon's own readers see it in the
-/// registry, but a client-facing listing skips it and an update to it is
-/// applied without a broadcast.
+/// registry, but a client-facing listing skips it, an update to it is
+/// applied without a broadcast, and every other event about it (attention,
+/// turn-end alerts, notices, an agent's end) is held on the record. The
+/// publish replays the held events still true after the first
+/// `SessionUpdated`; a discard drops them.
 pub struct PendingInsert<'a> {
     registry: &'a SessionRegistry,
     arc: Arc<Mutex<SessionRecord>>,
@@ -1603,9 +1702,14 @@ impl PendingInsert<'_> {
 
     /// Takes the unpublished record back out of the registry. No client
     /// heard of it (no listing sent to a client holds it, and no update to
-    /// it was broadcast), so nothing is broadcast.
+    /// it was broadcast), so nothing is broadcast, and the events it held
+    /// are dropped unsent.
     pub fn discard(self) {
-        let id = lock(&self.arc).id.clone();
+        let id = {
+            let mut rec = lock(&self.arc);
+            rec.held_events.clear();
+            rec.id.clone()
+        };
         write(&self.registry.by_id).remove(&id);
         lock(&self.registry.sidecar_gates).remove(&id);
         lock(&self.registry.scrollback_gates).remove(&id);
@@ -1644,8 +1748,9 @@ impl PendingInsert<'_> {
     /// (a recovered record keeps its own), mark it announced and send its
     /// first `SessionUpdated`, so keys go up in the order clients hear of
     /// sessions. The record lock is held across the send, so an update's
-    /// newer snapshot never reaches clients ahead of this one. Answers
-    /// whether the key is new.
+    /// newer snapshot never reaches clients ahead of this one, and the
+    /// events the record held while pending follow it under the same locks.
+    /// Answers whether the key is new.
     fn announce(&self, origin: Option<UpdateOrigin>) -> bool {
         let mut last = lock(&self.registry.publish);
         let mut rec = lock(&self.arc);
@@ -1659,6 +1764,7 @@ impl PendingInsert<'_> {
             .registry
             .events
             .send(SessionEvent::Updated(Box::new(rec.snapshot()), origin));
+        replay_held_events(&self.registry.events, &mut rec);
         fresh
     }
 }
@@ -2172,6 +2278,7 @@ impl SessionRegistry {
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
             announced: false,
+            held_events: Vec::new(),
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
@@ -2270,6 +2377,7 @@ impl SessionRegistry {
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
             announced: false,
+            held_events: Vec::new(),
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
@@ -2345,6 +2453,7 @@ impl SessionRegistry {
             hook_options: meta.hook_options.clone(),
             resumed_from: meta.resumed_from.clone(),
             announced: false,
+            held_events: Vec::new(),
             // An older sidecar holds no key: its start stands in, so a
             // restart lists by start whatever order the recoveries finish.
             listed_at: meta.listed_at.or(Some(meta.started_at)),
@@ -2449,6 +2558,7 @@ mod tests {
             hook_options: protocol::OptionValues::new(),
             resumed_from: Vec::new(),
             announced: false,
+            held_events: Vec::new(),
             listed_at: None,
             chat_answers: 0,
         }
@@ -2609,6 +2719,242 @@ mod tests {
                 Err(broadcast::error::TryRecvError::Empty)
             ),
             "the publish sends exactly one update"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Every event `events` holds, each as a short name, draining it.
+    fn drained_kinds(events: &mut broadcast::Receiver<SessionEvent>) -> Vec<String> {
+        let mut kinds = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            kinds.push(match event {
+                SessionEvent::Updated(..) => "updated".to_owned(),
+                SessionEvent::Removed(_) => "removed".to_owned(),
+                SessionEvent::Attention { reason, .. } => format!("attention:{reason:?}"),
+                SessionEvent::AgentExited { .. } => "agent_exited".to_owned(),
+                SessionEvent::Notice { .. } => "notice".to_owned(),
+                SessionEvent::WaitingAlert { notification, .. } => format!("alert:{notification}"),
+            });
+        }
+        kinds
+    }
+
+    /// Put `id`'s record in the registry's view of a waiting prompt.
+    fn raise_prompt(registry: &SessionRegistry, id: &str) {
+        registry.update(id, |rec| {
+            rec.status = SessionStatus::AwaitingInput;
+            rec.pending_input = Some(protocol::PendingInput::Other {
+                message: "go on?".to_owned(),
+            });
+        });
+    }
+
+    /// A turn-end alert for `id` whose notification reads `text`.
+    fn alert(id: &str, text: &str) -> SessionEvent {
+        TurnAlert {
+            kind: None,
+            notification: text.to_owned(),
+            source: protocol::SummarySource::Template,
+        }
+        .event(id)
+    }
+
+    #[test]
+    fn an_attention_on_a_pending_record_waits_for_publish() {
+        let dirs = scratch_dirs("pending-attention");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        raise_prompt(&registry, "s1");
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::AwaitingInput);
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::AwaitingInput);
+        assert!(
+            drained_kinds(&mut events).is_empty(),
+            "no client hears of a pending record's attention"
+        );
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated", "attention:AwaitingInput"],
+            "the prompt's attention follows the first update, once"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_screen_raised_prompt_held_while_pending_is_replayed() {
+        let dirs = scratch_dirs("pending-screen-prompt");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        // The screen raises a wait with nothing pending, as a trust dialog
+        // shown before any hook does.
+        registry.update("s1", |rec| rec.status = SessionStatus::AwaitingInput);
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::AwaitingInput);
+        assert!(
+            drained_kinds(&mut events).is_empty(),
+            "the attention is held"
+        );
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated", "attention:AwaitingInput"],
+            "a wait the screen raised still reaches clients after the first update"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_waiting_alert_on_a_pending_record_follows_publish() {
+        let dirs = scratch_dirs("pending-alert");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        registry.update_then("s1", |rec| {
+            rec.terminal_title = Some("one".to_owned());
+            Some(alert("s1", "first"))
+        });
+        registry.update_then("s1", |rec| {
+            rec.terminal_title = Some("two".to_owned());
+            Some(alert("s1", "second"))
+        });
+        assert!(drained_kinds(&mut events).is_empty(), "the alerts are held");
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated", "alert:second"],
+            "only the latest alert follows the first update"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_prompt_answered_before_publish_is_not_replayed() {
+        let dirs = scratch_dirs("pending-answered");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        raise_prompt(&registry, "s1");
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::AwaitingInput);
+        registry.update("s1", |rec| {
+            rec.status = SessionStatus::Working;
+            rec.pending_input = None;
+        });
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated"],
+            "a prompt gone by the publish raises no attention"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn an_agent_exit_on_a_pending_record_is_dropped() {
+        let dirs = scratch_dirs("pending-agent-exit");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        registry.announce_agent_exited("s1");
+        assert!(drained_kinds(&mut events).is_empty(), "the exit is held");
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated"],
+            "no client saw the agent start, so none hears it end"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_discarded_pending_record_sends_its_held_events_nowhere() {
+        let dirs = scratch_dirs("pending-discard-held");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        raise_prompt(&registry, "s1");
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::AwaitingInput);
+        registry.announce_notice("s1", protocol::SessionNoticeKind::WaitingInMain);
+        registry.update_then("s1", |_| Some(alert("s1", "held")));
+
+        pending.discard();
+        assert!(
+            drained_kinds(&mut events).is_empty(),
+            "a discarded record's held events go nowhere"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn held_events_replay_in_arrival_order() {
+        let dirs = scratch_dirs("pending-order");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        registry.announce_notice("s1", protocol::SessionNoticeKind::WaitingInMain);
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert!(drained_kinds(&mut events).is_empty(), "both are held");
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated", "notice", "attention:Error"],
+            "held events follow the first update in the order they arose"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_pending_record_that_stops_replays_its_stopped_attention() {
+        let dirs = scratch_dirs("pending-stopped");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut events = registry.subscribe();
+        let pending = registry.insert_pending(record("s1"));
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Stopped);
+        registry.fan_out_attention("s1".to_owned(), protocol::AttentionReason::Stopped);
+        assert!(drained_kinds(&mut events).is_empty(), "the stop is held");
+
+        pending.publish();
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["updated", "attention:Stopped"],
+            "an exit during the spawn reaches clients after its first update"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn removing_a_never_announced_record_sends_no_removed() {
+        let dirs = scratch_dirs("pending-remove");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("listed"));
+        let mut events = registry.subscribe();
+        let _pending = registry.insert_pending(record("s1"));
+
+        registry.remove("s1");
+        assert!(
+            drained_kinds(&mut events).is_empty(),
+            "no client heard of the record, so none hears it go"
+        );
+
+        registry.remove("listed");
+        assert_eq!(
+            drained_kinds(&mut events),
+            ["removed"],
+            "an announced record's removal is still sent"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

@@ -2884,6 +2884,7 @@ mod hysteresis_tests {
             hook_options: protocol::OptionValues::new(),
             resumed_from: Vec::new(),
             announced: false,
+            held_events: Vec::new(),
             listed_at: None,
             chat_answers: 0,
         }

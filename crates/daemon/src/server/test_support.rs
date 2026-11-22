@@ -528,6 +528,7 @@ pub(crate) fn idle_record(id: &str) -> SessionRecord {
         hook_options: protocol::OptionValues::new(),
         resumed_from: Vec::new(),
         announced: false,
+        held_events: Vec::new(),
         listed_at: None,
         chat_answers: 0,
     }
