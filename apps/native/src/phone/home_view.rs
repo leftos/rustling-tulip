@@ -12,7 +12,6 @@ use gpui::{
     Stateful, StyledText, TouchPhase, Window, canvas, div, prelude::*, px,
 };
 
-use super::PhoneRoot;
 use super::home::{Home, HomeGroup, HomeHost, HomeRow, Tone, pinned_host};
 use super::hosts_view::{RowParts, phone_button, row_parts, saved_name};
 use super::long_press::long_press_area;
@@ -20,6 +19,7 @@ use super::root_view::LIST_PANE_WIDTH;
 use super::settings_view::{CHECK, CHEVRON};
 use super::sheet::CANCEL_LABEL;
 use super::tray::{self, Arranged, Buttons, TrayCard};
+use super::{PhoneLayout, PhoneRoot};
 use crate::RootView;
 use crate::buttons::ButtonKind;
 use crate::chat_cards;
@@ -71,6 +71,21 @@ const REFRESHING_TEXT: &str = "Refreshing…";
 /// under the header and above `Open`, with anything longer scrolling
 /// inside.
 const TRAY_CARD_HEIGHT: f32 = 356.0;
+/// The most of the landscape list pane's usable height the card takes: half,
+/// so Home still shows under it.
+const TRAY_CARD_MAX_SHARE: f32 = 0.5;
+
+/// The Needs you card's height in `layout` on a window `usable_height` points
+/// tall: `TRAY_CARD_HEIGHT` beside the list, and no more than
+/// `TRAY_CARD_MAX_SHARE` of it in the landscape list pane.
+fn tray_card_height(layout: PhoneLayout, usable_height: f32) -> f32 {
+    if layout == PhoneLayout::TerminalFull {
+        (usable_height * TRAY_CARD_MAX_SHARE).min(TRAY_CARD_HEIGHT)
+    } else {
+        TRAY_CARD_HEIGHT
+    }
+}
+
 /// The button of a card whose prompt is answered on the session's page.
 const OPEN_LABEL: &str = "Open";
 /// Home's header button that opens the sort sheet, and the sheet's title.
@@ -678,7 +693,7 @@ impl PhoneRoot {
             .driver_id(|| "phone-tray-card".to_owned())
             .relative()
             .left(px(self.tray.offset()))
-            .h(px(TRAY_CARD_HEIGHT))
+            .h(px(tray_card_height(self.layout, self.usable_height)))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -1310,5 +1325,21 @@ impl PhoneRoot {
                     this.open_session(host.clone(), &session_id, cx);
                 }
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tray_card_height;
+    use crate::phone::PhoneLayout;
+
+    /// The landscape list pane gives the card half its height, and every
+    /// other layout keeps the card's own.
+    #[test]
+    fn tray_card_height_leaves_half_the_landscape_pane() {
+        assert_eq!(tray_card_height(PhoneLayout::TerminalFull, 402.0), 201.0);
+        assert_eq!(tray_card_height(PhoneLayout::TerminalFull, 800.0), 356.0);
+        assert_eq!(tray_card_height(PhoneLayout::TwoPane, 402.0), 356.0);
+        assert_eq!(tray_card_height(PhoneLayout::Single, 402.0), 356.0);
     }
 }

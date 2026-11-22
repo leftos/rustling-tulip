@@ -804,9 +804,8 @@ fn the_bar_ctrl_c_key_interrupts_with_text_selected(cx: &mut TestAppContext) {
         terminal.contains(&from) && terminal.contains(&to),
         "the selection drags inside the terminal: {from:?} to {to:?} in {terminal:?}"
     );
-    // A selection made as `ui_terminal`'s copy specs make one. The phone
-    // drops the `Copied` its release emits (`drops_phone_event`), so the
-    // selection is checked through the pane, not the clipboard.
+    // A selection made as `ui_terminal`'s copy specs make one; its release
+    // copies, so the selection is checked through the pane.
     h.drag(from, to, [Modifiers::none(); 2]);
     assert!(selected(&mut h, &slot), "the drag selects text");
     h.set_clipboard("other");
@@ -827,6 +826,37 @@ fn the_bar_ctrl_c_key_interrupts_with_text_selected(cx: &mut TestAppContext) {
         h.clipboard().as_deref(),
         Some("other"),
         "and the bar's Ctrl+C copies nothing"
+    );
+}
+
+#[gpui::test]
+fn a_terminal_selection_on_the_phone_reaches_the_clipboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    // At its final width first: a resize reflows the terminal's columns, and
+    // that clears any selection the drag had made.
+    phone_width(&mut h);
+    h.host(&saved_remote()).pty("n", b"hello world");
+    h.cx.run_until_parked();
+    let slot = slot_id("n");
+    let (from, to) = (
+        cell_edge(&mut h, &slot, 0, -2.0),
+        cell_edge(&mut h, &slot, 4, 2.0),
+    );
+    h.set_clipboard("other");
+
+    h.drag(from, to, [Modifiers::none(); 2]);
+
+    assert!(selected(&mut h, &slot), "the drag selects text");
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("hello"),
+        "the release copies the selection"
+    );
+    assert_eq!(
+        h.root(|root, _| root.copied_chip()),
+        Some(5),
+        "and the copied chip reports it"
     );
 }
 

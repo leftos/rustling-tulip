@@ -442,6 +442,49 @@ fn a_session_opened_on_its_side_shows_on_chat_in_the_panes(cx: &mut TestAppConte
     assert_eq!(toggle(&mut h), Some("Terminal"), "still on the Chat page");
 }
 
+/// [`listed`] with `a` waiting on a question of three described options.
+fn waiting() -> Vec<SessionSnapshot> {
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("awaiting_input")
+        .pending_input(json!({
+            "kind": "question",
+            "questions": [{
+                "question": "Which branch?",
+                "header": "Migration",
+                "options": ["main", "dev", "next"],
+                "option_descriptions": [
+                    "the trunk",
+                    "the feature line",
+                    "the next release's branch",
+                ],
+                "multi_select": false,
+            }],
+        }))
+        .build();
+    sessions
+}
+
+#[gpui::test]
+fn the_tray_card_leaves_room_for_home_in_landscape(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_side(cx, &dir);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: waiting(),
+    });
+    h.cx.run_until_parked();
+
+    assert!(drawn(&mut h, "phone-tray-card"), "the card shows");
+    let pane = h.bounds("phone-list-pane");
+    let card = h.bounds("phone-tray-card");
+    assert!(
+        card.size.height <= pane.size.height * 0.55,
+        "the card {card:?} leaves the landscape list pane {pane:?} room"
+    );
+}
+
 #[gpui::test]
 fn an_ended_session_stays_on_chat_on_its_side(cx: &mut TestAppContext) {
     let dir = TestDir::new();

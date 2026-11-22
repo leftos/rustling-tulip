@@ -1504,15 +1504,15 @@ impl RootView {
     }
 
     /// Whether `event` from slot `slot_id` needs the desktop's UI the phone's
-    /// terminal has none of: a link menu, a shell dot's menu, an image paste
-    /// or a copy's toast.
+    /// terminal has none of: a link menu, a shell dot's menu or an image
+    /// paste. A copy is not among them: the phone writes the clipboard and
+    /// draws the copied chip for it.
     pub(crate) fn drops_phone_event(&self, slot_id: &str, event: &PaneEvent) -> bool {
         matches!(
             event,
             PaneEvent::LinkMenu { .. }
                 | PaneEvent::ShellDotMenu { .. }
                 | PaneEvent::PasteImage { .. }
-                | PaneEvent::Copied { .. }
         ) && self.is_phone_terminal(slot_id)
     }
 

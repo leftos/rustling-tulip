@@ -766,3 +766,45 @@ fn the_list_pane_offers_the_sort_button_and_its_choice_applies(cx: &mut TestAppC
         "A–Z puts r1's row above r2's"
     );
 }
+
+/// [`listed`] with `a` waiting on a question of three described options.
+fn waiting() -> Vec<SessionSnapshot> {
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("awaiting_input")
+        .pending_input(json!({
+            "kind": "question",
+            "questions": [{
+                "question": "Which branch?",
+                "header": "Migration",
+                "options": ["main", "dev", "next"],
+                "option_descriptions": [
+                    "the trunk",
+                    "the feature line",
+                    "the next release's branch",
+                ],
+                "multi_select": false,
+            }],
+        }))
+        .build();
+    sessions
+}
+
+#[gpui::test]
+fn the_tray_card_keeps_its_height_on_the_ipad(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = ipad(cx, &dir);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: waiting(),
+    });
+    h.cx.run_until_parked();
+
+    assert!(drawn(&mut h, "phone-tray-card"), "the card shows");
+    assert_eq!(
+        h.bounds("phone-tray-card").size.height,
+        px(356.0),
+        "the iPad's list pane keeps the card's full height"
+    );
+}

@@ -30,6 +30,15 @@ pub enum PhoneLayout {
 }
 
 impl PhoneLayout {
+    /// The height, in points, of `viewport` less the safe area's top and
+    /// bottom bands: the height the layout reads, and the one the tray sizes
+    /// a card by. The keyboard is not counted.
+    #[must_use]
+    pub fn usable_height(viewport: Size<Pixels>, insets: &WindowInsets) -> f32 {
+        let safe = insets.safe_area;
+        f32::from(viewport.height) - f32::from(safe.top) - f32::from(safe.bottom)
+    }
+
     /// The layout for a `viewport` with `insets` drawn around it: the usable
     /// size is the viewport less the safe area, and the keyboard is not
     /// counted.
@@ -37,7 +46,7 @@ impl PhoneLayout {
     pub fn of(viewport: Size<Pixels>, insets: &WindowInsets) -> Self {
         let safe = insets.safe_area;
         let width = f32::from(viewport.width) - f32::from(safe.left) - f32::from(safe.right);
-        let height = f32::from(viewport.height) - f32::from(safe.top) - f32::from(safe.bottom);
+        let height = Self::usable_height(viewport, insets);
         if height < TERMINAL_FULL_HEIGHT {
             Self::TerminalFull
         } else if width >= TWO_PANE_WIDTH {

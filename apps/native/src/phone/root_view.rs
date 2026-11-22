@@ -159,6 +159,10 @@ pub struct PhoneRoot {
     /// The layout the last frame picked from the window's usable size, which
     /// the views draw their panes by.
     pub(super) layout: PhoneLayout,
+    /// The usable height the last frame read ([`PhoneLayout::usable_height`]),
+    /// which the tray sizes its card by. Unbounded until the first frame, so
+    /// the card never draws smaller than its full height.
+    pub(super) usable_height: f32,
     /// The page the shown session returns to when the iPhone turns upright:
     /// recorded when turning it on its side moved the session off it, and
     /// forgotten once the user picks a page or another session shows.
@@ -293,6 +297,7 @@ impl PhoneRoot {
             resumes: Vec::new(),
             insets_override: None,
             layout: PhoneLayout::Single,
+            usable_height: f32::INFINITY,
             landscape_return: None,
             logged_ready: false,
             in_front: window.visibility() == WindowVisibility::Visible,
@@ -2162,6 +2167,7 @@ impl Render for PhoneRoot {
             .unwrap_or_else(|| window.insets());
         let previous = self.layout;
         self.layout = PhoneLayout::of(window.viewport_size(), &insets);
+        self.usable_height = PhoneLayout::usable_height(window.viewport_size(), &insets);
         self.turn_terminal(previous, cx);
         let padding = content_padding(&insets);
         let keyboard_up = crate::keyboard::is_up(&insets);

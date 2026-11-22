@@ -39,6 +39,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Status hooks you start Claude with by hand keep running the current hook program, even when its copy was left read-only.
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
 - On the phone, an offline host's card on Settings › Hosts no longer jumps on each redial, and the Appearance page's theme rows and text size label line up.
+- On the phone's Terminal page, copying text now reaches the clipboard and shows the copied notice.
+- With the phone on its side, the Needs you card takes at most half the height, so Home's rows show under it.
 - On the phone and the iPad, the edit bar over a selection low on the page now sits above the keyboard instead of over it.
 - On the phone, Home's Settings button and the Notifications row show an amber dot while a host's notifications need attention, such as a failed re-register.
 - On the phone's Terminal page, opening Quick or putting the prompt sheet away no longer resizes the session, and with the keyboard up the output above the prompt shows.
