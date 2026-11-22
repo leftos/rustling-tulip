@@ -391,6 +391,9 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             record.clear_pending();
         }
         turn_alert = land_turn_end(record, false, "agent_end");
+        // The agent's background work ended with it, and the shell's watcher
+        // never reads the flag, so nothing else would clear it.
+        record.background = false;
         agent_exited = record.end_agent_in_shell();
         if agent_exited {
             // The title the agent painted named it, not the shell it ran in;
@@ -1786,6 +1789,32 @@ mod tests {
             crate::background_work::BackgroundWork::default(),
             "the agent's work ended with it"
         );
+    }
+
+    /// An agent-in-shell record at `Idle` whose last turn left work running.
+    fn background_idle_agent_in_shell_record() -> SessionRecord {
+        let mut record = agent_in_shell_record();
+        record.status = SessionStatus::Idle;
+        record.background = true;
+        record
+    }
+
+    #[test]
+    fn session_end_on_a_shell_hosted_record_clears_its_background() {
+        let mut record = background_idle_agent_in_shell_record();
+        apply_body(&mut record, 2, &session_end());
+        assert!(
+            !record.background,
+            "the agent's background work ended with it"
+        );
+    }
+
+    #[test]
+    fn a_clear_session_end_keeps_the_background() {
+        let mut record = background_idle_agent_in_shell_record();
+        let clear = json!({"hook_event_name": "SessionEnd", "reason": "clear"});
+        apply_body(&mut record, 2, &clear);
+        assert!(record.background, "the agent runs on after a /clear");
     }
 
     #[test]
