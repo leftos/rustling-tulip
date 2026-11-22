@@ -508,8 +508,8 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["hooks"],
-            "the file holds only a hooks key"
+            ["env", "hooks"],
+            "the file holds only the injected marker's env and the hooks"
         );
         let hook = &document["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(
