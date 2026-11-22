@@ -1355,6 +1355,176 @@ fn a_terminal_opened_under_the_keyboard_takes_the_keyboard_down_rows(
     assert_eq!(up_rows, down_rows, "the keyboard-down rows");
 }
 
+#[gpui::test]
+fn the_output_above_the_prompt_shows_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, rows) = opened_under(cx, &dir, px(336.0));
+    let rows = usize::from(rows.expect("the page claims a size"));
+    // The cursor a third of the way down, its row's top inside the band
+    // the keyboard covers.
+    let cursor_row = rows / 3;
+
+    h.host(&saved_remote())
+        .pty("n", &numbered_lines(cursor_row));
+    h.cx.run_until_parked();
+
+    assert!(shows_row(&mut h, cursor_row), "the cursor's row shows");
+    assert!(
+        shows_row(&mut h, cursor_row - 1),
+        "the output above the cursor's row shows"
+    );
+}
+
+#[gpui::test]
+fn opening_quick_on_the_terminal_keeps_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_terminal(cx, &dir);
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-bar-quick");
+
+    assert!(drawn(&mut h, "phone-terminal-quick"), "the dock opens");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_claim(&sent, "n"),
+        None,
+        "opening Quick sends no resize: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn putting_the_prompt_sheet_away_keeps_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = sheet_over_terminal(cx, &dir);
+    h.host(&saved_remote()).sent();
+
+    drag_sheet(&mut h, px(60.0), 5);
+
+    assert!(drawn(&mut h, "phone-prompt-show"), "Show prompt draws");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_claim(&sent, "a"),
+        None,
+        "putting the sheet away sends no resize: {sent:?}"
+    );
+
+    h.click_on("phone-prompt-show");
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet is back");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_claim(&sent, "a"),
+        None,
+        "bringing the sheet back sends no resize: {sent:?}"
+    );
+}
+
+/// The rows of every `Resize` for session `id` in `sent`.
+fn resize_rows(sent: &[ClientMessage], id: &str) -> Vec<u16> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::Resize {
+                session_id, rows, ..
+            } if session_id == id => Some(*rows),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn opening_the_terminal_with_the_prompt_put_away_sends_one_size(
+    plain: &mut TestAppContext,
+    cx: &mut TestAppContext,
+) {
+    let plain_dir = TestDir::new();
+    let mut plain = sheet_over_terminal(plain, &plain_dir);
+    let plain_rows = first_resize_rows(&plain.host(&saved_remote()).sent(), "a");
+    assert!(plain_rows.is_some(), "a plain open claims a size");
+
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = sent.iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "a" => Some(request_id.clone()),
+        _ => None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "message u1".to_owned(),
+            pending: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Dialog,
+            prompt: Some(question_prompt("q1")),
+        },
+        request_id: request.flatten(),
+    });
+    h.cx.run_until_parked();
+    drag_sheet(&mut h, px(60.0), 5);
+    assert!(drawn(&mut h, "phone-prompt-show"), "Show prompt draws");
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-session-toggle");
+
+    assert!(drawn(&mut h, "phone-session-terminal"), "the Terminal page");
+    assert!(
+        drawn(&mut h, "phone-prompt-show"),
+        "Show prompt still draws"
+    );
+    let laid_out = h.root(|root, cx| root.pane_cell_center(&slot_id("a"), 0, 0, cx));
+    assert!(
+        laid_out.is_some(),
+        "the terminal draws after the first frame"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    let rows = resize_rows(&sent, "a");
+    assert!(!rows.is_empty(), "the page claims a size: {sent:?}");
+    assert!(
+        rows.iter().all(|rows| Some(*rows) == plain_rows),
+        "one size, a plain open's {plain_rows:?}: {rows:?}"
+    );
+}
+
+#[gpui::test]
+fn quick_open_under_the_keyboard_keeps_the_keyboard_down_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    // The shortest window that keeps the portrait page: under a 400-point
+    // keyboard the Quick dock leaves the terminal's clip box no height.
+    h.cx.simulate_resize(gpui::size(px(600.0), px(600.0)));
+    draw_keyboard(&mut h, false);
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).pty("n", b"");
+    h.cx.run_until_parked();
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        first_resize_rows(&sent, "n").is_some(),
+        "the page claims the keyboard-down size: {sent:?}"
+    );
+    h.click_on("phone-bar-quick");
+    assert!(drawn(&mut h, "phone-terminal-quick"), "the dock opens");
+
+    phone_update(&mut h, |phone, cx| {
+        phone.set_insets_override(Some(keyboard_insets(px(400.0))), cx);
+    });
+
+    let clip = h.bounds("phone-session-terminal").size.height;
+    assert!(clip <= px(0.5), "the clip box has no height left: {clip:?}");
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        first_resize_rows(&sent, "n"),
+        None,
+        "the PTY keeps the keyboard-down rows: {sent:?}"
+    );
+}
+
 /// A pending single-select question `id` with two options.
 fn question_prompt(id: &str) -> ChatPrompt {
     ChatPrompt {

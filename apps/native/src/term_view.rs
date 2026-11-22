@@ -1082,6 +1082,17 @@ impl TerminalPane {
         Some(crate::PADDING + row * cell.height)
     }
 
+    /// The bottom of the cursor's row in points from the pane's top, shown
+    /// or hidden, as the last layout draws it: the row's top and one line.
+    ///
+    /// Returns:
+    ///     The row's bottom, or `None` before the first layout.
+    #[must_use]
+    pub fn cursor_row_bottom(&self) -> Option<f32> {
+        let (_, cell) = self.layout?;
+        Some(self.cursor_row_top()? + cell.height)
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }

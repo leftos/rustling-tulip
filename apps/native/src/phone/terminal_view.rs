@@ -4,11 +4,12 @@
 //! it leaves, through one sync each frame. The page only renders and
 //! forwards taps; the bar's logic is [`super::key_bar`]'s.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, HitboxBehavior,
-    ScrollEvent, Stateful, Window, canvas, div, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Edges, Entity, HitboxBehavior,
+    Pixels, ScrollEvent, Stateful, Window, canvas, div, prelude::*, px,
 };
 
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
@@ -155,25 +156,179 @@ impl TerminalTap {
 /// The points one line of a line-counted scroll pans the terminal by.
 const PAN_LINE: f32 = 20.0;
 
+/// The Terminal page's measured heights, in points, shared with the
+/// canvases that measure them as a frame draws: the terminal's rest height
+/// and what took room from its clip box.
+#[derive(Debug, Default)]
+pub(super) struct TerminalHeights {
+    /// The terminal's rest height, once a frame worked it out.
+    rest: Cell<Option<f32>>,
+    /// The clip box's height on the last frame.
+    clip: Cell<f32>,
+    /// The Quick dock's height when it last drew.
+    dock: Cell<f32>,
+    /// The Show prompt row's height when it last drew.
+    prompt: Cell<f32>,
+    /// The height the raised keyboard covers, from the insets.
+    cover: Cell<f32>,
+    /// The safe area's top, right, bottom and left insets on the last
+    /// frame.
+    safe: Cell<Option<[f32; 4]>>,
+}
+
+/// What a frame of the Terminal page drew, for its clip box's measure.
+#[derive(Clone, Copy, Debug)]
+struct TerminalFrame {
+    /// Whether the on-screen keyboard was up.
+    keyboard_up: bool,
+    /// Whether the Quick dock was open.
+    quick: bool,
+    /// Whether the Show prompt row drew under the page.
+    prompt: bool,
+    /// The height the raised keyboard covered.
+    cover: f32,
+}
+
+impl TerminalFrame {
+    /// Whether nothing took room from the clip box: the keyboard down, the
+    /// Quick dock closed and no Show prompt.
+    fn at_rest(self) -> bool {
+        !self.keyboard_up && self.cover <= 0.0 && !self.quick && !self.prompt
+    }
+}
+
+/// Which row under or beside the clip box a measure records.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HeightSlot {
+    /// The Quick dock.
+    Dock,
+    /// The Show prompt row.
+    Prompt,
+}
+
+impl TerminalHeights {
+    /// Forgets the rest height, so the next frame works it out again.
+    pub(super) fn clear(&self) {
+        self.rest.set(None);
+    }
+
+    /// Records the safe area's insets: a change, as a rotation brings,
+    /// forgets the rest height, so the next frame works it out again.
+    pub(super) fn note_safe_area(&self, safe: Edges<Pixels>) {
+        let safe = [safe.top, safe.right, safe.bottom, safe.left].map(f32::from);
+        let changed = |was: [f32; 4]| {
+            was.iter()
+                .zip(&safe)
+                .any(|(was, now)| (was - now).abs() > f32::EPSILON)
+        };
+        if self.safe.replace(Some(safe)).is_some_and(changed) {
+            self.clear();
+        }
+    }
+
+    /// The terminal's rest height, once a frame worked it out.
+    pub(super) fn rest(&self) -> Option<f32> {
+        self.rest.get()
+    }
+
+    /// Records the height the raised keyboard covers, and returns how much
+    /// of the terminal its clip box hides: below the rest height once that
+    /// is known, else the keyboard's cover.
+    pub(super) fn hidden(&self, cover: f32) -> f32 {
+        self.cover.set(cover);
+        self.rest.get().map_or(cover, |rest| {
+            terminal_fit::hidden_below(rest, self.clip.get())
+        })
+    }
+
+    /// Records one frame's clip box height: a frame at rest takes it as the
+    /// rest height, and a frame with no rest height yet seeds one from it
+    /// and what took room from it.
+    ///
+    /// Returns:
+    ///     Whether the rest height or the clip box's height changed, so the
+    ///     page must draw again.
+    fn record(&self, clip: f32, frame: TerminalFrame) -> bool {
+        let clip = clip.max(0.0);
+        let rest = match self.rest.get() {
+            _ if frame.at_rest() => clip,
+            Some(rest) => rest,
+            None => {
+                let dock = if frame.quick { self.dock.get() } else { 0.0 };
+                let prompt = if frame.prompt { self.prompt.get() } else { 0.0 };
+                terminal_fit::seed_rest(clip, frame.cover, dock, prompt)
+            }
+        };
+        let moved = |from: f32, to: f32| (from - to).abs() > f32::EPSILON;
+        let changed =
+            self.rest.get().is_none_or(|was| moved(was, rest)) || moved(self.clip.get(), clip);
+        self.rest.set(Some(rest));
+        self.clip.set(clip);
+        changed
+    }
+
+    /// A layer over the clip box that, once every row of the frame has
+    /// been measured, records the box's height and asks for another frame
+    /// when the terminal's heights changed.
+    fn clip_measure(this: &Rc<Self>, frame: TerminalFrame) -> impl IntoElement {
+        let heights = Rc::clone(this);
+        canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                if heights.record(f32::from(bounds.size.height), frame) {
+                    // A refresh while drawing is ignored: ask once this frame is done.
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// A layer over the row `slot` names that records its height.
+    pub(super) fn measure(this: &Rc<Self>, slot: HeightSlot) -> impl IntoElement {
+        let heights = Rc::clone(this);
+        canvas(
+            move |bounds, _, _| {
+                let height = f32::from(bounds.size.height);
+                match slot {
+                    HeightSlot::Dock => heights.dock.set(height),
+                    HeightSlot::Prompt => heights.prompt.set(height),
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+}
+
 impl PhoneRoot {
     /// Opens the shown session's terminal while its Terminal page shows and
     /// closes it otherwise; a terminal newly opened gets a fresh key bar,
     /// the keyboard's focus and the bar's sticky Ctrl for typed text. While
     /// it is open, the terminal records whether the keyboard is up, which
-    /// decides whether a tap puts it away, and keeps `hidden`, the height
-    /// the keyboard covers, for the page to draw it at its keyboard-down
-    /// height; the keyboard never re-sizes it. The pan over the hidden rows
-    /// starts over when the page opens or closes and while the keyboard is
-    /// down.
+    /// decides whether a tap puts it away, and keeps the height its clip
+    /// box hides for the page to draw it at its rest height: `cover`, the
+    /// height the keyboard covers, until a frame measured the rest height,
+    /// then what the clip box falls short of it. Neither the keyboard, the
+    /// Quick dock nor Show prompt re-sizes it. The rest height is measured
+    /// again when the page opens. The pan over the hidden rows starts over
+    /// when the page opens or closes and while nothing is hidden.
     pub(super) fn sync_terminal(
         &mut self,
         keyboard_up: bool,
-        hidden: f32,
+        cover: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((host, session_id)) = self.wanted_terminal(cx) else {
             self.terminal_hidden = 0.0;
+            self.terminal_heights.clear();
             self.terminal_pan = Pan::default();
             self.terminal_watch = None;
             self.terminal_viewport = None;
@@ -197,6 +352,7 @@ impl PhoneRoot {
             );
             self.terminal_open = Some(wanted);
             self.terminal_pan = Pan::default();
+            self.terminal_heights.clear();
             // The open claims its first size; only a later change re-claims.
             self.terminal_viewport = None;
             *self.key_bar.borrow_mut() = KeyBar::new();
@@ -214,26 +370,26 @@ impl PhoneRoot {
             }
         }
         self.claim_on_resize(window, cx);
+        let hidden = self.terminal_heights.hidden(cover);
         self.terminal_hidden = hidden;
-        self.terminal_pan = if keyboard_up {
-            self.terminal_pan.clamped(hidden)
-        } else {
-            Pan::default()
-        };
+        // Nothing hidden clamps the pan to none.
+        self.terminal_pan = self.terminal_pan.clamped(hidden);
         self.terminal_need = self.cursor_need(cx);
     }
 
     /// A rotation or a pane change resized the window's viewport under the
-    /// open terminal: the pane is marked resized, so the size it measures
-    /// next claims the PTY, as its open did. A keyboard leaves the viewport
-    /// as it is, so it never claims.
+    /// open terminal: its rest height is measured again and the pane is
+    /// marked resized, so the size it measures next claims the PTY, as its
+    /// open did. A keyboard leaves the viewport as it is, so it never
+    /// claims.
     fn claim_on_resize(&mut self, window: &Window, cx: &mut Context<Self>) {
         let viewport = window.viewport_size();
         let previous = self.terminal_viewport.replace(viewport);
-        if previous.is_some_and(|previous| previous != viewport)
-            && let Some(pane) = self.terminal_pane(cx)
-        {
-            pane.update(cx, |pane, _| pane.mark_resized());
+        if previous.is_some_and(|previous| previous != viewport) {
+            self.terminal_heights.clear();
+            if let Some(pane) = self.terminal_pane(cx) {
+                pane.update(cx, |pane, _| pane.mark_resized());
+            }
         }
     }
 
@@ -293,8 +449,11 @@ impl PhoneRoot {
 
     /// The Terminal page's body: the terminal filling it, the Quick replies
     /// while they are open, and the key bar. The terminal sits in a clip
-    /// box at its keyboard-down height, so a raised keyboard hides its top
-    /// rows rather than shrinking it, and the pan picks the rows shown.
+    /// box at its rest height, anchored by its bottom, so a raised
+    /// keyboard, the Quick dock or Show prompt hides its top rows rather
+    /// than shrinking it, and the pan picks the rows shown. Until a frame
+    /// measured the rest height the box draws empty, so the terminal's
+    /// first size is its rest height's.
     pub(super) fn terminal_page(
         &self,
         session_id: &str,
@@ -302,36 +461,53 @@ impl PhoneRoot {
         cx: &mut Context<Self>,
     ) -> Div {
         let hidden = self.terminal_hidden;
-        let (top, bottom) = self
+        let (_, bottom) = self
             .terminal_pan
             .effective(hidden, self.cursor_need(cx))
             .edges(hidden);
-        let pane = div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .top(px(top))
-            .bottom(px(bottom))
-            .flex()
-            .flex_col()
-            .children(self.terminal_pane(cx));
+        let pane = self.terminal_heights.rest().map(|rest| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(rest))
+                .bottom(px(bottom))
+                .flex()
+                .flex_col()
+                .children(self.terminal_pane(cx))
+        });
+        let frame = TerminalFrame {
+            keyboard_up,
+            quick: self.terminal_quick,
+            prompt: self.show_prompt_drawn(cx),
+            cover: self.terminal_heights.cover.get(),
+        };
         let screen = div()
             .driver_id(|| "phone-session-terminal".to_owned())
             .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .child(pane)
-            .child(Self::terminal_pan_layer(cx));
+            .children(pane)
+            .child(Self::terminal_pan_layer(cx))
+            .child(TerminalHeights::clip_measure(&self.terminal_heights, frame));
         let t = theme(cx);
         let quick = self.terminal_quick.then(|| {
-            div()
-                .flex_none()
+            let dock = div()
                 .px(px(SIDE_PADDING))
                 .py(px(BAR_GAP))
                 .border_t_1()
                 .border_color(gpui::rgb(t.line))
-                .child(self.quick_dock(session_id, QuickTarget::Terminal, &t, cx))
+                .child(self.quick_dock(session_id, QuickTarget::Terminal, &t, cx));
+            // A borderless box, so the measure takes the dock's border in.
+            div()
+                .relative()
+                .flex_none()
+                .child(dock)
+                .child(TerminalHeights::measure(
+                    &self.terminal_heights,
+                    HeightSlot::Dock,
+                ))
         });
         div()
             .flex()
@@ -388,17 +564,21 @@ impl PhoneRoot {
         .size_full()
     }
 
-    /// The least pan that keeps the open terminal's cursor row in sight
-    /// above the raised keyboard; none without a laid-out terminal.
+    /// The least pan that keeps the open terminal's cursor row on the
+    /// bottom row its clip box shows, the rows above it showing; none
+    /// without a laid-out terminal or a measured rest height.
     fn cursor_need(&self, cx: &App) -> f32 {
         if self.terminal_hidden <= 0.0 {
             return 0.0;
         }
-        let row_top = self
+        let Some(rest) = self.terminal_heights.rest() else {
+            return 0.0;
+        };
+        let row_bottom = self
             .terminal_pane(cx)
-            .and_then(|pane| pane.read(cx).cursor_row_top());
-        row_top.map_or(0.0, |top| {
-            terminal_fit::cursor_need(self.terminal_hidden, top)
+            .and_then(|pane| pane.read(cx).cursor_row_bottom());
+        row_bottom.map_or(0.0, |bottom| {
+            terminal_fit::cursor_need(self.terminal_hidden, rest, bottom)
         })
     }
 

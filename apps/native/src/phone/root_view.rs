@@ -99,8 +99,11 @@ pub struct PhoneRoot {
     pub(super) prompt_sheet: SheetState,
     /// The session whose terminal the Terminal page opened, while open.
     pub(super) terminal_open: Option<(HostKey, String)>,
-    /// How much of the open terminal the raised keyboard hides, in points.
+    /// How much of the open terminal its clip box hides, in points.
     pub(super) terminal_hidden: f32,
+    /// The Terminal page's measured heights: the terminal's rest height and
+    /// what took room from its clip box.
+    pub(super) terminal_heights: Rc<super::terminal_view::TerminalHeights>,
     /// How far the open terminal is panned to show the rows the keyboard
     /// hides.
     pub(super) terminal_pan: super::terminal_fit::Pan,
@@ -266,6 +269,7 @@ impl PhoneRoot {
             prompt_sheet: SheetState::default(),
             terminal_open: None,
             terminal_hidden: 0.0,
+            terminal_heights: Rc::default(),
             terminal_pan: super::terminal_fit::Pan::default(),
             terminal_need: 0.0,
             terminal_tap: TerminalTap::RaisesKeyboard,
@@ -2161,11 +2165,12 @@ impl Render for PhoneRoot {
         self.turn_terminal(previous, cx);
         let padding = content_padding(&insets);
         let keyboard_up = crate::keyboard::is_up(&insets);
-        let hidden = super::terminal_fit::hidden_height(
+        let cover = super::terminal_fit::hidden_height(
             f32::from(insets.safe_area.bottom),
             f32::from(insets.ime.bottom),
         );
-        self.sync_terminal(keyboard_up, hidden, window, cx);
+        self.terminal_heights.note_safe_area(insets.safe_area);
+        self.sync_terminal(keyboard_up, cover, window, cx);
         self.browser_next_page(cx);
         let host_open = hosts_view::any_host_open(self.root.read(cx));
         let body = self.page_body(host_open, keyboard_up, window, cx);

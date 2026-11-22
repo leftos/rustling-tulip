@@ -40,6 +40,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
 - On the phone and the iPad, the edit bar over a selection low on the page now sits above the keyboard instead of over it.
 - On the phone, Home's Settings button and the Notifications row show an amber dot while a host's notifications need attention, such as a failed re-register.
+- On the phone's Terminal page, opening Quick or putting the prompt sheet away no longer resizes the session, and with the keyboard up the output above the prompt shows.
 - Installed status hooks in Claude's user settings update to the current events and matchers at the next start, and a settings file saved with a byte order mark no longer refuses them.
 - A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.

@@ -15,6 +15,7 @@ use gpui::{
 use super::PhoneRoot;
 use super::home_view::{SIDE_PADDING, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::terminal_view::{HeightSlot, TerminalHeights};
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
 use crate::ui_theme::theme;
@@ -284,13 +285,17 @@ impl PhoneRoot {
         cx.notify();
     }
 
-    /// `Show prompt` at the page's bottom, while the current prompt was put
-    /// away.
-    pub(super) fn show_prompt_button(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if !self
-            .prompt_sheet
+    /// Whether `Show prompt` draws at the page's bottom: the current prompt
+    /// was put away.
+    pub(super) fn show_prompt_drawn(&self, cx: &App) -> bool {
+        self.prompt_sheet
             .put_away(self.current_prompt(cx).as_deref())
-        {
+    }
+
+    /// `Show prompt` at the page's bottom, while the current prompt was put
+    /// away, its height measured for the Terminal page.
+    pub(super) fn show_prompt_button(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.show_prompt_drawn(cx) {
             return None;
         }
         let button = phone_button("phone-prompt-show", ButtonKind::Primary, cx)
@@ -303,10 +308,15 @@ impl PhoneRoot {
             }));
         Some(
             div()
+                .relative()
                 .flex_none()
                 .px(px(SIDE_PADDING))
                 .py(px(8.0))
-                .child(button),
+                .child(button)
+                .child(TerminalHeights::measure(
+                    &self.terminal_heights,
+                    HeightSlot::Prompt,
+                )),
         )
     }
 
