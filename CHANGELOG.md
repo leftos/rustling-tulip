@@ -4,23 +4,32 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.18.3-alpha
+
+### Highlights
+
+- A question still on screen never reads Idle, and returns to Needs you when anything but your answer ends its wait.
+- Sessions keep their list order after a reload or restart.
+- On the phone, paste, pairing, dragging keys and the return to the foreground behave as they should.
+- Linear issue cards open below their chip and read older updates in days.
+
 ### Fixed
 
-- On the phone, a tap on Paste, Quick, Keys or Hide under a selection reaches the button, and the Cut/Copy/Paste bar stays clear of the keyboard.
+- On the phone, Paste, Quick, Keys and Hide answer taps under a selection, and the Cut/Copy/Paste bar stays clear of the keyboard.
 - The chat's model picker card shows a model's whole description when the terminal is narrow enough to wrap it.
 - A question's "Review your answers" step reads as waiting on you when a task list is drawn under it.
 - On the phone, the pairing code field raises the number pad instead of the letter keyboard.
-- On the phone, the pairing dialog names the phone or iPad instead of "this PC", lines "Have a code?" up with its text, and dims the status bar and bottom strip too.
+- The phone's pairing dialog names the phone or iPad instead of "this PC", aligns "Have a code?", and dims the status bar and bottom strip.
 - In the viewer, two-digit and longer line numbers stay on one line, and on the phone they sit clear of the screen edge.
 - In the phone's host browser, rows no longer jump when a fetch starts or finishes.
 - Clearing the phone's fetched files also removes the folders they leave empty.
 - A Needs you card's options stay inside their boxes in the phone's narrow list column.
 - Apply sends nothing on a locked Settings › Dashboard, including changes made before it locked.
 - A question card keeps the space after a word like "and/or" at a row's end, while long paths and addresses still rejoin whole.
-- On the phone, dropping a dragged key or quick reply on a row's lower half places it after that row all the way down the list.
+- On the phone, a key or quick reply dropped on a row's lower half lands after that row, all the way down the list.
 - After the phone returns to the foreground, Home dims each host's sessions and says "Refreshing…" until their fresh list arrives.
-- Sessions started at nearly the same moment keep their list order after a reload or restart, and a session still starting never shows a row that vanishes.
-- A question still on screen never reads Idle after a minute, and it returns to Needs you when something other than your answer ends its wait.
+- Sessions started together keep their list order after a reload or restart, and a session still starting never shows a vanishing row.
+- A question still on screen never reads Idle after a minute, and returns to Needs you when anything but your answer ends its wait.
 - Settings › Accounts says "1 account" for a single account.
 - A failed account login no longer shows the CLI's "Login successful." line above its failure.
 - With a terminal draft's buttons showing, the composer's note stays on one line.
