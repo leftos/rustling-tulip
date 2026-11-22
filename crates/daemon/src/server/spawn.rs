@@ -1896,7 +1896,6 @@ async fn spawn_interactive_session(
         }
     };
     let agent_in_shell = shell_label.is_some();
-    let env = with_hooks_marker(env, hook_settings.is_some());
 
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = PtySpawnSpec {
@@ -2105,17 +2104,6 @@ fn with_shell_env(
     env
 }
 
-/// `env` with [`tracer_client::HOOKS_INJECTED_ENV`] set to `1` when the
-/// spawn's hook files were written (`hooked`), so a user-layer hook shim in
-/// the same session does nothing and no event is reported twice.
-fn with_hooks_marker(mut env: Vec<(String, String)>, hooked: bool) -> Vec<(String, String)> {
-    if hooked {
-        env.retain(|(key, _)| !tracer_client::is_env_name(key, tracer_client::HOOKS_INJECTED_ENV));
-        env.push((tracer_client::HOOKS_INJECTED_ENV.to_owned(), "1".to_owned()));
-    }
-    env
-}
-
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -2164,10 +2152,7 @@ async fn spawn_plain_shell_session(
     } = resume;
     let agent_note = shell_resume_agent_note(cfg, resume_injector.is_some(), &members);
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
-    let env = with_hooks_marker(
-        with_shell_env(cfg.env.set.clone(), shell.extra_env),
-        hook_settings.is_some(),
-    );
+    let env = with_shell_env(cfg.env.set.clone(), shell.extra_env);
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
         program: shell.program,
@@ -4350,10 +4335,11 @@ mod tests {
         );
     }
 
-    /// A spawn whose hooks were injected tells the user-layer shim so, and a
-    /// plain shell, which gets none, does not.
+    /// A spawn whose hooks were injected leaves the marker out of its shell's
+    /// environment, since the agent's own settings set it for the agent's
+    /// process tree only; a plain shell, which gets no hooks, has none either.
     #[tokio::test]
-    async fn injected_hooks_spawn_exports_the_marker() {
+    async fn injected_hooks_spawn_leaves_the_marker_out_of_the_shell() {
         const MARKER: &str = "RUSTLING_TULIP_HOOKS_INJECTED";
         let (hub, scratch) = hook_test_hub("hooks-injected-marker");
         let folder = scratch.path().join("folder");
@@ -4363,9 +4349,9 @@ mod tests {
         assert!(error.contains("spawning claude via tracer"), "{error}");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
         assert_eq!(
-            child_value(&child, MARKER).as_deref(),
-            Some("1"),
-            "the hooked agent spawn exports the marker: {child:?}"
+            child_value(&child, MARKER),
+            None,
+            "a hand-typed agent in this shell after the injected run must report: {child:?}"
         );
 
         let (hub, _scratch, _repo) = env_ref_repo_hub("hooks-injected-shell");

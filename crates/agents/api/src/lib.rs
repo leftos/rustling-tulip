@@ -53,6 +53,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::error;
 
+/// Env var an agent whose hooks the daemon injected carries, set to `1` by the
+/// plugin's own injected settings so it reaches the agent and every process
+/// it starts (its hooks and any nested agent) but never the shell hosting it;
+/// a user-layer hook shim that sees it does nothing, so no event is posted twice.
+pub const HOOKS_INJECTED_ENV: &str = "RUSTLING_TULIP_HOOKS_INJECTED";
+
 /// The rule set of a plugin that reads no screen: every reading is no match,
 /// so its sessions are read by their hooks alone.
 static EMPTY_SCREEN_RULES: ScreenRules = ScreenRules { rules: Vec::new() };

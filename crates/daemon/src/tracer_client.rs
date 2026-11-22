@@ -387,10 +387,10 @@ pub const SESSION_ID_ENV: &str = "RUSTLING_TULIP_SESSION_ID";
 /// whose `daemon.json` a user-layer hook shim reads.
 pub const HOOK_CONFIG_DIR_ENV: &str = "RUSTLING_TULIP_HOOK_CONFIG_DIR";
 
-/// Env var a spawn whose hooks the daemon injected sets to `1`, so a
-/// user-layer hook shim in the same session does nothing. A spawn that sets
-/// none removes any inherited value.
-pub const HOOKS_INJECTED_ENV: &str = "RUSTLING_TULIP_HOOKS_INJECTED";
+/// Env var an injected agent's own settings set for its process tree, never
+/// for a PTY child: every spawn removes an inherited value, since a daemon
+/// started from inside an injected agent inherits it.
+pub use agent_api::HOOKS_INJECTED_ENV;
 
 /// The variables a running session of any registered agent sets for its own
 /// children (each plugin's `inherited_session_vars`). A daemon started from

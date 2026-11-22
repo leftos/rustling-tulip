@@ -4,7 +4,8 @@
 
 use crate::ClaudeOptions;
 use agent_api::{
-    AgentError, HookFile, HookPlan, HookReport, HookShim, UserHooksState, hook_vocabulary,
+    AgentError, HOOKS_INJECTED_ENV, HookFile, HookPlan, HookReport, HookShim, UserHooksState,
+    hook_vocabulary,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -84,9 +85,14 @@ pub(crate) fn hook_plan(shim: &HookShim<'_>) -> HookPlan {
 }
 
 /// The contents of the `--settings` file an interactive Claude spawn gets: a
-/// JSON object holding only a `hooks` key, so every other settings key keeps
-/// the user's value and the injected hooks add to the user's and the repo's
-/// hooks instead of replacing them.
+/// JSON object holding only an `env` and a `hooks` key, so every other settings
+/// key keeps the user's value and the injected hooks add to the user's and the
+/// repo's hooks instead of replacing them.
+///
+/// `env` sets [`HOOKS_INJECTED_ENV`] for the agent and every process it starts,
+/// its hooks and any nested agent included, so a user-layer hook shim among
+/// them does nothing; the shell hosting the agent never gets it, so an agent
+/// typed there by hand after this one ends still reports.
 ///
 /// Every event of the design's table gets one command hook in exec form
 /// (`command` plus `args`, never a shell string) running the session's cached
@@ -124,7 +130,10 @@ fn build_hook_settings(tracer_exe: &Path, session_id: &str, config_dir: &Path) -
         .into_iter()
         .map(|(event, groups)| (event.to_string(), groups))
         .collect();
-    let document = serde_json::json!({ "hooks": hooks });
+    let document = serde_json::json!({
+        "env": { (HOOKS_INJECTED_ENV): "1" },
+        "hooks": hooks,
+    });
     serde_json::to_string_pretty(&document).unwrap_or_else(|_| document.to_string())
 }
 
@@ -714,8 +723,12 @@ mod tests {
     }
 
     /// The `--settings` document [`build_hook_settings`] wrote for [`TRACER_EXE`],
-    /// [`SESSION_ID`] and [`CONFIG_DIR`] before its events moved into one table.
+    /// [`SESSION_ID`] and [`CONFIG_DIR`] before its events moved into one table,
+    /// with the injected-hooks marker's `env` block added since.
     const HOOK_SETTINGS_BEFORE_THE_TABLE: &str = r#"{
+  "env": {
+    "RUSTLING_TULIP_HOOKS_INJECTED": "1"
+  },
   "hooks": {
     "Elicitation": [
       {
@@ -1098,8 +1111,24 @@ mod tests {
         let object = document.as_object().expect("a JSON object");
         assert_eq!(
             object.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["hooks"],
+            ["env", "hooks"],
             "every other settings key must keep the user's value"
+        );
+    }
+
+    #[test]
+    fn hook_settings_set_the_injected_marker_for_the_agent() {
+        let document = hook_document();
+        let env = document["env"].as_object().expect("an env object");
+        assert_eq!(
+            env.keys().map(String::as_str).collect::<Vec<_>>(),
+            [agent_api::HOOKS_INJECTED_ENV],
+            "the env block sets only the marker: {env:?}"
+        );
+        assert_eq!(
+            env[agent_api::HOOKS_INJECTED_ENV],
+            "1",
+            "the agent and every process it starts carry the marker"
         );
     }
 
