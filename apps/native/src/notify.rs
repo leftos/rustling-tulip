@@ -1319,7 +1319,7 @@ impl RootView {
         };
         let notifier = Arc::clone(&self.notifications.notifier);
         let attention = toast.attention;
-        let waited = attention && self.session_waits(toast.session_id);
+        let waited = attention && self.session_waits(toast.host, toast.session_id);
         cx.spawn(async move |this, cx| {
             let busy = cx
                 .background_executor()
@@ -1336,8 +1336,9 @@ impl RootView {
                     return;
                 }
                 let now = cx.background_executor().now();
-                let waits = matches!(sound, NotifyKind::NeedsYou) && this.session_waits(&key.1);
-                let wait = waits.then(|| (this.toast_ask(&key), this.toast_pending(&key.1)));
+                let waits =
+                    matches!(sound, NotifyKind::NeedsYou) && this.session_waits(&key.0, &key.1);
+                let wait = waits.then(|| (this.toast_ask(&key), this.toast_pending(&key)));
                 let mut toast = AppToast::new(key, kind, title, body, now);
                 if let Some((ask, pending)) = wait {
                     toast = toast.waiting_on(ask, pending);
@@ -1349,10 +1350,10 @@ impl RootView {
         .detach();
     }
 
-    /// Whether session `id` is awaiting input.
-    fn session_waits(&self, id: &str) -> bool {
+    /// Whether `host`'s session `id` is awaiting input.
+    fn session_waits(&self, host: &HostKey, id: &str) -> bool {
         self.sidebar
-            .session(id)
+            .session_on(host, id)
             .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
     }
 
@@ -1368,10 +1369,10 @@ impl RootView {
                 .is_none_or(|session| waited && session.status != SessionStatus::AwaitingInput)
     }
 
-    /// The prompt session `id` waits on, as its snapshot reads now.
-    fn toast_pending(&self, id: &str) -> Option<PendingInput> {
+    /// The prompt `key`'s session waits on, as its host lists it now.
+    fn toast_pending(&self, key: &SessionKey) -> Option<PendingInput> {
         self.sidebar
-            .session(id)
+            .session_on(&key.0, &key.1)
             .and_then(|session| session.pending_input.clone())
     }
 
@@ -1382,7 +1383,7 @@ impl RootView {
     /// daemon refuses a typed answer.
     fn toast_ask(&self, key: &SessionKey) -> Option<AskBlock> {
         let (host, id) = (&key.0, key.1.as_str());
-        let mut ask = self.ask_of(self.sidebar.session(id)?)?;
+        let mut ask = self.ask_of(self.sidebar.session_on(host, id)?)?;
         if ask.choices.len() > MAX_TOAST_CHOICES {
             ask.choices.clear();
         }
@@ -1822,7 +1823,7 @@ impl RootView {
             .iter()
             .filter(|toast| toast.waiting && toast.key.0 == *host)
             .filter(|toast| {
-                let session = self.sidebar.session(&toast.key.1);
+                let session = self.sidebar.session_on(&toast.key.0, &toast.key.1);
                 session.is_some_and(|session| session.pending_input != toast.pending)
             })
             .map(|toast| toast.key.clone())
@@ -1832,7 +1833,7 @@ impl RootView {
         }
         let now = cx.background_executor().now();
         for key in moved {
-            let (ask, pending) = (self.toast_ask(&key), self.toast_pending(&key.1));
+            let (ask, pending) = (self.toast_ask(&key), self.toast_pending(&key));
             let stack = &mut self.notifications.toasts.stack;
             stack.update_ask(&key, ask, pending, now);
         }
@@ -1861,8 +1862,8 @@ impl RootView {
     /// Whether an answer is out for `key`'s session.
     fn toast_answer_out(&self, key: &SessionKey) -> bool {
         self.sidebar
-            .session(&key.1)
-            .is_some_and(|session| self.dashboard_answers.is_out(session))
+            .session_on(&key.0, &key.1)
+            .is_some_and(|session| self.dashboard_answers.is_out(&key.0, session))
     }
 
     /// Tells each open toast's view its toast as the stack holds it and

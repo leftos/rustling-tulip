@@ -841,10 +841,11 @@ impl ToastView {
             return;
         };
         let root = self.root.clone();
+        let host = self.toast.key.0.clone();
         let session_id = self.toast.key.1.clone();
         cx.defer(move |cx| {
             let answered = root.update(cx, |root, cx| {
-                root.answer_from_dashboard(&session_id, since, choice, cx);
+                root.answer_from_dashboard(&host, &session_id, since, choice, cx);
             });
             if let Err(err) = answered {
                 tracing::debug!("toast answered after the root view went: {err:#}");
@@ -1012,6 +1013,7 @@ impl Render for ToastView {
         let (go_root, dismiss_root) = (self.root.clone(), self.root.clone());
         let (go_key, dismiss_key) = (self.toast.key.clone(), self.toast.key.clone());
         let answer_root = self.root.clone();
+        let host = self.toast.key.0.clone();
         let session_id = self.toast.key.1.clone();
         let typed = self.ensure_typed(cx).map(|input| TypedRow {
             input,
@@ -1028,7 +1030,7 @@ impl Render for ToastView {
                 // only when the toast has closed, and its keys with it.
                 view.update(cx, |view, cx| view.give_back_keys(cx)).ok();
                 let answered = answer_root.update(cx, |root, cx| {
-                    root.answer_from_dashboard(&session_id, since, choice, cx);
+                    root.answer_from_dashboard(&host, &session_id, since, choice, cx);
                 });
                 if let Err(err) = answered {
                     tracing::debug!("toast answered after the root view went: {err:#}");

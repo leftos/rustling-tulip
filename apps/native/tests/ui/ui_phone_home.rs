@@ -13,8 +13,8 @@ use gpui::{
     TouchPhase, point, px,
 };
 use protocol::{
-    ClientMessage, ContainerRef, DEVICE_NOT_APPROVED, DaemonMessage, FEATURE_HOST_LAYOUTS,
-    FEATURE_RESUME_SESSION, PromptChoice, SessionSnapshot,
+    AttentionReason, ClientMessage, ContainerRef, DEVICE_NOT_APPROVED, DaemonMessage,
+    FEATURE_HOST_LAYOUTS, FEATURE_RESUME_SESSION, PromptChoice, SessionSnapshot,
 };
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, SshHost, Target};
@@ -2366,4 +2366,88 @@ fn a_tap_on_the_pinned_header_opens_no_session(cx: &mut TestAppContext) {
     h.tap_on(&header);
 
     assert_eq!(shown(&mut h), None, "the tap opens no session");
+}
+
+/// The sessions `target` was sent an `AnswerPrompt` for since the last look.
+fn answered(h: &mut Harness<'_>, target: &Target) -> Vec<String> {
+    h.host(target)
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::AnswerPrompt { session_id, .. } => Some(session_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two open hosts listing one session id `b`, each waiting on the same
+/// question; `den`'s wait is the longer, so its card shows first.
+fn two_hosts_asking_for_one_session<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = two_host_phone(cx, dir);
+    open_host(&mut h, &saved_remote());
+    open_host(&mut h, &den());
+    h.host(&den()).send(DaemonMessage::Sessions {
+        sessions: vec![waiting("b", 9, question(&["main", "dev"]))],
+    });
+    send_waits(&mut h, vec![waiting("b", 3, question(&["main", "dev"]))]);
+    assert_eq!(
+        header(&mut h).as_deref(),
+        Some("Needs you · 1 of 2"),
+        "both hosts' cards are in the tray"
+    );
+    h.host(&saved_remote()).sent();
+    h.host(&den()).sent();
+    h
+}
+
+#[gpui::test]
+fn a_tray_answer_goes_to_the_host_whose_card_was_tapped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts_asking_for_one_session(cx, &dir);
+
+    h.click_on("phone-tray-choice-1");
+
+    assert_eq!(
+        answered(&mut h, &den()),
+        ["b"],
+        "the answer goes to the host whose card showed"
+    );
+    assert!(
+        answered(&mut h, &saved_remote()).is_empty(),
+        "the other host listing the same session id is sent nothing"
+    );
+}
+
+#[gpui::test]
+fn opening_an_ended_tray_card_clears_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    h.host(&saved_remote()).send(DaemonMessage::Attention {
+        session_id: "b".to_owned(),
+        reason: AttentionReason::Stopped,
+    });
+    send_waits(
+        &mut h,
+        vec![
+            session("b")
+                .label("Bravo")
+                .in_repo("r2")
+                .status("stopped")
+                .status_since(minutes_ago(2))
+                .build(),
+        ],
+    );
+    assert_eq!(header(&mut h).as_deref(), Some("Needs you · 1 of 1"));
+    assert!(
+        drawn(&mut h, "phone-tray-open"),
+        "an ended card offers Open"
+    );
+
+    h.click_on("phone-tray-open");
+    assert!(drawn(&mut h, "phone-session"), "Open shows the session");
+
+    h.click_on("phone-session-back");
+
+    assert!(drawn(&mut h, "phone-home"), "Back returns to Home");
+    assert_eq!(header(&mut h), None, "the opened ended card is gone");
 }

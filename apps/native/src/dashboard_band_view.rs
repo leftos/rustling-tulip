@@ -71,7 +71,7 @@ impl RootView {
         let answers = |id: &str| {
             self.sidebar
                 .session(id)
-                .is_some_and(|session| self.dashboard_answers.is_out(session))
+                .is_some_and(|session| self.dashboard_answers.is_out_any_host(session))
         };
         Some(
             div()

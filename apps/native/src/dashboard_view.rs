@@ -242,7 +242,7 @@ impl RootView {
                     let answer_out = self
                         .sidebar
                         .session(&ask.session_id)
-                        .is_some_and(|session| self.dashboard_answers.is_out(session));
+                        .is_some_and(|session| self.dashboard_answers.is_out_any_host(session));
                     body.push(ask_block_element(ask, answer_out, cx));
                 }
                 let host = self.host_of_session(&cells.session_id);
@@ -888,7 +888,8 @@ fn ask_choice_button(
     })
     .when_some(answer_at, |button, since| {
         button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.answer_from_dashboard(&session, since, answer.clone(), cx);
+            let host = this.host_of_session(&session);
+            this.answer_from_dashboard(&host, &session, since, answer.clone(), cx);
         }))
     })
     .into_any_element()

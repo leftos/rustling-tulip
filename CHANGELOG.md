@@ -20,6 +20,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, leaving Settings › Hosts with the add-host form open closes it, so the keyboard no longer rises over an old half-typed form.
 - On the phone, a key-bar key pressed after a typed accent such as ´ sends the accent first instead of losing it.
 - On the phone's Needs you tray, the options of a question it cannot answer no longer flash as if pressed when tapped.
+- Answering from the phone's Needs you tray or a desktop toast reaches the host whose card you used, even when two saved hosts list the same session.
+- On the phone, opening an ended session from the Needs you tray clears its card.
 - An agent killed mid-turn no longer raises a Finished alert, and the Needs you list and pane headers stop showing it as waiting.
 - A prompt or error a session raises while still starting now shows once the sidebar lists the session, not before.
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.

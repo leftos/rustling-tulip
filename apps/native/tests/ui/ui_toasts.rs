@@ -12,6 +12,7 @@ use crate::support;
 use chrono::{DateTime, TimeZone as _, Utc};
 use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px};
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot};
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{BundledSound, ClipSource, Connection, NetEvent, PhysicalRect};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -1370,4 +1371,71 @@ fn a_question_with_five_options_shows_only_go_to_pane(cx: &mut TestAppContext) {
     assert!(!drawn(&mut toast, "toast-answer-0"), "nothing is offered");
     h.advance(Duration::from_secs(30));
     assert_eq!(h.window_count(), 1, "it lasts as a plain Needs you");
+}
+
+/// The second tailnet host these specs save beside [`support::REMOTE`].
+const DEN: &str = "den.tail1234.ts.net";
+
+fn den() -> Target {
+    Target::tailnet(DEN, Some(8787))
+}
+
+/// Both hosts open, each listing session `b` as waiting on a question of its
+/// own since a stamp of its own: [`support::REMOTE`]'s `b` since `stamp(1)`,
+/// [`DEN`]'s since `stamp(2)`.
+fn two_hosts_waiting_on_b<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({
+            "saved_hosts": [
+                { "name": support::REMOTE, "port": 8787 },
+                { "name": DEN, "port": 8787 },
+            ],
+            "notifications": { "toast_style": "app" },
+        }),
+    );
+    let mut h = Harness::with(cx, dir, &sessions(&[]));
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![waiting("b", stamp(1), question(&["a", "c"]))],
+    });
+    h.host(&den()).connect();
+    h.host(&den()).send(DaemonMessage::Sessions {
+        sessions: vec![waiting("b", stamp(2), question(&["main", "dev"]))],
+    });
+    h
+}
+
+#[gpui::test]
+fn a_toast_answer_uses_its_own_hosts_wait(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts_waiting_on_b(cx, &dir);
+    h.host(&saved_remote()).sent();
+    h.host(&den()).sent();
+
+    h.host(&den()).send(needs_you("b"));
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let first = toast
+        .debug_bounds("toast-answer-0")
+        .expect("the first choice is drawn");
+
+    press(&mut toast, "toast-answer-0");
+
+    let on_den = answers(h.host(&den()).sent());
+    assert_eq!(on_den.len(), 1, "the keyed host is asked once: {on_den:?}");
+    assert_eq!(on_den[0].0, "b");
+    assert_eq!(on_den[0].1, stamp(2), "chosen against its own wait's stamp");
+    assert!(
+        answers(h.host(&saved_remote()).sent()).is_empty(),
+        "the other host listing the same id is not asked"
+    );
+
+    toast.simulate_click(first.center(), Modifiers::none());
+    toast.run_until_parked();
+
+    assert!(
+        answers(h.host(&den()).sent()).is_empty(),
+        "a second press sends nothing"
+    );
 }

@@ -983,7 +983,9 @@ impl PhoneRoot {
     /// Shows `host`'s session `session_id` in place of Home, on its chat
     /// when the chat is mirrored, else on its terminal, and loads its chat
     /// while it can show. It opens no tab and lays out no pane, and closes
-    /// the viewer, the browser and Settings.
+    /// the viewer, the browser and Settings. The look clears the session's
+    /// attention and its unseen turn, as the desktop's own show does, so an
+    /// ended card leaves the tray.
     pub(crate) fn open_session(&mut self, host: HostKey, session_id: &str, cx: &mut Context<Self>) {
         tracing::debug!(?host, session_id, "phone: showing a session");
         self.forget_pending_open();
@@ -1009,6 +1011,8 @@ impl PhoneRoot {
         self.sort_menu = false;
         // The page's context label reads the host's Dashboard facts.
         self.root.update(cx, |root, cx| {
+            root.sidebar.clear_attention_on(&shown.0, &shown.1);
+            root.mark_session_seen(Some(&shown.0), &shown.1, cx);
             root.dismiss_phone_card(cx);
             root.show_phone_chat(Some(shown), cx);
             root.sync_dashboard_watch();

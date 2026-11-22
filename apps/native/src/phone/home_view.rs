@@ -823,6 +823,7 @@ impl PhoneRoot {
             .map(|(at, button)| {
                 let id = format!("phone-tray-choice-{}", at + 1);
                 let session_id = card.key.session_id.clone();
+                let host = card.key.host.clone();
                 let choice = button.choice.clone();
                 let description_selector = button
                     .description
@@ -846,7 +847,13 @@ impl PhoneRoot {
                 row.w_full()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.root.update(cx, |root, cx| {
-                            root.answer_from_dashboard(&session_id, since, choice.clone(), cx);
+                            root.answer_from_dashboard(
+                                &host,
+                                &session_id,
+                                since,
+                                choice.clone(),
+                                cx,
+                            );
                         });
                     }))
             })

@@ -100,15 +100,15 @@ impl DashboardOpens {
 
 /// The `AnswerPrompt`s the Dashboard's ask blocks sent and the daemon has
 /// not refused, by the host each went to, the newest [`ANSWERS_CAP`] of
-/// them; and per session the wait its last answer was sent for, whose
-/// buttons stay disabled while that wait holds; and per host and session
-/// the last refusal, with the wait it was for, which the phone's Needs you
-/// tray shows on the session's card while that wait holds.
+/// them; and per host and session the wait its last answer was sent for,
+/// whose buttons stay disabled while that wait holds; and per host and
+/// session the last refusal, with the wait it was for, which the phone's
+/// Needs you tray shows on the session's card while that wait holds.
 #[derive(Debug, Default)]
 pub(crate) struct DashboardAnswers {
     next_answer: u64,
     sent: VecDeque<(HostKey, String)>,
-    out: HashMap<String, AnswerOut>,
+    out: HashMap<(HostKey, String), AnswerOut>,
     refusals: HashMap<(HostKey, String), Refusal>,
 }
 
@@ -122,10 +122,15 @@ struct Refusal {
 /// The wait an answer was sent for: the snapshot's stamp and prompt then.
 #[derive(Debug)]
 struct AnswerOut {
-    host: HostKey,
     request_id: String,
     since: DateTime<Utc>,
     pending: Option<PendingInput>,
+}
+
+/// Whether `out` was sent for `session`'s wait as its snapshot reads now:
+/// same status stamp, same prompt.
+fn out_matches(out: &AnswerOut, session: &SessionSnapshot) -> bool {
+    Some(out.since) == session.status_since && out.pending == session.pending_input
 }
 
 impl DashboardAnswers {
@@ -154,8 +159,8 @@ impl DashboardAnswers {
         };
         self.sent.remove(at);
         let refusals = &mut self.refusals;
-        self.out.retain(|session_id, out| {
-            let ours = out.host == *host && out.request_id == id;
+        self.out.retain(|(sent_to, session_id), out| {
+            let ours = sent_to == host && out.request_id == id;
             if ours {
                 refusals.insert(
                     (host.clone(), session_id.clone()),
@@ -179,18 +184,26 @@ impl DashboardAnswers {
             .map(|refusal| refusal.message.as_str())
     }
 
-    /// Whether an answer is out for `session`'s wait as its snapshot reads
-    /// now: same status stamp, same prompt.
-    pub(crate) fn is_out(&self, session: &SessionSnapshot) -> bool {
-        self.out.get(&session.id).is_some_and(|out| {
-            Some(out.since) == session.status_since && out.pending == session.pending_input
-        })
+    /// Whether an answer is out for `host`'s `session`'s wait as its
+    /// snapshot reads now: same status stamp, same prompt.
+    pub(crate) fn is_out(&self, host: &HostKey, session: &SessionSnapshot) -> bool {
+        self.out
+            .get(&(host.clone(), session.id.clone()))
+            .is_some_and(|out| out_matches(out, session))
+    }
+
+    /// Whether an answer is out for `session`'s wait on any host, which the
+    /// Dashboard needs: it lists a session by id alone.
+    pub(crate) fn is_out_any_host(&self, session: &SessionSnapshot) -> bool {
+        self.out
+            .iter()
+            .any(|((_, id), out)| id == &session.id && out_matches(out, session))
     }
 
     /// `host`'s connection is new: no refusal of an old answer will come.
     fn reset(&mut self, host: &HostKey) {
         self.sent.retain(|(sent_to, _)| sent_to != host);
-        self.out.retain(|_, out| out.host != *host);
+        self.out.retain(|(sent_to, _), _| sent_to != host);
         self.refusals
             .retain(|(refused_on, _), _| refused_on != host);
     }
@@ -491,39 +504,38 @@ impl RootView {
         }
     }
 
-    /// An ask block's choice button: sends `choice` for `session_id`'s
-    /// prompt, chosen against the snapshot's status stamp `since`, to the
-    /// session's host, and holds the session's buttons until that wait
+    /// An ask block's choice button: sends `choice` for `host`'s
+    /// `session_id`'s prompt, chosen against the snapshot's status stamp
+    /// `since`, and holds `host`'s buttons for that session until its wait
     /// changes or the answer is refused. Nothing is sent while an answer
     /// for the same wait is out.
     pub(crate) fn answer_from_dashboard(
         &mut self,
+        host: &HostKey,
         session_id: &str,
         since: DateTime<Utc>,
         choice: PromptChoice,
         cx: &mut Context<Self>,
     ) {
-        let pending = match self.sidebar.session(session_id) {
-            Some(session) if self.dashboard_answers.is_out(session) => return,
+        let pending = match self.sidebar.session_on(host, session_id) {
+            Some(session) if self.dashboard_answers.is_out(host, session) => return,
             Some(session) => session.pending_input.clone(),
             None => None,
         };
-        let host = self.host_of_session(session_id);
-        let request_id = self.dashboard_answers.answer_id(&host);
+        let request_id = self.dashboard_answers.answer_id(host);
         self.dashboard_answers
             .refusals
             .remove(&(host.clone(), session_id.to_owned()));
         self.dashboard_answers.out.insert(
-            session_id.to_owned(),
+            (host.clone(), session_id.to_owned()),
             AnswerOut {
-                host: host.clone(),
                 request_id: request_id.clone(),
                 since,
                 pending,
             },
         );
         self.send_to(
-            &host,
+            host,
             ClientMessage::AnswerPrompt {
                 session_id: session_id.to_owned(),
                 since,
