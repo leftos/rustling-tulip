@@ -16,7 +16,7 @@ use agent_api::{AgentError, AgentPlugin, UserHooksState};
 use protocol::{ClientMessage, DaemonMessage, UserHooksWire};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{ErrorKind, Write as _};
+use std::io::{self, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -299,9 +299,19 @@ pub(super) fn backup_path(settings: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// `<settings>.rt-backup.tmp`, where a backup's bytes are written before it is
+/// linked into place.
+fn backup_temp_path(settings: &Path) -> PathBuf {
+    let mut name = OsString::from(settings.as_os_str());
+    name.push(".rt-backup.tmp");
+    PathBuf::from(name)
+}
+
 /// Copy `settings` byte for byte to its backup, unless the file is missing or
-/// the backup exists; an existing backup is never overwritten. `true` when
-/// this call created the backup.
+/// the backup exists; an existing backup is never overwritten. The bytes go to
+/// `<settings>.rt-backup.tmp` and are linked into place, so a backup is either
+/// whole or absent, even across a crash. `true` when this call created the
+/// backup.
 fn back_up_once(settings: &Path) -> Result<bool, String> {
     let backup = backup_path(settings);
     let bytes = match fs::read(settings) {
@@ -309,23 +319,42 @@ fn back_up_once(settings: &Path) -> Result<bool, String> {
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(named(settings, &err)),
     };
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&backup)
-    {
-        Ok(file) => file,
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(false),
-        Err(err) => return Err(named(&backup, &err)),
-    };
-    if let Err(err) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        // A torn backup would never be replaced; leave none instead.
-        let _ = fs::remove_file(&backup);
-        return Err(named(&backup, &err));
+    if fs::symlink_metadata(&backup).is_ok() {
+        return Ok(false);
     }
-    info!(backup = %backup.display(), "agent_hooks: user settings backed up");
-    Ok(true)
+    let temp = backup_temp_path(settings);
+    let published = write_temp(&temp, &bytes).and_then(|()| publish_backup(&temp, &backup));
+    // Only a linked backup stays; the temp has done its job either way.
+    let _ = fs::remove_file(&temp);
+    match published {
+        Ok(true) => {
+            info!(backup = %backup.display(), "agent_hooks: user settings backed up");
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(err) => Err(named(&backup, &err)),
+    }
+}
+
+/// Write `bytes` to `temp`, flushed to disk; a temp an earlier crash left is
+/// replaced.
+fn write_temp(temp: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Link `temp` into place as `backup`; `false` when a backup already exists.
+fn publish_backup(temp: &Path, backup: &Path) -> io::Result<bool> {
+    match fs::hard_link(temp, backup) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// Write `text` to `settings` atomically, creating its folder.
@@ -546,6 +575,58 @@ mod tests {
             std::fs::read(&backup).expect("the backup still exists"),
             original.as_bytes(),
             "an existing backup is never overwritten"
+        );
+    }
+
+    #[test]
+    fn a_crash_leftover_temp_does_not_block_the_backup() {
+        let scratch = ScratchDir::new("hooks-backup-leftover-temp");
+        let settings = scratch.path().join("settings.json");
+        let original = "{\r\n    \"theme\": \"dark\"\r\n}\r\n";
+        std::fs::write(&settings, original).expect("write the user's file");
+        // A crash between writing the temp and linking it leaves this behind.
+        std::fs::write(backup_temp_path(&settings), "torn").expect("a leftover temp");
+        let site = site(scratch.path().join("hook-shim").join("rt-hook"));
+
+        let on = answer(
+            Some(hooks_plugin()),
+            Some(&settings),
+            Request::Set(true),
+            &site,
+        );
+        assert_eq!((on.state, on.error), (UserHooksWire::On, None));
+        assert_eq!(
+            std::fs::read(backup_path(&settings)).expect("the backup exists"),
+            original.as_bytes()
+        );
+        assert!(
+            !backup_temp_path(&settings).exists(),
+            "the leftover temp is overwritten and removed"
+        );
+    }
+
+    #[test]
+    fn the_backup_temp_is_gone_after_a_backup() {
+        let scratch = ScratchDir::new("hooks-backup-temp");
+        let settings = scratch.path().join("settings.json");
+        let original = "{\"theme\": \"dark\"}\n";
+        std::fs::write(&settings, original).expect("write the user's file");
+        let site = site(scratch.path().join("hook-shim").join("rt-hook"));
+
+        let on = answer(
+            Some(hooks_plugin()),
+            Some(&settings),
+            Request::Set(true),
+            &site,
+        );
+        assert_eq!((on.state, on.error), (UserHooksWire::On, None));
+        assert_eq!(
+            std::fs::read(backup_path(&settings)).expect("the backup exists"),
+            original.as_bytes()
+        );
+        assert!(
+            !backup_temp_path(&settings).exists(),
+            "only the backup is left"
         );
     }
 

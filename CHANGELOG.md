@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.
 - On the iPhone, tapping a web link in a session's terminal opens it in Safari, or in the app that claims it.
 - Answering one question of a multi-question card from the phone or the chat keeps the session waiting on you until the card is submitted.
+- A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
 
 ## v0.18.3-alpha

@@ -274,7 +274,7 @@ It exists for the tracer's `hook --from-env` mode run from a user's settings hoo
 
 `GetAgentUserHooks` and `SetAgentUserHooks` (`crates/daemon/src/server/agent_hooks.rs`) read and edit the agent's own user settings file, outside the app's folders: for Claude `settings.json` under `CLAUDE_CONFIG_DIR` (non-empty), else `~/.claude`.
 
-All of the file work runs off the async threads. An unchanged text writes nothing. Before a call's first write the daemon copies the file to `<settings>.rt-backup`, only when that file is absent, and removes the copy again if that call's write does not happen.
+All of the file work runs off the async threads. An unchanged text writes nothing. Before a call's first write the daemon copies the file to `<settings>.rt-backup`, only when that file is absent, and removes the copy again if that call's write does not happen. The copy is written to `<settings>.rt-backup.tmp`, flushed, and hard-linked into place, so a crash leaves a whole backup or none; the temp is removed on every exit, and one an earlier crash left is overwritten.
 
 Every write is a compare-and-swap (read, compute, re-read, recompute once, else refuse with "<path> changed while it was being edited; try again") and then atomic. A symlinked settings file is refused for a Set ("<path> is a link; …"). On Unix the first write leaves `settings.json` owner-only.
 
