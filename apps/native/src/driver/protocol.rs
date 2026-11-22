@@ -2,7 +2,9 @@
 //!
 //! A request is `{ "id": u64, "method": string, "params": {...} }`; its reply
 //! carries the same id and either `"result"` or `"error"`, an error naming a
-//! [`ErrorCode`], a message and, where one helps, a hint.
+//! [`ErrorCode`], a message and, where one helps, a hint. `cancel` names
+//! another request still pending on the same connection ([`CancelParams`]);
+//! the pipe answers it at once with `{"cancelled": bool}`.
 
 use gpui::Keystroke;
 use serde::de::DeserializeOwned;
@@ -10,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 15] = [
+pub const METHODS: [&str; 16] = [
     "action",
+    "cancel",
     "click",
     "drag",
     "find",
@@ -165,6 +168,14 @@ impl Reply {
             Some(format!("methods: {}", METHODS.join(", "))),
         )
     }
+}
+
+/// `cancel`'s params: the id of the request to cancel, pending on the same
+/// connection.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelParams {
+    pub request: u64,
 }
 
 /// `find`'s params: the names to list start with `prefix`.
@@ -539,8 +550,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ClickParams, ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply, Request,
-        WheelParams,
+        CancelParams, ClickParams, ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply,
+        Request, WheelParams,
     };
 
     fn request(text: &str) -> Request {
@@ -589,7 +600,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: action, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, state, type_text, wait_for, wheel",
+                    "hint": "methods: action, cancel, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, state, type_text, wait_for, wheel",
                 },
             })
         );
@@ -636,6 +647,26 @@ mod tests {
             let reply = Request::decode(text).expect_err("not a request");
             assert_eq!(reply.id, id, "{text}");
             assert_eq!(failure(reply).code, ErrorCode::BadParams, "{text}");
+        }
+    }
+
+    #[test]
+    fn cancel_params_name_one_request() {
+        let named = request(r#"{"id":7,"method":"cancel","params":{"request":3}}"#);
+        let params: CancelParams = named.params().expect("one request id decodes");
+        assert_eq!(params, CancelParams { request: 3 });
+        for params in [
+            r"{}",
+            r#"{"request":"3"}"#,
+            r#"{"request":-1}"#,
+            r#"{"request":3,"also":4}"#,
+        ] {
+            let text = format!(r#"{{"id":7,"method":"cancel","params":{params}}}"#);
+            let refused = request(&text)
+                .params::<CancelParams>()
+                .expect_err("not one request id");
+            assert_eq!(refused.id, 7, "{params}");
+            assert_eq!(failure(refused).code, ErrorCode::BadParams, "{params}");
         }
     }
 

@@ -117,7 +117,7 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(
         failed.hint.as_deref(),
         Some(
-            "methods: action, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, \
+            "methods: action, cancel, click, drag, find, key, move, pane_text, panic, paste, ping, screenshot, \
              state, type_text, wait_for, wheel"
         )
     );
@@ -779,4 +779,112 @@ fn driver_wait_for_rejects_a_malformed_predicate(cx: &mut TestAppContext) {
         "{}",
         failed.message
     );
+}
+
+#[gpui::test]
+fn driver_cancel_is_answered_only_over_the_pipe(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let failed = failure(&mut h, "cancel", json!({"request": 3}));
+
+    assert_eq!(failed.code, ErrorCode::Refused);
+    assert_eq!(
+        failed.message,
+        "cancel is answered only over the driver pipe"
+    );
+}
+
+/// The endpoint's dispatcher, answering calls against the harness window.
+#[cfg(windows)]
+mod endpoint {
+    use futures::channel::{mpsc, oneshot};
+    use gpui::TestAppContext;
+    use rustling_tulip_native::driver::endpoint::dispatch;
+    use rustling_tulip_native::driver::pipe::Call;
+    use rustling_tulip_native::driver::protocol::{ErrorCode, Reply, Request};
+    use serde_json::{Value, json};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{TestDir, two_repos};
+    use crate::support::Harness;
+
+    /// Starts the endpoint's dispatcher on `h`'s window and returns where its
+    /// calls go.
+    fn dispatcher(h: &mut Harness<'_>) -> mpsc::UnboundedSender<Call> {
+        let (calls, received) = mpsc::unbounded::<Call>();
+        let root = h.root.downgrade();
+        h.cx.update(|window, cx| dispatch(received, window.window_handle(), root, cx));
+        calls
+    }
+
+    /// Hands `method` with `params` and `cancel` to the dispatcher under id
+    /// 7, and returns where its reply comes.
+    fn send(
+        calls: &mpsc::UnboundedSender<Call>,
+        method: &str,
+        params: Value,
+        cancel: &CancellationToken,
+    ) -> oneshot::Receiver<Reply> {
+        let (reply, answered) = oneshot::channel();
+        let request = Request {
+            id: 7,
+            method: method.to_owned(),
+            params,
+        };
+        let call = Call {
+            request,
+            reply,
+            cancel: cancel.clone(),
+        };
+        assert!(
+            calls.unbounded_send(call).is_ok(),
+            "the dispatcher holds its receiver"
+        );
+        answered
+    }
+
+    fn cancelled() -> Reply {
+        Reply::error(7, ErrorCode::Refused, "cancelled".to_owned(), None)
+    }
+
+    #[gpui::test]
+    fn driver_endpoint_skips_a_call_cancelled_in_the_queue(cx: &mut TestAppContext) {
+        let dir = TestDir::new();
+        let mut h = Harness::with(cx, &dir, &two_repos());
+        let calls = dispatcher(&mut h);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let mut answered = send(&calls, "action", json!({"name": "open_settings"}), &cancel);
+        h.cx.run_until_parked();
+
+        assert_eq!(answered.try_recv(), Ok(Some(cancelled())));
+        assert!(
+            !h.root(|root, _| root.settings_open()),
+            "a call cancelled in the queue does nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn driver_wait_for_ends_when_cancelled_between_polls(cx: &mut TestAppContext) {
+        let dir = TestDir::new();
+        let mut h = Harness::with(cx, &dir, &two_repos());
+        let calls = dispatcher(&mut h);
+        let cancel = CancellationToken::new();
+
+        let mut answered = send(
+            &calls,
+            "wait_for",
+            json!({"until": {"state": "overlay", "equals": "settings"}, "timeout_ms": 60000}),
+            &cancel,
+        );
+        h.cx.run_until_parked();
+        assert_eq!(answered.try_recv(), Ok(None), "the wait is still polling");
+
+        cancel.cancel();
+        h.cx.run_until_parked();
+
+        assert_eq!(answered.try_recv(), Ok(Some(cancelled())));
+    }
 }

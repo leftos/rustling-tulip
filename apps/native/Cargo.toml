@@ -26,9 +26,11 @@ workspace = true
 # bounds (src/driver/), fed at prepaint, and the endpoint a driven run opens:
 # a named pipe (`interprocess`), current-user only (`Win32_Security`,
 # `Win32_Security_Authorization`), and `screenshot`'s capture (`Win32_Storage_Xps`
-# for PrintWindow) written as a PNG. Off by default.
+# for PrintWindow) written as a PNG, and tokio-util's cancel token for the
+# pipe's cancel method. Off by default.
 driver = [
     "dep:interprocess",
+    "dep:tokio-util",
     "windows/Win32_Security",
     "windows/Win32_Security_Authorization",
     "windows/Win32_Storage_Xps",
@@ -113,6 +115,7 @@ rodio = { version = "0.23.0", default-features = false, features = [
     "vorbis",
 ] }
 interprocess = { version = "2", features = ["tokio"], optional = true }
+tokio-util = { version = "0.7", optional = true }
 # Pasting a copied bitmap into a remote session sends it as a PNG.
 png = "0.18"
 # The in-process SSH transport (`src/ssh_inproc.rs`): the session, the phone's

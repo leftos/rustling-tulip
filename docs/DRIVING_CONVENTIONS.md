@@ -66,7 +66,7 @@ When a request's time passes, the server should send the endpoint a cancel for i
 
 Then diagnose the timeout: a short `ping` tells a busy client (it answers) from a stuck UI thread, and a stuck one's error adds the client process's CPU over a short sample, its thread count and the last lines of its log, sampled from the client's own pid. With a debugger attached (`CheckRemoteDebuggerPresent`) a call should fail at once as "most likely paused at a breakpoint".
 
-Not met: there is no cancel method, a timed-out call is not diagnosed, and the debugger check is not built.
+The endpoint's side is met: `cancel` ends a pending request and a closed connection cancels its pending ones. Not met: the server sends no cancel when a request's time passes or its connection is lost, a timed-out call is not diagnosed, and the debugger check is not built.
 Source: `tools/rt-driver-mcp/src/pipe.rs`, `apps/native/src/driver/pipe.rs`; other projects' decision records, changelog fixes and pipe-client tests; Windows docs for CheckRemoteDebuggerPresent. Seen: 0 here (seeded from godot-mcp, yaat).
 
 ### Bound every wait on both sides, and return its outcome as data with the last values seen
@@ -136,7 +136,7 @@ Endpoint requests run on gpui's UI thread, queued from the pipe's connection tas
 
 A test of that race freezes it on the queue (queue a request, close its connection, then let the dispatcher run, and assert the work did not run) rather than watching a time window, which passes vacuously or fails spuriously under load.
 
-Not met: the dispatcher loop runs every queued call and only logs that the connection closed before its reply.
+Met for the dispatcher: each call carries a cancellation token, a call whose token fired before its turn is refused "cancelled" without touching the window, and a closed connection fires the tokens of its pending calls; a frame wait and a `wait_for` end early on it.
 Source: `apps/native/src/driver/endpoint.rs`, `apps/native/src/driver/pipe.rs`; another project's in-app hook wait handler and a dispatcher-queue test of a cancelled wait. Seen: 0 here (seeded from yaat).
 
 ## Driving an app
@@ -395,9 +395,9 @@ Source: `apps/native/src/driver/handlers.rs`; other projects' decision records a
 ### Answer every request with a stable error code and a hint, and cancel it when its connection goes
 <!-- rule: coded-errors-never-throw -->
 
-The endpoint answers every failure (an unreadable or oversized line, an unknown method, bad params, a handler error) with a stable code (`unknown_method`, `bad_params`, `not_found`, `not_visible`, `refused`), a message and, where it helps, a hint; an unknown method's hint lists the methods, and codes may be added but never respelled. Requests on a connection are answered one at a time, in order.
+The endpoint answers every failure (an unreadable or oversized line, an unknown method, bad params, a handler error) with a stable code (`unknown_method`, `bad_params`, `not_found`, `not_visible`, `refused`), a message and, where it helps, a hint; an unknown method's hint lists the methods, and codes may be added but never respelled. Replies on a connection go out in line order, except a `cancel`'s, which is written at once; a request id still pending on the connection is refused `bad_params`, and an unterminated last line at end of file is not dispatched.
 
-A disconnect should cancel the running request (the one case left unanswered, since nobody is left). Not met: a request whose connection has gone still runs to its end ("Post every handler's UI work" above).
+A disconnect cancels every request the connection still has pending (the one case left unanswered, since nobody is left): the work is withdrawn before it runs, or ends at its next wait ("Post every handler's UI work" above).
 Source: `apps/native/src/driver/protocol.rs`, `apps/native/src/driver/pipe.rs`, `apps/native/src/driver/endpoint.rs`; another project's hook dispatcher and error codes. Seen: 0 here (seeded from yaat).
 
 ### Feed the app's errors into every tool result

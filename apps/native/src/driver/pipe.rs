@@ -1,11 +1,15 @@
 //! The driver's named pipe, `rt-driver-<pid>`: one JSON request per line in,
-//! one reply line out per request, in order. Only the current user can open
-//! it, and only from this machine.
+//! one reply line out per request, in line order. Only the current user can
+//! open it, and only from this machine.
 //!
 //! The pipe runs on its own `driver-pipe` thread. Each request is handed to
-//! the UI thread's dispatcher as a [`Call`], and its reply is written before
-//! the next line of that connection is read.
+//! the UI thread's dispatcher as a [`Call`] with a cancel token, and the
+//! connection keeps reading lines while replies are pending. A `cancel` line
+//! is answered here, never by the dispatcher, and its reply is written at
+//! once: it fires the token of the named request pending on the same
+//! connection. A connection that ends fires every token it holds.
 
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::time::Duration;
@@ -20,9 +24,11 @@ use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 use interprocess::os::windows::security_descriptor::{
     AsSecurityDescriptorExt as _, BorrowedSecurityDescriptor, SecurityDescriptor,
 };
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio_util::sync::CancellationToken;
 
-use crate::driver::protocol::{ErrorCode, Reply, Request};
+use crate::driver::protocol::{CancelParams, ErrorCode, Reply, Request};
 use crate::offscreen::DRIVER_REFUSED_EXIT;
 
 /// The longest request line read, without its `\n`.
@@ -38,6 +44,8 @@ const ACCEPT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 pub struct Call {
     pub request: Request,
     pub reply: oneshot::Sender<Reply>,
+    /// Fired when the client cancels the request, or its connection ends.
+    pub cancel: CancellationToken,
 }
 
 /// The pipe name of the client whose process id is `pid`.
@@ -146,40 +154,30 @@ pub fn serve(
     })
 }
 
-/// Answers one connection's lines in order until it closes, or until a
-/// line runs past [`MAX_LINE`].
+/// Answers one connection's lines until it closes, or until a line runs
+/// past [`MAX_LINE`]. Lines are read while replies are pending; replies go
+/// out in line order, except a `cancel`'s, which is written at once. The
+/// connection's end fires the token of every request it still has pending.
 async fn connection(stream: Stream, calls: UnboundedSender<Call>) {
     let (read, mut write) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read);
-    let mut line = Vec::new();
+    let mut lines = Lines::new(read);
+    let mut connection = Connection::new(calls);
     loop {
-        line.clear();
-        let limit = u64::try_from(MAX_LINE + 1).unwrap_or(u64::MAX);
-        let read = (&mut reader).take(limit).read_until(b'\n', &mut line).await;
-        match read {
-            Ok(0) => return,
-            Ok(_) => {}
-            Err(err) => {
-                tracing::debug!("driver pipe: reading a request: {err}");
-                return;
-            }
-        }
-        let terminated = line.last() == Some(&b'\n');
-        if terminated {
-            line.pop();
-        } else if line.len() > MAX_LINE {
-            let reply = Reply::error(
-                0,
-                ErrorCode::BadParams,
-                "the request line is longer than 64 KiB".to_owned(),
-                None,
-            );
-            if let Err(err) = write_reply(&mut write, &reply).await {
-                tracing::warn!("driver pipe: writing the over-long line's refusal: {err:#}");
-            }
-            return;
-        }
-        let reply = answer(&line, &calls).await;
+        let reply = tokio::select! {
+            biased;
+            reply = connection.next_reply(), if connection.has_queued() => reply,
+            line = lines.next() => match line {
+                Line::Text(text) => match connection.take_line(&text) {
+                    Some(reply) => reply,
+                    None => continue,
+                },
+                Line::TooLong => {
+                    refuse_too_long(&mut write).await;
+                    return;
+                }
+                Line::Closed => return,
+            },
+        };
         if let Err(err) = write_reply(&mut write, &reply).await {
             tracing::warn!("driver pipe: writing a reply: {err:#}");
             return;
@@ -187,26 +185,208 @@ async fn connection(stream: Stream, calls: UnboundedSender<Call>) {
     }
 }
 
-/// The reply to one request line: decoded and dispatched, or refused.
-async fn answer(line: &[u8], calls: &UnboundedSender<Call>) -> Reply {
-    let Ok(text) = std::str::from_utf8(line) else {
-        return Reply::error(
+/// Writes the refusal of a line longer than [`MAX_LINE`].
+async fn refuse_too_long<W>(write: &mut W)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let reply = Reply::error(
+        0,
+        ErrorCode::BadParams,
+        "the request line is longer than 64 KiB".to_owned(),
+        None,
+    );
+    if let Err(err) = write_reply(write, &reply).await {
+        tracing::warn!("driver pipe: writing the over-long line's refusal: {err:#}");
+    }
+}
+
+/// What a connection's next read came to.
+enum Line {
+    /// One whole line, without its `\n`.
+    Text(Vec<u8>),
+    /// A line that runs past [`MAX_LINE`].
+    TooLong,
+    /// End of file, a read error, or a last line the client never ended:
+    /// never dispatched.
+    Closed,
+}
+
+/// One connection's request lines. A read dropped before it ends keeps the
+/// bytes it took (`read_until` appends to `line` as it goes), and the next
+/// read carries on from them against what is left of the limit.
+struct Lines<R> {
+    reader: BufReader<R>,
+    line: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> Lines<R> {
+    fn new(read: R) -> Self {
+        Self {
+            reader: BufReader::new(read),
+            line: Vec::new(),
+        }
+    }
+
+    /// The next line. Cancel safe: a partial line stays in `self.line`.
+    async fn next(&mut self) -> Line {
+        if self.line.len() > MAX_LINE {
+            return Line::TooLong;
+        }
+        let budget = u64::try_from(MAX_LINE + 1 - self.line.len()).unwrap_or(u64::MAX);
+        let read = (&mut self.reader)
+            .take(budget)
+            .read_until(b'\n', &mut self.line)
+            .await;
+        match read {
+            Ok(0) => Line::Closed,
+            Ok(_) if self.line.last() == Some(&b'\n') => {
+                self.line.pop();
+                Line::Text(std::mem::take(&mut self.line))
+            }
+            Ok(_) if self.line.len() > MAX_LINE => Line::TooLong,
+            // Under the limit with no `\n`: the stream ended mid-line.
+            Ok(_) => Line::Closed,
+            Err(err) => {
+                tracing::debug!("driver pipe: reading a request: {err}");
+                Line::Closed
+            }
+        }
+    }
+}
+
+/// One entry of a connection's reply queue, in line order.
+enum Queued {
+    /// A reply the pipe made itself.
+    Ready(Reply),
+    /// A request handed to the dispatcher, whose reply is still to come.
+    Pending {
+        id: u64,
+        answer: oneshot::Receiver<Reply>,
+    },
+}
+
+/// One connection's replies in line order, and the cancel token of each
+/// request it has pending, by id. Dropping it fires every token it holds.
+struct Connection {
+    calls: UnboundedSender<Call>,
+    queue: VecDeque<Queued>,
+    tokens: HashMap<u64, CancellationToken>,
+}
+
+impl Connection {
+    fn new(calls: UnboundedSender<Call>) -> Self {
+        Self {
+            calls,
+            queue: VecDeque::new(),
+            tokens: HashMap::new(),
+        }
+    }
+
+    /// Takes one request line: a `cancel`'s reply is returned, to be written
+    /// at once; any other line's reply is queued behind those before it.
+    fn take_line(&mut self, line: &[u8]) -> Option<Reply> {
+        let request = match decode(line) {
+            Ok(request) => request,
+            Err(reply) => {
+                self.queue.push_back(Queued::Ready(reply));
+                return None;
+            }
+        };
+        if request.method == "cancel" {
+            return Some(self.cancel(&request));
+        }
+        self.dispatch(request);
+        None
+    }
+
+    /// The reply to a `cancel`: whether it named a request still pending on
+    /// this connection, whose token it fires.
+    fn cancel(&self, request: &Request) -> Reply {
+        match request.params::<CancelParams>() {
+            Ok(CancelParams { request: target }) => {
+                let token = self.tokens.get(&target);
+                if let Some(token) = token {
+                    token.cancel();
+                }
+                Reply::ok(request.id, json!({"cancelled": token.is_some()}))
+            }
+            Err(reply) => reply,
+        }
+    }
+
+    /// Hands `request` to the dispatcher with a token of its own, and queues
+    /// its pending reply; an id already pending here is refused instead.
+    fn dispatch(&mut self, request: Request) {
+        let id = request.id;
+        if self.tokens.contains_key(&id) {
+            let refused = Reply::error(
+                id,
+                ErrorCode::BadParams,
+                format!("request {id} is already pending on this connection"),
+                None,
+            );
+            self.queue.push_back(Queued::Ready(refused));
+            return;
+        }
+        let cancel = CancellationToken::new();
+        self.tokens.insert(id, cancel.clone());
+        let (reply, answer) = oneshot::channel();
+        let call = Call {
+            request,
+            reply,
+            cancel,
+        };
+        if self.calls.unbounded_send(call).is_err() {
+            self.tokens.remove(&id);
+            self.queue.push_back(Queued::Ready(closing(id)));
+            return;
+        }
+        self.queue.push_back(Queued::Pending { id, answer });
+    }
+
+    fn has_queued(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// The reply at the head of the queue once it is ready, taken off the
+    /// queue, its token with it. Cancel safe: the head stays until its reply
+    /// is taken. Polled only while the queue is not empty.
+    async fn next_reply(&mut self) -> Reply {
+        if let Some(Queued::Pending { id, answer }) = self.queue.front_mut() {
+            let id = *id;
+            let answered = answer.await;
+            self.queue.pop_front();
+            self.tokens.remove(&id);
+            return answered.unwrap_or_else(|_| closing(id));
+        }
+        match self.queue.pop_front() {
+            Some(Queued::Ready(reply)) => reply,
+            // A pending head returned above, and an empty queue is not polled.
+            Some(Queued::Pending { .. }) | None => std::future::pending().await,
+        }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        for (_, token) in self.tokens.drain() {
+            token.cancel();
+        }
+    }
+}
+
+/// The request one line holds, or the reply refusing it.
+fn decode(line: &[u8]) -> Result<Request, Reply> {
+    let text = std::str::from_utf8(line).map_err(|_| {
+        Reply::error(
             0,
             ErrorCode::BadParams,
             "the request line is not UTF-8".to_owned(),
             None,
-        );
-    };
-    let request = match Request::decode(text) {
-        Ok(request) => request,
-        Err(reply) => return reply,
-    };
-    let id = request.id;
-    let (reply, answered) = oneshot::channel();
-    if calls.unbounded_send(Call { request, reply }).is_err() {
-        return closing(id);
-    }
-    answered.await.unwrap_or_else(|_| closing(id))
+        )
+    })?;
+    Request::decode(text)
 }
 
 /// The reply to request `id` once the dispatcher is gone.
@@ -340,7 +520,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
     use super::{Call, MAX_LINE, current_user_only, serve};
-    use crate::driver::protocol::Reply;
+    use crate::driver::protocol::{ErrorCode, Reply};
 
     /// How long a spec waits on a reply line before it fails as hung.
     const HANG_GUARD: Duration = Duration::from_secs(10);
@@ -462,5 +642,237 @@ mod tests {
             reply_line(&mut reader).await,
             json!({"id": 9, "error": {"code": "refused", "message": "the client is closing"}})
         );
+    }
+
+    /// Serves a pipe whose calls the spec answers itself, and returns its
+    /// name and the calls as they arrive.
+    fn start_held() -> (String, mpsc::UnboundedReceiver<Call>) {
+        let name = unique_name();
+        let (calls, received) = mpsc::unbounded::<Call>();
+        let accept = serve(&name, current_user_only().expect("a descriptor"), calls)
+            .expect("the listener is created");
+        tokio::spawn(accept);
+        (name, received)
+    }
+
+    /// The next call the pipe hands its dispatcher.
+    async fn next_call(received: &mut mpsc::UnboundedReceiver<Call>) -> Call {
+        tokio::time::timeout(HANG_GUARD, received.next())
+            .await
+            .expect("hung: no call within the hang guard")
+            .expect("the pipe holds its sender")
+    }
+
+    /// Waits until `call`'s token has fired.
+    async fn fired(call: &Call) {
+        tokio::time::timeout(HANG_GUARD, call.cancel.cancelled())
+            .await
+            .expect("hung: the call's token did not fire");
+    }
+
+    /// Answers `call` as `ping`'s dispatcher does.
+    fn pong(call: Call) {
+        let reply = Reply::ok(call.request.id, json!({"pong": true}));
+        assert!(call.reply.send(reply).is_ok(), "the pipe awaits the reply");
+    }
+
+    async fn send(writer: &mut tokio::io::WriteHalf<Stream>, lines: &[u8]) {
+        writer.write_all(lines).await.expect("writes");
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_cancel_fires_a_held_requests_token() {
+        let (name, mut received) = start_held();
+        let (mut reader, mut writer) = connect(&name).await;
+        send(&mut writer, b"{\"id\":3,\"method\":\"ping\"}\n").await;
+        let held = next_call(&mut received).await;
+        assert!(!held.cancel.is_cancelled(), "nothing cancelled it yet");
+        send(
+            &mut writer,
+            b"{\"id\":7,\"method\":\"cancel\",\"params\":{\"request\":3}}\n",
+        )
+        .await;
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 7, "result": {"cancelled": true}})
+        );
+        fired(&held).await;
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_answers_the_cancel_before_the_request_it_cancelled() {
+        let (name, mut received) = start_held();
+        let (mut reader, mut writer) = connect(&name).await;
+        send(
+            &mut writer,
+            b"{\"id\":3,\"method\":\"ping\"}\n{\"id\":7,\"method\":\"cancel\",\"params\":{\"request\":3}}\n",
+        )
+        .await;
+        let held = next_call(&mut received).await;
+        fired(&held).await;
+        let refused = Reply::error(3, ErrorCode::Refused, "cancelled".to_owned(), None);
+        assert!(
+            held.reply.send(refused).is_ok(),
+            "the pipe awaits the reply"
+        );
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 7, "result": {"cancelled": true}})
+        );
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 3, "error": {"code": "refused", "message": "cancelled"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_cancel_after_the_reply_answers_false() {
+        let name = start(true);
+        let (mut reader, mut writer) = connect(&name).await;
+        send(&mut writer, b"{\"id\":3,\"method\":\"ping\"}\n").await;
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 3, "result": {"pong": true}})
+        );
+        send(
+            &mut writer,
+            b"{\"id\":7,\"method\":\"cancel\",\"params\":{\"request\":3}}\n",
+        )
+        .await;
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 7, "result": {"cancelled": false}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_cancel_of_an_unknown_id_answers_false() {
+        let name = start(true);
+        let (mut reader, mut writer) = connect(&name).await;
+        send(
+            &mut writer,
+            b"{\"id\":7,\"method\":\"cancel\",\"params\":{\"request\":99}}\n",
+        )
+        .await;
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 7, "result": {"cancelled": false}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_cancel_never_reaches_another_connection() {
+        let (name, mut received) = start_held();
+        let (mut held_reader, mut held_writer) = connect(&name).await;
+        send(&mut held_writer, b"{\"id\":3,\"method\":\"ping\"}\n").await;
+        let held = next_call(&mut received).await;
+        let (mut other_reader, mut other_writer) = connect(&name).await;
+        send(
+            &mut other_writer,
+            b"{\"id\":7,\"method\":\"cancel\",\"params\":{\"request\":3}}\n",
+        )
+        .await;
+        assert_eq!(
+            reply_line(&mut other_reader).await,
+            json!({"id": 7, "result": {"cancelled": false}})
+        );
+        assert!(
+            !held.cancel.is_cancelled(),
+            "a cancel on one connection leaves another's token alone"
+        );
+        pong(held);
+        assert_eq!(
+            reply_line(&mut held_reader).await,
+            json!({"id": 3, "result": {"pong": true}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_refuses_a_malformed_cancel() {
+        let (name, mut received) = start_held();
+        let (mut reader, mut writer) = connect(&name).await;
+        send(&mut writer, b"{\"id\":3,\"method\":\"ping\"}\n").await;
+        let held = next_call(&mut received).await;
+        send(
+            &mut writer,
+            b"{\"id\":7,\"method\":\"cancel\",\"params\":{}}\n{\"id\":8,\"method\":\"cancel\",\"params\":{\"request\":\"3\"}}\n",
+        )
+        .await;
+        for id in [7, 8] {
+            let refused = reply_line(&mut reader).await;
+            assert_eq!(refused["id"], json!(id), "{refused}");
+            assert_eq!(refused["error"]["code"], json!("bad_params"), "{refused}");
+        }
+        assert!(
+            !held.cancel.is_cancelled(),
+            "a malformed cancel fires nothing"
+        );
+        pong(held);
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 3, "result": {"pong": true}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_close_fires_every_pending_token() {
+        let (name, mut received) = start_held();
+        let (reader, mut writer) = connect(&name).await;
+        send(
+            &mut writer,
+            b"{\"id\":3,\"method\":\"ping\"}\n{\"id\":4,\"method\":\"ping\"}\n",
+        )
+        .await;
+        let first = next_call(&mut received).await;
+        let second = next_call(&mut received).await;
+        drop(writer);
+        drop(reader);
+        fired(&first).await;
+        fired(&second).await;
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_refuses_a_duplicate_pending_id() {
+        let (name, mut received) = start_held();
+        let (mut reader, mut writer) = connect(&name).await;
+        send(
+            &mut writer,
+            b"{\"id\":3,\"method\":\"ping\"}\n{\"id\":3,\"method\":\"ping\"}\n{\"id\":4,\"method\":\"ping\"}\n",
+        )
+        .await;
+        let first = next_call(&mut received).await;
+        let marker = next_call(&mut received).await;
+        assert_eq!(first.request.id, 3);
+        assert_eq!(marker.request.id, 4, "the duplicate is not dispatched");
+        pong(first);
+        pong(marker);
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 3, "result": {"pong": true}})
+        );
+        let duplicate = reply_line(&mut reader).await;
+        assert_eq!(duplicate["id"], json!(3), "{duplicate}");
+        assert_eq!(
+            duplicate["error"]["code"],
+            json!("bad_params"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            reply_line(&mut reader).await,
+            json!({"id": 4, "result": {"pong": true}})
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_pipe_reuses_an_id_once_answered() {
+        let name = start(true);
+        let (mut reader, mut writer) = connect(&name).await;
+        for _ in 0..2 {
+            send(&mut writer, b"{\"id\":3,\"method\":\"ping\"}\n").await;
+            assert_eq!(
+                reply_line(&mut reader).await,
+                json!({"id": 3, "result": {"pong": true}})
+            );
+        }
     }
 }

@@ -68,6 +68,11 @@ pub fn handle(
             ErrorCode::Refused,
             "screenshot is answered only over the driver pipe".to_owned(),
         )),
+        // It reaches a connection's other requests, so the pipe answers it.
+        "cancel" => Err(request.fail(
+            ErrorCode::Refused,
+            "cancel is answered only over the driver pipe".to_owned(),
+        )),
         "wait_for" => wait_for(request),
         "click" => click(request, window, cx),
         "move" => move_to(request, window, cx),
