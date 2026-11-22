@@ -250,6 +250,37 @@ pub(crate) fn outlined_button(
     button(selector, look)
 }
 
+/// The look of a [`read_only_outlined_button`] at UI text `offset` and UI
+/// weight `shift`: a disabled outlined button's, drawn at full strength.
+pub(crate) fn read_only_outlined_look(
+    offset: i8,
+    shift: i8,
+    size: ButtonSize,
+    layer: Layer,
+    t: &UiTheme,
+) -> ButtonLook {
+    ButtonLook {
+        opacity: 1.0,
+        ..button_look(offset, shift, ButtonKind::Outlined, size, false, layer, t)
+    }
+}
+
+/// An outlined button that takes no press but draws at full strength, for a
+/// control a surface shows read-only; see [`button`].
+pub(crate) fn read_only_outlined_button(
+    offset: i8,
+    shift: i8,
+    selector: &str,
+    size: ButtonSize,
+    layer: Layer,
+    t: &UiTheme,
+) -> Stateful<Div> {
+    button(
+        selector,
+        read_only_outlined_look(offset, shift, size, layer, t),
+    )
+}
+
 /// A [`ButtonKind::Primary`] button in `t`; see [`button`].
 pub(crate) fn primary_button(
     offset: i8,

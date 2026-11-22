@@ -12,9 +12,11 @@ use gpui::{AnyElement, App, ClickEvent, Div, Entity, Stateful, Window, div, prel
 use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage};
 
 use crate::UI_TEXT_SIZE;
-use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
+use crate::buttons::{
+    ButtonSize, Layer, field_frame, outlined_button, primary_button, read_only_outlined_button,
+};
 use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
-use crate::dashboard_rows::AskQuestion;
+use crate::dashboard_rows::{AskOption, AskQuestion};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::text_input::TextInput;
@@ -926,34 +928,13 @@ fn card_button(
     let choice = option_of(prompt, button);
     let fills = prompt.multi || prompt.kind == ChatPromptKind::ModelPicker;
     let selected = fills && choice.is_some_and(|option| option.selected);
-    let base = if selected {
-        primary_button(
-            offset,
-            shift,
-            &selector,
-            ButtonSize::Compact,
-            !busy,
-            Layer::Base,
-            t,
-        )
-    } else {
-        outlined_button(
-            offset,
-            shift,
-            &selector,
-            ButtonSize::Compact,
-            !busy,
-            Layer::Base,
-            t,
-        )
-    };
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
     let text_box = view
         .text_box
         .filter(|_| button.answer == ButtonAnswer::TypedText);
-    let base = match choice {
-        Some(option) => option_row_linked(
+    let base = if let Some(option) = choice {
+        option_row_linked(
             OptionRow {
                 offset,
                 shift,
@@ -963,13 +944,36 @@ fn card_button(
                 description_selector: Some(format!("chat-card-option-desc-{}", option.number)),
                 selected,
                 enabled: !busy,
+                read_only: false,
                 min_height: None,
             },
             Some(view.links),
             t,
         )
-        .when(text_box.is_none(), Styled::w_full),
-        None => base.child(button.label.clone()),
+        .when(text_box.is_none(), Styled::w_full)
+    } else {
+        let base = if selected {
+            primary_button(
+                offset,
+                shift,
+                &selector,
+                ButtonSize::Compact,
+                !busy,
+                Layer::Base,
+                t,
+            )
+        } else {
+            outlined_button(
+                offset,
+                shift,
+                &selector,
+                ButtonSize::Compact,
+                !busy,
+                Layer::Base,
+                t,
+            )
+        };
+        base.child(button.label.clone())
     };
     let base = base
         .when_some(button.tip.clone(), |base, tip| {
@@ -1016,6 +1020,9 @@ pub(crate) struct OptionRow<'a> {
     pub(crate) selected: bool,
     /// Whether the row takes a press.
     pub(crate) enabled: bool,
+    /// Whether the row is shown read-only: it takes no press, drawn at full
+    /// strength rather than a disabled control's dim.
+    pub(crate) read_only: bool,
     /// The least height the row takes, for the phone's 44 pt target.
     pub(crate) min_height: Option<f32>,
 }
@@ -1036,28 +1043,8 @@ fn option_row_linked(
     links: Option<CardLinks<'_>>,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    let (offset, shift, selector) = (row.offset, row.shift, row.selector);
-    let base = if row.selected {
-        primary_button(
-            offset,
-            shift,
-            selector,
-            ButtonSize::Compact,
-            row.enabled,
-            Layer::Base,
-            t,
-        )
-    } else {
-        outlined_button(
-            offset,
-            shift,
-            selector,
-            ButtonSize::Compact,
-            row.enabled,
-            Layer::Base,
-            t,
-        )
-    };
+    let (offset, selector) = (row.offset, row.selector);
+    let base = row_button(&row, t);
     let base = base
         .flex_col()
         .items_start()
@@ -1085,6 +1072,35 @@ fn option_row_linked(
     match row.min_height {
         Some(height) => base.min_h(px(height)),
         None => base,
+    }
+}
+
+/// [`OptionRow`]'s button: a read-only row takes no press at full strength,
+/// a selected one is filled, and any other is outlined.
+fn row_button(row: &OptionRow<'_>, t: &UiTheme) -> Stateful<Div> {
+    let (offset, shift, selector) = (row.offset, row.shift, row.selector);
+    if row.read_only {
+        read_only_outlined_button(offset, shift, selector, ButtonSize::Compact, Layer::Base, t)
+    } else if row.selected {
+        primary_button(
+            offset,
+            shift,
+            selector,
+            ButtonSize::Compact,
+            row.enabled,
+            Layer::Base,
+            t,
+        )
+    } else {
+        outlined_button(
+            offset,
+            shift,
+            selector,
+            ButtonSize::Compact,
+            row.enabled,
+            Layer::Base,
+            t,
+        )
     }
 }
 
@@ -1134,20 +1150,42 @@ fn tray_question(
             let selector = format!("phone-tray-option-{number}-{at}");
             let description_selector = format!("phone-tray-option-desc-{number}-{at}");
             option_row(
-                OptionRow {
+                tray_option_row(
                     offset,
                     shift,
-                    selector: &selector,
-                    label: &option.label,
-                    description: option.description.as_deref(),
-                    description_selector: Some(description_selector),
-                    selected: false,
-                    enabled: true,
-                    min_height: Some(min_height),
-                },
+                    &selector,
+                    option,
+                    description_selector,
+                    min_height,
+                ),
                 t,
             )
         }))
+}
+
+/// One option row of [`tray_question`] `number`, its label tagged `selector`
+/// and its description `description_selector`, at least `min_height` tall;
+/// read-only, so a tap leaves it without a pressed fill or pointer cursor.
+fn tray_option_row<'a>(
+    offset: i8,
+    shift: i8,
+    selector: &'a str,
+    option: &'a AskOption,
+    description_selector: String,
+    min_height: f32,
+) -> OptionRow<'a> {
+    OptionRow {
+        offset,
+        shift,
+        selector,
+        label: &option.label,
+        description: option.description.as_deref(),
+        description_selector: Some(description_selector),
+        selected: false,
+        enabled: false,
+        read_only: true,
+        min_height: Some(min_height),
+    }
 }
 
 /// The card's text box (`chat-card-box`), filling the rest of its row.
@@ -1195,9 +1233,10 @@ mod tests {
     use super::{
         AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, adjust_buttons,
         allow_once_option, always_allow_option, card_answer_message, card_buttons, deny_option,
-        key_action, option_description_color,
+        key_action, option_description_color, tray_option_row,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
+    use crate::dashboard_rows::AskOption;
 
     fn option(number: u32, label: &str) -> ChatOption {
         ChatOption {
@@ -2020,5 +2059,71 @@ mod tests {
                 "{id}: an unselected option's description stays the secondary text colour"
             );
         }
+    }
+
+    #[test]
+    fn a_read_only_tray_option_draws_no_pressed_state() {
+        let option = AskOption {
+            label: "main".to_owned(),
+            description: Some("the default branch".to_owned()),
+        };
+        let row = tray_option_row(
+            0,
+            0,
+            "phone-tray-option-1-1",
+            &option,
+            "phone-tray-option-desc-1-1".to_owned(),
+            44.0,
+        );
+        assert!(
+            !row.enabled,
+            "a tray option takes no press: no pressed fill, no pointer cursor"
+        );
+        assert!(row.read_only, "and draws at full strength, not dimmed");
+        assert!(!row.selected, "no tray option is a chosen one");
+        assert_eq!(row.label, "main");
+        assert_eq!(row.description, Some("the default branch"));
+        assert_eq!(
+            row.description_selector.as_deref(),
+            Some("phone-tray-option-desc-1-1")
+        );
+        assert_eq!(row.min_height, Some(44.0), "the phone's 44 pt target");
+    }
+
+    #[test]
+    fn a_read_only_outlined_look_takes_no_press_at_full_strength() {
+        use crate::buttons::{
+            ButtonKind, ButtonLook, ButtonSize, Layer, button_look, read_only_outlined_look,
+        };
+        use crate::ui_theme::UiTheme;
+        let t = &UiTheme::CONTRAST;
+        let look = read_only_outlined_look(0, 0, ButtonSize::Compact, Layer::Base, t);
+        assert!(!look.enabled, "takes no press");
+        assert_eq!(look.hover_fill, None, "no hover fill");
+        assert_eq!(look.pressed_fill, None, "no pressed fill");
+        assert!(
+            (look.opacity - 1.0).abs() < f32::EPSILON,
+            "drawn at full strength, not the disabled dim"
+        );
+        let disabled = button_look(
+            0,
+            0,
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            false,
+            Layer::Base,
+            t,
+        );
+        assert_eq!(
+            ButtonLook {
+                opacity: 0.0,
+                ..look
+            },
+            ButtonLook {
+                opacity: 0.0,
+                ..disabled
+            },
+            "a disabled outlined button in every other field"
+        );
     }
 }

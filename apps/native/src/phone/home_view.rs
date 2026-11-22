@@ -838,6 +838,7 @@ impl PhoneRoot {
                         description_selector,
                         selected: false,
                         enabled: true,
+                        read_only: false,
                         min_height: Some(TOUCH_TARGET),
                     },
                     t,
