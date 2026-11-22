@@ -512,6 +512,15 @@ impl Confirm {
         self.check_at = Some(self.hold_until);
     }
 
+    /// A check that read nothing the open window can count: its next
+    /// confirmation waits [`CONFIRM_SPACING`] from `now`, its agreeing
+    /// checks as they were.
+    fn postpone(&mut self, now: Instant) {
+        if let Some(window) = self.window.as_mut() {
+            window.counted = window.counted.max(now);
+        }
+    }
+
     /// Count one check that reads `target` against `read`; answers whether
     /// the gated change publishes now. A check that disagrees with the open
     /// window, or reads a record that moved, opens a new one.
@@ -765,8 +774,11 @@ impl ScreenWatch {
             Mode::ShellAgent if !shows_agent(&reading) => {
                 // An agent screen no rule knows, or the agent's title alone, with
                 // the shell's prompt not back: the agent may still run. Nothing
-                // writes, and any open window waits for the next check.
+                // writes, and an open window waits [`CONFIRM_SPACING`] from now
+                // for its next check, so a frame it cannot count never spins the
+                // watcher at full speed.
                 self.confirm.candidate = None;
+                self.confirm.postpone(now);
                 Checked::Done
             }
             Mode::Agent | Mode::ShellAgent => {
@@ -2593,6 +2605,49 @@ mod tests {
     #[test]
     fn shell_command_output_marks_working() {
         assert!(shell_output_is_working(8, 1_200));
+    }
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::{CONFIRM_SPACING, Confirm, Instant, StatusRead, Target};
+    use protocol::SessionStatus;
+
+    /// A record read no window can be moved by.
+    fn read() -> StatusRead {
+        StatusRead {
+            status: SessionStatus::Idle,
+            hook_driven: false,
+            main_hook_time: None,
+            pending: false,
+            held: None,
+            raise: None,
+            chat_answers: 0,
+            background: false,
+        }
+    }
+
+    #[test]
+    fn a_postponed_window_is_not_due_at_once() {
+        let t0 = Instant::now();
+        let mut confirm = Confirm::new(t0);
+        assert!(!confirm.agree(read(), Target::AgentShown, t0));
+        let now = t0 + CONFIRM_SPACING * 3;
+        // The spin's precondition: a window past its spacing is due at once.
+        assert!(confirm.next_check(None) <= Some(now));
+        confirm.postpone(now);
+        assert_eq!(confirm.next_check(None), Some(now + CONFIRM_SPACING));
+        assert_eq!(confirm.window.map(|window| window.agreeing), Some(1));
+    }
+
+    #[test]
+    fn postponing_without_a_window_changes_nothing() {
+        let t0 = Instant::now();
+        let mut confirm = Confirm::new(t0);
+        confirm.schedule(t0);
+        let before = confirm.next_check(None);
+        confirm.postpone(t0);
+        assert_eq!(confirm.next_check(None), before);
     }
 }
 
