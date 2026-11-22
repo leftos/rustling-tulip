@@ -38,6 +38,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - When turning Claude's hooks on or off in Settings fails, the switch shows the error and its last state instead of vanishing or waiting forever.
 - Status hooks you start Claude with by hand keep running the current hook program, even when its copy was left read-only.
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
+- On the phone and the iPad, the edit bar over a selection low on the page now sits above the keyboard instead of over it.
 - Installed status hooks in Claude's user settings update to the current events and matchers at the next start, and a settings file saved with a byte order mark no longer refuses them.
 - A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.

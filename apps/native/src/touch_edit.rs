@@ -148,9 +148,9 @@ pub(crate) struct SelectionBox {
 /// [`BAR_GAP`] above its top row when the bar fits there clear of the
 /// keyboard, else [`BAR_GAP`] below its bottom row, its top never past
 /// where the bar still fits above the keyboard (nor above the window's
-/// top); with no room below the selection above the keyboard the bar goes
-/// above the selection; centred on its x and kept inside the window's
-/// width.
+/// top); with neither spot clear of the keyboard the bar takes the lowest
+/// top that is, or the window's top when none is; centred on its x and
+/// kept inside the window's width.
 pub(crate) fn bar_origin(
     selection: SelectionBox,
     bar: Size<Pixels>,
@@ -169,9 +169,6 @@ pub(crate) fn bar_origin(
         above
     } else if below <= lowest {
         below
-    } else if above >= 0.0 {
-        // The keyboard leaves no room below the selection: go above it.
-        above
     } else {
         lowest
     };
@@ -409,6 +406,17 @@ mod tests {
         // No keyboard: the window's bottom bounds the bar, as ever.
         let low = bar_origin(sel(30.0, 790.0, 200.0), bar, window, px(0.0));
         assert_eq!(low.y, px(750.0));
+    }
+
+    #[test]
+    fn the_edit_bar_takes_the_lowest_clear_spot_when_both_reach_under_the_keyboard() {
+        let window = size(px(400.0), px(800.0));
+        let bar = size(px(100.0), px(50.0));
+        // A keyboard over the bottom 300 leaves 450 as the lowest clear top;
+        // the spot above a selection at 600..620 and the spot below it both
+        // reach under the keyboard.
+        let origin = bar_origin(sel(600.0, 620.0, 200.0), bar, window, px(300.0));
+        assert_eq!(origin, point(px(150.0), px(450.0)));
     }
 
     #[test]
