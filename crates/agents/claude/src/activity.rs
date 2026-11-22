@@ -775,19 +775,22 @@ fn last_text_block(content: &Value) -> Option<&str> {
 }
 
 /// Whether `record` is a prompt the user typed: the chat's line facts call it
-/// a prompt, and it did not arrive as a task notification.
+/// a prompt, and it did not arrive as a task notification or as a message
+/// another session sent.
 fn is_typed_prompt(record: &Value) -> bool {
     let woke_the_agent = record.pointer("/origin/kind").and_then(Value::as_str)
         == Some(chat_entries::TASK_NOTIFICATION_KIND);
-    chat_entries::record_facts(record).is_user_prompt && !woke_the_agent
+    chat_entries::record_facts(record).is_user_prompt
+        && !woke_the_agent
+        && chat_entries::peer_message(record).is_none()
 }
 
 /// The prompt a `user` record gives: the slash command it runs as its
 /// command line (`/nextup RT-483`), or its own text; cut to
 /// [`PROMPT_BYTES`]. `None` for a record marked `isMeta`, one with no text, a
-/// `/clear` and a local command's own output.
+/// `/clear`, a local command's own output and a message another session sent.
 fn prompt_of(record: &Value) -> Option<String> {
-    if transcripts::is_meta(record) {
+    if transcripts::is_meta(record) || chat_entries::peer_message(record).is_some() {
         return None;
     }
     let text = records::result_text(&record["message"])?;
@@ -1353,6 +1356,75 @@ pub(crate) mod tests {
 
         scratch.append(&lines(FAILURES, 6, 7));
         assert_eq!(reader.read(now).failure_run, 0);
+    }
+
+    /// A message another agent session sent, as one transcript line.
+    fn peer_line(uuid: &str, time: &str) -> String {
+        let body = "The fix is on main.";
+        let content = format!(
+            "Another Claude session sent a message:\n<cross-session-message from=\"uds:x\" from-name=\"yaat-3a\">\n\
+             {body}\n</cross-session-message>\n\nThis came from another Claude session."
+        );
+        let record = serde_json::json!({"type": "user", "uuid": uuid, "isSidechain": false,
+            "timestamp": time, "isMeta": true, "promptSource": "system", "turnOrigin": "peer",
+            "message": {"role": "user", "content": content},
+            "origin": {"kind": "peer", "from": "uds:x", "name": "yaat-3a", "body": body}});
+        format!("{record}\n")
+    }
+
+    fn typed_line(uuid: &str, time: &str, text: &str) -> String {
+        let record = serde_json::json!({"type": "user", "uuid": uuid, "isSidechain": false,
+            "timestamp": time, "message": {"role": "user", "content": text},
+            "origin": {"kind": "human"}});
+        format!("{record}\n")
+    }
+
+    #[test]
+    fn a_peer_record_is_not_a_typed_prompt() {
+        let body = [
+            typed_line(
+                "00000000-0000-4000-8000-0000000000d1",
+                "2026-09-27T10:00:01.000Z",
+                "Fix the build",
+            ),
+            peer_line(
+                "00000000-0000-4000-8000-0000000000d2",
+                "2026-09-27T10:00:06.000Z",
+            ),
+        ]
+        .concat();
+        let snapshot = read_whole("peer-typed", &body, "2026-09-27T10:01:00Z");
+        assert_eq!(
+            snapshot.last_typed_prompt_at,
+            Some(at("2026-09-27T10:00:01Z")),
+            "the typed prompt, not the peer message after it"
+        );
+        let alone = peer_line(
+            "00000000-0000-4000-8000-0000000000d3",
+            "2026-09-27T10:00:06.000Z",
+        );
+        assert_eq!(
+            read_whole("peer-typed-none", &alone, "2026-09-27T10:01:00Z").last_typed_prompt_at,
+            None
+        );
+    }
+
+    #[test]
+    fn a_peer_record_is_not_the_first_prompt() {
+        let body = [
+            peer_line(
+                "00000000-0000-4000-8000-0000000000e1",
+                "2026-09-27T10:00:01.000Z",
+            ),
+            typed_line(
+                "00000000-0000-4000-8000-0000000000e2",
+                "2026-09-27T10:00:06.000Z",
+                "Fix the build",
+            ),
+        ]
+        .concat();
+        let snapshot = read_whole("peer-first", &body, "2026-09-27T10:01:00Z");
+        assert_eq!(snapshot.first_prompt.as_deref(), Some("Fix the build"));
     }
 
     #[test]

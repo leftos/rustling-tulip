@@ -5348,6 +5348,7 @@ pub(crate) fn chat_row(
             tool_card(look, &tool, chat.log.is_expanded(id), cx)
         }
         ChatEntry::System { text, .. } => system_pill(look, text),
+        ChatEntry::Agent { from, text, .. } => agent_row(look, id, from, text),
         ChatEntry::Receipt {
             question, answer, ..
         } => receipt_row(look, id, &format!("{question} \u{2014} {answer}")),
@@ -5409,6 +5410,37 @@ fn user_row(look: &RowLook<'_>, id: &str, text: &str, pending: bool) -> Div {
                 look.select,
                 id,
                 UnitSource::User,
+                text.to_owned(),
+                Vec::new(),
+            )),
+    )
+}
+
+/// A message another agent sent: the user's bubble on the left, tagged
+/// `chat-agent-<id>`, its sender on one muted line above the text, tagged
+/// `chat-agent-from-<id>`.
+fn agent_row(look: &RowLook<'_>, id: &str, from: &str, text: &str) -> Div {
+    let bubble = format!("chat-agent-{id}");
+    let sender = format!("chat-agent-from-{id}");
+    div().flex().justify_start().child(
+        div()
+            .driver_id(|| bubble)
+            .max_w(relative(BUBBLE_MAX_SHARE))
+            .px(px(BUBBLE_PAD_X))
+            .py(px(BUBBLE_PAD_Y))
+            .rounded(px(BUBBLE_RADIUS))
+            .bg(gpui::rgb(look.theme.chip))
+            .child(
+                div()
+                    .driver_id(|| sender)
+                    .text_size(ui_px_at(look.text_offset, UI_TEXT_SIZE))
+                    .text_color(gpui::rgb(look.theme.muted))
+                    .child(from.to_owned()),
+            )
+            .child(select_text(
+                look.select,
+                id,
+                UnitSource::Agent,
                 text.to_owned(),
                 Vec::new(),
             )),

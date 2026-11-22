@@ -518,6 +518,22 @@ body[data-route="session"] #notifications {
   background: #313244;
 }
 
+/* A message another agent sent: the user's bubble on the left, its sender on a
+   muted line above the text. */
+.chat-row--agent {
+  align-self: flex-start;
+}
+
+.chat-row--agent-from {
+  margin: 0;
+  color: #a6adc8;
+  font-size: 0.9rem;
+}
+
+.chat-row--agent-text {
+  margin: 0;
+}
+
 .session-pending,
 .session-live {
   opacity: 0.7;

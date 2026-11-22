@@ -360,6 +360,8 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
     switch (row.kind) {
       case "user":
         return bubble(row, "session-user");
+      case "agent":
+        return agentNode(row);
       case "answer":
         return bubble(row, "session-answer");
       case "tool":
@@ -367,6 +369,17 @@ export function mountSessionView(container: HTMLElement, options: SessionViewOpt
       default:
         return mutedNode(row);
     }
+  }
+
+  /** A message another agent sent: the user bubble on the left, its sender on a muted line above the text. */
+  function agentNode(row: ChatRow): HTMLElement {
+    const node = element("div", "session-row session-user chat-row--agent");
+    const sender = element("p", "chat-row--agent-from");
+    sender.textContent = row.from ?? "";
+    const text = element("p", "chat-row--agent-text");
+    text.textContent = row.text;
+    node.append(sender, text);
+    return node;
   }
 
   function bubble(row: ChatRow, className: string): HTMLElement {

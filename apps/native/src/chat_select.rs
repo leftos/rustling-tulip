@@ -28,6 +28,8 @@ pub(crate) struct TextPos {
 pub(crate) enum UnitSource {
     /// A user message's text.
     User,
+    /// The text of a message another agent sent (not its sender line).
+    Agent,
     /// An answer's Markdown row `row`, part `part` (a table row's cell).
     AnswerRow { row: usize, part: usize },
     /// An answer with no parsed document: its raw text.
@@ -354,6 +356,7 @@ fn entry_parts<'a>(
 ) -> Vec<(UnitSource, String)> {
     match entry {
         ChatEntry::User { text, .. } => vec![(UnitSource::User, text.clone())],
+        ChatEntry::Agent { text, .. } => vec![(UnitSource::Agent, text.clone())],
         ChatEntry::Answer { text, .. } => match doc_of(id) {
             Some(doc) => doc
                 .unit_texts()

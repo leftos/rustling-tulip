@@ -3718,6 +3718,15 @@ pub enum ChatEntry {
     },
     /// A row the daemon itself wrote, such as a cleared conversation.
     System { id: String, text: String },
+    /// A message another agent session sent into this one: `from` is the
+    /// sender's name (or its address when it has none), `text` the message
+    /// without the agent's wrapper. Read-only and never pending; it starts a
+    /// turn as a user message does, but the user did not type it.
+    Agent {
+        id: String,
+        from: String,
+        text: String,
+    },
     /// The card a prompt was answered with, kept as the chat's receipt.
     Receipt {
         id: String,
@@ -17990,6 +17999,11 @@ mod tests {
                 id: "sys1".to_string(),
                 text: "Conversation cleared".to_string(),
             },
+            ChatEntry::Agent {
+                id: "ag1".to_string(),
+                from: "yaat-3a".to_string(),
+                text: "The fix is on main.".to_string(),
+            },
             ChatEntry::Receipt {
                 id: "rec1".to_string(),
                 question: "Allow Bash?".to_string(),
@@ -19947,6 +19961,22 @@ mod tests {
         assert!(!prompt.multi);
         assert_eq!(prompt.cursor, None);
         assert!(!prompt.questions[0].current);
+    }
+
+    #[test]
+    fn an_agent_entry_round_trips_as_kind_agent() {
+        let entry = ChatEntry::Agent {
+            id: "ag1".to_string(),
+            from: "yaat-3a".to_string(),
+            text: "The fix is on main.".to_string(),
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"agent","id":"ag1","from":"yaat-3a","text":"The fix is on main."}"#
+        );
+        let decoded: ChatEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, entry);
     }
 
     #[test]

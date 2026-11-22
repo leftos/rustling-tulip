@@ -254,6 +254,7 @@ function onError(state: ChatState, message: ErrorReply): ChatTransition {
 function knownEntry(entry: ChatEntry): boolean {
   switch (entry.kind) {
     case "user":
+    case "agent":
     case "answer":
     case "thinking":
     case "tool":

@@ -49,6 +49,7 @@ pub fn entry_id(entry: &ChatEntry) -> Option<&str> {
         | ChatEntry::Thinking { id, .. }
         | ChatEntry::Tool { id, .. }
         | ChatEntry::System { id, .. }
+        | ChatEntry::Agent { id, .. }
         | ChatEntry::Receipt { id, .. }
         | ChatEntry::TurnEnd { id, .. } => Some(id),
         ChatEntry::Unknown => None,
@@ -1020,13 +1021,15 @@ fn settle_finished_runs(rows: &mut [DisplayRow<'_>]) {
     }
 }
 
-/// Whether `entry` ends the turn before it: a turn end, or a user message
-/// the transcript has. A message still pending (queued while the agent
-/// works) does not.
+/// Whether `entry` ends the turn before it: a turn end, a user message the
+/// transcript has, or a message another agent sent. A message still pending
+/// (queued while the agent works) does not.
 fn ends_turn(entry: &ChatEntry) -> bool {
     matches!(
         entry,
-        ChatEntry::TurnEnd { .. } | ChatEntry::User { pending: false, .. }
+        ChatEntry::TurnEnd { .. }
+            | ChatEntry::User { pending: false, .. }
+            | ChatEntry::Agent { .. }
     )
 }
 

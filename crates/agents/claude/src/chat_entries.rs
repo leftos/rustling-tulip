@@ -36,6 +36,12 @@ const PLAN_ANSWER: &str = "Approved the plan";
 /// The `origin.kind` a record carries when a task notification woke the agent,
 /// rather than a prompt the user typed.
 pub(crate) const TASK_NOTIFICATION_KIND: &str = "task-notification";
+/// The `origin.kind` of a record another Claude Code session sent in.
+const PEER_KIND: &str = "peer";
+/// The element a peer message's text is wrapped in.
+const PEER_TAG: &str = "cross-session-message";
+/// The line Claude Code writes before a peer message's element.
+const PEER_LEAD: &str = "Another Claude session sent a message:";
 
 /// Code Mode's tool: one call whose JavaScript runs other tools.
 const SCRIPT_TOOL: &str = "REPL";
@@ -226,9 +232,12 @@ fn ended_tasks(record: &Value) -> Vec<String> {
 
 /// The text a `user` record carries, which is what makes it a prompt: a
 /// string, or an array's text blocks joined. A record that is not a user
-/// record, is meta, is a compact summary, or has no text carries none.
+/// record, is meta (unless it is a peer message, which starts a turn), is a
+/// compact summary, or has no text carries none.
 fn prompt_text(record: &Value) -> Option<String> {
-    if str_at(record, "type") != Some("user") || is_meta(record) || flag(record, "isCompactSummary")
+    if str_at(record, "type") != Some("user")
+        || flag(record, "isCompactSummary")
+        || (is_meta(record) && peer_message(record).is_none())
     {
         return None;
     }
@@ -272,7 +281,14 @@ fn user_entries(
     known: Known<'_>,
     book: &mut ScriptBook,
 ) -> Vec<ChatEntry> {
-    if is_meta(record) || flag(record, "isCompactSummary") {
+    if flag(record, "isCompactSummary") {
+        return Vec::new();
+    }
+    // A peer message is meta as Claude Code writes it, so it is read first.
+    if let Some(peer) = peer_message(record) {
+        return vec![agent_entry(uuid, peer)];
+    }
+    if is_meta(record) {
         return Vec::new();
     }
     let Some(content) = record.pointer("/message/content") else {
@@ -291,6 +307,111 @@ fn user_entries(
             .collect(),
         Value::Array(blocks) => user_block_entries(record, uuid, blocks, known, book),
         _ => Vec::new(),
+    }
+}
+
+/// A message another agent session sent: its sender and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PeerMessage {
+    pub(crate) from: String,
+    pub(crate) text: String,
+}
+
+/// The peer message `record` carries; none for any other record. A record
+/// whose `origin.kind` is `peer` names its sender in `origin.name` (else
+/// `origin.from`) and carries the clean text in `origin.body`; a record
+/// without that origin is read from the wrapper in its text.
+pub(crate) fn peer_message(record: &Value) -> Option<PeerMessage> {
+    let content = record.pointer("/message/content")?;
+    let text = match content {
+        Value::String(text) => Some(text.as_str()),
+        Value::Array(blocks) => blocks
+            .iter()
+            .find(|block| str_at(block, "type") == Some("text"))
+            .and_then(|block| str_at(block, "text")),
+        _ => None,
+    };
+    peer_of(record.get("origin"), text)
+}
+
+/// The peer message an `origin` and the text it came with describe: a
+/// `peer` origin's own sender and body (its text's wrapper when it has no
+/// body); with no origin at all, the wrapper in the text. An origin of any
+/// other kind is no peer message.
+fn peer_of(origin: Option<&Value>, text: Option<&str>) -> Option<PeerMessage> {
+    match origin {
+        Some(origin) if str_at(origin, "kind") == Some(PEER_KIND) => {
+            peer_origin(origin).or_else(|| text.and_then(peer_message_text))
+        }
+        Some(_) => None,
+        None => text.and_then(peer_message_text),
+    }
+}
+
+/// The peer message a `peer` origin describes, when it has a body.
+fn peer_origin(origin: &Value) -> Option<PeerMessage> {
+    let text = str_at(origin, "body")?;
+    let from = str_at(origin, "name")
+        .filter(|name| !name.is_empty())
+        .or_else(|| str_at(origin, "from"))
+        .unwrap_or_default();
+    Some(PeerMessage {
+        from: from.to_owned(),
+        text: text.trim().to_owned(),
+    })
+}
+
+/// The peer message a record's text wraps: text that opens with the lead
+/// line or the `<cross-session-message …>` element, its sender the element's
+/// `from-name` attribute (else its `from`), its text the element's inner text
+/// trimmed. The lead line, the tags and the trailer after the close tag are
+/// left out. None for any other text, an element without its close tag
+/// included.
+fn peer_message_text(text: &str) -> Option<PeerMessage> {
+    let open = format!("<{PEER_TAG}");
+    let close = format!("</{PEER_TAG}>");
+    let trimmed = text.trim_start();
+    let rest = trimmed
+        .strip_prefix(PEER_LEAD)
+        .map_or(trimmed, str::trim_start);
+    let after_open = rest
+        .strip_prefix(open.as_str())
+        .filter(|after| after.starts_with(|c: char| c.is_whitespace() || c == '>'))?;
+    let (attrs, after_tag) = after_open.split_once('>')?;
+    let (inner, _trailer) = after_tag.split_once(close.as_str())?;
+    let from = attribute(attrs, "from-name")
+        .filter(|name| !name.is_empty())
+        .or_else(|| attribute(attrs, "from"))
+        .unwrap_or_default();
+    Some(PeerMessage {
+        from: from.to_owned(),
+        text: inner.trim().to_owned(),
+    })
+}
+
+/// The value of the attribute `name` among a tag's `attrs`.
+fn attribute<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("{name}=\"");
+    let mut at = 0;
+    while let Some(found) = attrs[at..].find(&key) {
+        let start = at + found;
+        let bounded = attrs[..start].ends_with(char::is_whitespace);
+        let value_from = start + key.len();
+        if bounded {
+            let (value, _) = attrs[value_from..].split_once('"')?;
+            return Some(value);
+        }
+        at = value_from;
+    }
+    None
+}
+
+/// A peer message as its entry.
+fn agent_entry(uuid: &str, peer: PeerMessage) -> ChatEntry {
+    ChatEntry::Agent {
+        id: uuid.to_owned(),
+        from: peer.from,
+        text: peer.text,
     }
 }
 
@@ -953,8 +1074,9 @@ fn attachment_entries(
     entries
 }
 
-/// A mid-turn message the user typed (`queued_command`); a queued
-/// notification is skipped, as it arrives again as its own record.
+/// A mid-turn message the user typed (`queued_command`), or one another
+/// session sent, which is its agent entry; a queued notification is skipped,
+/// as it arrives again as its own record.
 fn queued_entry(record: &Value, uuid: &str) -> Option<ChatEntry> {
     let attachment = record.get("attachment")?;
     if str_at(attachment, "type") != Some("queued_command")
@@ -963,6 +1085,9 @@ fn queued_entry(record: &Value, uuid: &str) -> Option<ChatEntry> {
         return None;
     }
     let prompt = content_text(attachment.get("prompt")?)?;
+    if let Some(peer) = peer_of(attachment.get("origin"), Some(&prompt)) {
+        return Some(agent_entry(uuid, peer));
+    }
     user_message(uuid, &prompt)
 }
 
@@ -1208,8 +1333,8 @@ pub(crate) fn cap_chars(text: &str, max: usize) -> String {
 )]
 mod tests {
     use super::{
-        CUT_MARKER, Known, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output, line_facts,
-        split_at_limit, tool_kind, tool_result_text,
+        CUT_MARKER, Known, PeerMessage, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output,
+        line_facts, peer_message_text, split_at_limit, tool_kind, tool_result_text,
     };
     use crate::scripts::ScriptBook;
     use agent_api::{ModelSwitch, TranscriptLineFacts};
@@ -1700,6 +1825,7 @@ mod tests {
             | ChatEntry::Thinking { id, .. }
             | ChatEntry::Tool { id, .. }
             | ChatEntry::System { id, .. }
+            | ChatEntry::Agent { id, .. }
             | ChatEntry::Receipt { id, .. }
             | ChatEntry::TurnEnd { id, .. } => id,
             ChatEntry::Unknown => "",
@@ -2661,6 +2787,212 @@ mod tests {
                 pending: false,
             }]
         );
+    }
+
+    const PEER_ADDRESS: &str = r"uds:\\.\pipe\LOCAL\cc-msg-967480c12fd594cfe448ed2a6ad7ccde";
+    const PEER_BODY: &str =
+        "From the yaat /nextup session: your request is planned.\nI'll message you when it lands.";
+
+    /// A peer message's string content as Claude Code writes it: the lead
+    /// line, the element with `attrs`, the body and the trailer.
+    fn peer_wrapper(attrs: &str) -> String {
+        format!(
+            "Another Claude session sent a message:\n<cross-session-message {attrs}>\n{PEER_BODY}\n</cross-session-message>\n\n\
+             This came from another Claude session — not typed by your user, but very likely working on their behalf."
+        )
+    }
+
+    fn peer_attrs() -> String {
+        format!(r#"from="{PEER_ADDRESS}" from-name="yaat-3a" from-mode="bypass""#)
+    }
+
+    fn agent(n: &str, from: &str, text: &str) -> ChatEntry {
+        ChatEntry::Agent {
+            id: uid(n),
+            from: from.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    /// A peer record as Claude Code writes it: meta, from the system, its
+    /// turn's origin a peer, with `origin` when that is given.
+    fn peer_record(n: &str, content: &Value, origin: Option<Value>) -> String {
+        let mut record = json!({"type": "user", "uuid": uid(n), "promptId": format!("p-{n}"),
+            "isMeta": true, "promptSource": "system", "turnOrigin": "peer",
+            "message": {"role": "user", "content": content}});
+        if let (Some(origin), Some(fields)) = (origin, record.as_object_mut()) {
+            fields.insert("origin".to_owned(), origin);
+        }
+        record.to_string()
+    }
+
+    #[test]
+    fn a_peer_record_is_an_agent_entry() {
+        let origin = json!({"kind": "peer", "from": PEER_ADDRESS, "msg_id": "769574e5",
+            "name": "yaat-3a", "fromMode": "bypass", "body": PEER_BODY});
+        let record = peer_record("50", &json!(peer_wrapper(&peer_attrs())), Some(origin));
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [agent("50", "yaat-3a", PEER_BODY)]
+        );
+        let facts = line_facts(&record);
+        assert!(
+            facts.is_user_prompt,
+            "a peer message is a prompt: it starts a turn"
+        );
+        assert_eq!(facts.prompt_id.as_deref(), Some("p-50"));
+    }
+
+    #[test]
+    fn a_peer_record_that_is_not_meta_is_an_agent_entry() {
+        let record = json!({"type": "user", "uuid": uid("57"),
+            "message": {"role": "user", "content": peer_wrapper(&peer_attrs())},
+            "origin": {"kind": "peer", "from": PEER_ADDRESS, "name": "yaat-3a", "body": PEER_BODY}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [agent("57", "yaat-3a", PEER_BODY)]
+        );
+    }
+
+    #[test]
+    fn a_subagent_hand_back_is_an_agent_entry_naming_the_subagent() {
+        let body = "[Subagent hand-back] STATUS: done";
+        let text = format!("<agent-message from=\"adfbf049d1cdc225f\">\n{body}\n</agent-message>");
+        let origin = json!({"kind": "peer", "from": "adfbf049d1cdc225f", "name": "implementer",
+            "body": body});
+        let record = peer_record("58", &json!(text), Some(origin));
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [agent("58", "implementer", body)]
+        );
+    }
+
+    #[test]
+    fn a_human_origin_wrapper_stays_a_user_entry() {
+        let text = peer_wrapper(&peer_attrs());
+        let record = json!({"type": "user", "uuid": uid("59"),
+            "message": {"role": "user", "content": text},
+            "origin": {"kind": "human"}})
+        .to_string();
+        assert_eq!(chat_entries(&record, &|_| None), [user("59", &text)]);
+    }
+
+    /// A message queued mid-turn, as its `queued_command` attachment, with
+    /// `origin` when that is given.
+    fn queued_record(n: &str, prompt: &str, origin: Option<Value>) -> String {
+        let mut attachment = json!({"type": "queued_command", "commandMode": "prompt",
+            "isMeta": true, "prompt": prompt});
+        if let (Some(origin), Some(fields)) = (origin, attachment.as_object_mut()) {
+            fields.insert("origin".to_owned(), origin);
+        }
+        json!({"type": "attachment", "uuid": uid(n), "attachment": attachment}).to_string()
+    }
+
+    #[test]
+    fn a_queued_peer_message_is_an_agent_entry() {
+        let prompt = format!(
+            "<cross-session-message {}>\n{PEER_BODY}\n</cross-session-message>",
+            peer_attrs()
+        );
+        let origin = json!({"kind": "peer", "from": PEER_ADDRESS, "name": "delve-20",
+            "fromMode": "bypass", "body": PEER_BODY});
+        assert_eq!(
+            chat_entries(&queued_record("5a", &prompt, Some(origin)), &|_| None),
+            [agent("5a", "delve-20", PEER_BODY)]
+        );
+        assert_eq!(
+            chat_entries(&queued_record("5b", &prompt, None), &|_| None),
+            [agent("5b", "yaat-3a", PEER_BODY)]
+        );
+        assert_eq!(
+            chat_entries(&queued_record("5c", "also run clippy", None), &|_| None),
+            [user("5c", "also run clippy")]
+        );
+    }
+
+    #[test]
+    fn a_cross_session_wrapper_without_origin_is_an_agent_entry() {
+        let record = json!({"type": "user", "uuid": uid("51"),
+            "message": {"role": "user", "content": peer_wrapper(&peer_attrs())}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [agent("51", "yaat-3a", PEER_BODY)]
+        );
+        let meta = peer_record("5d", &json!(peer_wrapper(&peer_attrs())), None);
+        assert_eq!(
+            chat_entries(&meta, &|_| None),
+            [agent("5d", "yaat-3a", PEER_BODY)]
+        );
+        let blocks = json!({"type": "user", "uuid": uid("52"),
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": peer_wrapper(&peer_attrs())}]}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&blocks, &|_| None),
+            [agent("52", "yaat-3a", PEER_BODY)]
+        );
+    }
+
+    #[test]
+    fn a_wrapper_without_from_name_names_the_from_address() {
+        let attrs = format!(r#"from="{PEER_ADDRESS}" from-mode="bypass""#);
+        let record = json!({"type": "user", "uuid": uid("53"),
+            "message": {"role": "user", "content": peer_wrapper(&attrs)}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&record, &|_| None),
+            [agent("53", PEER_ADDRESS, PEER_BODY)]
+        );
+        let unnamed = peer_record(
+            "54",
+            &json!(peer_wrapper(&attrs)),
+            Some(json!({"kind": "peer", "from": PEER_ADDRESS, "body": PEER_BODY})),
+        );
+        assert_eq!(
+            chat_entries(&unnamed, &|_| None),
+            [agent("54", PEER_ADDRESS, PEER_BODY)]
+        );
+    }
+
+    #[test]
+    fn a_human_record_stays_a_user_entry() {
+        let typed = json!({"type": "user", "uuid": uid("55"),
+            "message": {"role": "user", "content": "Fix the build"},
+            "origin": {"kind": "human"}})
+        .to_string();
+        assert_eq!(
+            chat_entries(&typed, &|_| None),
+            [user("55", "Fix the build")]
+        );
+        let quoting = "Why does a cross-session-message show its tags?";
+        let mentions = json!({"type": "user", "uuid": uid("56"),
+            "message": {"role": "user", "content": quoting},
+            "origin": {"kind": "human"}})
+        .to_string();
+        assert_eq!(chat_entries(&mentions, &|_| None), [user("56", quoting)]);
+    }
+
+    #[test]
+    fn the_peer_wrapper_parse_keeps_only_the_elements_text() {
+        let parsed = peer_message_text(&peer_wrapper(&peer_attrs()));
+        assert_eq!(
+            parsed,
+            Some(PeerMessage {
+                from: "yaat-3a".to_owned(),
+                text: PEER_BODY.to_owned(),
+            })
+        );
+        let unnamed = peer_message_text(&peer_wrapper(&format!(r#"from="{PEER_ADDRESS}""#)));
+        assert_eq!(unnamed.map(|peer| peer.from), Some(PEER_ADDRESS.to_owned()));
+        for text in [
+            "Why does a cross-session-message show its tags?",
+            "<task-notification>\n<task-id>a1</task-id>\n</task-notification>",
+            "Another Claude session sent a message:\n<cross-session-message from=\"x\">\nno close",
+        ] {
+            assert_eq!(peer_message_text(text), None, "{text}");
+        }
     }
 
     #[test]

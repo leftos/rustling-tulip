@@ -2872,6 +2872,13 @@ export type ChatEntry =
   | { kind: "tool"; id: string; name: string; summary: string; input: string; result?: ToolOutcome | null; parent_id?: string | null; tail_paths?: string[]; tool_kind?: ToolKind; script?: ScriptFacts | null }
   /** A row the daemon itself wrote, such as a cleared conversation. */
   | { kind: "system"; id: string; text: string }
+  /**
+   * A message another agent session sent into this one: `from` is the
+   * sender's name (or its address when it has none), `text` the message
+   * without the agent's wrapper. Read-only and never pending; it starts a
+   * turn as a user message does, but the user did not type it.
+   */
+  | { kind: "agent"; id: string; from: string; text: string }
   /** The card a prompt was answered with, kept as the chat's receipt. */
   | { kind: "receipt"; id: string; question: string; answer: string }
   /** The last row of one agent turn, carrying how long the turn took. */

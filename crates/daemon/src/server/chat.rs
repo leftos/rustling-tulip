@@ -1377,6 +1377,7 @@ mod tests {
             | ChatEntry::Thinking { id, .. }
             | ChatEntry::Tool { id, .. }
             | ChatEntry::System { id, .. }
+            | ChatEntry::Agent { id, .. }
             | ChatEntry::Receipt { id, .. }
             | ChatEntry::TurnEnd { id, .. } => id.clone(),
             ChatEntry::Unknown => String::new(),

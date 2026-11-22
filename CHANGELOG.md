@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Ctrl+clicking a path that ends in a GitHub-style line anchor, such as `#L4` or `#L4C2`, opens the file at that line.
 - On the phone, the Desktop tabs order heads a tab you never named with the same name the desktop's tab shows, and each row shows its repo or workspace.
 - In Chat, a tool result cut at 8 KB offers Show all, which loads the rest of it from the session's transcript, on the desktop and the phone.
+- In Chat, a message another agent session or a subagent sends shows as its own bubble naming the sender, instead of as your message with its tags.
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 
 ### Fixed

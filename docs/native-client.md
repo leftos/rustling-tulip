@@ -1003,7 +1003,7 @@ A pane showing an interactive agent session that offers a chat has three views: 
 
   A desktop Chat answer's Windows paths keep their backslashes: a drive path outside a code span or fence draws as written (`X:\dev\.tmp\a.rs` keeps both) and links, and a UNC path draws with its backslashes but stays unlinked (`md_blocks::keep_path_backslashes`, run by `prepare_answer`). Markdown escapes outside a path, a link's text and target, and code spans and fences are unchanged; every Markdown file in the viewer and the release notes keeps CommonMark's `\.` escape.
 
-  User bubbles sit on the right (a pending one dimmed until its transcript record arrives).
+  User bubbles sit on the right (a pending one dimmed until its transcript record arrives). An agent message (another session's, or a subagent's hand-back) is a left-aligned bubble with the user bubble's background and the sender's name, else its address, on a muted line above the text; the text is selectable and copyable, the sender line is not copied (driver ids `chat-agent-{id}` and `chat-agent-from-{id}`; the phone app's Chat draws the same row).
 
   Answers are Markdown, composed by `stretchtext.rs` (stretchtext drawn as its short form, a faded-underline link that opens its long form in place, one level at a time, with a muted `‹` that closes it and its nested ones; open state per session and answer, in memory, carried from a live answer to its transcript answer).
 

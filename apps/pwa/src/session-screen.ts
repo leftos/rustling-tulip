@@ -55,10 +55,13 @@ export const HIDE = "Hide";
 /** What a send the connection never carried says under the box, or in the sheet. */
 export const OFFLINE_NOT_SENT = "Offline: not sent";
 
-/** One row of the chat: a bubble, a tool's collapsed card, or a muted line. */
+/**
+ * One row of the chat: a bubble (the user's, an answer, or a message another agent sent), a
+ * tool's collapsed card, or a muted line.
+ */
 export interface ChatRow {
   readonly id: string;
-  readonly kind: "user" | "answer" | "tool" | "muted";
+  readonly kind: "user" | "agent" | "answer" | "tool" | "muted";
   /** The row's line; a tool row is its name and summary. */
   readonly text: string;
   /** A tool row's expanded text: its input and what it returned; null when both are empty. */
@@ -69,6 +72,8 @@ export interface ChatRow {
   readonly live: boolean;
   /** An answer row's text as Markdown blocks; absent on every other row. */
   readonly markdown?: readonly MdBlock[];
+  /** An agent row's sender; absent on every other row. */
+  readonly from?: string;
 }
 
 /** The composer as the view paints it. */
@@ -399,6 +404,17 @@ function rowFor(entry: ChatEntry, answers: AnswerCache, kept: AnswerCache): Chat
         detail: null,
         pending: entry.pending === true,
         live: false,
+      };
+    case "agent":
+      // A message another agent sent: read-only, never pending.
+      return {
+        id: entry.id,
+        kind: "agent",
+        text: entry.text,
+        detail: null,
+        pending: false,
+        live: false,
+        from: entry.from,
       };
     case "answer":
       return {

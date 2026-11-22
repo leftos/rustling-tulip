@@ -2453,6 +2453,7 @@ pub(crate) fn entry_id(entry: &ChatEntry) -> Option<&str> {
         | ChatEntry::Thinking { id, .. }
         | ChatEntry::Tool { id, .. }
         | ChatEntry::System { id, .. }
+        | ChatEntry::Agent { id, .. }
         | ChatEntry::Receipt { id, .. }
         | ChatEntry::TurnEnd { id, .. } => Some(id),
         ChatEntry::Unknown => None,
@@ -3051,6 +3052,36 @@ mod tests {
         let lines = chat.stretch_lines();
         let line_ids: Vec<&str> = lines.iter().map(|line| line.id.as_str()).collect();
         assert_eq!(line_ids, ["u-1"]);
+    }
+
+    #[test]
+    fn a_peer_message_starts_a_turn() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        let body = "The fix is on main.";
+        let peer = serde_json::json!({
+            "type": "user", "uuid": "g-2", "timestamp": stamp(3), "promptId": "P2",
+            "isMeta": true, "promptSource": "system", "turnOrigin": "peer",
+            "message": {"role": "user", "content": format!(
+                "Another Claude session sent a message:\n<cross-session-message from=\"uds:x\" \
+                 from-name=\"yaat-3a\">\n{body}\n</cross-session-message>\n\nThis came from another session."
+            )},
+            "origin": {"kind": "peer", "from": "uds:x", "name": "yaat-3a", "body": body},
+        })
+        .to_string();
+        apply(&mut chat, &peer);
+        assert!(
+            chat.turn_starts.contains("g-2"),
+            "a peer message starts a turn"
+        );
+        let lines = chat.stretch_lines();
+        let line_ids: Vec<&str> = lines.iter().map(|line| line.id.as_str()).collect();
+        assert_eq!(line_ids, ["u-1", "g-2"]);
+        assert!(
+            lines[1].text.starts_with(body),
+            "the turn is named by the message: {:?}",
+            lines[1]
+        );
     }
 
     #[test]

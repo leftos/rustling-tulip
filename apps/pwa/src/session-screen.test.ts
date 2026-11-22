@@ -324,6 +324,20 @@ test("a tool call is one line with its name and summary", () => {
   expect(view.rows[0]?.detail).toContain("Edited 1 file.");
 });
 
+test("draws an agent message as an agent row", () => {
+  const message: ChatEntry = {
+    kind: "agent",
+    id: "g1",
+    from: "yaat-3a",
+    text: "The fix is on main.",
+  };
+  const view = screen({ chat: loaded([USER, message]) });
+  expect(view.rows.map((row) => [row.kind, row.text, row.from, row.pending])).toEqual([
+    ["user", "Add the reset on a target switch", undefined, false],
+    ["agent", "The fix is on main.", "yaat-3a", false],
+  ]);
+});
+
 test("a receipt draws as one muted line", () => {
   const view = screen({ chat: loaded([RECEIPT]) });
   expect(view.rows.map((row) => [row.kind, row.text])).toEqual([["muted", "Allow Bash? — Allow"]]);

@@ -220,6 +220,7 @@ These need the phone app from TestFlight on an iPhone with Tailscale signed in a
 - [ ] Copy a HEIC photo (one taken with the camera, not a screenshot) and tap `Paste` in a session's composer. **Expect:** it uploads and its path appears at the caret. Copy a GIF or a TIFF. **Expect:** it uploads the same way.
 - [ ] On the iPad with Home and a session side by side, press and hold a session row to open its sheet, then close it and open the sort sheet. **Expect:** the composer's `Paste` still pastes while each sheet is up. Drag the composer's end selection handle down toward `Paste`. **Expect:** a tap on `Paste` is never taken by the handle.
 - [ ] With two hosts added, scroll Home. **Expect:** each row and Needs you card names its host in a small chip, and the header of the host whose sessions are under the top stays pinned there, swapping when the next host's header arrives.
+- [ ] Send a message to a session from another Claude Code session, then open the session's Chat on the phone. **Expect:** it shows as a left-aligned bubble naming the sender, with no tags.
 - [ ] Open a Claude session's page. **Expect:** the header shows `ctx NN%` beside the status once the session has used some context, red above 80%.
 
 ### Files from the host

@@ -173,6 +173,7 @@ fn row_ids(h: &mut Harness<'_>) -> Vec<String> {
             | ChatEntry::Thinking { id, .. }
             | ChatEntry::Tool { id, .. }
             | ChatEntry::System { id, .. }
+            | ChatEntry::Agent { id, .. }
             | ChatEntry::Receipt { id, .. }
             | ChatEntry::TurnEnd { id, .. } => Some(id.clone()),
             ChatEntry::Unknown => None,
@@ -261,6 +262,36 @@ fn the_reply_draws_its_rows(cx: &mut TestAppContext) {
     assert!(
         painted(&mut h, "chat-tool-running-p1-t1"),
         "a call without a result runs"
+    );
+}
+
+#[gpui::test]
+fn an_agent_message_draws_as_an_agent_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    let message = ChatEntry::Agent {
+        id: "g1".to_owned(),
+        from: "yaat-3a".to_owned(),
+        text: "The fix is on main.".to_owned(),
+    };
+    h.send(reply(Some(&id), vec![message.clone()]));
+    assert_eq!(h.root(|root, _| root.chat_rows("s1")), [message]);
+    assert!(painted(&mut h, "chat-row-p1-g1"), "the row is drawn");
+    assert!(painted(&mut h, "chat-agent-g1"), "as an agent bubble");
+    assert!(
+        painted(&mut h, "chat-agent-from-g1"),
+        "with its sender line"
+    );
+    let row = h.bounds("chat-row-p1-g1");
+    let bubble = h.bounds("chat-agent-g1");
+    let sender = h.bounds("chat-agent-from-g1");
+    assert!(
+        bubble.origin.x - row.origin.x < px(1.0) && bubble.right() < row.right() - px(1.0),
+        "on the left, not a user bubble on the right: {bubble:?} in {row:?}"
+    );
+    assert!(
+        sender.origin.y < bubble.bottom() && sender.bottom() < bubble.bottom(),
+        "the sender line is above the text inside the bubble: {sender:?} in {bubble:?}"
     );
 }
 

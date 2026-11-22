@@ -130,6 +130,7 @@ fn entry_id(entry: &ChatEntry) -> Option<&str> {
         | ChatEntry::Thinking { id, .. }
         | ChatEntry::Tool { id, .. }
         | ChatEntry::System { id, .. }
+        | ChatEntry::Agent { id, .. }
         | ChatEntry::Receipt { id, .. }
         | ChatEntry::TurnEnd { id, .. } => Some(id),
         ChatEntry::Unknown => None,

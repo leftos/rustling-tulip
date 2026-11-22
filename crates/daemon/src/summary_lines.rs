@@ -130,11 +130,12 @@ fn turn_inputs(turn: &[TimedEntry<'_>]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// What a turn opens with: the row that began it (a `!` command, a notice),
-/// else its first user entry whose pending flag `keep` accepts.
+/// What a turn opens with: the row that began it (a `!` command, a notice,
+/// a message another agent sent), else its first user entry whose pending
+/// flag `keep` accepts.
 fn opening<'a>(placed: &[Placed<'a>], keep: impl Fn(bool) -> bool) -> Option<&'a str> {
     match placed.first().map(|first| first.entry) {
-        Some(ChatEntry::System { text, .. }) => Some(text.as_str()),
+        Some(ChatEntry::System { text, .. } | ChatEntry::Agent { text, .. }) => Some(text.as_str()),
         _ => placed.iter().find_map(|placed| match placed.entry {
             ChatEntry::User { text, pending, .. } if keep(*pending) => Some(text.as_str()),
             _ => None,
@@ -409,6 +410,30 @@ mod tests {
             lines
                 .iter()
                 .all(|line| line.source == SummarySource::Template)
+        );
+    }
+
+    #[test]
+    fn a_turn_opened_by_an_agent_message_takes_its_text() {
+        let message = ChatEntry::Agent {
+            id: "g1".to_owned(),
+            from: "yaat-3a".to_owned(),
+            text: "Rebase onto main\nthen rerun".to_owned(),
+        };
+        let rows = [
+            (message, Some(0), true),
+            tool("t1", Some(1)),
+            answer("a1", Some(2)),
+        ];
+        let lines = lines_of(&rows);
+        assert_eq!(ids(&lines), ["g1"]);
+        assert_eq!(lines[0].text, "Rebase onto main (2m, 1 tool)");
+        let inputs = inputs_of(&rows);
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0].1.starts_with("Rebase onto main"),
+            "{:?}",
+            inputs[0]
         );
     }
 
