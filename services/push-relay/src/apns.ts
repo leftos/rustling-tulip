@@ -8,6 +8,7 @@ import { b64urlDecode, b64urlEncode } from "./vapid";
 export interface Kv {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
 }
 
 export interface ApnsEnv {
@@ -47,7 +48,7 @@ export interface ApnsResult {
   retryAfter?: string;
   /** APNs' reason when the relay's own credential was refused (logged; the relay's fault). */
   relayFault?: string;
-  /** The KV key whose write failed during the send (the push went on regardless). */
+  /** The KV key whose write or delete failed during the send (the push went on regardless). */
   kvError?: string;
 }
 
@@ -115,6 +116,21 @@ export async function providerToken(env: ApnsEnv, nowSeconds: number): Promise<{
   return { token, cacheFailed: false };
 }
 
+/** The result's KV-error field for a failed cache write or drop, empty when neither failed. */
+function kvError(failed: boolean): Partial<ApnsResult> {
+  return failed ? { kvError: JWT_KEY } : {};
+}
+
+/** Drops the cached token so the next push mints a new one; true when the delete failed. */
+async function dropProviderToken(env: ApnsEnv): Promise<boolean> {
+  try {
+    await env.RELAY_STATE.delete(JWT_KEY);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function apnsHeaders(env: ApnsEnv, push: ApnsPush, jwt: string, nowSeconds: number): Headers {
   const ttl = Number.parseInt(push.headers.get("TTL") ?? "", 10);
   const urgency = (push.headers.get("Urgency") ?? "").trim().toLowerCase();
@@ -160,7 +176,8 @@ async function reasonOf(response: Response): Promise<string> {
  * Sends `push` to APNs carrying the ciphertext in `e`, as a mutable-content alert or, for a
  * `background` push, a `content-available` push with no alert, and maps the answer. A provider
  * key that cannot sign is the relay's fault (502); an APNs that cannot be reached is answered
- * 503 with `Retry-After`.
+ * 503 with `Retry-After`. A provider token APNs refuses is dropped from the cache, so the next
+ * push mints a new one; a failed drop is answered as the push otherwise would be, with `kvError` set.
  */
 export async function sendApns(env: ApnsEnv, push: ApnsPush, nowMs: number, fetcher: typeof fetch): Promise<ApnsResult> {
   const nowSeconds = Math.floor(nowMs / 1000);
@@ -170,7 +187,6 @@ export async function sendApns(env: ApnsEnv, push: ApnsPush, nowMs: number, fetc
   } catch {
     return { status: 502, relayFault: "ProviderKeyUnusable" };
   }
-  const kvError = jwt.cacheFailed ? { kvError: JWT_KEY } : {};
   const url = `https://${HOSTS[push.environment]}/3/device/${push.token}`;
   let response: Response;
   try {
@@ -178,7 +194,10 @@ export async function sendApns(env: ApnsEnv, push: ApnsPush, nowMs: number, fetc
     const body = push.kind === "background" ? backgroundBody(push.body) : alertBody(push.body);
     response = await fetcher(url, { method: "POST", headers, body });
   } catch {
-    return { status: 503, retryAfter: "60", ...kvError };
+    return { status: 503, retryAfter: "60", ...kvError(jwt.cacheFailed) };
   }
-  return { ...mapApnsAnswer(response.status, response.status === 200 ? "" : await reasonOf(response)), ...kvError };
+  const reason = response.status === 200 ? "" : await reasonOf(response);
+  const refused = response.status === 403 && CREDENTIAL_REASONS.has(reason);
+  const dropFailed = refused ? await dropProviderToken(env) : false;
+  return { ...mapApnsAnswer(response.status, reason), ...kvError(jwt.cacheFailed || dropFailed) };
 }

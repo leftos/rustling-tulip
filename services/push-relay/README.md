@@ -45,7 +45,7 @@ Never read, print or echo either file or a variable loaded from it.
 
 1. Make a new key in the Apple Developer account and save its `.p8` file to the push-relay folder in Private Config, updating `APNS_KEY_ID` in `ids.env`.
 2. Set `APNS_KEY_P8` and `APNS_KEY_ID` with `wrangler secret put` as in [Secrets](#secrets).
-3. Delete the cached provider token so the next push mints one with the new key: `pnpm exec wrangler kv key delete --namespace-id <RELAY_STATE id> apns-jwt --remote`, the id being `RELAY_STATE`'s in `wrangler.jsonc`.
+3. Delete the cached provider token so the next push mints one with the new key: `pnpm exec wrangler kv key delete --namespace-id <RELAY_STATE id> apns-jwt --remote`, the id being `RELAY_STATE`'s in `wrangler.jsonc`. Skipping it costs one refused push: the relay drops the cached token itself when APNs answers `InvalidProviderToken` or `ExpiredProviderToken`.
 4. Revoke the old key in the Apple Developer account.
 
 ## Deny a sender or a token

@@ -19,6 +19,8 @@ class MemoryKv implements Kv {
   readonly puts: { key: string; value: string; ttl: number | undefined }[] = [];
   /** A put to a key this accepts throws, as Workers KV does on a second write to a key within a second. */
   failPut: (key: string) => boolean = () => false;
+  /** A delete of a key this accepts throws, as a second write to a key within a second can. */
+  failDelete: (key: string) => boolean = () => false;
 
   async get(key: string): Promise<string | null> {
     return this.values.get(key) ?? null;
@@ -28,6 +30,11 @@ class MemoryKv implements Kv {
     if (this.failPut(key)) throw new Error("KV PUT failed: 429 Too Many Requests");
     this.values.set(key, value);
     this.puts.push({ key, value, ttl: options?.expirationTtl });
+  }
+
+  async delete(key: string): Promise<void> {
+    if (this.failDelete(key)) throw new Error("KV DELETE failed: 429 Too Many Requests");
+    this.values.delete(key);
   }
 }
 
@@ -362,6 +369,47 @@ describe("push relay", () => {
     expect(w.env.RELAY_STATE.values.has("apns-jwt")).toBe(false);
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0] ?? "")).toMatchObject({ status: 201, kv_error: "apns-jwt" });
+  });
+
+  it.each(["InvalidProviderToken", "ExpiredProviderToken"])(
+    "a_refused_provider_token_is_dropped_from_the_cache (%s)",
+    async (reason) => {
+      const w = await world();
+      const bearer = (index: number) => w.apns.requests[index]?.headers.get("authorization") ?? "";
+      expect((await send(w)).status).toBe(201);
+      expect(w.env.RELAY_STATE.values.has("apns-jwt")).toBe(true);
+      w.apns.answer = { status: 403, body: JSON.stringify({ reason }) };
+      expect((await send(w)).status).toBe(502);
+      expect(w.apns.requests[1]?.headers.get("authorization")).toBe(bearer(0));
+      expect(w.env.RELAY_STATE.values.has("apns-jwt")).toBe(false);
+      w.apns.answer = { status: 200 };
+      w.nowMs += 60 * 1000;
+      expect((await send(w)).status).toBe(201);
+      expect(bearer(2)).not.toBe(bearer(0));
+      expect(await verifiesWith(w.publicKey, bearer(2).slice("bearer ".length))).toBe(true);
+    },
+  );
+
+  it("another_403_keeps_the_cached_token", async () => {
+    const w = await world();
+    expect((await send(w)).status).toBe(201);
+    const cached = w.env.RELAY_STATE.values.get("apns-jwt");
+    expect(cached).toBeDefined();
+    w.apns.answer = { status: 403, body: '{"reason":"BadCertificateEnvironment"}' };
+    expect((await send(w)).status).toBe(502);
+    expect(w.env.RELAY_STATE.values.get("apns-jwt")).toBe(cached);
+  });
+
+  it("a_failed_token_drop_still_answers", async () => {
+    const w = await world();
+    expect((await send(w)).status).toBe(201);
+    w.env.RELAY_STATE.failDelete = (key) => key === "apns-jwt";
+    w.apns.answer = { status: 403, body: '{"reason":"InvalidProviderToken"}' };
+    const lines = captureLog();
+    expect((await send(w)).status).toBe(502);
+    expect(w.env.RELAY_STATE.values.has("apns-jwt")).toBe(true);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] ?? "")).toMatchObject({ status: 502, kv_error: "apns-jwt" });
   });
 
   it("answers 429 with Retry-After 60 when the per-token limiter refuses", async () => {
