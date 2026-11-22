@@ -3210,7 +3210,9 @@ impl RootView {
     /// `msg` from `host` while OK waits: an echo it owes in a final state is
     /// crossed off, and the wait ends once the last is, after `msg` has
     /// been folded; a refusal of one of its sends ends the wait at once,
-    /// leaving Settings open with the refusal shown.
+    /// leaving Settings open with the refusal shown. A refusal of a
+    /// user-hooks Set ends that Set and shows the refusal under the Hooks
+    /// switch, whether or not OK waits.
     pub(crate) fn settings_ok_hears(
         &mut self,
         host: &HostKey,
@@ -3218,6 +3220,22 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let DaemonMessage::Error {
+            request_id: Some(id),
+            message,
+            ..
+        } = msg
+            && let Some(mirrors) = self.mirrors_of_mut(host)
+            && fold_user_hooks_refusal(
+                &mut mirrors.agent_user_hooks,
+                &mut mirrors.agent_user_hooks_pending,
+                id,
+                message,
+            )
+        {
+            tracing::warn!(?host, %id, "settings: the daemon refused an agent's user hooks change");
+            cx.notify();
+        }
         let Some(wait) = self.settings_pending.ok_wait.as_mut() else {
             return;
         };
@@ -9995,12 +10013,15 @@ pub(crate) fn user_hooks_row(
 
 /// Folds `agent`'s answer `entry`, carrying `request_id`, into one host's
 /// answers and waiting Sets: the answer replaces the last, its error
-/// included, and ends the Set it answers.
+/// included, and ends the Set it answers. An answer that failed without
+/// reading the file (the agent unsupported or unknown) keeps the last
+/// answer's state and path and replaces only the error, so the Hooks
+/// section stays shown; with no last answer the state is off.
 pub(crate) fn fold_user_hooks_reply(
     entries: &mut HashMap<AgentId, UserHooksEntry>,
     pending: &mut HashMap<AgentId, UserHooksPending>,
     agent: AgentId,
-    entry: UserHooksEntry,
+    mut entry: UserHooksEntry,
     request_id: Option<&str>,
 ) {
     let answers = pending
@@ -10009,7 +10030,46 @@ pub(crate) fn fold_user_hooks_reply(
     if answers {
         pending.remove(&agent);
     }
+    let failed_without_a_state = entry.error.is_some()
+        && matches!(
+            entry.state,
+            UserHooksWire::Unsupported | UserHooksWire::Unknown
+        );
+    if failed_without_a_state {
+        let last = entries.get(&agent);
+        entry.state = last.map_or(UserHooksWire::Off, |last| last.state);
+        entry.path = last.map_or(entry.path, |last| last.path.clone());
+    }
     entries.insert(agent, entry);
+}
+
+/// Ends the Set a refusal `message` names, in one host's answers and
+/// waiting Sets: the agent whose Set carries `request_id` stops waiting
+/// and shows `message` as the Hooks error, keeping the state and path the
+/// last answer gave. Returns whether `request_id` was a Set's.
+pub(crate) fn fold_user_hooks_refusal(
+    entries: &mut HashMap<AgentId, UserHooksEntry>,
+    pending: &mut HashMap<AgentId, UserHooksPending>,
+    request_id: &str,
+    message: &str,
+) -> bool {
+    let Some(agent) = pending
+        .iter()
+        .find(|(_, sent)| sent.request_id == request_id)
+        .map(|(agent, _)| agent.clone())
+    else {
+        return false;
+    };
+    pending.remove(&agent);
+    entries
+        .entry(agent)
+        .and_modify(|entry| entry.error = Some(message.to_owned()))
+        .or_insert_with(|| UserHooksEntry {
+            state: UserHooksWire::Off,
+            path: None,
+            error: Some(message.to_owned()),
+        });
+    true
 }
 
 /// The daemon message that echoes a send of Apply.
@@ -11404,6 +11464,151 @@ mod tests {
             row(&entries, &pending),
             Some(live_row(true, false, false)),
             "the next answer clears the error"
+        );
+    }
+
+    #[test]
+    fn a_failed_answer_marked_unsupported_keeps_the_section_and_its_state() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::On),
+            Some("get"),
+        );
+        pending.insert(claude.clone(), hooks_pending("set-1", false));
+        let mut failed = hooks_entry(UserHooksWire::Unsupported);
+        failed.path = None;
+        failed.error = Some("the settings request did not finish".to_owned());
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            failed,
+            Some("set-1"),
+        );
+        assert_eq!(
+            super::user_hooks_row(true, true, entries.get(&claude), None, pending.get(&claude)),
+            Some(super::UserHooksRow {
+                error: Some("the settings request did not finish".to_owned()),
+                ..live_row(true, false, false)
+            }),
+            "the failed answer keeps the switch on its last known state, the error under it"
+        );
+    }
+
+    #[test]
+    fn a_failed_unsupported_answer_with_no_earlier_answer_shows_the_switch_off_with_the_error() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut failed = hooks_entry(UserHooksWire::Unsupported);
+        failed.path = None;
+        failed.error = Some("the settings request did not finish".to_owned());
+        super::fold_user_hooks_reply(&mut entries, &mut pending, claude.clone(), failed, None);
+        assert_eq!(
+            super::user_hooks_row(true, true, entries.get(&claude), None, None),
+            Some(super::UserHooksRow {
+                path: None,
+                error: Some("the settings request did not finish".to_owned()),
+                ..live_row(false, false, false)
+            }),
+            "with no earlier answer the switch shows off under the error"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_answer_without_an_error_still_hides_the_section() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::On),
+            Some("get"),
+        );
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Unsupported),
+            Some("get-2"),
+        );
+        assert_eq!(
+            super::user_hooks_row(true, true, entries.get(&claude), None, None),
+            None,
+            "an unsupported agent with no error hides the section, as before"
+        );
+    }
+
+    #[test]
+    fn a_refused_set_ends_its_wait_and_shows_the_refusal() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Off),
+            Some("get"),
+        );
+        pending.insert(claude.clone(), hooks_pending("r1", true));
+        assert!(
+            super::fold_user_hooks_refusal(
+                &mut entries,
+                &mut pending,
+                "r1",
+                "unknown message type"
+            ),
+            "the refusal answers the Set it names"
+        );
+        assert_eq!(
+            super::user_hooks_row(true, true, entries.get(&claude), None, pending.get(&claude)),
+            Some(super::UserHooksRow {
+                error: Some("unknown message type".to_owned()),
+                ..live_row(false, false, false)
+            }),
+            "the switch is off again, with the daemon's refusal under it"
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_another_request_leaves_the_set_waiting() {
+        use protocol::UserHooksWire;
+        let claude = AgentId("claude".to_owned());
+        let mut entries = HashMap::new();
+        let mut pending = HashMap::new();
+        super::fold_user_hooks_reply(
+            &mut entries,
+            &mut pending,
+            claude.clone(),
+            hooks_entry(UserHooksWire::Off),
+            Some("get"),
+        );
+        pending.insert(claude.clone(), hooks_pending("r1", true));
+        assert!(
+            !super::fold_user_hooks_refusal(
+                &mut entries,
+                &mut pending,
+                "r2",
+                "unknown message type"
+            ),
+            "a refusal of another request is not this Set's"
+        );
+        assert_eq!(
+            super::user_hooks_row(true, true, entries.get(&claude), None, pending.get(&claude)),
+            Some(live_row(true, false, true)),
+            "the Set still waits, asking for on"
         );
     }
 
