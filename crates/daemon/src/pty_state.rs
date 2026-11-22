@@ -457,6 +457,10 @@ struct Window {
     from: StatusRead,
     agreeing: u8,
     opened: Instant,
+    /// [`Self::opened`] on the hook clock (nanoseconds since the Unix epoch,
+    /// as the hook shim stamps events), for a release that must refuse every
+    /// event stamped before the screen showed the change.
+    opened_hook: u128,
     /// When the last check that counted ran.
     counted: Instant,
 }
@@ -528,6 +532,16 @@ impl Confirm {
         self.agree_after(read, target, now, false)
     }
 
+    /// The hook-clock instant the open window for `target` against `read`
+    /// opened, the window the next [`Self::agree`] on them would count;
+    /// `None` when none is open.
+    fn opened_hook(&self, read: StatusRead, target: Target) -> Option<u128> {
+        self.window
+            .as_ref()
+            .filter(|window| window.target == target && window.from == read)
+            .map(|window| window.opened_hook)
+    }
+
     /// [`Self::agree`]; with `no_stop`, the change ends a hook-driven turn no
     /// `Stop` has ended, and publishes only after [`IDLE_WITHOUT_STOP`],
     /// however many checks have counted.
@@ -556,6 +570,7 @@ impl Confirm {
                     from: read,
                     agreeing: 1,
                     opened: now,
+                    opened_hook: hook_clock_now(),
                     counted: now,
                 });
                 false
@@ -1398,10 +1413,14 @@ impl ScreenWatch {
     /// that lands is this watcher's own, so its broadcast starts no hold.
     fn watch_for_agent_end(&mut self, read: StatusRead, now: Instant) -> Checked {
         self.confirm.candidate = None;
+        // Read before the window confirms, since confirming closes it.
+        let opened = self.confirm.opened_hook(read, Target::AgentGone);
         if !self.confirm.agree(read, Target::AgentGone, now) {
             return Checked::Done;
         }
-        match hand_shell_back(&self.registry, &self.session_id, read) {
+        // A window that confirms was open, so the clock is only a fallback.
+        let floor = opened.unwrap_or_else(hook_clock_now);
+        match hand_shell_back(&self.registry, &self.session_id, read, floor) {
             Some(after) => {
                 self.wake.seen = Some(after);
                 self.screen_set_background = false;
@@ -1693,7 +1712,12 @@ fn record_background(registry: &Arc<SessionRegistry>, session_id: &str) -> Optio
 /// [`apply_watcher_status`] (an `Idle` stays as it is). Refused, like
 /// [`apply_screen_status`], unless the record still holds what `from` read;
 /// answers the record as written, or `None` when refused. It is the only
-/// screen write of `hook_driven`, and it never writes the hook stamp. An agent
+/// screen write of `hook_driven`. It raises the hook stamp to `floor`, the
+/// hook-clock moment the shell's prompt came back (the confirm window's
+/// opening), so an event the dead run had in flight is refused rather than
+/// pinning the shell to its conversation again; an event stamped after the
+/// prompt came back still applies, the next agent's or a live run's, even
+/// when it arrives after this write. An agent
 /// typed into its shell at spawn whose `SessionEnd` never came ends here, and
 /// its end is announced once the update is broadcast. A held turn end's alert
 /// follows that update; its background flag ended with the agent.
@@ -1701,6 +1725,7 @@ fn hand_shell_back(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
     from: StatusRead,
+    floor: u128,
 ) -> Option<StatusRead> {
     let mut after = None;
     let mut agent_exited = false;
@@ -1722,6 +1747,10 @@ fn hand_shell_back(
         }
         promoted = rec.promoted_shell();
         let changed = rec.hook_driven || rec.background || in_turn || agent_exited;
+        // An event the dead run's shim stamped before the prompt came back
+        // is refused by the ordering check, so it cannot drive the shell
+        // again.
+        rec.last_hook_time = Some(rec.last_hook_time.map_or(floor, |last| last.max(floor)));
         rec.hook_driven = false;
         rec.background = false;
         let held = rec.turn_end.take();
@@ -1762,6 +1791,14 @@ fn hand_shell_back(
         registry.announce_agent_exited(session_id);
     }
     after
+}
+
+/// Now on the hook clock: nanoseconds since the Unix epoch, the time the hook
+/// shim stamps `X-RT-Hook-Time` with; 0 for a clock before the epoch.
+fn hook_clock_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 /// The fields a screen sighting of an agent may change on a shell's record.
@@ -4228,6 +4265,114 @@ mod hysteresis_tests {
         );
     }
 
+    /// Nanoseconds since the Unix epoch, the clock the hook shim stamps
+    /// events with.
+    fn hook_clock() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_nanos()
+    }
+
+    /// Deliver the user-layer hook `body` stamped `time` the way the hook
+    /// route does: dropped when the user rule drops it, else applied.
+    fn user_hook(h: &Harness, time: u128, body: &serde_json::Value) {
+        let report = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered")
+            .map_hook_event(body, None)
+            .expect("the payload maps to a report");
+        h.set_record(|record| {
+            if !crate::hook_status::user_rule_drops(record, Some(time), body) {
+                crate::hook_status::apply_to_record(record, Some(time), &report);
+            }
+        });
+    }
+
+    /// A shell running a turn pinned to the conversation `dead` by a hook
+    /// stamped `stamp`, its watcher started and past its first hold.
+    async fn start_dead_run(tag: &str, stamp: u128) -> Harness {
+        let mut record = hook_record(SessionStatus::Working);
+        record.conversation_id = Some("dead".to_owned());
+        record.last_hook_time = Some(stamp);
+        record.main_hook_time = Some(stamp);
+        let h = start_record(tag, true, record);
+        pass_hold().await;
+        h
+    }
+
+    /// A shell pinned to the conversation `dead` by a hook stamped just
+    /// before now, handed back after its agent died without `SessionEnd`;
+    /// answers the harness and the stamp the record held.
+    async fn hand_back_a_dead_run(tag: &str) -> (Harness, u128) {
+        let stamp = hook_clock() - 1_000_000;
+        let h = start_dead_run(tag, stamp).await;
+        h.chunk(shell_prompt_frame());
+        advance(ms(700)).await;
+        assert!(!h.hook_driven(), "the dead run's end hands the shell back");
+        (h, stamp)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_next_agents_session_start_stamped_before_the_hand_back_write_still_applies() {
+        let h = start_dead_run("shell-next-start-in-window", hook_clock() - 1_000_000).await;
+        h.chunk(shell_prompt_frame());
+        // The first check reads the prompt and opens the window.
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        assert!(h.hook_driven(), "the window has not confirmed yet");
+        // The hook clock is the wall clock, which a paused runtime leaves
+        // running: let it pass the window's opening, stamp the next agent's
+        // start, and let it pass that stamp before the hand-back writes.
+        std::thread::sleep(ms(5));
+        let started = hook_clock();
+        std::thread::sleep(ms(5));
+        advance(ms(700)).await;
+        assert!(!h.hook_driven(), "the dead run's end hands the shell back");
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": "next",
+        });
+        user_hook(&h, started, &start);
+        settle().await;
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let rec = rec.lock().expect("record lock");
+        assert!(rec.hook_driven, "the next agent's start was refused");
+        assert_eq!(rec.conversation_id.as_deref(), Some("next"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_runs_late_hook_after_hand_back_does_not_pin_again() {
+        let (h, stamp) = hand_back_a_dead_run("shell-dead-late-hook").await;
+        // The dead run's shim stamped this before the hand-back, and it
+        // lands after it.
+        let late = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "dead",
+        });
+        user_hook(&h, stamp + 1, &late);
+        settle().await;
+        assert!(
+            !h.hook_driven(),
+            "a late event of the dead run pinned the shell again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_next_agents_hooks_apply_after_a_killed_agent_hands_back() {
+        let (h, _) = hand_back_a_dead_run("shell-next-agent-hooks").await;
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": "next",
+        });
+        user_hook(&h, hook_clock() + 1, &start);
+        settle().await;
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let rec = rec.lock().expect("record lock");
+        assert!(rec.hook_driven, "the next agent's hooks drive the shell");
+        assert_eq!(rec.conversation_id.as_deref(), Some("next"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_hook_arriving_mid_window_keeps_claude_mode() {
         let h = start_record(
@@ -4439,7 +4584,7 @@ mod hysteresis_tests {
             main_stamp(&mut record.lock().expect("record lock"));
         }
         assert_eq!(
-            hand_shell_back(&registry, SESSION, read),
+            hand_shell_back(&registry, SESSION, read, 0),
             None,
             "the leave write landed over a newer hook event"
         );
@@ -4817,7 +4962,7 @@ mod hysteresis_tests {
         registry.insert(record);
         let mut events = registry.subscribe();
         let read = record_status(&registry, SESSION).expect("the session is registered");
-        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert!(hand_shell_back(&registry, SESSION, read, 0).is_some());
         assert_eq!(agent_exits(&mut events), 1, "the agent's end is announced");
         {
             let record = registry.get(SESSION).expect("session registered");
@@ -4833,7 +4978,7 @@ mod hysteresis_tests {
         // The agent runs again without a `SessionStart` (no hooks) and ends.
         registry.update(SESSION, |rec| rec.hook_driven = true);
         let read = record_status(&registry, SESSION).expect("the session is registered");
-        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert!(hand_shell_back(&registry, SESSION, read, 0).is_some());
         assert_eq!(agent_exits(&mut events), 0, "one run announces once");
     }
 
@@ -4847,7 +4992,7 @@ mod hysteresis_tests {
         record.terminal_title = Some("✳ Claude Code".to_owned());
         registry.insert(record);
         let read = record_status(&registry, SESSION).expect("the session is registered");
-        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert!(hand_shell_back(&registry, SESSION, read, 0).is_some());
         let record = registry.get(SESSION).expect("session registered");
         let guard = record.lock().expect("record lock");
         assert_eq!(guard.terminal_title, None, "the agent's title left with it");
@@ -6607,7 +6752,7 @@ mod hysteresis_tests {
         registry.insert(record);
         let mut events = registry.subscribe();
         let read = record_status(&registry, SESSION).expect("the session is registered");
-        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert!(hand_shell_back(&registry, SESSION, read, 0).is_some());
         let mut alerts = 0;
         let mut landed = None;
         while let Ok(event) = events.try_recv() {

@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.
 - On the iPhone, tapping a web link in a session's terminal opens it in Safari, or in the app that claims it.
 - Answering one question of a multi-question card from the phone or the chat keeps the session waiting on you until the card is submitted.

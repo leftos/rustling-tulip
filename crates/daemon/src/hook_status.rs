@@ -126,6 +126,17 @@ fn user_rule(
     UserRule::Map
 }
 
+/// Whether [`user_rule`] drops a user-layer event at `event_time` on
+/// `record`, for tests that drive the rule without a hub.
+#[cfg(test)]
+pub(crate) fn user_rule_drops(
+    record: &SessionRecord,
+    event_time: Option<u128>,
+    body: &serde_json::Value,
+) -> bool {
+    user_rule(record, HookSource::User, event_time, body) == UserRule::Drop
+}
+
 /// The hook event's name in `body`, empty when it names none.
 fn event_name(body: &serde_json::Value) -> &str {
     body.get("hook_event_name")

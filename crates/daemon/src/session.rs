@@ -359,9 +359,11 @@ pub struct SessionRecord {
     /// true, a plain shell runs the screen check in place of its classifier.
     /// Set by the first accepted signal from
     /// [`crate::hook_status::apply_signal`]; cleared by a daemon restart's
-    /// rebuild of the record (see [`Self::last_hook_time`])
-    /// and by a plain shell's own `SessionEnd`, after which the classifier
-    /// owns its status again. Runtime-only: neither mirrored into the sidecar
+    /// rebuild of the record (see [`Self::last_hook_time`]),
+    /// by a plain shell's own `SessionEnd`, and by the shell watcher's hand-back
+    /// to the shell's own classifier when its agent ended without one (the
+    /// shell's prompt back for a whole confirm window); after those two the
+    /// classifier owns its status again. Runtime-only: neither mirrored into the sidecar
     /// nor sent on the wire.
     pub hook_driven: bool,
     /// The assistant message the last `Stop` ended its turn with, trimmed and
