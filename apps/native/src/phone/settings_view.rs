@@ -391,10 +391,10 @@ impl PhoneRoot {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .p(px(SIDE_PADDING))
-            .child(section_label(THEMES_LABEL, t, cx))
-            .children(rows)
-            .child(self.text_size_section(t, cx))
+            .py(px(SIDE_PADDING))
+            .child(section_label(THEMES_LABEL, t, cx).px(px(SIDE_PADDING)))
+            .child(div().flex().flex_col().children(rows))
+            .child(self.text_size_section(t, cx).px(px(SIDE_PADDING)))
     }
 
     /// The theme `native-ui.json` names, when it names one.
@@ -494,6 +494,7 @@ impl PhoneRoot {
                             .flex_1()
                             .flex()
                             .justify_center()
+                            .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
                             .child(crate::appearance_view::ui_text_size_label(offset)),
                     )
                     .child(self.text_size_button(1, t, cx)),

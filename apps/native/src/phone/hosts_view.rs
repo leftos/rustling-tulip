@@ -235,8 +235,8 @@ pub(super) struct RowParts {
     /// stopped host does.
     pub(super) retry: bool,
     /// Whether the row offers Retry for an offline host: in the head of its
-    /// Home header, so the header does not grow, and as a line on its hosts
-    /// screen row.
+    /// Home header and of its card on the hosts screen, so neither grows as
+    /// it redials.
     pub(super) redial: bool,
 }
 
@@ -677,7 +677,8 @@ impl PhoneRoot {
     }
 
     /// One saved host: its head, the unknown host key prompt, its reason
-    /// line and its Retry button, as its state calls for them.
+    /// line and a stopped host's Retry button, as its state calls for them;
+    /// an offline host's Retry sits in its head.
     fn row(row: &HostRow, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let row_id = format!("phone-host-row-{}", row.name);
         let mut card = div()
@@ -703,14 +704,15 @@ impl PhoneRoot {
         if let Some(reason) = row.parts.reason.as_deref() {
             card = card.child(Self::reason_line(&row.name, reason, t));
         }
-        if row.parts.retry || row.parts.redial {
+        if row.parts.retry {
             card = card.child(Self::retry_line(&row.name, &row.key, cx));
         }
         card
     }
 
-    /// A row's head: its name and state word, and its Pair button when it
-    /// offers one.
+    /// A row's head: its name and state word, its Pair button when it offers
+    /// one, and Retry when the host is offline; it keeps a touch target's
+    /// height either way, so the card does not grow or shrink as it redials.
     fn row_head(row: &HostRow, t: &UiTheme, cx: &mut Context<Self>) -> Div {
         let pair_button = row.pair.then(|| {
             let key = row.key.clone();
@@ -725,10 +727,16 @@ impl PhoneRoot {
                 this.pair(&key, window, cx);
             }))
         });
+        let redial = row.parts.redial.then(|| {
+            Self::retry_button(&row.name, &row.key, cx)
+                .flex_none()
+                .min_h(px(TOUCH_TARGET))
+        });
         div()
             .flex()
             .items_center()
             .gap(px(8.0))
+            .min_h(px(TOUCH_TARGET))
             .child(
                 div()
                     .flex_1()
@@ -743,6 +751,7 @@ impl PhoneRoot {
                     ),
             )
             .children(pair_button)
+            .children(redial)
     }
 
     /// The prompt on a host whose connection offered a key this phone has
@@ -818,8 +827,8 @@ impl PhoneRoot {
         }))
     }
 
-    /// A host's Retry on a line of its own: a stopped host's under its
-    /// reason, and an offline host's on its hosts screen row.
+    /// A stopped host's Retry on a line of its own, under its reason; an
+    /// offline host draws its Retry in its head instead.
     pub(super) fn retry_line(name: &str, key: &HostKey, cx: &mut Context<Self>) -> Div {
         div()
             .flex()

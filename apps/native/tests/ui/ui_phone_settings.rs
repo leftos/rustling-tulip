@@ -694,6 +694,46 @@ fn appearance_lists_the_themes_and_marks_the_current_one(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn appearance_theme_rows_touch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_appearance(&mut h);
+
+    for pair in BUILT_INS.windows(2) {
+        let above = h.bounds(&format!("phone-theme-{}", pair[0].0));
+        let below = h.bounds(&format!("phone-theme-{}", pair[1].0));
+        assert_eq!(
+            below.top(),
+            above.bottom(),
+            "{} sits on {}'s bottom, with no gap between the rows",
+            pair[1].0,
+            pair[0].0
+        );
+    }
+}
+
+#[gpui::test]
+fn appearance_check_lines_up_with_the_heading(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_appearance(&mut h);
+
+    let page = h.bounds("phone-settings-body");
+    let row = h.bounds("phone-theme-nord");
+    let check = h.bounds("phone-theme-check-nord");
+    assert_eq!(
+        row.left(),
+        page.left(),
+        "the rows span the page, padded once by the page"
+    );
+    assert_eq!(
+        check.left(),
+        page.left() + px(16.0),
+        "the check sits at the heading's side padding, level with its text"
+    );
+}
+
+#[gpui::test]
 fn tapping_a_theme_switches_and_saves_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));

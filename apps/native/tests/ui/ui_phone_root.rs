@@ -625,6 +625,15 @@ fn refused(target: &Target) -> Connection {
     conn
 }
 
+/// A connection to `target` the daemon dropped, as a host that is switched
+/// off leaves it: offline, with no reason line, and offering Retry.
+fn offline(target: &Target) -> Connection {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    let _ = conn.on_closed("gone".to_owned());
+    conn
+}
+
 /// The pending host key the window holds for `key`.
 fn pending(h: &mut Harness<'_>, key: &HostKey) -> Option<String> {
     h.root(|root, _| root.unverified_fingerprint(key).map(str::to_owned))
@@ -990,6 +999,38 @@ fn a_stopped_host_shows_its_reason_and_retry_restarts_it(cx: &mut TestAppContext
         .filter(|command| matches!(command, NetCommand::Restart))
         .count();
     assert_eq!(restarts, 1, "Retry restarts the host");
+}
+
+#[gpui::test]
+fn an_offline_host_card_keeps_its_height_through_a_redial(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "kind": "ssh", "name": SSH }] }),
+    );
+    let mut h = Harness::phone(cx, &dir);
+    let target = ssh_target();
+    h.host(&target).event(NetEvent::State(offline(&target)));
+    let card = format!("phone-host-row-{SSH}");
+
+    assert!(
+        drawn(&mut h, &format!("phone-host-retry-{SSH}")),
+        "an offline host offers Retry"
+    );
+    let offline_height = h.bounds(&card).size.height;
+
+    let redialling = {
+        let mut conn = Connection::for_target(target.clone());
+        conn.on_connecting();
+        conn
+    };
+    h.host(&target).event(NetEvent::State(redialling));
+
+    assert_eq!(
+        h.bounds(&card).size.height,
+        offline_height,
+        "the card keeps its height while it redials"
+    );
 }
 
 #[gpui::test]
