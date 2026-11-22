@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - On the phone, tapping a path that cannot be fetched now says why on the session page instead of showing nothing.
+- On the phone, the hosts screen a first run adds its first host on now scrolls, so Add stays reachable above the keyboard.
 - On the phone, a notification tap made while Settings is open closes Settings and shows that it is waiting for its host.
 - On the phone, a file or folder fetch no longer fails when Storage's Clear runs at the moment it starts.
 - In the phone's Chat, tapping or holding on a wrapped right- or centre-aligned table cell selects the character under your finger.

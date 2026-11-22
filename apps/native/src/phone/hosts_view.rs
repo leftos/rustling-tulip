@@ -471,16 +471,20 @@ pub(super) fn field_box(
 
 impl PhoneRoot {
     /// The hosts screen: under the header with its `Settings` button, the
-    /// hosts' content, which Settings' Hosts page draws too.
+    /// hosts' content, which Settings' Hosts page draws too, scrolling so
+    /// Add stays above the keyboard the SSH form raises.
     pub(super) fn hosts_body(&self, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let header = Self::home_header_row(false, &t, cx);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(self.hosts_content(&t, cx))
+        div().size_full().flex().flex_col().child(header).child(
+            div()
+                .id("phone-hosts-body")
+                .driver_id(|| "phone-hosts-body".to_owned())
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(self.hosts_content(&t, cx)),
+        )
     }
 
     /// The saved hosts' rows and the tail under them: the add form or the

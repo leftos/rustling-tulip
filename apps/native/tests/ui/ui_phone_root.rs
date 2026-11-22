@@ -5,7 +5,7 @@
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{Edges, KeyboardKind, TestAppContext, WindowInsets, point, px};
+use gpui::{Edges, KeyboardKind, Pixels, TestAppContext, WindowInsets, point, px};
 use protocol::{
     ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome, FEATURE_CLIENT_PRESENCE,
     FEATURE_RELAY_PUSH,
@@ -819,6 +819,67 @@ fn the_ssh_form_shows_the_phones_public_key_and_copy_puts_it_on_the_clipboard(
     assert!(
         copied.ends_with(" rustling-tulip-phone"),
         "carrying the phone's key comment: {copied}"
+    );
+}
+
+/// The insets a phone draws with a `keyboard`-tall on-screen keyboard up.
+fn keyboard_insets(keyboard: Pixels) -> WindowInsets {
+    WindowInsets {
+        safe_area: Edges {
+            top: px(62.0),
+            bottom: px(34.0),
+            ..Edges::default()
+        },
+        ime: Edges {
+            bottom: keyboard,
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    }
+}
+
+#[gpui::test]
+fn the_first_run_hosts_screen_scrolls_add_above_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::phone(cx, &dir);
+    // An iPhone's own width, so the SSH key the form shows wraps to at
+    // least three lines and Add starts under the keyboard.
+    h.cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
+    h.cx.run_until_parked();
+    h.click_on("phone-host-mode-ssh");
+    let keyboard = px(336.0);
+    let insets = keyboard_insets(keyboard);
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.set_insets_override(Some(insets), cx));
+    });
+    h.cx.run_until_parked();
+
+    let keyboard_top = h.cx.update(|window, _| window.viewport_size().height) - keyboard;
+    assert!(
+        drawn(&mut h, "phone-hosts-body"),
+        "the first run's hosts content scrolls"
+    );
+    let body = h.bounds("phone-hosts-body");
+    assert!(
+        body.bottom() <= keyboard_top,
+        "the hosts body stops above the keyboard: {body:?}, keyboard top {keyboard_top:?}"
+    );
+
+    let add = h.bounds("phone-host-add");
+    assert!(
+        add.bottom() > keyboard_top,
+        "Add starts under the keyboard: {add:?}, keyboard top {keyboard_top:?}"
+    );
+
+    h.scroll_into_view("phone-hosts-body", "phone-host-add");
+    let add = h.bounds("phone-host-add");
+    assert!(
+        add.bottom() <= keyboard_top,
+        "Add shows above the keyboard: {add:?}, keyboard top {keyboard_top:?}"
     );
 }
 
