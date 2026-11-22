@@ -474,6 +474,32 @@ fn dead_key_then_space_sends_only_the_accent(cx: &mut TestAppContext) {
     }
 }
 
+/// Sends `bytes` through the pane as a phone key bar or Keys dock key does.
+fn grid_key(h: &mut Harness<'_>, bytes: &[u8]) {
+    h.root_update(|root, _, cx| {
+        let terminal = root.pane_terminal("p1").expect("the pane has a terminal");
+        terminal.update(cx, |terminal, cx| terminal.type_bytes(bytes, cx));
+    });
+}
+
+#[gpui::test]
+fn a_grid_key_sends_a_pending_dead_key_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    grid_key(&mut h, b"\x1b");
+    assert_eq!(h.sent_input("s1"), "´\x1b".as_bytes());
+    assert_eq!(h.preedit("p1"), None, "no dead key is pending after");
+}
+
+#[gpui::test]
+fn a_grid_key_with_no_pending_dead_key_sends_only_its_bytes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    grid_key(&mut h, b"\x1b");
+    assert_eq!(h.sent_input("s1"), b"\x1b");
+}
+
 #[gpui::test]
 fn marked_text_dropped_on_blur(cx: &mut TestAppContext) {
     let dir = TestDir::new();

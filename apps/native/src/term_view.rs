@@ -1748,13 +1748,9 @@ impl TerminalPane {
     /// accent is cancelled by Backspace, dropped for Escape and sent ahead
     /// of any other key. Returns whether `ks` still does its own action.
     fn end_dead_key(&mut self, ks: &Keystroke) -> bool {
-        if !self.dead_key {
-            return true;
-        }
-        let Some(accent) = self.marked.take() else {
+        let Some(accent) = self.take_dead_key() else {
             return true;
         };
-        flush_dead_key();
         match term_input::dead_key_fate(ks) {
             DeadKeyFate::Cancel => false,
             DeadKeyFate::Drop => true,
@@ -1767,6 +1763,17 @@ impl TerminalPane {
                 false
             }
         }
+    }
+
+    /// Takes the pending dead key's accent, clearing the key Windows still
+    /// holds. Returns `None` when no accent is pending.
+    fn take_dead_key(&mut self) -> Option<String> {
+        if !self.dead_key {
+            return None;
+        }
+        let accent = self.marked.take()?;
+        flush_dead_key();
+        Some(accent)
     }
 
     fn copy_selection(&mut self, clear_selection: bool, cx: &mut Context<Self>) {
@@ -1815,13 +1822,17 @@ impl TerminalPane {
     }
 
     /// Types `bytes` into the session as typed input, as a key's bytes go:
-    /// the size is claimed and the pane repaints at the live screen.
+    /// a pending dead key's accent sends first, then the size is claimed and
+    /// the pane repaints at the live screen.
     pub fn type_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         if bytes.is_empty() {
             return;
         }
         self.note_input();
         self.term.clear_selection();
+        if let Some(accent) = self.take_dead_key() {
+            self.send_input(accent.as_bytes());
+        }
         self.send_input(bytes);
         cx.notify();
     }
