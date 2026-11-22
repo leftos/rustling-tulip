@@ -47,7 +47,8 @@ $NotifyBundle = 'PlugIns/RustlingTulipNotify.appex'
 $NotifyExecutable = 'RustlingTulipNotify'
 $PlistBuddy = '/usr/libexec/PlistBuddy'
 $AppId = 'dev.leftos.rustling-tulip.phone'
-$SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64', 'IOS_NOTIFY_PROFILE_GZ_BASE64', 'IOS_TEAM_ID'
+$SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64',
+    'IOS_NOTIFY_PROFILE_GZ_BASE64', 'IOS_TEAM_ID'
 # -Sign's variables, moved out of the environment before the build (see the end of this script).
 $Signing = @{}
 
@@ -74,6 +75,22 @@ function Invoke-CargoBuild([string] $Triple) {
     $env:IPHONEOS_DEPLOYMENT_TARGET = '15.0'
     & cargo @cargoArgs
     Assert-LastExit "cargo $($cargoArgs -join ' ')"
+}
+
+# The app's and the extension's simulator entitlements as XML and DER under
+# target/ios/sim-entitlements, which their build scripts link into the binaries.
+function Write-SimEntitlement {
+    $dir = Join-Path $RepoRoot 'target/ios/sim-entitlements'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    foreach ($pair in @(@('app', 'apps/ios/sim.entitlements'), @('notify', 'apps/ios-notify/sim.entitlements'))) {
+        $xml = Join-Path $dir "$($pair[0]).xml"
+        $der = Join-Path $dir "$($pair[0]).der"
+        & plutil -convert xml1 -o $xml (Join-Path $RepoRoot $pair[1]) | Out-Host
+        Assert-LastExit "plutil -convert xml1 $($pair[1])"
+        & derq query -f xml -i $xml -o $der --raw | Out-Host
+        Assert-LastExit "derq query $($pair[0]).der"
+    }
+    return (Resolve-Path -LiteralPath $dir).Path
 }
 
 function Write-PlistValue([string] $Plist, [string] $Key, [string] $Value) {
@@ -202,13 +219,19 @@ function Build-AppIcon([string] $App, [string] $WorkDir) {
         Copy-Item -LiteralPath $source -Destination $icon
     }
     $partial = Join-Path $WorkDir 'icon.plist'
+    # Info.plist declares iPhone and iPad (UIDeviceFamily 1 and 2), so the icons cover both.
     & xcrun actool --compile $App --platform iphoneos --minimum-deployment-target 15.0 --app-icon AppIcon `
-        --output-partial-info-plist $partial $catalog | Out-Host
+        --target-device iphone --target-device ipad --output-partial-info-plist $partial $catalog | Out-Host
     Assert-LastExit 'xcrun actool'
     if (-not (Test-Path -LiteralPath (Join-Path $App 'Assets.car'))) { throw 'xcrun actool wrote no Assets.car into the bundle' }
     if (-not (Test-Path -LiteralPath $partial)) { throw 'xcrun actool wrote no partial Info.plist' }
     & $PlistBuddy -c "Merge $partial" (Join-Path $App 'Info.plist') | Out-Host
     Assert-LastExit 'PlistBuddy Merge icon.plist'
+    # A missing key reads as $null, which fails the same check.
+    if ((Get-PlistEntry (Join-Path $App 'Info.plist') 'CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconName') -ne 'AppIcon') {
+        throw 'the merged Info.plist has no CFBundleIcons~ipad: actool made no iPad icons'
+    }
+    Write-Output 'iPad icons present: AppIcon'
 }
 
 function Get-PlistEntry([string] $Plist, [string] $Key) {
@@ -394,7 +417,14 @@ if ($Sign) {
 }
 
 $triple = if ($Target -eq 'sim') { 'aarch64-apple-ios-sim' } else { 'aarch64-apple-ios' }
-Invoke-CargoBuild $triple
+# Only a simulator build links entitlements into its binaries; a device build is signed with them.
+$env:RUSTLING_TULIP_IOS_SIM_ENTITLEMENTS = if ($Target -eq 'sim') { Write-SimEntitlement } else { $null }
+try {
+    Invoke-CargoBuild $triple
+}
+finally {
+    $env:RUSTLING_TULIP_IOS_SIM_ENTITLEMENTS = $null
+}
 $app = Build-AppBundle $triple
 if ($Target -eq 'sim') {
     # Inside out: the extension first, then the app that holds it.

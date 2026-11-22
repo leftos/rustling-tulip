@@ -6,10 +6,12 @@
 # to the Mac (log .tmp/ios-sim-run.log); the gate brings .tmp/ios/*.png back on
 # a pass and .tmp/ios/* on a failure. On the Mac (-OnMac) it builds the
 # simulator bundle (tools/ios/build.ps1), boots the simulator -Device names on
-# iOS 27.0 unless it is already booted, installs and launches the app, waits for its
-# "phone app started" log line with the background-wake method's line before it,
-# takes .tmp/ios/sim-first.png, then stops the app and shuts the simulator down
-# again if this run booted it.
+# iOS 27.0 unless it is already booted, installs and launches the app with
+# --keychain-selftest, waits for its "phone app started" log line with the
+# background-wake method's line before it, then for the self-test's
+# "phone: keychain self-test passed" line (failing on its "failed" line or after
+# 60 s), takes .tmp/ios/sim-first.png, then stops the app and shuts the
+# simulator down again if this run booted it.
 #
 #   pwsh -NoProfile -File tools/ios/sim-run.ps1 [-Device <name>]
 #
@@ -37,6 +39,10 @@ $ReadyLine = 'phone app started'
 # method: the wake line, and no warning that the class was not registered yet.
 $WakeLine = 'phone: background wake method added'
 $WakeLateLine = 'phone: the app delegate class is not registered yet'
+# The app's Keychain round trip through the device token store pairing uses.
+$KeychainArg = '--keychain-selftest'
+$KeychainPassLine = 'phone: keychain self-test passed'
+$KeychainFailLine = 'phone: keychain self-test failed'
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
 $Shot = Join-Path $OutDir 'sim-first.png'
 
@@ -114,7 +120,8 @@ function Assert-WakeLineBeforeReady([string[]] $Logs) {
     foreach ($log in $Logs) {
         if (-not (Test-Path $log)) { continue }
         if (Select-String -LiteralPath $log -SimpleMatch $WakeLateLine -Quiet) {
-            throw "the app delegate class was not registered before launch ('$WakeLateLine' in the app log); the background-push method was added late"
+            throw ("the app delegate class was not registered before launch ('$WakeLateLine' in the app log); " +
+                'the background-push method was added late')
         }
     }
     foreach ($log in $Logs) {
@@ -124,6 +131,29 @@ function Assert-WakeLineBeforeReady([string[]] $Logs) {
         if ($wake -and $ready -and $wake.LineNumber -lt $ready.LineNumber) { return }
     }
     throw "no '$WakeLine' line before '$ReadyLine'; the background-push method was not added before launch"
+}
+
+# The log lines holding $Line, from every log that exists.
+function Get-LogLine([string[]] $Logs, [string] $Line) {
+    foreach ($log in $Logs) {
+        if (Test-Path $log) { Select-String -LiteralPath $log -SimpleMatch $Line | ForEach-Object { $_.Line } }
+    }
+}
+
+# Waits up to 60 s for the Keychain self-test's pass line; its fail line, or none in time, throws.
+function Wait-ForKeychainSelfTest([string[]] $Logs, [Diagnostics.Process] $Launch) {
+    for ($second = 0; $second -lt 60; $second++) {
+        $failed = @(Get-LogLine $Logs $KeychainFailLine)
+        if ($failed.Count -gt 0) { throw "the app's Keychain self-test failed:`n$($failed -join "`n")" }
+        $passed = @(Get-LogLine $Logs $KeychainPassLine)
+        if ($passed.Count -gt 0) { $passed | Out-Host; return }
+        if ($Launch.HasExited) { break }
+        Start-Sleep -Seconds 1
+    }
+    $failed = @(Get-LogLine $Logs $KeychainFailLine)
+    if ($failed.Count -gt 0) { throw "the app's Keychain self-test failed:`n$($failed -join "`n")" }
+    $tail = foreach ($log in $Logs) { if (Test-Path $log) { Get-Content -LiteralPath $log -Tail 30 } }
+    throw "no '$KeychainPassLine' line from the app within 60 s; log tail:`n$($tail -join "`n")"
 }
 
 function Stop-Run([string] $Udid, [Diagnostics.Process] $Launch, [bool] $Booted) {
@@ -159,9 +189,10 @@ function Invoke-OnMac {
         Assert-LastExit "xcrun simctl install $udid"
         $logs = @((Join-Path $OutDir 'app.log'), (Join-Path $OutDir 'app-err.log'))
         $launch = Start-Process -FilePath 'xcrun' -PassThru -RedirectStandardOutput $logs[0] -RedirectStandardError $logs[1] `
-            -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId)
+            -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId, $KeychainArg)
         Wait-ForReadyLine $logs $launch
         Assert-WakeLineBeforeReady $logs
+        Wait-ForKeychainSelfTest $logs $launch
         & xcrun simctl io $udid screenshot $Shot
         Assert-LastExit "xcrun simctl io $udid screenshot"
     }

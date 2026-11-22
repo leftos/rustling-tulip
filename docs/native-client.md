@@ -1276,6 +1276,7 @@ A file is fetched and opens in the viewer. A folder opens the browser at it: a h
 A path no reading of which is on the host, or a folder with no root to join, fetches nothing and sets the session page's line "Not on {host}: {path}" (`phone-path-note`, `PhoneRoot::path_note`; `PhoneOpen::Missing`), naming the path as tapped.
 
 The phone opens web links on iOS: a tap on an http(s) link in the phone terminal, and the Linear card sheet's Open (the issue's https address, which Linear's app claims through its universal link where installed), go through `UIApplication` (`phone/open_ios.rs`, `IosOpener`). Any other scheme is refused, and VS Code, reveal and folder actions still only log on the phone. `--open-selftest` opens `https://example.com/` after 2 s for `tools/ios/sim-open.ps1` (`docs/testing.md` "iPhone Simulator on the Mac mini").
+`--keychain-selftest` saves, reads and deletes a device token for the host `keychain-selftest.invalid` through the real device token store, off the main thread, and logs `phone: keychain self-test passed` or `phone: keychain self-test failed` (with an `error` field) for `tools/ios/sim-run.ps1` (`phone/keychain_selftest.rs`).
 
 Each tap carries its session and path with its own request (`file_fetch::PhoneTap`), so a later tap never renames an earlier one, and an outcome for a session whose page is no longer shown is dropped.
 

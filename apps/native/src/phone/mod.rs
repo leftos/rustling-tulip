@@ -14,6 +14,8 @@ mod hosts_view;
 mod idiom_ios;
 mod key_bar;
 pub mod key_grid;
+#[cfg(target_os = "ios")]
+mod keychain_selftest;
 mod keys_view;
 mod layout;
 pub(crate) mod lifecycle;
@@ -113,6 +115,8 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
             share_selftest(share, cx);
             #[cfg(target_os = "ios")]
             open_selftest(cx);
+            #[cfg(target_os = "ios")]
+            keychain_selftest();
         });
 }
 
@@ -228,6 +232,15 @@ fn share_selftest(share: Arc<dyn ShareSheet>, cx: &mut App) {
 fn open_selftest(cx: &mut App) {
     if std::env::args().any(|arg| arg == open_ios::OPEN_SELFTEST_ARG) {
         open_ios::start_selftest(cx);
+    }
+}
+
+/// Launched with [`keychain_selftest::KEYCHAIN_SELFTEST_ARG`], saves, reads
+/// back and removes a token in the device token store, off the main thread.
+#[cfg(target_os = "ios")]
+fn keychain_selftest() {
+    if std::env::args().any(|arg| arg == keychain_selftest::KEYCHAIN_SELFTEST_ARG) {
+        keychain_selftest::start();
     }
 }
 
