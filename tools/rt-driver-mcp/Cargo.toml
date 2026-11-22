@@ -25,6 +25,8 @@ base64 = "0.22"
 daemon-client = { workspace = true }
 # The isolated daemon a session's client connects to, and the process walk.
 dev-daemon = { workspace = true }
+# The reply, busy-pipe and discovery ceilings count load-adjusted time.
+load-clock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

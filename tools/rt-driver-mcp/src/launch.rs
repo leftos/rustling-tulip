@@ -1,20 +1,27 @@
 //! `launch`: shadow-copy a driver build, start an isolated daemon from the
 //! copy, start the driven client against it, and wait until its endpoint
 //! answers.
+//!
+//! The wait for the client's discovery file counts load-adjusted time on the
+//! process's one clock (`pipe::clock`), with a 5x wall backstop, and ends
+//! sooner when the client stalls: neither its log nor its CPU grows for
+//! [`DEFAULT_STALL_LIMIT`] of wall time.
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use daemon_client::isolation::REMOTE_FILES_DIR_VAR;
 use dev_daemon::{DaemonSpec, IsolatedDaemon, TestShell};
+use load_clock::{DEFAULT_STALL_LIMIT, Deadline, Expiry, StallWatch, SystemTicker};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::pipe::{PipeClient, Transport as _};
+use crate::pipe::{PipeClient, Transport as _, clock};
 use crate::session::{RemoteHost, ScratchRepo, Session, log_tail, native_log};
 use crate::token;
 
@@ -25,8 +32,9 @@ pub const BUILD_HINT: &str = "build the driven client first: cargo build -p rust
 /// The exes a session runs, shadow-copied out of the build folder.
 const EXES: [&str; 3] = ["rustling-tulip-native", "rustling-tulipd", "rt-tracer"];
 
-/// The hang guard of the wait for the client's discovery file. A healthy
-/// start writes it after its first cloaked frame, in seconds.
+/// The hang guard of the wait for the client's discovery file, in
+/// load-adjusted time with a 5x wall backstop. A healthy start writes it
+/// after its first cloaked frame, in seconds.
 const DISCOVERY_GUARD: Duration = Duration::from_secs(60);
 
 /// The folder under the temp dir with one discovery file per driven client.
@@ -144,7 +152,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<Session, String> {
     };
     let mut client = spawn_client(&client_spec).map_err(|err| fail("starting the client", &err))?;
     let remote = remote.map(|(remote, _)| remote);
-    let pipe = match wait_discovery(&mut client, &spec.scratch) {
+    let pipe = match wait_discovery(&mut client, &spec.scratch, &log) {
         Ok(discovery) => format!(r"\\.\pipe\{}", discovery.pipe),
         Err(err) => {
             let message = fail("waiting for the driver endpoint", &err);
@@ -410,30 +418,86 @@ fn client_command(client: &ClientSpec<'_>, stderr: Stdio) -> Command {
 }
 
 /// Waits for the discovery file of `client`, matched by pid and creation
-/// time, failing at once when the client exits.
-fn wait_discovery(client: &mut Child, scratch: &Path) -> Result<Discovery, String> {
-    let started_at = creation_time(client)?;
+/// time, failing at once when the client exits, and when neither `log` nor
+/// the client's CPU grows for [`DEFAULT_STALL_LIMIT`].
+fn wait_discovery(client: &mut Child, scratch: &Path, log: &Path) -> Result<Discovery, String> {
+    let started_at = process_times(client)?.created;
     let dir = std::env::temp_dir().join(DISCOVERY_FOLDER);
-    let deadline = Instant::now() + DISCOVERY_GUARD;
+    let pid = client.id();
+    let deadline = Deadline::start(clock(), DISCOVERY_GUARD);
+    let mut stall = StallWatch::new(Arc::new(SystemTicker), DEFAULT_STALL_LIMIT);
+    let observe = || Observed {
+        exited: match client.try_wait() {
+            Ok(Some(status)) => Some(format!(
+                "the client exited ({status}); its stderr ends:\n{}",
+                log_tail(&scratch.join("client-stderr.log"))
+            )),
+            _ => None,
+        },
+        found: find_discovery(&dir, pid, started_at),
+        log_len: std::fs::metadata(log).map_or(0, |meta| meta.len()),
+        cpu: process_times(client).map_or(Duration::ZERO, |times| times.cpu),
+    };
+    let pause = || std::thread::sleep(Duration::from_millis(100));
+    let target = discovery_target(pid, &dir);
+    discovery_loop(&deadline, &mut stall, observe, pause, &target)
+}
+
+/// One look at a starting client.
+struct Observed {
+    /// Why the client is gone, when it has exited.
+    exited: Option<String>,
+    /// Its discovery file, once written.
+    found: Option<Discovery>,
+    /// Its log's length in bytes.
+    log_len: u64,
+    /// Its kernel + user CPU so far.
+    cpu: Duration,
+}
+
+/// The discovery wait's loop: each pass observes the client and fails on an
+/// exit, ends on its file, then fails once `deadline` expires or `stall`
+/// fires, else pauses. `target` names the file waited for
+/// ([`discovery_target`]).
+fn discovery_loop(
+    deadline: &Deadline,
+    stall: &mut StallWatch,
+    mut observe: impl FnMut() -> Observed,
+    mut pause: impl FnMut(),
+    target: &str,
+) -> Result<Discovery, String> {
     loop {
-        if let Ok(Some(status)) = client.try_wait() {
-            let stderr = log_tail(&scratch.join("client-stderr.log"));
-            return Err(format!(
-                "the client exited ({status}); its stderr ends:\n{stderr}"
-            ));
+        let seen = observe();
+        if let Some(exited) = seen.exited {
+            return Err(exited);
         }
-        if let Some(discovery) = find_discovery(&dir, client.id(), started_at) {
+        if let Some(discovery) = seen.found {
             return Ok(discovery);
         }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "hung: no discovery file for pid {} in {} within {DISCOVERY_GUARD:?}",
-                client.id(),
-                dir.display()
-            ));
+        stall.observe(seen.log_len, seen.cpu);
+        if let Some(expiry) = deadline.expired() {
+            return Err(no_discovery(target, &expiry));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if let Some(expiry) = stall.stalled() {
+            return Err(stalled(&expiry));
+        }
+        pause();
     }
+}
+
+/// The discovery file waited for, as the timeout error names it.
+pub(crate) fn discovery_target(pid: u32, dir: &Path) -> String {
+    format!("pid {pid} in {}", dir.display())
+}
+
+/// The error of a discovery file that did not come.
+pub(crate) fn no_discovery(target: &str, expiry: &Expiry) -> String {
+    format!("hung: no discovery file for {target}: {expiry}")
+}
+
+/// The error of a client that stalled while starting.
+pub(crate) fn stalled(expiry: &Expiry) -> String {
+    format!("the client {expiry}")
 }
 
 /// The discovery file in `dir` for process `pid` started at `started_at`;
@@ -446,10 +510,17 @@ pub fn find_discovery(dir: &Path, pid: u32, started_at: u64) -> Option<Discovery
     (discovery.pid == pid && discovery.started_at == started_at).then_some(discovery)
 }
 
-/// `child`'s creation time as a `FILETIME` in one u64, read through its
-/// handle.
+/// A process's times, read through its handle.
+struct ProcessTimes {
+    /// Its creation time as a `FILETIME` in one u64.
+    created: u64,
+    /// Its kernel + user CPU so far.
+    cpu: Duration,
+}
+
+/// `child`'s creation time and CPU, read through its handle.
 #[cfg(windows)]
-fn creation_time(child: &Child) -> Result<u64, String> {
+fn process_times(child: &Child) -> Result<ProcessTimes, String> {
     use std::os::windows::io::AsRawHandle as _;
     use windows::Win32::Foundation::{FILETIME, HANDLE};
     use windows::Win32::System::Threading::GetProcessTimes;
@@ -472,11 +543,18 @@ fn creation_time(child: &Child) -> Result<u64, String> {
         )
     }
     .map_err(|err| format!("reading the client's start time: {err}"))?;
-    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    let units =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    let cpu = units(kernel).saturating_add(units(user));
+    Ok(ProcessTimes {
+        created: units(created),
+        // 100 ns units.
+        cpu: Duration::from_nanos(cpu.saturating_mul(100)),
+    })
 }
 
 #[cfg(not(windows))]
-fn creation_time(_child: &Child) -> Result<u64, String> {
+fn process_times(_child: &Child) -> Result<ProcessTimes, String> {
     Err("a driven client runs on Windows only".to_owned())
 }
 
@@ -834,5 +912,127 @@ mod tests {
             "names each missing exe: {message}"
         );
         assert!(!scratch_made, "a refused launch made {}", scratch.display());
+    }
+
+    /// The discovery wait's loop on a manual clock: no client, no sleeping.
+    mod discovery_wait {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use load_clock::{DEFAULT_STALL_LIMIT, Deadline, StallWatch};
+
+        use super::super::{DISCOVERY_GUARD, Discovery, Observed, discovery_loop};
+        use crate::pipe::tests::{Rig, assert_about};
+
+        const PAUSE: Duration = Duration::from_millis(100);
+
+        fn discovery() -> Discovery {
+            Discovery {
+                pid: 42,
+                pipe: "rt-driver-42".to_owned(),
+                started_at: 7,
+                version: "1".to_owned(),
+            }
+        }
+
+        /// A client that neither exits nor writes its file, logging a line each pass when `logs`.
+        fn quiet(pass: u64, logs: bool) -> Observed {
+            Observed {
+                exited: None,
+                found: None,
+                log_len: if logs { pass } else { 10 },
+                cpu: Duration::from_secs(1),
+            }
+        }
+
+        /// Runs the loop against `budget` at a machine free by `share`, each pass observed by `script`.
+        fn run(
+            rig: &Rig,
+            budget: Duration,
+            share: f64,
+            mut script: impl FnMut(u64) -> Observed,
+        ) -> Result<Discovery, String> {
+            let deadline = Deadline::start(Arc::clone(&rig.clock), budget);
+            let mut stall = StallWatch::new(rig.ticker.clone(), DEFAULT_STALL_LIMIT);
+            let mut pass = 0;
+            discovery_loop(
+                &deadline,
+                &mut stall,
+                || {
+                    pass += 1;
+                    script(pass)
+                },
+                || rig.advance(PAUSE, share),
+                "pid 42 in the folder",
+            )
+        }
+
+        #[test]
+        fn a_discovery_wait_ends_at_its_found_file() {
+            let rig = Rig::new();
+            let got = run(&rig, DISCOVERY_GUARD, 1.0, |pass| Observed {
+                found: (pass == 5).then(discovery),
+                ..quiet(pass, false)
+            });
+            assert_eq!(got, Ok(discovery()));
+            assert_eq!(rig.wall(), 4 * PAUSE);
+        }
+
+        #[test]
+        fn a_client_that_exits_fails_the_discovery_wait_with_its_stderr() {
+            let rig = Rig::new();
+            let text = "the client exited (exit code: 4); its stderr ends:\ndriver run refused";
+            let got = run(&rig, DISCOVERY_GUARD, 1.0, |pass| Observed {
+                exited: (pass == 3).then(|| text.to_owned()),
+                // A file read on the exit's own pass does not win over it.
+                found: (pass == 3).then(discovery),
+                ..quiet(pass, false)
+            });
+            assert_eq!(got, Err(text.to_owned()));
+        }
+
+        #[test]
+        fn a_stalled_client_fails_the_discovery_wait() {
+            let rig = Rig::new();
+            let got = run(&rig, Duration::from_secs(600), 1.0, |pass| {
+                quiet(pass, false)
+            });
+            let err = got.err().unwrap_or_default();
+            assert!(
+                err.starts_with("the client stalled: no log line and no CPU for 120 s"),
+                "{err}"
+            );
+            assert_about(rig.wall(), DEFAULT_STALL_LIMIT);
+        }
+
+        #[test]
+        fn a_client_that_logs_is_not_stalled() {
+            let rig = Rig::new();
+            let got = run(&rig, Duration::from_secs(300), 1.0, |pass| {
+                quiet(pass, true)
+            });
+            let err = got.err().unwrap_or_default();
+            assert!(
+                err.starts_with(
+                    "hung: no discovery file for pid 42 in the folder: did not finish within 300 s"
+                ),
+                "{err}"
+            );
+            assert_about(rig.wall(), Duration::from_secs(300));
+        }
+
+        #[test]
+        fn a_loaded_discovery_wait_outlasts_60_s_of_wall() {
+            let rig = Rig::new();
+            let got = run(&rig, DISCOVERY_GUARD, 0.5, |pass| quiet(pass, true));
+            let err = got.err().unwrap_or_default();
+            assert!(
+                err.starts_with(
+                    "hung: no discovery file for pid 42 in the folder: did not finish within 60 s"
+                ),
+                "{err}"
+            );
+            assert_about(rig.wall(), Duration::from_secs(120));
+        }
     }
 }

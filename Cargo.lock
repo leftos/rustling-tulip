@@ -6718,6 +6718,7 @@ dependencies = [
  "daemon-client",
  "dev-daemon",
  "keyring-core",
+ "load-clock",
  "serde",
  "serde_json",
  "tracing",

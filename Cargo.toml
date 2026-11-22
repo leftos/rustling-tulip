@@ -63,6 +63,7 @@ agent-claude = { path = "crates/agents/claude" }
 claude-accounts = { path = "crates/agents/claude/accounts" }
 agent-registry = { path = "crates/agents/registry" }
 dev-daemon = { path = "crates/dev-daemon" }
+load-clock = { path = "crates/load-clock" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
