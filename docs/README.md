@@ -36,6 +36,7 @@ crates/
   tracer-protocol/ - the stable daemon <-> tracer ABI
   daemon-client/ - client-side daemon supervision shared by the clients
   dev-daemon/   - an isolated daemon under a `.tmp` folder for the live tests and the driver tools; never shipped
+  load-clock/   - a load-adjusted clock, a deadline with a wall-time backstop and a stall watch for driver ceilings; never shipped
   tailnet/      - Tailscale CLI wrapper and the owner rule for tailnet peers
   update-core/  - the updater's release feed, download, verify and update lock, shared by the client and the daemon; no GPUI
   agents/api/   - the agent plugin trait and its context types
@@ -275,6 +276,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Live-run file**: `<run_id>.json` in the live-run folder, one per `claude` process the dispatch tool runs, written by the tool (temporary name, then an atomic rename) and read, never written, by the daemon: the run's title, backend, worktree, stream path and child pid with its creation time; see [on-disk.md](on-disk.md) ("The dispatch live-run folder").
 - **Live-run folder**: the one folder the daemon watches for live-run files, `RUSTLING_TULIP_DISPATCH_DIR` else the Claude plugin's `live_runs_dir`; with none the daemon follows no dispatch runs and lists no `dispatch_runs` feature (`resolve_dispatch_live_dir`, `CLAUDE.md` environment table).
 - **Liveness tokens**: the process-name fragments the orphan check accepts for a dead-or-alive test of a sidecar that names no program (`Agent::liveness_tokens`; Claude's are `claude` and `node`).
+- **Load-adjusted time**: time that advances by the machine's free share while other work loads it, and is wall time on an idle machine (`crates/load-clock`: `LoadClock`, `Deadline` with its wall-time backstop, `StallWatch`).
 - **Loader**: a connection that has loaded a session's chat (`LoadChat`) or its summary (`LoadSummary`), or both, and is sent the loaded view's appends (and, for the chat, its screen changes) until it unloads or closes.
 - **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
 - **Login PATH**: on macOS, the PATH the user's login shell prints (`$SHELL -ilc`), which the daemon sets as its process PATH at start when the inherited one is launchd-minimal (unset, empty, or only `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`), followed by the inherited entries not already present, so every child resolves programs through it (`crates/daemon/src/login_path.rs`, `docs/daemon-cli.md`).

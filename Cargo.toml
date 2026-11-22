@@ -9,6 +9,7 @@ members = [
     "crates/daemon-client",
     "crates/tailnet",
     "crates/update-core",
+    "crates/load-clock",
     "crates/agents/api",
     "crates/agents/claude",
     "crates/agents/claude/accounts",
