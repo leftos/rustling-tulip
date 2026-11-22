@@ -20,9 +20,7 @@
 - [ ] RT-850 Read background counts on a default-mode Claude footer · release vNext
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-947 User hooks: let a hand-typed agent report after an injected run ends in the same shell · release vNext
-- [ ] RT-950 User hooks: release a shell's conversation pin when its agent dies without SessionEnd · release vNext
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
-- [ ] RT-1131 Make Finished toasts and every status marker use the agent-up rule, and cache it per session · release vNext
 - [ ] RT-1263 Don't notify Finished for a /compact with nothing running · release vNext
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open · release vNext
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
@@ -35,7 +33,6 @@
 - [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card · release vNext
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule · release vNext
 - [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
-- [ ] RT-2100 Slice the model picker's description column on a character boundary · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 
@@ -106,7 +103,6 @@
 - [ ] RT-1457 Check rustling-tulipd's output and exit code when a script runs it on Windows
 - [ ] RT-1462 Keep session labels across auto-resume at daemon start
 - [ ] RT-1463 Report a send that never reached the agent from rustling-tulipd send
-- [ ] RT-2096 Hold back attention and follow-up events for a session still pending · release vNext
 
 ## Build, test and driver tooling
 
@@ -310,7 +306,6 @@
 - [ ] RT-843 Send Home and End in application-cursor form when DECCKM is set
 - [ ] RT-987 Open pop-out toolbar tooltips below the toolbar row, like the pane header's
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
-- [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line · release vNext
 - [ ] RT-1171 Anchor a multi-line nu prompt's gutter mark on its first line under ConPTY
 - [ ] RT-1174 Stop a pane header flickering for one frame on each resize step
 - [ ] RT-1175 Measure pane header fit once per tab render instead of per pane per frame
@@ -502,29 +497,23 @@
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
 - [ ] RT-1681 Polish the phone's add-host form and Pair dialog: Return, keys, scrim, Cancel
-- [ ] RT-1704 Clear the signing values from testflight.ps1's environment once each is used · release vNext
 - [ ] RT-1709 Find why the notification extension does not launch for a simulator push · release vNext
 - [ ] RT-1726 Answer the right host from the phone tray, let a tap through after a swipe, and clear an ended card after Open · release vNext
 - [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
-- [ ] RT-1765 Draw the phone tray's read-only options without a pressed state · release vNext
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
 - [ ] RT-1768 Let a tap on the phone terminal's command gutter toggle the keyboard · release vNext
-- [ ] RT-1772 Show a waiting notification tap under the phone's Settings, and keep it through a Settings step · release vNext
 - [ ] RT-1773 Show on the phone's Home that a host's notifications need attention · release vNext
 - [ ] RT-1774 Tidy the phone Settings › Notifications page: hint wording, offline hosts and specs
-- [ ] RT-1781 Reset the phone's add-host form when leaving Settings › Hosts, so the keyboard does not rise on its own · release vNext
 - [ ] RT-1782 Let the phone's hosts screen scroll so Add stays above the keyboard · release vNext
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
 - [ ] RT-1785 Even out the phone Appearance page: theme row spacing and the text size label · release vNext
 - [ ] RT-1793 Keep an offline host's card on Settings › Hosts from jumping on each redial · release vNext
-- [ ] RT-1797 Hit-test a wrapped right- or centre-aligned Chat table cell by its own line's offset · release vNext
 - [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone · release vNext
 - [ ] RT-1879 Copy a phone Terminal selection to the clipboard · release vNext
-- [ ] RT-1881 Flush a pending dead key before a phone grid key sends · release vNext
 - [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
 - [ ] RT-1910 Send photos and files from the phone into a session · release vNext
 - [ ] RT-1913 Keep the phone's Quick dock and Show prompt from re-sizing the session's PTY · release vNext
@@ -533,13 +522,11 @@
 - [ ] RT-1931 Pinch to zoom an image in the phone viewer · release vNext
 - [ ] RT-1959 Fit two-digit line numbers in the phone viewer's gutter · release vNext
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
-- [ ] RT-1975 Say on the phone why a tapped path could not open when no reading fits · release vNext
 - [ ] RT-1977 Build the iPad app icons and check the notification extension for an iPad upload · release vNext
 - [ ] RT-1978 Fit the Needs you tray card's options in the phone's two-pane list · release vNext
 - [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up · release vNext
 - [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain · release vNext
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
-- [ ] RT-2097 Keep a phone fetch from failing when Storage's Clear prunes its new folder · release vNext
 - [ ] RT-2098 Keep the phone edit bar off the keyboard when both placements reach under it · release vNext
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
 - [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
@@ -800,6 +787,20 @@
 - [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
 - [ ] RT-2116 Refresh a partial user-hooks install whose events need the current table
 - [ ] RT-2117 Send a driver connection's earlier replies before ending it on an over-long line
+- [ ] RT-2122 Release a user-hooks shell pin when a new agent starts inside the hand-back window or the prompt is unrecognised
+- [ ] RT-2123 Label the link menu's open row from the reading the pick opens
+- [ ] RT-2124 Keep a lost SessionStart from pinning a user-hooks shell to the previous conversation
+- [ ] RT-2125 Make the phone's Finished push follow the desktop's agent-up rule
+- [ ] RT-2126 Read a session by host and id in the Finished, unseen and marker lookups
+- [ ] RT-2127 Open a fetched remote Markdown file at the #heading its link names
+- [ ] RT-2128 Push a prompt a session raised while it was still pending
+- [ ] RT-2129 Keep a session's updates and follow-up alerts in order when two updates race
+- [ ] RT-2130 Re-check a replayed hook prompt at publish before raising its attention
+- [ ] RT-2131 Open a chat answer's Markdown file link at its #heading
+- [ ] RT-2132 Say on the phone when a tapped link reading hits a host too old to send folders
+- [ ] RT-2133 Match gpui's unclamped row offset and place a start handle on its own row in phone Chat selection
+- [ ] RT-2134 Fix aligned selection highlights, underlines and link hit tests in the gpui fork
+- [ ] RT-2135 Say on the phone when a tapped path's file fetch fails or is refused
 
 ## Design files
 
