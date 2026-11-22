@@ -18,6 +18,8 @@ mod keys_view;
 mod layout;
 pub(crate) mod lifecycle;
 mod long_press;
+#[cfg(target_os = "ios")]
+mod open_ios;
 mod open_tap;
 pub(crate) mod order;
 #[cfg(target_os = "ios")]
@@ -56,6 +58,7 @@ use std::time::Instant;
 
 use gpui::{App, AppContext as _, Edges, Pixels, WindowInsets, WindowOptions};
 
+use crate::open::Opener;
 use crate::{
     LiveSeams, NoTaskbarBadge, NoToastPlacer, RootDeps, RootShape, RootView, SilentNotifier,
     SilentSounder,
@@ -108,7 +111,70 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
             cx.activate(true);
             #[cfg(target_os = "ios")]
             share_selftest(share, cx);
+            #[cfg(target_os = "ios")]
+            open_selftest(cx);
         });
+}
+
+/// The phone's opener on iOS: a web link opens in the system, the rest only
+/// logs.
+#[cfg(target_os = "ios")]
+fn phone_opener() -> Arc<dyn Opener> {
+    Arc::new(open_ios::IosOpener)
+}
+
+/// Off iOS the phone opens nothing: every open only logs.
+#[cfg(not(target_os = "ios"))]
+fn phone_opener() -> Arc<dyn Opener> {
+    crate::open::opener_for(true)
+}
+
+/// Whether the phone opens `url` itself: an `http` or `https` address, in
+/// any case, with no whitespace or control characters and something after
+/// its `://`.
+#[cfg(any(target_os = "ios", test))]
+fn is_web_link(url: &str) -> bool {
+    crate::open::validate_http_url(url).is_ok()
+        && url
+            .split_once("://")
+            .is_some_and(|(_, rest)| !rest.is_empty() && !rest.starts_with('/'))
+}
+
+/// `url` with every byte iOS 15's `NSURL` refuses percent-encoded as `%XX`
+/// in upper-case hex: each non-ASCII byte of its UTF-8, each ASCII byte in
+/// neither RFC 3986's unreserved nor its reserved set, and `[` and `]` after
+/// the authority (inside it they bracket an IPv6 host). A `%` is left as it
+/// is, so an `%XX` already there is never encoded again.
+#[cfg(any(target_os = "ios", test))]
+fn percent_encode_link(url: &str) -> String {
+    const RESERVED: &[u8] = b":/?#[]@!$&'()*+,;=";
+    let authority_start = url.find("://").map_or(0, |at| at + 3);
+    let path_start = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |at| authority_start + at);
+    let mut encoded = String::with_capacity(url.len());
+    for (at, byte) in url.bytes().enumerate() {
+        let bracket = byte == b'[' || byte == b']';
+        let kept = byte.is_ascii_alphanumeric()
+            || b"-._~%".contains(&byte)
+            || (RESERVED.contains(&byte) && !(bracket && at >= path_start));
+        if kept {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.extend(['%', upper_hex(byte >> 4), upper_hex(byte & 0x0F)]);
+        }
+    }
+    encoded
+}
+
+/// The upper-case hex digit of `nibble`, a value below 16.
+#[cfg(any(target_os = "ios", test))]
+fn upper_hex(nibble: u8) -> char {
+    char::from(if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'A' + nibble - 10
+    })
 }
 
 /// The phone's share sheet on iOS: `UIActivityViewController`.
@@ -156,6 +222,15 @@ fn share_selftest(share: Arc<dyn ShareSheet>, cx: &mut App) {
     }
 }
 
+/// Launched with [`open_ios::OPEN_SELFTEST_ARG`], opens a web page once the
+/// window shows.
+#[cfg(target_os = "ios")]
+fn open_selftest(cx: &mut App) {
+    if std::env::args().any(|arg| arg == open_ios::OPEN_SELFTEST_ARG) {
+        open_ios::start_selftest(cx);
+    }
+}
+
 /// The phone's push on iOS; launched with
 /// [`push_ios::PUSH_PROVISIONAL_ARG`] it asks for provisional notification
 /// permission and the device token at once, else nothing until a switch asks.
@@ -193,7 +268,7 @@ fn phone_deps() -> RootDeps {
         wanted: None,
         now: Arc::new(Instant::now),
         quit: Box::new(|cx: &mut App| cx.quit()),
-        open: crate::open::opener_for(true),
+        open: phone_opener(),
         notify: Arc::new(SilentNotifier),
         toast_placer: Arc::new(NoToastPlacer),
         sound: Arc::new(SilentSounder),
@@ -229,6 +304,49 @@ pub fn content_padding(insets: &WindowInsets) -> Edges<Pixels> {
 mod tests {
     use super::*;
     use gpui::px;
+
+    #[test]
+    fn the_phone_opens_web_links_only() {
+        for url in [
+            "https://example.com/",
+            "http://example.com",
+            "HTTPS://linear.app/rt/issue/RT-1",
+        ] {
+            assert!(is_web_link(url), "{url} is a web link");
+        }
+        let refused = [
+            "linear://linear.app/rt/issue/RT-1",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "not a url",
+            "https://",
+            "https:///path",
+            "https://exa mple.com",
+        ];
+        for url in refused {
+            assert!(!is_web_link(url), "{url} is not a web link");
+        }
+    }
+
+    #[test]
+    fn a_link_is_percent_encoded_before_it_is_parsed() {
+        let rows = [
+            (
+                "https://de.wikipedia.org/wiki/Köln",
+                "https://de.wikipedia.org/wiki/K%C3%B6ln",
+            ),
+            ("https://x.test/?a[]=1", "https://x.test/?a%5B%5D=1"),
+            ("https://x.test/a%3Ab", "https://x.test/a%3Ab"),
+            ("https://[::1]:8080/p", "https://[::1]:8080/p"),
+            (
+                "https://example.com/a/b?c=d&e=f#g",
+                "https://example.com/a/b?c=d&e=f#g",
+            ),
+        ];
+        for (url, encoded) in rows {
+            assert_eq!(percent_encode_link(url), encoded, "{url}");
+        }
+    }
 
     #[test]
     fn padding_is_the_safe_area() {
