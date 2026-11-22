@@ -849,7 +849,7 @@ impl PhoneRoot {
             )
         };
         match next {
-            open_tap::Next::Wait => {}
+            open_tap::Next::Wait => self.close_settings_for_tap(cx),
             open_tap::Next::Open => self.open_session(pending.host, &pending.session_id, cx),
             open_tap::Next::Note(note) => {
                 tracing::debug!(
@@ -867,16 +867,22 @@ impl PhoneRoot {
                         self.close_session(cx);
                     }
                 }
-                self.leave_hosts_page(cx);
-                self.settings = None;
-                self.keep_reply_editor();
-                self.keep_key_editor();
-                self.keep_restore_confirm();
-                self.keep_keys_restore_confirm();
+                self.close_settings_for_tap(cx);
                 self.open_note = Some(note);
                 cx.notify();
             }
         }
+    }
+
+    /// Closes Settings for a tap's line, which only Home and the hosts
+    /// screen draw: Settings covers them.
+    fn close_settings_for_tap(&mut self, cx: &mut Context<Self>) {
+        self.leave_hosts_page(cx);
+        self.settings = None;
+        self.keep_reply_editor();
+        self.keep_key_editor();
+        self.keep_restore_confirm();
+        self.keep_keys_restore_confirm();
     }
 
     /// Any navigation the user makes clears the tap's wait and its line.

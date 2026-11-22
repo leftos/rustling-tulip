@@ -874,6 +874,34 @@ fn the_wait_line_shows_while_no_host_is_open(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_waiting_notification_tap_closes_settings_and_opens_its_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = phone(cx, &dir, platform.clone());
+    h.click_on("phone-settings-open");
+    assert!(drawn(&mut h, "phone-settings"), "Settings shows");
+
+    tap(&platform, REMOTE, "s1", &mut h);
+
+    assert!(
+        !drawn(&mut h, "phone-settings"),
+        "Settings closes for the tap"
+    );
+    assert!(
+        drawn(&mut h, "phone-open-pending"),
+        "the wait shows on Home"
+    );
+
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(remote_list("working", "s2"));
+
+    assert_eq!(
+        shown_session(&mut h),
+        Some((REMOTE.to_owned(), "s1".to_owned()))
+    );
+}
+
+#[gpui::test]
 fn a_tap_for_a_host_not_paired_notes_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(
