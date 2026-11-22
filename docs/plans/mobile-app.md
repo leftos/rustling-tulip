@@ -289,7 +289,7 @@ Risks: a new SSH dependency (`russh`, pure Rust, its licence and advisories chec
 
 ## After the MA phases
 
-The web app's open features wait for the native app and are built there once its screens stand, each from its own issue: Linear cards (RT-142), files (RT-106, described in [native-client.md](../native-client.md) "Phone shape"), the Accounts screen (RT-112) and dictation (RT-83, which on the native app is the keyboard's own dictation key into the composer, checked in MA.16).
+The web app's open features wait for the native app and are built there once its screens stand, each from its own issue: Linear cards (RT-142; the terminal tap is built as a bottom sheet, chat and titles (RT-2110) remain), files (RT-106, described in [native-client.md](../native-client.md) "Phone shape"), the Accounts screen (RT-112) and dictation (RT-83, which on the native app is the keyboard's own dictation key into the composer, checked in MA.16).
 
 **Retiring the web app:** once MA.16's hand check and PR.8 pass, the web app is removed in an item of its own (`apps/pwa`, `tools/protocol-ts`, the tailnet router's static routes and the `-Pwa` build steps), since the native app then replaces it. Whether the daemon's direct Web Push sender goes with it is decided in that item.
 

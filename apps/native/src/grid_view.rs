@@ -1225,6 +1225,19 @@ impl RootView {
                 name,
                 bytes,
             } => self.on_paste_image(slot_id, session_id, name, bytes, cx),
+            // On the phone a tap raises the card; with Linear off on the
+            // host, or a host that cannot answer, it opens the link, so the
+            // tap is never a dead end.
+            PaneEvent::ShowLinearCard { web_url, .. }
+                if self.shape == crate::RootShape::Phone
+                    && host
+                        .as_ref()
+                        .is_some_and(|host| !self.phone_raises_card(host)) =>
+            {
+                if let Some(host) = host {
+                    self.open_issue_link(web_url, &host, window, cx);
+                }
+            }
             PaneEvent::AskLinearIssue { .. }
             | PaneEvent::ShowLinearCard { .. }
             | PaneEvent::HideLinearCard => self.on_card_event(slot_id, host, event, cx),
@@ -1361,6 +1374,17 @@ impl RootView {
             return;
         };
         slot.view.update(cx, |pane, _| pane.release());
+        // The card anchored on the slot goes with it, so it never comes back
+        // over a fresh terminal.
+        if self
+            .linear_card
+            .as_ref()
+            .is_some_and(|anchor| anchor.pane_id == slot_id)
+        {
+            self.linear_card = None;
+            self.phone_card_drag.cancelled();
+            cx.notify();
+        }
         self.chat.forget_pane(&slot_id);
         self.sync_chat_loads(cx);
         if self.popout_focused.as_deref() == Some(slot_id.as_str()) {
@@ -1439,6 +1463,16 @@ impl RootView {
         let session = self.phone_terminal.as_ref()?;
         let slot_id = popouts::session_slot_id(&session.host, &session.id);
         Some(self.panes.get(&slot_id)?.view.clone())
+    }
+
+    /// Whether a phone tap on an issue link of `host` raises its card:
+    /// Linear is on for `host` and it lists `linear_links`, so it can
+    /// answer; else the tap opens the link.
+    fn phone_raises_card(&self, host: &HostKey) -> bool {
+        self.linear_enabled(host)
+            && self
+                .conn_of(host)
+                .is_some_and(|conn| conn.supports(protocol::FEATURE_LINEAR_LINKS))
     }
 
     /// Whether slot `slot_id` is the phone's terminal.

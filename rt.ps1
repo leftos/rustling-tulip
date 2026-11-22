@@ -81,7 +81,7 @@
       native-shot
                  Write a PNG of the native client's window showing one view
                  (`main`, `main-compact`, `main-narrow`, `source-control`, `diff`, `settings`,
-                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `chat-model-picker`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-accounts-rows`, `settings-sounds`, `settings-toast-position`, `accounts`, `dispatch`, `subagents`, `host-rebind`, `perf`, `exited`, `abandoned`, `empty-main`, `first-connect`, `phone-home`, `phone-sheet`, `phone-session`, `phone-session-sheet`, `phone-composer-edit`, `phone-terminal`; default `main`) over a fake daemon with fixed
+                 `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `dashboard-compact`, `connections`, `connections-ssh`, `connections-scan-error`, `menu`, `safe-start`, `panes-accent`, `panes-accent-chosen`, `update`, `update-countdown`, `chat`, `chat-compact`, `chat-model-picker`, `summary`, `themes`, `themes-edit`, `multi-host`, `spawn-hosts` or `settings-hosts`, `settings-accounts`, `settings-accounts-rows`, `settings-sounds`, `settings-toast-position`, `accounts`, `dispatch`, `subagents`, `host-rebind`, `perf`, `exited`, `abandoned`, `empty-main`, `first-connect`, `phone-home`, `phone-sheet`, `phone-session`, `phone-session-sheet`, `phone-composer-edit`, `phone-terminal`, `phone-linear`; default `main`) over a fake daemon with fixed
                  content, via
                  `cargo run --example shot`. No daemon starts; the window
                  stays cloaked and never takes focus. Writes
@@ -1534,7 +1534,7 @@ Commands:
              settings-accounts-rows, settings-sounds, settings-toast-position,
              accounts, dispatch, subagents, host-rebind, perf,
              exited, abandoned, empty-main, first-connect, phone-home, phone-sheet, phone-session,
-             phone-session-sheet, phone-composer-edit, phone-terminal;
+             phone-session-sheet, phone-composer-edit, phone-terminal, phone-linear;
              default main)
              over a fake daemon with fixed content, then print its path.
              <out.png> is the PNG to write; -Out says the same thing.

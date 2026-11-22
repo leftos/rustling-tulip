@@ -203,6 +203,12 @@ impl SheetState {
         }
     }
 
+    /// Another sheet's swipe (the Linear card's) committed: the rest of its
+    /// pan, its momentum included, is swallowed as this sheet's own is.
+    pub(crate) fn swallow_rest_of_pan(&mut self) {
+        self.swallow_pan = true;
+    }
+
     /// The system took the touch: the sheet snaps back.
     pub(crate) fn drag_cancelled(&mut self) {
         self.drag = None;

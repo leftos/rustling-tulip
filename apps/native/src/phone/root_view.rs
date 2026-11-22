@@ -2027,7 +2027,7 @@ impl PhoneRoot {
         self.sync_prompt_sheet(cx);
         let screen_height = window.viewport_size().height;
         let prompt_sheet = self
-            .prompt_sheet_shown()
+            .prompt_sheet_shown(cx)
             .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
             .flatten();
         let drawn = [
@@ -2071,10 +2071,11 @@ impl PhoneRoot {
     }
 
     /// Whether the prompt sheet may draw: a session's page is shown with no
-    /// viewer, browser or Settings over it.
-    fn prompt_sheet_shown(&self) -> bool {
+    /// viewer, browser or Settings over it, and no Linear card sheet up,
+    /// which the question waits under until it goes.
+    fn prompt_sheet_shown(&self, cx: &App) -> bool {
         let page_over = self.viewer.is_some() || self.browser.is_some() || self.settings.is_some();
-        self.shown.is_some() && !page_over
+        self.shown.is_some() && !page_over && self.root.read(cx).phone_linear_card().is_none()
     }
 
     /// `layer` over the whole window, or over `pane` alone while one is
@@ -2143,7 +2144,10 @@ impl Render for PhoneRoot {
         let split = self.split(host_open, cx);
         let (layers, covers_session) = self.sheet_layers(host_open, padding, window, cx);
         let pairing_covers = pairing.is_some() && layer_covers_session(split, SheetLayer::Pairing);
-        let paste_end = Self::paste_frame_end(self, covers_session || pairing_covers, cx);
+        // The Linear card sheet covers the session page from inside it.
+        let card_covers = self.root.read(cx).phone_linear_card().is_some();
+        let paste_end =
+            Self::paste_frame_end(self, covers_session || pairing_covers || card_covers, cx);
         let padded = || {
             div()
                 .pt(padding.top)

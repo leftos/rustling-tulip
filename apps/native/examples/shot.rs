@@ -87,6 +87,11 @@
 //! agent, opened on its Terminal page: the shell's screen in the live
 //! terminal at the phone's width, the key bar under it. The width the
 //! terminal sizes its PTY to is logged.
+//! `phone-linear` shows that Terminal page with [`PHONE_LINEAR_LINE`]
+//! under the shell's screen and its issue identifier tapped: the issue's
+//! Linear card raised as a bottom sheet over a scrim, filled with its
+//! state, priority, title, project, release, assignee and updated time,
+//! over Open in Linear.
 //! `phone-settings` shows the same Home's Settings button tapped: Settings'
 //! header with Back and its title over the category list.
 //! `phone-settings-appearance` shows Settings' Appearance page: its header
@@ -432,6 +437,7 @@ enum View {
     PhoneSessionSheet,
     PhoneComposerEdit,
     PhoneTerminal,
+    PhoneLinear,
     PhoneSettings,
     PhoneSettingsAppearance,
     PhoneSettingsKeys,
@@ -449,7 +455,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 75] = [
+    const ALL: [Self; 76] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -511,6 +517,7 @@ impl View {
         Self::PhoneSessionSheet,
         Self::PhoneComposerEdit,
         Self::PhoneTerminal,
+        Self::PhoneLinear,
         Self::PhoneSettings,
         Self::PhoneSettingsAppearance,
         Self::PhoneSettingsKeys,
@@ -539,6 +546,7 @@ impl View {
                 | Self::PhoneSessionSheet
                 | Self::PhoneComposerEdit
                 | Self::PhoneTerminal
+                | Self::PhoneLinear
                 | Self::PhoneSettings
                 | Self::PhoneSettingsAppearance
                 | Self::PhoneSettingsKeys
@@ -672,6 +680,7 @@ impl View {
             Self::PhoneSessionSheet => "phone-session-sheet",
             Self::PhoneComposerEdit => "phone-composer-edit",
             Self::PhoneTerminal => "phone-terminal",
+            Self::PhoneLinear => "phone-linear",
             Self::PhoneSettings => "phone-settings",
             Self::PhoneSettingsAppearance => "phone-settings-appearance",
             Self::PhoneSettingsKeys => "phone-settings-keys",
@@ -744,6 +753,7 @@ impl View {
             | Self::PhoneSessionSheet
             | Self::PhoneComposerEdit
             | Self::PhoneTerminal
+            | Self::PhoneLinear
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
             | Self::PhoneSettingsKeys
@@ -804,6 +814,7 @@ impl View {
             | Self::PhoneSessionSheet
             | Self::PhoneComposerEdit
             | Self::PhoneTerminal
+            | Self::PhoneLinear
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
             | Self::PhoneSettingsKeys
@@ -1111,6 +1122,7 @@ impl Shot {
             | View::PhoneSessionSheet
             | View::PhoneComposerEdit
             | View::PhoneTerminal
+            | View::PhoneLinear
             | View::PhoneSettings
             | View::PhoneSettingsAppearance
             | View::PhoneSettingsKeys
@@ -1969,6 +1981,7 @@ async fn capture_phone_home(
     open_phone_screen(shot.view, handle, cx).await?;
     open_phone_file_page(shot, handle, cx).await?;
     check_phone_session_sheet(shot.view, handle, cx)?;
+    check_phone_linear(shot.view, handle, cx)?;
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -2127,6 +2140,124 @@ async fn open_phone_file_page(
     }
     if shot.view == View::PhoneBrowser {
         open_phone_browser(handle, cx).await?;
+    }
+    Ok(())
+}
+
+/// The line the `phone-linear` shot's shell prints under its screen, naming
+/// [`PHONE_LINEAR_ISSUE`].
+const PHONE_LINEAR_LINE: &str = "see RT-12 for the fix";
+/// The issue the `phone-linear` shot's card shows.
+const PHONE_LINEAR_ISSUE: &str = "RT-12";
+/// The title of [`PHONE_LINEAR_ISSUE`]'s copy.
+const PHONE_LINEAR_TITLE: &str = "Phone card as a bottom sheet";
+
+/// The screen session `session_id`'s scrollback replays in `view`: the
+/// `phone-linear` shot's shell prints [`PHONE_LINEAR_LINE`] under its
+/// screen.
+fn scrollback_screen(view: View, session_id: &str) -> String {
+    let screen = screen_for(session_id);
+    if view == View::PhoneLinear && session_id == PHONE_TERMINAL_SESSION {
+        format!("{screen}\r\n{PHONE_LINEAR_LINE}")
+    } else {
+        screen
+    }
+}
+
+/// The `phone-linear` shot host's Linear context: a key, workspace `acme`
+/// and the team `RT`.
+fn phone_linear_context() -> DaemonMessage {
+    DaemonMessage::LinearContext {
+        team_keys: vec!["RT".to_owned()],
+        workspace: Some("acme".to_owned()),
+        key_configured: true,
+    }
+}
+
+/// The `phone-linear` shot host's answer to the card's ask: a fresh copy
+/// of [`PHONE_LINEAR_ISSUE`], In Progress, High, with every field set.
+fn phone_linear_issues(now: DateTime<Utc>) -> DaemonMessage {
+    let issue = protocol::LinearIssue {
+        identifier: PHONE_LINEAR_ISSUE.to_owned(),
+        title: PHONE_LINEAR_TITLE.to_owned(),
+        url: format!("https://linear.app/acme/issue/{PHONE_LINEAR_ISSUE}"),
+        state: Some(protocol::LinearState {
+            name: "In Progress".to_owned(),
+            kind: protocol::LinearStateKind::Started,
+            color: "#f2c94c".to_owned(),
+        }),
+        priority: 2,
+        priority_label: "High".to_owned(),
+        project: Some("Mobile app".to_owned()),
+        releases: vec!["vNext".to_owned()],
+        assignee: Some("Ada Lovelace".to_owned()),
+        updated_at: Some(now - chrono::Duration::hours(3)),
+        fetched_at: now,
+        stale: false,
+    };
+    DaemonMessage::LinearIssues {
+        issues: vec![issue],
+    }
+}
+
+/// Opens the `phone-linear` view's Terminal page as `phone-terminal` does,
+/// then taps [`PHONE_LINEAR_ISSUE`] where the shell printed it, which
+/// raises its card.
+async fn raise_phone_linear_card(handle: WindowHandle<PhoneRoot>, cx: &mut AsyncApp) -> Result<()> {
+    open_phone_terminal(handle, cx).await?;
+    let at = handle.update(cx, |phone, _, cx| {
+        let pane = phone.root().read(cx).phone_terminal_view()?;
+        let pane = pane.read(cx);
+        let (row, col) = pane
+            .grid_text()
+            .iter()
+            .enumerate()
+            .find_map(|(row, text)| text.find(PHONE_LINEAR_ISSUE).map(|col| (row, col + 1)))?;
+        pane.cell_center(col, row)
+    })?;
+    let Some(at) = at else {
+        bail!("the phone-linear view's terminal does not draw {PHONE_LINEAR_ISSUE}");
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        let down = gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        };
+        let up = gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        };
+        window.dispatch_event(gpui::PlatformInput::MouseDown(down), cx);
+        window.dispatch_event(gpui::PlatformInput::MouseUp(up), cx);
+    })?;
+    cx.background_executor().timer(LOAD_WAIT).await;
+    Ok(())
+}
+
+/// Checks the `phone-linear` view's terminal holds its issue's filled
+/// card, which its sheet draws.
+fn check_phone_linear(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if view != View::PhoneLinear {
+        return Ok(());
+    }
+    let lines = handle.update(cx, |phone, _, cx| {
+        let pane = phone.root().read(cx).phone_terminal_view()?;
+        pane.read(cx).linear_card_lines()
+    })?;
+    let filled = lines
+        .as_ref()
+        .is_some_and(|lines| lines.iter().any(|line| line == PHONE_LINEAR_TITLE));
+    if !filled {
+        bail!("the phone-linear view's card is {lines:?}, not {PHONE_LINEAR_TITLE}'s");
     }
     Ok(())
 }
@@ -2450,6 +2581,7 @@ async fn open_phone_screen(
 ) -> Result<()> {
     match view {
         View::PhoneTerminal => open_phone_terminal(handle, cx).await,
+        View::PhoneLinear => raise_phone_linear_card(handle, cx).await,
         View::PhoneLandscapeTerminal => open_landscape_terminal(handle, cx).await,
         View::PhoneSettings => {
             handle.update(cx, |phone, _, cx| phone.open_settings(cx))?;
@@ -2705,6 +2837,7 @@ fn drive(
         | View::PhoneSessionSheet
         | View::PhoneComposerEdit
         | View::PhoneTerminal
+        | View::PhoneLinear
         | View::PhoneSettings
         | View::PhoneSettingsAppearance
         | View::PhoneSettingsKeys
@@ -3863,7 +3996,7 @@ impl RemoteFixture {
                 "idle",
                 in_repo(PHONE_REPO, PHONE_REPO_PATH),
                 40,
-                if view == View::PhoneTerminal {
+                if matches!(view, View::PhoneTerminal | View::PhoneLinear) {
                     json!({ "agent": null })
                 } else {
                     json!({})
@@ -4403,6 +4536,7 @@ impl FakeDaemon {
             View::HostRebind | View::PhoneHomeSorted => {
                 vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()]
             }
+            View::PhoneLinear => vec![protocol::FEATURE_LINEAR_LINKS.to_owned()],
             View::PhoneBrowser => vec![
                 protocol::FEATURE_HOST_PATHS.to_owned(),
                 protocol::FEATURE_HOST_BROWSE.to_owned(),
@@ -4432,7 +4566,11 @@ impl FakeDaemon {
         self.send(fixture.repos.clone())?;
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
-        })
+        })?;
+        if self.view == View::PhoneLinear {
+            self.send(phone_linear_context())?;
+        }
+        Ok(())
     }
 
     /// The review session works, then goes idle while nobody looks at it.
@@ -4517,7 +4655,7 @@ impl FakeDaemon {
                 request_id,
             } => DaemonMessage::Scrollback {
                 session_id: session_id.clone(),
-                data_b64: B64.encode(screen_for(session_id)),
+                data_b64: B64.encode(scrollback_screen(self.view, session_id)),
                 truncated: false,
                 request_id: request_id.clone(),
                 forwarder_restarted: true,
@@ -4567,6 +4705,9 @@ impl FakeDaemon {
             ClientMessage::WatchDashboard { on: true } => return self.watch_replies(),
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::TestLinear { request_id } => shot_linear_test(request_id.clone()),
+            ClientMessage::GetLinearIssues { .. } if self.view == View::PhoneLinear => {
+                phone_linear_issues(self.now)
+            }
             ClientMessage::ListShellChoices => shot_shell_choices(),
             ClientMessage::GetHostInfo { id } => shot_host_info(id),
             ClientMessage::ListDir { id, cursor, .. } => {

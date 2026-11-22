@@ -1,9 +1,12 @@
 //! Draws the Linear hover card from its [`Card`]: a popover anchored just
 //! below the hovered identifier, with no backdrop, holding the identifier,
 //! priority and state, the title, the fields, the notice and the Ctrl tip's
-//! line at its foot.
+//! line at its foot; and the same content as the body of the phone's card
+//! sheet.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, AnyView, App, Context, Div, FontWeight, MouseButton, MouseDownEvent, Pixels, Point,
@@ -150,6 +153,107 @@ fn card_frame(owner: &str, card: &Card, open: Option<&OpenCard>, cx: &App) -> St
                 .map(|notice| notice_row(owner, card, notice, open, &t)),
         )
         .child(foot)
+}
+
+/// The tag the phone's card sheet gives its parts in place of a pane's.
+pub(crate) const PHONE_OWNER: &str = "phone";
+
+/// The card's content as the phone's bottom sheet draws it, at the sheet's
+/// width: the desktop card's header, title, fields and notice, built from
+/// the same parts and tagged [`PHONE_OWNER`], with no foot, since the sheet
+/// carries its own Open in Linear.
+pub(crate) fn card_sheet_body(card: &Card, cx: &App) -> Div {
+    let t = ui_theme::theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .font_family(fonts::ui_family(cx))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text))
+        .child(header(PHONE_OWNER, card, &t))
+        .children(title(PHONE_OWNER, card, None))
+        .children(
+            card.fields
+                .iter()
+                .map(|(label, value)| field(label, value, &t)),
+        )
+        .children(
+            card.notice
+                .as_ref()
+                .map(|notice| notice_row(PHONE_OWNER, card, notice, None, &t)),
+        )
+}
+
+/// How far back from the lift the card sheet's release velocity looks, as
+/// the prompt sheet's does.
+const SHEET_VELOCITY_WINDOW: Duration = Duration::from_millis(40);
+
+/// A touch dragging the phone's card sheet down: how far it has travelled,
+/// its last movement's time and speed, and the sheet's height as last
+/// drawn, which the lift is measured against.
+#[derive(Debug, Default)]
+pub(crate) struct SheetDrag {
+    /// The travel down since the touch went down, while one is down.
+    travel: Option<f32>,
+    /// When the touch last moved.
+    last_at: Option<Instant>,
+    /// The speed of its last movement, in pixels per second, down above
+    /// zero.
+    velocity: f32,
+    /// The sheet's height as last drawn.
+    pub height: Rc<Cell<f32>>,
+}
+
+impl SheetDrag {
+    /// A touch went down on the sheet, already `dy` down, at `at`.
+    pub(crate) fn started(&mut self, dy: f32, at: Instant) {
+        self.travel = Some(dy);
+        self.last_at = Some(at);
+        self.velocity = 0.0;
+    }
+
+    /// The touch moved `dy` down at `at`; nothing while none is down.
+    pub(crate) fn moved(&mut self, dy: f32, at: Instant) {
+        let Some(travel) = self.travel.as_mut() else {
+            return;
+        };
+        *travel += dy;
+        let span = self
+            .last_at
+            .map_or(0.0, |last| at.saturating_duration_since(last).as_secs_f32());
+        if span > 0.0 {
+            self.velocity = dy / span;
+        }
+        self.last_at = Some(at);
+    }
+
+    /// The touch lifted after a last `dy` at `at`: its travel and release
+    /// velocity, which is none when the finger rested past
+    /// [`SHEET_VELOCITY_WINDOW`]; `None` while no touch was down.
+    pub(crate) fn ended(&mut self, dy: f32, at: Instant) -> Option<(f32, f32)> {
+        let travel = self.travel.take()? + dy;
+        let rested = self
+            .last_at
+            .take()
+            .is_none_or(|last| at.saturating_duration_since(last) > SHEET_VELOCITY_WINDOW);
+        let velocity = if rested { 0.0 } else { self.velocity };
+        Some((travel, velocity))
+    }
+
+    /// The touch went, or the sheet: it springs back.
+    pub(crate) fn cancelled(&mut self) {
+        self.travel = None;
+        self.last_at = None;
+    }
+
+    /// How far down the sheet is drawn off its place: the drag's travel,
+    /// never up.
+    pub(crate) fn offset(&self) -> f32 {
+        self.travel.map_or(0.0, |travel| travel.max(0.0))
+    }
 }
 
 /// The card's box as a tooltip: the popover's look, without taking the

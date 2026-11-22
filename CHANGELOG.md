@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- On the phone, tapping a Linear issue in a session's terminal shows its card in a sheet, with Open in Linear.
+
 ### Fixed
 
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.

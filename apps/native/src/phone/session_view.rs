@@ -3,9 +3,11 @@
 //! Terminal toggle, over the Chat or Terminal page's body. The page's root
 //! takes the back gesture. It only renders and forwards taps.
 
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, BackGestureEvent, ClickEvent, Context, Div, FontWeight, MouseUpEvent, Pixels,
-    Point, Stateful, Window, div, prelude::*, px,
+    Point, ScrollEvent, Stateful, TouchPhase, Window, canvas, div, prelude::*, px,
 };
 
 use super::composer::Dock;
@@ -16,6 +18,7 @@ use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::pasteboard::{self, PasteSpot};
 use super::photos::{self, PHOTOS_LABEL};
+use super::prompt_sheet;
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use super::{PhoneLayout, PhoneRoot};
@@ -27,6 +30,8 @@ use crate::dashboard_rows::ContextLabel;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
+use crate::linear_card::OPEN_IN_LINEAR;
+use crate::linear_card_view::card_sheet_body;
 use crate::target::HostKey;
 use crate::term_input;
 use crate::text_input::SystemPaste;
@@ -274,8 +279,9 @@ impl PhoneRoot {
         self.toggle_page(cx);
     }
 
-    /// One back step on the session page: the prompt sheet goes down while
-    /// it is up, else the composer's open dock closes, else the page steps
+    /// One back step on the session page: the Linear card sheet goes down
+    /// while it is up, else the prompt sheet while it is up, else the
+    /// composer's open dock closes, else the page steps
     /// back, from the Terminal page to the Chat page while the toggle shows,
     /// else back to Home: in two panes, the selection clears to the empty
     /// session pane.
@@ -283,6 +289,7 @@ impl PhoneRoot {
         let (mirrored, toggle) = self.session_header(cx).map_or((false, false), |header| {
             (header.chat_mirrored, header.toggle)
         });
+        let card_up = self.root.read(cx).phone_linear_card().is_some();
         let sheet_up = self.prompt_sheet_up(cx);
         // The Terminal page's Quick dock closes on Back as the composer's
         // dock does; `dock_drawn` stays the composer's, which it draws from.
@@ -293,6 +300,7 @@ impl PhoneRoot {
         let step = match self.page.as_mut() {
             Some(page) => {
                 let over = session::Over {
+                    card_up,
                     sheet_up,
                     dock_drawn: drawn,
                 };
@@ -301,6 +309,7 @@ impl PhoneRoot {
             None => BackStep::Close,
         };
         match step {
+            BackStep::DismissCard => self.dismiss_card(cx),
             BackStep::DismissSheet => self.put_prompt_sheet_away(cx),
             BackStep::CloseDock => {
                 self.composer_dock = Dock::None;
@@ -520,9 +529,160 @@ impl PhoneRoot {
                         .text_color(gpui::rgb(t.muted))
                         .child(note)
                 }))
+                .relative()
                 .child(body)
-                .children(show_prompt),
+                .children(show_prompt)
+                .children(self.card_sheet_layer(cx)),
         )
+    }
+
+    /// Takes the Linear card sheet down.
+    fn dismiss_card(&mut self, cx: &mut Context<Self>) {
+        self.root.update(cx, RootView::dismiss_linear_card);
+        cx.notify();
+    }
+
+    /// While the phone's Linear card is up ([`RootView::phone_linear_card`]):
+    /// a scrim over the session page, whose tap takes the card down, and
+    /// the card as a bottom sheet over it: a grab handle, the card's
+    /// content and Open in Linear. A drag down on it takes it down.
+    fn card_sheet_layer(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let card = self.root.read(cx).phone_linear_card()?;
+        let t = theme(cx);
+        let scrim = div()
+            .id("phone-linear-scrim")
+            .driver_id(|| "phone-linear-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            // The scrim hides the page's root from the gesture, so it takes
+            // the back gesture itself, and carries on a drag the sheet
+            // began once the finger runs past the sheet's top.
+            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .on_scroll(cx.listener(Self::card_scrim_scrolled))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_card(cx)));
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(self.card_sheet_panel(&card, &t, cx)),
+        )
+    }
+
+    /// The card sheet itself, drawn its drag's travel below its place.
+    fn card_sheet_panel(
+        &self,
+        card: &crate::linear_card::Card,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (offset, height) = {
+            let drag = self.root.read(cx).phone_card_drag_ref();
+            (drag.offset(), Rc::clone(&drag.height))
+        };
+        let measure = canvas(
+            move |bounds, _, _| height.set(f32::from(bounds.size.height)),
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let handle = div().flex_none().flex().justify_center().py(px(6.0)).child(
+            div()
+                .driver_id(|| "phone-linear-handle".to_owned())
+                .w(px(36.0))
+                .h(px(5.0))
+                .rounded_full()
+                .bg(gpui::rgb(t.muted)),
+        );
+        let open = phone_button("phone-linear-open", ButtonKind::Primary, cx)
+            .w_full()
+            .min_h(px(TOUCH_TARGET))
+            .child(OPEN_IN_LINEAR)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.root
+                    .update(cx, |root, cx| root.open_phone_linear_card(window, cx));
+                cx.notify();
+            }));
+        div()
+            .id("phone-linear-sheet")
+            .driver_id(|| "phone-linear-sheet".to_owned())
+            .occlude()
+            .relative()
+            .top(px(offset))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .pt(px(4.0))
+            .pb(px(16.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .on_scroll(cx.listener(Self::card_sheet_scrolled))
+            .child(measure)
+            .child(handle)
+            .child(div().px(px(SIDE_PADDING)).child(card_sheet_body(card, cx)))
+            .child(div().px(px(SIDE_PADDING)).child(open))
+    }
+
+    /// A pan over the card sheet: its downward travel feeds the drag, and
+    /// a lift that commits ([`prompt_sheet::commits`]) takes the card
+    /// down; one that does not springs it back.
+    fn card_sheet_scrolled(
+        &mut self,
+        event: &ScrollEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
+        let at = cx.background_executor().now();
+        let committed = self.root.update(cx, |root, _| {
+            let drag = root.phone_card_drag();
+            match event.touch_phase {
+                TouchPhase::Started => drag.started(dy, at),
+                TouchPhase::Moved => drag.moved(dy, at),
+                TouchPhase::Ended => {
+                    let height = drag.height.get();
+                    return drag.ended(dy, at).is_some_and(|(travel, speed)| {
+                        prompt_sheet::commits(travel, speed, height)
+                    });
+                }
+                TouchPhase::Cancelled => drag.cancelled(),
+            }
+            false
+        });
+        if committed {
+            // The rest of the pan, its momentum included, never reaches the
+            // terminal under the sheet.
+            self.prompt_sheet.swallow_rest_of_pan();
+            self.dismiss_card(cx);
+        }
+        cx.notify();
+    }
+
+    /// A pan over the card sheet's scrim: it carries on the sheet's drag in
+    /// progress, but never starts one.
+    fn card_scrim_scrolled(
+        &mut self,
+        event: &ScrollEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.touch_phase != TouchPhase::Started {
+            self.card_sheet_scrolled(event, window, cx);
+        }
     }
 
     /// The shown session's composer under its chat: the Quick or Keys dock

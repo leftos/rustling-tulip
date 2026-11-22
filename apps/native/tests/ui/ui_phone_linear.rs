@@ -1,0 +1,629 @@
+//! The phone's Linear card: a tap on an issue link in the terminal asks the
+//! host for the issue once while it is asked and holds its card, which the
+//! reply fills; the keyboard is left alone, a plain URL still opens, and a
+//! host with Linear off opens the link instead.
+
+#![expect(
+    clippy::expect_used,
+    reason = "a spec fails with the message of the precondition it lost"
+)]
+
+use crate::support;
+
+use std::time::Duration;
+
+use daemon_client::device_tokens::DeviceTokenStore as _;
+use gpui::{
+    BackGesturePhase, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext,
+    TouchPhase, point, px,
+};
+use protocol::{
+    ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
+    DaemonMessage,
+};
+use rustling_tulip_native::keyboard::{clear_keyboard_calls, keyboard_calls};
+use rustling_tulip_native::target::HostKey;
+use serde_json::json;
+use support::{Harness, Opened, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+
+const ISSUE_URL: &str = "https://linear.app/acme/issue/RT-12/slug";
+/// The address `RT-12` is detected with in workspace `acme`, and the one
+/// its copy names.
+const ISSUE_WEB: &str = "https://linear.app/acme/issue/RT-12";
+/// The card sheet's selector.
+const SHEET: &str = "phone-linear-sheet";
+
+/// The selector of the saved host's Home row for session `id`.
+fn row(id: &str) -> String {
+    let wire = HostKey::of(&saved_remote())
+        .wire()
+        .expect("a tailnet host has a wire key")
+        .to_owned();
+    format!("phone-home-row-{wire}::{id}")
+}
+
+/// The Linear context of a host whose workspace `acme` has the team `RT`
+/// and a key.
+fn linear() -> DaemonMessage {
+    DaemonMessage::LinearContext {
+        team_keys: vec!["RT".to_owned()],
+        workspace: Some("acme".to_owned()),
+        key_configured: true,
+    }
+}
+
+/// The `LinearStatus` of a host with Linear `enabled` or off.
+fn linear_status(enabled: bool) -> DaemonMessage {
+    DaemonMessage::LinearStatus {
+        enabled,
+        key: protocol::LinearKeyState::Stored,
+        workspace_name: Some("Acme".to_owned()),
+        team_keys: vec!["RT".to_owned()],
+        last_error: None,
+        key_saved: true,
+    }
+}
+
+/// The phone on the saved [`REMOTE`]'s session `n`, a shell, on its
+/// terminal page, the host listing `features` and [`linear`]; `text` is
+/// the terminal's first row, and everything sent so far is drained.
+fn terminal_on<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    features: &[&str],
+    text: &str,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(features);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let shell = session("n")
+        .label("November")
+        .in_repo("r1")
+        .status("working")
+        .no_agent()
+        .build();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![shell],
+    });
+    host.send(linear());
+    h.click_on(&row("n"));
+    h.host(&saved_remote())
+        .pty("n", format!("{text}\r\n").as_bytes());
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    // A frame lays the grid out, so its cells have places.
+    h.bounds("phone-session-terminal");
+    h
+}
+
+/// [`terminal_on`] over a host listing `linear_links`.
+fn linked<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
+    terminal_on(cx, dir, &[protocol::FEATURE_LINEAR_LINKS], text)
+}
+
+/// A finger down and straight up on the terminal's cell at `col`, `row`,
+/// a second after any earlier tap, so no two make a double tap.
+fn tap_cell(h: &mut Harness<'_>, col: usize, row: usize) {
+    h.advance(Duration::from_secs(1));
+    let at = h
+        .root(|root, cx| {
+            root.phone_terminal_view()
+                .and_then(|view| view.read(cx).cell_center(col, row))
+        })
+        .expect("the terminal's grid is laid out");
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+}
+
+/// The lines of the card the phone's terminal holds; `None` while it holds
+/// none.
+fn card(h: &mut Harness<'_>) -> Option<Vec<String>> {
+    h.cx.run_until_parked();
+    h.root(|root, cx| {
+        root.phone_terminal_view()
+            .and_then(|view| view.read(cx).linear_card_lines())
+    })
+}
+
+/// Whether the held card has the line `line`.
+fn card_says(h: &mut Harness<'_>, line: &str) -> bool {
+    card(h).is_some_and(|lines| lines.iter().any(|shown| shown == line))
+}
+
+/// The identifiers of every `GetLinearIssues` the host was sent since the
+/// last call.
+fn asked(h: &mut Harness<'_>) -> Vec<Vec<String>> {
+    h.host(&saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetLinearIssues { identifiers, .. } => Some(identifiers),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_tap_on_an_issue_link_asks_once_and_holds_its_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = linked(cx, &dir, "RT-12 now");
+
+    tap_cell(&mut h, 1, 0);
+
+    assert_eq!(asked(&mut h), [vec!["RT-12".to_owned()]], "one ask");
+    assert!(
+        card_says(&mut h, "Fetching from Linear"),
+        "{:?}",
+        card(&mut h)
+    );
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Phone card",
+        )]));
+    assert!(card_says(&mut h, "Phone card"), "{:?}", card(&mut h));
+    assert!(card_says(&mut h, "In Progress"), "{:?}", card(&mut h));
+    assert!(!card_says(&mut h, "Fetching from Linear"));
+    assert_eq!(h.opened(), [], "a tap on an issue opens nothing");
+}
+
+#[gpui::test]
+fn a_second_tap_while_asked_sends_no_second_ask(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = linked(cx, &dir, "RT-12 now");
+    tap_cell(&mut h, 1, 0);
+    assert_eq!(asked(&mut h), [vec!["RT-12".to_owned()]]);
+    // The card's scrim covers the terminal, so the second tap needs it down.
+    h.root_update(|root, _, cx| root.dismiss_linear_card(cx));
+
+    tap_cell(&mut h, 2, 0);
+
+    assert_eq!(
+        asked(&mut h),
+        Vec::<Vec<String>>::new(),
+        "not again while the first is in flight"
+    );
+    assert!(
+        card_says(&mut h, "Fetching from Linear"),
+        "{:?}",
+        card(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_an_issue_link_leaves_the_keyboard_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = linked(cx, &dir, "RT-12 now");
+    clear_keyboard_calls();
+
+    tap_cell(&mut h, 1, 0);
+
+    assert_eq!(
+        keyboard_calls(),
+        [],
+        "a tap on an issue leaves the keyboard"
+    );
+    assert!(card(&mut h).is_some(), "and holds the card");
+}
+
+#[gpui::test]
+fn a_host_without_linear_links_is_never_asked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = terminal_on(cx, &dir, &[], "RT-12 now");
+
+    tap_cell(&mut h, 1, 0);
+
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new(), "no linear_links");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(ISSUE_WEB.to_owned())],
+        "a host that cannot answer opens the link"
+    );
+    assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
+#[gpui::test]
+fn a_tap_on_a_plain_url_still_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let url = "https://example.com/docs";
+    let mut h = linked(cx, &dir, &format!("see {url} now"));
+
+    tap_cell(&mut h, 8, 0);
+
+    assert_eq!(h.opened(), [Opened::Url(url.to_owned())]);
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new());
+    assert_eq!(card(&mut h), None, "a URL holds no card");
+}
+
+#[gpui::test]
+fn a_tap_on_an_issue_link_with_linear_off_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = linked(cx, &dir, &format!("see {ISSUE_URL} now"));
+    h.host(&saved_remote()).send(linear_status(false));
+
+    tap_cell(&mut h, 10, 0);
+
+    assert_eq!(h.opened(), [Opened::Url(ISSUE_URL.to_owned())]);
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new());
+    assert_eq!(card(&mut h), None, "Linear off holds no card");
+}
+
+#[gpui::test]
+fn dismissing_the_card_clears_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = linked(cx, &dir, "RT-12 now");
+    tap_cell(&mut h, 1, 0);
+    assert!(card(&mut h).is_some(), "the tap holds the card");
+
+    h.root_update(|root, _, cx| root.dismiss_linear_card(cx));
+
+    assert_eq!(card(&mut h), None, "the card is gone");
+}
+
+/// Whether the last frame drew what `selector` tags.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.width > px(0.0)
+}
+
+/// Whether `selector` is drawn inside the card sheet.
+fn in_sheet(h: &mut Harness<'_>, selector: &str) -> bool {
+    let sheet = h.bounds(SHEET);
+    drawn(h, selector) && sheet.contains(&h.bounds(selector).center())
+}
+
+/// The phone over a host listing `linear_links`, on its terminal showing
+/// `RT-12 now`, with the issue's card raised by a tap and still asked.
+fn card_up<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = linked(cx, dir, "RT-12 now");
+    tap_cell(&mut h, 1, 0);
+    asked(&mut h);
+    h
+}
+
+/// [`card_up`] with the host's answer in: the card filled.
+fn card_filled<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = card_up(cx, dir);
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Phone card",
+        )]));
+    h.cx.run_until_parked();
+    h
+}
+
+/// A committed back gesture from the page's leading edge.
+fn back(h: &mut Harness<'_>) {
+    let page = h.bounds("phone-session");
+    let at = point(page.origin.x + px(4.0), page.origin.y + px(200.0));
+    h.back_gesture(BackGesturePhase::Started, at);
+    h.back_gesture(BackGesturePhase::Committed, at);
+    h.cx.run_until_parked();
+}
+
+/// A downward pan over the card sheet's handle: `steps` movements of `dy`,
+/// then the lift.
+fn drag_sheet(h: &mut Harness<'_>, dy: Pixels, steps: usize) {
+    let at = h.bounds("phone-linear-handle").center();
+    let pan = |delta: Pixels, touch_phase: TouchPhase| ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), delta)),
+        modifiers: Modifiers::none(),
+        touch_phase,
+        source: ScrollSource::Touch,
+    };
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Started));
+    for _ in 0..steps {
+        h.cx.simulate_event(pan(dy, TouchPhase::Moved));
+    }
+    h.cx.simulate_event(pan(px(0.0), TouchPhase::Ended));
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_tapped_issues_card_shows_as_a_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_up(cx, &dir);
+
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+    assert!(drawn(&mut h, "phone-linear-scrim"));
+    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+    assert!(
+        in_sheet(&mut h, "linear-card-notice-phone=Fetching from Linear"),
+        "while asked it says so"
+    );
+    assert!(in_sheet(&mut h, "linear-card-id-phone=RT-12"));
+
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Phone card",
+        )]));
+
+    assert!(in_sheet(&mut h, "linear-card-title-phone=Phone card"));
+    assert!(in_sheet(&mut h, "linear-card-state-phone=In Progress"));
+    assert!(!drawn(
+        &mut h,
+        "linear-card-notice-phone=Fetching from Linear"
+    ));
+    assert!(in_sheet(&mut h, "phone-linear-handle"));
+    assert!(in_sheet(&mut h, "phone-linear-open"));
+    let (sheet, scrim) = (h.bounds(SHEET), h.bounds("phone-linear-scrim"));
+    assert!(
+        sheet.bottom() + px(1.0) >= scrim.bottom(),
+        "anchored to the bottom: {sheet:?} in {scrim:?}"
+    );
+    assert!(!drawn(&mut h, "linear-card"), "no desktop tooltip");
+}
+
+#[gpui::test]
+fn back_takes_the_card_down_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+
+    back(&mut h);
+
+    assert!(!drawn(&mut h, SHEET), "the card is down");
+    assert_eq!(card(&mut h), None);
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the page is unchanged"
+    );
+
+    back(&mut h);
+
+    assert!(
+        !drawn(&mut h, "phone-session"),
+        "a second back leaves the page, as back did before"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_scrim_takes_the_card_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+
+    h.click_on("phone-linear-scrim");
+
+    assert!(!drawn(&mut h, SHEET));
+    assert!(!drawn(&mut h, "phone-linear-scrim"));
+    assert_eq!(card(&mut h), None);
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    assert_eq!(h.opened(), [], "the scrim opens nothing");
+}
+
+#[gpui::test]
+fn a_swipe_down_takes_the_card_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+
+    drag_sheet(&mut h, px(60.0), 5);
+
+    assert!(!drawn(&mut h, SHEET));
+    assert_eq!(card(&mut h), None);
+    assert!(drawn(&mut h, "phone-session-terminal"));
+}
+
+#[gpui::test]
+fn a_short_drag_leaves_it_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+    let before = h.bounds(SHEET);
+
+    drag_sheet(&mut h, px(4.0), 2);
+
+    assert!(drawn(&mut h, SHEET), "a short slow drag springs back");
+    assert_eq!(h.bounds(SHEET), before, "to where it was");
+    assert!(card(&mut h).is_some());
+}
+
+#[gpui::test]
+fn closing_the_terminal_takes_the_card_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+    assert!(drawn(&mut h, SHEET));
+
+    // As a turn upright closes the terminal; the next frame on the
+    // Terminal page opens it afresh, as a turn back on its side does.
+    h.root_update(|root, _, cx| root.close_phone_terminal(cx));
+    h.cx.run_until_parked();
+
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the terminal is back"
+    );
+    assert!(!drawn(&mut h, SHEET), "and the old card stays down");
+    assert_eq!(card(&mut h), None);
+}
+
+/// The phone terminal's rows as drawn.
+fn grid(h: &mut Harness<'_>) -> Vec<String> {
+    h.cx.run_until_parked();
+    h.root(|root, cx| {
+        root.phone_terminal_view()
+            .map(|view| view.read(cx).grid_text())
+    })
+    .expect("the terminal is open")
+}
+
+/// A touch pan event of `dy` in `phase` at `at`.
+fn pan_at(h: &mut Harness<'_>, at: gpui::Point<Pixels>, dy: Pixels, phase: TouchPhase) {
+    h.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), dy)),
+        modifiers: Modifiers::none(),
+        touch_phase: phase,
+        source: ScrollSource::Touch,
+    });
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_committed_swipe_does_not_scroll_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let history = (0..120)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let mut h = linked(cx, &dir, &format!("{history}\r\nRT-12 now"));
+    let row = grid(&mut h)
+        .iter()
+        .position(|text| text.starts_with("RT-12"))
+        .expect("the issue is on screen");
+    tap_cell(&mut h, 1, row);
+    asked(&mut h);
+    assert!(drawn(&mut h, SHEET));
+    let at = h.bounds("phone-linear-handle").center();
+
+    pan_at(&mut h, at, px(0.0), TouchPhase::Started);
+    for _ in 0..5 {
+        pan_at(&mut h, at, px(60.0), TouchPhase::Moved);
+    }
+    pan_at(&mut h, at, px(0.0), TouchPhase::Ended);
+    assert!(!drawn(&mut h, SHEET), "the swipe commits");
+    let before = grid(&mut h);
+    // The swipe's momentum, at the point the pan began.
+    for _ in 0..4 {
+        pan_at(&mut h, at, px(40.0), TouchPhase::Moved);
+    }
+    pan_at(&mut h, at, px(10.0), TouchPhase::Ended);
+
+    assert_eq!(grid(&mut h), before, "the terminal did not scroll");
+    let sent = h.host(&saved_remote()).sent();
+    assert!(sent.is_empty(), "nothing reached the host: {sent:?}");
+}
+
+/// The phone on the saved [`REMOTE`]'s session `a`, an agent's, over a
+/// host listing `linear_links` and [`linear`]: its chat loaded with no
+/// prompt, then its Terminal page showing `RT-12 now`.
+fn chat_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(&[protocol::FEATURE_LINEAR_LINKS]);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let agent = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("working")
+        .build();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![agent],
+    });
+    host.send(linear());
+    h.click_on(&row("a"));
+    let request = h
+        .host(&saved_remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "message u1".to_owned(),
+            pending: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request.flatten(),
+    });
+    h.click_on("phone-session-toggle");
+    h.host(&saved_remote()).pty("a", b"RT-12 now\r\n");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h.bounds("phone-session-terminal");
+    h
+}
+
+/// A pending question, `q1`.
+fn question() -> ChatPrompt {
+    ChatPrompt {
+        id: "q1".to_owned(),
+        kind: ChatPromptKind::Question,
+        subject: "calc.py".to_owned(),
+        body: "Which one?".to_owned(),
+        options: [(1, "sub"), (2, "div")]
+            .iter()
+            .map(|(number, label)| ChatOption {
+                number: *number,
+                label: (*label).to_owned(),
+                description: None,
+                selected: false,
+            })
+            .collect(),
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+        adjust: None,
+    }
+}
+
+#[gpui::test]
+fn a_question_waits_under_the_card_until_it_goes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_terminal(cx, &dir);
+    assert!(drawn(&mut h, "phone-session-terminal"));
+    tap_cell(&mut h, 1, 0);
+    assert!(drawn(&mut h, SHEET), "the tap raises the card");
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: Some(question()),
+            },
+        });
+
+    assert!(drawn(&mut h, SHEET), "the card stays up");
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "the question waits under it"
+    );
+
+    back(&mut h);
+
+    assert!(!drawn(&mut h, SHEET), "back takes the card down");
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "and the question rises"
+    );
+}
+
+#[gpui::test]
+fn open_opens_the_issue_and_takes_the_card_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = card_filled(cx, &dir);
+
+    h.click_on("phone-linear-open");
+
+    assert_eq!(h.opened(), [Opened::Url(ISSUE_WEB.to_owned())]);
+    assert!(!drawn(&mut h, SHEET));
+    assert_eq!(card(&mut h), None);
+}

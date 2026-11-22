@@ -1987,8 +1987,9 @@ impl TerminalPane {
     }
 
     /// The release of a phone press on a link: on the cell it began on, a
-    /// tap, which opens the link; anywhere else nothing. Returns whether a
-    /// press on a link was waiting for it.
+    /// tap, which raises an issue link's card and opens any other link;
+    /// anywhere else nothing. Returns whether a press on a link was waiting
+    /// for it.
     fn phone_link_release(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) -> bool {
         if event.button != MouseButton::Left {
             return false;
@@ -1999,15 +2000,41 @@ impl TerminalPane {
         let tapped = self
             .cell_within(event.position)
             .is_some_and(|cell| (cell.row, cell.col) == at);
-        if tapped {
-            cx.emit(PaneEvent::OpenLink {
+        if !tapped {
+            return true;
+        }
+        match issue_identifier(&link) {
+            Some(identifier) => self.hold_phone_card(link, identifier, cx),
+            None => cx.emit(PaneEvent::OpenLink {
                 link,
                 base_dirs: self.base_dirs.clone(),
                 session: self.session_id().map(str::to_owned),
                 action: LinkAction::Viewer,
-            });
+            }),
         }
         true
+    }
+
+    /// A phone tap on issue link `link`, issue `identifier`: asks for the
+    /// issue and holds its card, which the root fills and the phone draws;
+    /// the pane draws no card of its own there.
+    fn hold_phone_card(&mut self, link: TerminalLink, identifier: String, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::AskLinearIssue {
+            identifier: identifier.clone(),
+        });
+        let web_url = link.target.clone();
+        self.card.shown = Some(ShownCard {
+            link,
+            by_ctrl: false,
+            at: Point::default(),
+            read_at: self.card_key(),
+        });
+        self.card.model = None;
+        cx.emit(PaneEvent::ShowLinearCard {
+            identifier,
+            web_url,
+        });
+        cx.notify();
     }
 
     fn on_mouse_down(
@@ -2222,6 +2249,10 @@ impl TerminalPane {
     /// The pointer or Ctrl changed: the card follows the issue link under
     /// the pointer.
     fn follow_card(&mut self, cx: &mut Context<Self>) {
+        // The phone has no pointer to rest: a tap raises its card.
+        if self.phone_links {
+            return;
+        }
         self.rebase_card();
         let under = self.issue_under_mouse();
         if under != self.card.under {
@@ -2487,8 +2518,14 @@ impl TerminalPane {
     /// shows none.
     #[must_use]
     pub fn linear_card_lines(&self) -> Option<Vec<String>> {
+        self.linear_card().map(Card::lines)
+    }
+
+    /// The card the pane holds, once the root said what it shows; `None`
+    /// while it holds none.
+    pub(crate) fn linear_card(&self) -> Option<&Card> {
         self.card.shown.as_ref()?;
-        self.card.model.as_ref().map(Card::lines)
+        self.card.model.as_ref()
     }
 
     /// The card's Open in Linear or title was clicked: opens the issue as a
@@ -2509,8 +2546,12 @@ impl TerminalPane {
         });
     }
 
-    /// The card the pane shows, once the root said what it shows.
+    /// The card the pane shows, once the root said what it shows; none on
+    /// the phone, which draws the card it holds itself.
     fn card_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.phone_links {
+            return None;
+        }
         self.check_card(cx);
         let at = self.card.shown.as_ref()?.at;
         let card = self.card.model.as_ref()?;

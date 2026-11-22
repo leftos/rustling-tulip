@@ -1378,6 +1378,8 @@ pub struct RootView {
     linear_issues: linear_card::LinearCache,
     /// The Linear card a pane shows: at most one at a time.
     linear_card: Option<linear_card::CardAnchor>,
+    /// The touch dragging the phone's card sheet, while one is down.
+    phone_card_drag: linear_card_view::SheetDrag,
     /// The panes the last frame drew; one that leaves it forgets its hover.
     drawn_panes: HashSet<String>,
     /// When the pending layout save is due, if one is.
@@ -2051,6 +2053,7 @@ impl RootView {
             linear_contexts: HashMap::new(),
             linear_issues: linear_card::LinearCache::default(),
             linear_card: None,
+            phone_card_drag: linear_card_view::SheetDrag::default(),
             drawn_panes: HashSet::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
@@ -5807,7 +5810,9 @@ impl RootView {
         }
         let host = anchor.host.clone();
         self.linear_card = Some(anchor);
+        self.phone_card_drag.cancelled();
         self.refresh_linear_card(&host, cx);
+        cx.notify();
     }
 
     /// Tells the pane showing a card of `host` what it shows now.
@@ -5829,6 +5834,58 @@ impl RootView {
             let view = slot.view().clone();
             view.update(cx, |pane, cx| pane.set_linear_card(card, cx));
         }
+    }
+
+    /// Puts away the card shown, the phone's or a pane's: its pane drops
+    /// it.
+    pub fn dismiss_linear_card(&mut self, cx: &mut Context<Self>) {
+        self.phone_card_drag.cancelled();
+        let Some(anchor) = self.linear_card.take() else {
+            return;
+        };
+        if let Some(slot) = self.panes.get(&anchor.pane_id) {
+            let view = slot.view().clone();
+            view.update(cx, term_view::TerminalPane::drop_linear_card);
+        }
+        cx.notify();
+    }
+
+    /// The card the phone's card sheet draws: that of the issue
+    /// `self.linear_card` names, while the pane it anchors on is the
+    /// phone's terminal; `None` otherwise.
+    pub(crate) fn phone_linear_card(&self) -> Option<linear_card::Card> {
+        let anchor = self
+            .linear_card
+            .as_ref()
+            .filter(|anchor| self.is_phone_terminal(&anchor.pane_id))?;
+        Some(self.linear_issues.card(
+            &anchor.host,
+            &anchor.identifier,
+            &anchor.web_url,
+            chrono::Utc::now(),
+        ))
+    }
+
+    /// The touch dragging the phone's card sheet.
+    pub(crate) fn phone_card_drag(&mut self) -> &mut linear_card_view::SheetDrag {
+        &mut self.phone_card_drag
+    }
+
+    /// The phone's card sheet's drag, to read its offset and height.
+    pub(crate) fn phone_card_drag_ref(&self) -> &linear_card_view::SheetDrag {
+        &self.phone_card_drag
+    }
+
+    /// The phone card sheet's Open in Linear: opens the card's issue on its
+    /// host, then takes the card down.
+    pub(crate) fn open_phone_linear_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.phone_linear_card() else {
+            return;
+        };
+        if let Some(host) = self.linear_card.as_ref().map(|anchor| anchor.host.clone()) {
+            self.open_issue_link(&card.open_url, &host, window, cx);
+        }
+        self.dismiss_linear_card(cx);
     }
 
     /// The Linear context `host`'s panes read issue links against: its last

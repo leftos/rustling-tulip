@@ -79,6 +79,8 @@ impl Page {
 /// Where one back step goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackStep {
+    /// The Linear card sheet goes down; the page stays as it is.
+    DismissCard,
     /// The prompt sheet goes down; the page stays as it is.
     DismissSheet,
     /// The composer's open dock closes, and the page stays as it is.
@@ -152,22 +154,26 @@ impl SessionPage {
 /// What lies over the session page when a back step comes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Over {
+    /// The Linear card sheet is up.
+    pub(crate) card_up: bool,
     /// The prompt sheet is up.
     pub(crate) sheet_up: bool,
     /// The composer's dock is drawn.
     pub(crate) dock_drawn: bool,
 }
 
-/// One back step with `over` lying over the page: the prompt sheet goes
-/// down first, the page unchanged; with it down, [`back_step`] (the dock,
-/// then the page's own step).
+/// One back step with `over` lying over the page: the Linear card sheet
+/// goes down first, then the prompt sheet, the page unchanged; with both
+/// down, [`back_step`] (the dock, then the page's own step).
 pub(crate) fn back_over_sheet(
     over: Over,
     page: &mut SessionPage,
     chat_mirrored: bool,
     toggle_shown: bool,
 ) -> BackStep {
-    if over.sheet_up {
+    if over.card_up {
+        BackStep::DismissCard
+    } else if over.sheet_up {
         BackStep::DismissSheet
     } else {
         back_step(over.dock_drawn, page, chat_mirrored, toggle_shown)
@@ -353,6 +359,7 @@ mod tests {
     /// The sheet up or not and the dock drawn or not.
     fn over(sheet_up: bool, dock_drawn: bool) -> Over {
         Over {
+            card_up: false,
             sheet_up,
             dock_drawn,
         }
