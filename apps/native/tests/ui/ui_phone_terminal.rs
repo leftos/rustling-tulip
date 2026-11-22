@@ -1678,6 +1678,23 @@ fn on_paths_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir, id: &str) -> Har
 /// A phone on Home over a host that serves host paths, browsing and folder
 /// fetches, listing its sessions.
 fn paths_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    paths_phone_with(
+        cx,
+        dir,
+        &[
+            protocol::FEATURE_HOST_PATHS,
+            protocol::FEATURE_HOST_BROWSE,
+            protocol::FEATURE_FOLDER_FETCH,
+        ],
+    )
+}
+
+/// [`paths_phone`] over a host that lists `features` beyond the usual ones.
+fn paths_phone_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    features: &[&str],
+) -> Harness<'a> {
     seed_ui(
         dir,
         &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
@@ -1687,11 +1704,7 @@ fn paths_phone<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let copies = dir.path().join("copies");
     h.root_update(move |root, _, _| root.set_remote_files_root(copies));
     let mut host = h.host(&saved_remote());
-    host.connect_with_features(&[
-        protocol::FEATURE_HOST_PATHS,
-        protocol::FEATURE_HOST_BROWSE,
-        protocol::FEATURE_FOLDER_FETCH,
-    ]);
+    host.connect_with_features(features);
     host.send(DaemonMessage::Repos {
         repos: vec![repo("r1", REPO_ROOT)],
     });
@@ -1833,7 +1846,36 @@ fn tapping_each_line_of_a_wrapped_code_span_path_opens_it(cx: &mut TestAppContex
 /// The phone on session `n`'s terminal, whose output is `lines`, one per
 /// row from the top.
 fn terminal_showing<'a>(cx: &'a mut TestAppContext, dir: &TestDir, lines: &[&str]) -> Harness<'a> {
-    let mut h = on_paths_page(cx, dir, "n");
+    let h = on_paths_page(cx, dir, "n");
+    terminal_output(h, lines)
+}
+
+/// [`terminal_showing`] over a host that lists none of the path features:
+/// no host paths, no session folders, no folder fetches. There `n` works in
+/// a worktree of `r1` at [`REPO_ROOT`], its one folder.
+fn older_terminal_showing<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    lines: &[&str],
+) -> Harness<'a> {
+    let mut h = paths_phone_with(cx, dir, &[]);
+    let mut sessions = listed();
+    sessions[1] = session("n")
+        .label("November")
+        .members(&[("r1", "main", REPO_ROOT)])
+        .status("working")
+        .no_agent()
+        .cwd(REPO_ROOT)
+        .build();
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.click_on(&row("n"));
+    h.host(&saved_remote()).sent();
+    terminal_output(h, lines)
+}
+
+/// The phone `h` on session `n`'s terminal once its output is `lines`.
+fn terminal_output<'a>(mut h: Harness<'a>, lines: &[&str]) -> Harness<'a> {
     let output = lines.iter().fold(String::new(), |mut output, line| {
         output.push_str(line);
         output.push_str("\r\n");
@@ -2119,6 +2161,52 @@ fn a_missing_answer_after_leaving_the_page_shows_no_line(cx: &mut TestAppContext
         "the next session's page has no line"
     );
     assert!(!drawn(&mut h, "phone-path-note"));
+}
+
+/// The titles of the toasts the root holds.
+fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| toast.title.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_tapped_path_outside_the_sessions_repos_says_why_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = older_terminal_showing(cx, &dir, &["/elsewhere/notes.txt"]);
+
+    tap_cell(&mut h, 3, 0);
+    h.cx.run_until_parked();
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(fetches(&sent), Vec::<String>::new(), "nothing is fetched");
+    assert_eq!(
+        path_note(&mut h).as_deref(),
+        Some("Not inside a repo or worktree of this session.")
+    );
+    assert!(drawn(&mut h, "phone-path-note"), "the line shows");
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new(), "no toast");
+}
+
+#[gpui::test]
+fn a_tap_on_a_host_too_old_for_folders_says_why_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = older_terminal_showing(cx, &dir, &[REPO_ROOT]);
+
+    tap_cell(&mut h, 3, 0);
+    h.cx.run_until_parked();
+
+    let sent = h.host(&saved_remote()).sent();
+    assert_eq!(fetches(&sent), Vec::<String>::new(), "nothing is fetched");
+    let note = format!(
+        "{REMOTE} runs an older rustling-tulip that cannot send folders. Update it to fetch folders."
+    );
+    assert_eq!(path_note(&mut h).as_deref(), Some(note.as_str()));
+    assert!(drawn(&mut h, "phone-path-note"), "the line shows");
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new(), "no toast");
 }
 
 #[gpui::test]

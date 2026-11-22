@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
+- On the phone, tapping a path that cannot be fetched now says why on the session page instead of showing nothing.
 - On the phone, a file or folder fetch no longer fails when Storage's Clear runs at the moment it starts.
 - In the phone's Chat, tapping or holding on a wrapped right- or centre-aligned table cell selects the character under your finger.
 - On the phone, leaving Settings › Hosts with the add-host form open closes it, so the keyboard no longer rises over an old half-typed form.

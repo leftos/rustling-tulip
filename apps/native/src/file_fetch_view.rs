@@ -237,7 +237,7 @@ impl RootView {
         }
         if !self.host_sends_folders(&request.host) {
             tracing::info!(host = ?request.host, "the host no longer sends folders");
-            self.push_too_old(&request.host, &name, cx);
+            self.push_too_old(&request.host, &name, None, cx);
             return;
         }
         self.fetch_remote_folder(request, cx);
@@ -299,8 +299,9 @@ impl RootView {
                 folders = ?dirs,
                 "no folder of the run holds the transcript path link"
             );
-            self.push_toast(
-                ToastKind::Warning,
+            self.warn_tap(
+                source.host,
+                tap.as_ref(),
                 &failed_title(file_fetch::file_name(&link.target)),
                 Some(NOT_INSIDE.to_owned()),
                 cx,
@@ -430,8 +431,9 @@ impl RootView {
                 session = session.unwrap_or("none"),
                 "no repo or worktree of the session holds the terminal path link"
             );
-            self.push_toast(
-                ToastKind::Warning,
+            self.warn_tap(
+                host,
+                tap.as_ref(),
                 &failed_title(file_fetch::file_name(&link.target)),
                 Some(NOT_INSIDE.to_owned()),
                 cx,
@@ -514,7 +516,7 @@ impl RootView {
         };
         if !self.start_file_flow(readings, None, cx) {
             tracing::info!(host = ?host, "the host cannot send the folder a link names");
-            self.push_too_old(host, &root, cx);
+            self.push_too_old(host, &root, tap.as_ref(), cx);
         }
     }
 
@@ -565,8 +567,9 @@ impl RootView {
                 listing_error = error.unwrap_or("none"),
                 "no folder the host lists holds the terminal path link"
             );
-            self.push_toast(
-                ToastKind::Warning,
+            self.warn_tap(
+                &ask.host,
+                ask.tap.as_ref(),
                 &failed_title(file_fetch::file_name(&ask.target)),
                 Some(detail),
                 cx,
@@ -666,15 +669,50 @@ impl RootView {
             .is_some_and(|conn| conn.supports(protocol::FEATURE_FOLDER_FETCH))
     }
 
-    /// Says that `host` is too old to send the folder `name`.
-    fn push_too_old(&mut self, host: &HostKey, name: &str, cx: &mut Context<Self>) {
+    /// Says that `host` is too old to send the folder `name`: on the phone,
+    /// on the page of the session `tap` was tapped in.
+    fn push_too_old(
+        &mut self,
+        host: &HostKey,
+        name: &str,
+        tap: Option<&file_fetch::PhoneTap>,
+        cx: &mut Context<Self>,
+    ) {
         let label = self.host_label_of(host);
-        self.push_toast(
-            ToastKind::Warning,
+        self.warn_tap(
+            host,
+            tap,
             &failed_title(name),
             Some(too_old_detail(&label)),
             cx,
         );
+    }
+
+    /// A warning titled `title` about a link on `host`: on the phone, for a
+    /// path tapped there (`tap`), the page of the session it was tapped in
+    /// says why (`detail`, else `title`), since the phone draws no toasts;
+    /// otherwise a warning toast.
+    fn warn_tap(
+        &mut self,
+        host: &HostKey,
+        tap: Option<&file_fetch::PhoneTap>,
+        title: &str,
+        detail: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match tap.filter(|_| self.shape == crate::RootShape::Phone) {
+            Some(tap) => {
+                let note = detail.unwrap_or_else(|| title.to_owned());
+                tracing::info!(path = %tap.path, %note, "phone: a tapped path could not open");
+                let open = crate::PhoneOpen::Missing {
+                    host: host.clone(),
+                    session: tap.session.clone(),
+                    note,
+                };
+                self.phone_open(open, cx);
+            }
+            None => self.push_toast(ToastKind::Warning, title, detail, cx),
+        }
     }
 
     /// Fetches the first of a link's `readings` that names a file, trying
@@ -733,7 +771,7 @@ impl RootView {
                 };
                 let mut readings = vec![stat.reading().clone()];
                 readings.extend(stat.rest().iter().cloned());
-                self.start_files_or_warn(readings, id, cx);
+                self.start_files_or_warn(readings, id, stat.tap(), cx);
             }
         }
         true
@@ -776,7 +814,7 @@ impl RootView {
             id,
             "no reading of the link is on the host; fetching as files"
         );
-        self.start_files_or_warn(stat.readings().to_vec(), id, cx);
+        self.start_files_or_warn(stat.readings().to_vec(), id, stat.tap(), cx);
     }
 
     /// On the phone, the host says the reading `stat` asked about is a
@@ -871,11 +909,13 @@ impl RootView {
     /// as repo or worktree roots names a folder missing on the host, and
     /// any other link is outside the session's repos and worktrees. The
     /// toast of the link's stat `key` becomes the fetch's, or gives way to
-    /// the warning.
+    /// the warning, which on the phone is the note of the session `tap` was
+    /// tapped in.
     fn start_files_or_warn(
         &mut self,
         readings: Vec<FetchRequest>,
         key: &str,
+        tap: Option<&file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) {
         let name = readings
@@ -888,13 +928,17 @@ impl RootView {
             .all(|reading| reading.rel_path.is_empty())
             .then(|| readings.first().map(|reading| reading.host.clone()))
             .flatten();
+        let host = readings.first().map(|reading| reading.host.clone());
         if !self.start_file_flow(readings, Some(key), cx) {
             self.dismiss_toast_key(key, cx);
             let detail = match root_host {
                 Some(host) => format!("{name} is not on {}.", self.host_label_of(&host)),
                 None => NOT_INSIDE.to_owned(),
             };
-            self.push_toast(ToastKind::Warning, &failed_title(&name), Some(detail), cx);
+            match host {
+                Some(host) => self.warn_tap(&host, tap, &failed_title(&name), Some(detail), cx),
+                None => self.push_toast(ToastKind::Warning, &failed_title(&name), Some(detail), cx),
+            }
         }
     }
 
@@ -1437,7 +1481,7 @@ impl RootView {
             abort_writer(id, &entry);
             let host = entry.host_key().clone();
             self.dismiss_toast_key(&fetching_toast_key(id, entry.group()), cx);
-            self.push_too_old(&host, entry.file_name(), cx);
+            self.push_too_old(&host, entry.file_name(), None, cx);
             return;
         }
         match self.fetches.next_reading(id) {
