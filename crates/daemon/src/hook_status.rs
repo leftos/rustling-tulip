@@ -52,6 +52,152 @@ const PENDING_HOOK_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// registered for the agent.
 pub type PluginLookup = fn(&AgentId) -> Option<&'static dyn AgentPlugin>;
 
+/// Which hook layer sent an event: the hooks the spawn's hook plan injects,
+/// or a hook in the agent's own user settings (`X-RT-Hook-Source: user`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookSource {
+    Injected,
+    User,
+}
+
+/// The two hook headers an event travels with on every route, live, held
+/// and replayed: its `X-RT-Hook-Time` and its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HookHeaders {
+    /// Nanoseconds since the Unix epoch; `None` is the oldest possible.
+    pub(crate) time: Option<u128>,
+    pub(crate) source: HookSource,
+}
+
+impl HookHeaders {
+    /// An injected hook's event at `time`.
+    #[cfg(test)]
+    pub(crate) fn injected(time: Option<u128>) -> Self {
+        Self {
+            time,
+            source: HookSource::Injected,
+        }
+    }
+
+    /// A user-settings hook's event at `time`.
+    #[cfg(test)]
+    pub(crate) fn user(time: Option<u128>) -> Self {
+        Self {
+            time,
+            source: HookSource::User,
+        }
+    }
+}
+
+/// What the user-layer rules do with one event before it is mapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserRule {
+    /// The event belongs to another conversation below the shell.
+    Drop,
+    /// The event promotes an unpromoted plain shell, then maps.
+    Promote,
+    /// The event maps as it is.
+    Map,
+}
+
+/// The rule for one event from `source` at `event_time` on `record`, the
+/// same live and on replay: an injected event maps; a user-layer event
+/// pinned to another conversation ([`is_another_conversation`]) is dropped;
+/// a user-layer `SessionStart` that would apply on an unpromoted plain shell
+/// promotes it first; anything else maps.
+fn user_rule(
+    record: &SessionRecord,
+    source: HookSource,
+    event_time: Option<u128>,
+    body: &serde_json::Value,
+) -> UserRule {
+    if source == HookSource::Injected {
+        return UserRule::Map;
+    }
+    if is_another_conversation(record, body) {
+        return UserRule::Drop;
+    }
+    if event_name(body) == "SessionStart"
+        && is_unpromoted_shell(record)
+        && would_apply(record, event_time)
+    {
+        return UserRule::Promote;
+    }
+    UserRule::Map
+}
+
+/// The hook event's name in `body`, empty when it names none.
+fn event_name(body: &serde_json::Value) -> &str {
+    body.get("hook_event_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// Whether a user-layer event belongs to a conversation other than the one
+/// driving `record`: while the record is hook-driven, an event naming a
+/// different conversation came from an agent the shell's agent ran (every
+/// descendant of the PTY inherits its session variables), and must neither
+/// take the session over nor end its run. An event naming no conversation is
+/// not judged.
+///
+/// The plugin seam reports a conversation id only for a `SessionStart`, so
+/// the id is read with the hook vocabulary's own payload reader.
+fn is_another_conversation(record: &SessionRecord, body: &serde_json::Value) -> bool {
+    let Some(id) = agent_api::hook_vocabulary::details(body).session_id else {
+        return false;
+    };
+    record.hook_driven && record.conversation_id.as_deref() != Some(id.as_str())
+}
+
+/// Whether an event at `event_time` would be applied to `record` rather than
+/// dropped by [`apply_to_record`]'s checks that do not depend on the
+/// promotion: it has a usable time, newer than the last one applied, and the
+/// record has not ended.
+fn would_apply(record: &SessionRecord, event_time: Option<u128>) -> bool {
+    let Some(event_time) = event_time else {
+        return false;
+    };
+    record.last_hook_time.is_none_or(|last| event_time > last)
+        && !matches!(record.status, SessionStatus::Stopped | SessionStatus::Error)
+}
+
+/// Whether `record` is a plain shell no screen sighting, spawn or recovery
+/// gave a hook agent, whose hook events therefore map to nothing.
+fn is_unpromoted_shell(record: &SessionRecord) -> bool {
+    record.mode == protocol::SessionMode::PlainShell && record.hook_agent.is_none()
+}
+
+/// Whether `report` names a conversation and `record` now holds it: a
+/// discovery waiter for the session has nothing left to find.
+fn holds_named_conversation(record: &SessionRecord, report: &HookReport) -> bool {
+    report
+        .conversation_id
+        .as_deref()
+        .is_some_and(|id| record.conversation_id.as_deref() == Some(id))
+}
+
+/// A user-layer `SessionStart` in an unpromoted plain shell: the agent was
+/// started there by hand. The shell is promoted the way a screen sighting
+/// promotes it, but no discovery waiter starts, since the event itself names
+/// the conversation; the event is then mapped as usual.
+fn promote_for_user_hook(hub: &Hub, session_id: &str) {
+    let shown = crate::pty_state::promote_plain_shell(&hub.sessions, session_id);
+    log_user_promotion(session_id, &shown, false);
+}
+
+/// Log a promotion a user-settings hook made; `replayed` when it was held
+/// before its session was inserted.
+fn log_user_promotion(session_id: &str, shown: &crate::session::ShownAgent, replayed: bool) {
+    if *shown != crate::session::ShownAgent::Ignored {
+        info!(
+            session_id,
+            ?shown,
+            replayed,
+            "plain shell: a user-settings hook reports an agent running in it"
+        );
+    }
+}
+
 /// `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary,
 /// ending in `…`, which counts inside the cap. Text within the cap is
 /// returned unchanged. A cap too small for the ellipsis keeps that many
@@ -115,9 +261,11 @@ pub fn apply_signal(
     let mut applied = Applied::default();
     let mut start_turns = false;
     let mut promoted = false;
+    let mut holds_named = false;
     hub.sessions.update_then(session_id, |record| {
         applied = apply_to_record(record, event_time, report);
         promoted = record.promoted_shell();
+        holds_named = holds_named_conversation(record, report);
         // The report joins the pipeline in the same update that ends the
         // turn, so the registry sees a stop line on its way and keeps a
         // provisional line for it to replace.
@@ -151,6 +299,12 @@ pub fn apply_signal(
     if applied.entered_awaiting {
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
     }
+    // The hook named the conversation the record now holds, so a discovery
+    // waiter for the session has nothing left to find. The record lock is
+    // released before the discovery lock is taken.
+    if holds_named {
+        hub.sessions.discovery().deregister(session_id);
+    }
     if applied.agent_exited {
         // A promoted shell's waiter lives only while its agent runs.
         if promoted {
@@ -173,42 +327,61 @@ pub fn apply_signal(
 /// [`apply_signal`]; one it does not know changes nothing. An applied event
 /// whose conversation id the record now holds stops the session's discovery
 /// waiter, if it has one.
+///
+/// The user-layer rules ([`user_rule`]) run first, on `headers.source`: a
+/// user-settings event from another conversation below the shell is dropped,
+/// and a user-settings `SessionStart` on an unpromoted plain shell promotes
+/// it, with no lock held, before the event is mapped.
 pub fn deliver(
     hub: &Hub,
     session_id: &str,
     record: &Mutex<SessionRecord>,
-    event_time: Option<u128>,
+    headers: HookHeaders,
     body: &serde_json::Value,
 ) {
-    let (line, report) = {
-        let record = crate::sync::lock(record);
-        let Some(plugin) = hub.pending_hooks.plugin_for(&record) else {
+    let rule = user_rule(
+        &crate::sync::lock(record),
+        headers.source,
+        headers.time,
+        body,
+    );
+    match rule {
+        UserRule::Drop => {
+            debug!(
+                target: "status_trace",
+                session = %session_id,
+                event = event_name(body),
+                reason = "another conversation below the shell",
+                "hook dropped"
+            );
             return;
-        };
-        if let Some(line) = plugin.map_live_line(body) {
-            (Some(line), None)
-        } else {
-            (None, plugin.map_hook_event(body, hook_options(&record)))
         }
-    };
+        UserRule::Promote => promote_for_user_hook(hub, session_id),
+        UserRule::Map => {}
+    }
+    let (line, report) = map_event(hub, record, body);
     if let Some(line) = line {
         hub.live_lines.publish(session_id, line);
     } else if let Some(report) = report {
-        let event = body
-            .get("hook_event_name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        apply_signal(hub, session_id, event_time, &report, event);
-        // The hook named the conversation the record now holds, so a
-        // discovery waiter for the session has nothing left to find.
-        // The record lock is released before the discovery lock is taken.
-        let holds_hook_id = report
-            .conversation_id
-            .as_deref()
-            .is_some_and(|id| crate::sync::lock(record).conversation_id.as_deref() == Some(id));
-        if holds_hook_id {
-            hub.sessions.discovery().deregister(session_id);
-        }
+        apply_signal(hub, session_id, headers.time, &report, event_name(body));
+    }
+}
+
+/// The live line or the report `record`'s hook plugin maps `body` to, read
+/// under the record lock; neither when the record has no plugin.
+fn map_event(
+    hub: &Hub,
+    record: &Mutex<SessionRecord>,
+    body: &serde_json::Value,
+) -> (Option<LiveLine>, Option<HookReport>) {
+    let record = crate::sync::lock(record);
+    let Some(plugin) = hub.pending_hooks.plugin_for(&record) else {
+        return (None, None);
+    };
+    if let Some(line) = plugin.map_live_line(body) {
+        (Some(line), None)
+    } else {
+        (None, plugin.map_hook_event(body, hook_options(&record)))
     }
 }
 
@@ -569,7 +742,8 @@ fn log_mismatch(session_id: &str, mismatch: Option<&(String, String)>) {
 }
 
 /// One hook event that arrived before its session was inserted: its raw
-/// body, mapped by the session's plugin once the record exists.
+/// body and the hook layer that sent it, run through the user-layer rules
+/// and mapped by the session's plugin once the record exists.
 #[derive(Debug, Clone)]
 struct PendingHook {
     at: Instant,
@@ -577,6 +751,7 @@ struct PendingHook {
     /// to evict; two arrivals can share one `Instant`.
     seq: u64,
     event_time: Option<u128>,
+    source: HookSource,
     body: serde_json::Value,
     /// The body's length in bytes as it arrived.
     len: usize,
@@ -661,18 +836,19 @@ impl PendingHooks {
         plugin
     }
 
-    /// Hold the raw event `body`, `len` bytes long, for `session_id` until
-    /// its spawn inserts the session.
+    /// Hold the raw event `body`, `len` bytes long, sent with `headers`, for
+    /// `session_id` until its spawn inserts the session.
     ///
     /// The buffer lock is also the insert's lock: an event either lands in
-    /// the buffer before the insert takes it (and is mapped and replayed into
-    /// the record), or this call finds the session registered and maps and
-    /// applies the event directly. Neither order can drop it.
+    /// the buffer before the insert takes it (and is replayed into the
+    /// record with the same user-layer rules as live), or this call finds the
+    /// session registered and hands the event to [`deliver`] with its source.
+    /// Neither order can drop it.
     pub fn defer(
         &self,
         hub: &Hub,
         session_id: &str,
-        event_time: Option<u128>,
+        headers: HookHeaders,
         body: serde_json::Value,
         len: usize,
     ) {
@@ -681,7 +857,7 @@ impl PendingHooks {
         prune_expired(&mut held.sessions, now);
         if let Some(record) = hub.sessions.get(session_id) {
             drop(held);
-            deliver(hub, session_id, &record, event_time, &body);
+            deliver(hub, session_id, &record, headers, &body);
             return;
         }
         if len > PENDING_HOOK_MAX_BYTES_PER_SESSION {
@@ -699,7 +875,8 @@ impl PendingHooks {
             PendingHook {
                 at: now,
                 seq,
-                event_time,
+                event_time: headers.time,
+                source: headers.source,
                 body,
                 len,
             },
@@ -707,13 +884,22 @@ impl PendingHooks {
         debug!(session_id, "hook event held until its session is inserted");
     }
 
-    /// Insert `record` with every held event for its id mapped by its hook
-    /// plugin and applied, under the buffer lock so a concurrent
-    /// [`Self::defer`] cannot land between the take and the insert. Answers
-    /// whether the record still holds an `AwaitingInput` prompt after the
-    /// whole replay, so the caller raises its one `Attention` after
-    /// publishing the session: a later event in the buffer may have cleared
-    /// the prompt an earlier one set.
+    /// Insert `record` with every held event for its id replayed into it,
+    /// under the buffer lock so a concurrent [`Self::defer`] cannot land
+    /// between the take and the insert. Each event, in arrival order, runs
+    /// the same user-layer rules as live ([`user_rule`]) against the record
+    /// as the earlier events left it: one from another conversation is
+    /// dropped, and a user-settings `SessionStart` promotes an unpromoted
+    /// plain shell on the owned record; then it is mapped by the record's
+    /// hook plugin and applied. Nothing is broadcast or announced: the
+    /// publish's snapshot carries the result. When a replayed event named
+    /// the conversation the record ends up holding, the session's discovery
+    /// waiter is stopped once the buffer lock is released.
+    ///
+    /// Answers whether the record still holds an `AwaitingInput` prompt
+    /// after the whole replay, so the caller raises its one `Attention`
+    /// after publishing the session: a later event in the buffer may have
+    /// cleared the prompt an earlier one set.
     pub fn insert_with_pending<'a>(
         &self,
         hub: &'a Hub,
@@ -723,18 +909,40 @@ impl PendingHooks {
         let mut held = crate::sync::lock(&self.held);
         prune_expired(&mut held.sessions, Instant::now());
         let events = held.sessions.remove(&session_id).unwrap_or_default();
+        let holds_named = self.replay(&mut record, events);
+        let awaiting =
+            record.status == SessionStatus::AwaitingInput && record.pending_input.is_some();
+        let pending = hub.sessions.insert_pending(record);
+        drop(held);
+        if holds_named {
+            hub.sessions.discovery().deregister(&session_id);
+        }
+        (pending, awaiting)
+    }
+
+    /// Apply `events`, in arrival order, to the owned `record`, and answer
+    /// whether one named a conversation the record holds once it was applied.
+    fn replay(&self, record: &mut SessionRecord, events: Vec<PendingHook>) -> bool {
+        let mut holds_named = false;
         for event in events {
-            let Some(report) = self.map_for_record(&record, &event.body) else {
+            match user_rule(record, event.source, event.event_time, &event.body) {
+                UserRule::Drop => continue,
+                UserRule::Promote => {
+                    let shown = record.agent_shown_in_plain_shell();
+                    log_user_promotion(&record.id, &shown, true);
+                }
+                UserRule::Map => {}
+            }
+            let Some(report) = self.map_for_record(record, &event.body) else {
                 continue;
             };
             // An agent's end held before its session was published has no
             // client that saw it start, so it is not announced.
-            let applied = apply_to_record(&mut record, event.event_time, &report);
-            log_mismatch(&session_id, applied.mismatch.as_ref());
+            let applied = apply_to_record(record, event.event_time, &report);
+            log_mismatch(&record.id, applied.mismatch.as_ref());
+            holds_named |= holds_named_conversation(record, &report);
         }
-        let awaiting =
-            record.status == SessionStatus::AwaitingInput && record.pending_input.is_some();
-        (hub.sessions.insert_pending(record), awaiting)
+        holds_named
     }
 
     /// The hook times of the events held for `session_id`, oldest first.
@@ -2368,8 +2576,13 @@ mod tests {
     /// Hold `body`, `len` bytes long, for `session_id` at hook time `time`,
     /// as the hook route does for a session not inserted yet.
     fn hold(hub: &Hub, session_id: &str, time: u128, body: Value, len: usize) {
-        hub.pending_hooks
-            .defer(hub, session_id, Some(time), body, len);
+        hub.pending_hooks.defer(
+            hub,
+            session_id,
+            HookHeaders::injected(Some(time)),
+            body,
+            len,
+        );
     }
 
     /// Insert `record` with its held events applied and answer what the
@@ -2616,7 +2829,13 @@ mod tests {
             hub.sessions.insert(record);
             let mut lines = hub.live_lines.subscribe(&id);
             let arc = hub.sessions.get(&id).expect("inserted");
-            deliver(&hub, &id, &arc, Some(50), &message_display("Red\n", 0));
+            deliver(
+                &hub,
+                &id,
+                &arc,
+                HookHeaders::injected(Some(50)),
+                &message_display("Red\n", 0),
+            );
             assert_eq!(hook_state(&crate::sync::lock(&arc)), before, "{id}");
             let line = lines.try_recv().expect("the live line reached the channel");
             assert_eq!((line.index, line.text.as_str()), (0, "Red\n"), "{id}");
@@ -2631,12 +2850,18 @@ mod tests {
         record.last_hook_time = Some(1);
         hub.sessions.insert(record);
         let arc = hub.sessions.get("s1").expect("inserted");
-        deliver(&hub, "s1", &arc, Some(50), &message_display("Red\n", 0));
         deliver(
             &hub,
             "s1",
             &arc,
-            Some(2),
+            HookHeaders::injected(Some(50)),
+            &message_display("Red\n", 0),
+        );
+        deliver(
+            &hub,
+            "s1",
+            &arc,
+            HookHeaders::injected(Some(2)),
             &json!({"hook_event_name": "UserPromptSubmit"}),
         );
         let record = crate::sync::lock(&arc);
@@ -2656,7 +2881,13 @@ mod tests {
         let mut s2_lines = hub.live_lines.subscribe("s2");
         let arc = hub.sessions.get("s1").expect("inserted");
         for (delta, index) in [("Blue\n", 2), ("Red\n", 0), ("Yellow\n", 1)] {
-            deliver(&hub, "s1", &arc, Some(9), &message_display(delta, index));
+            deliver(
+                &hub,
+                "s1",
+                &arc,
+                HookHeaders::injected(Some(9)),
+                &message_display(delta, index),
+            );
         }
         let received: Vec<(u64, String)> = std::iter::from_fn(|| s1_lines.try_recv().ok())
             .map(|line| (line.index, line.text))
@@ -2677,7 +2908,13 @@ mod tests {
         let (hub, _scratch) = crate::server::test_support::test_hub("live-line-none");
         hub.sessions.insert(turn_record());
         let arc = hub.sessions.get("s1").expect("inserted");
-        deliver(&hub, "s1", &arc, Some(9), &message_display("Red\n", 0));
+        deliver(
+            &hub,
+            "s1",
+            &arc,
+            HookHeaders::injected(Some(9)),
+            &message_display("Red\n", 0),
+        );
         let mut lines = hub.live_lines.subscribe("s1");
         assert!(lines.try_recv().is_err(), "a line before the subscription");
     }
@@ -2716,7 +2953,7 @@ mod tests {
             &hub,
             "s1",
             &arc,
-            Some(100),
+            HookHeaders::injected(Some(100)),
             &json!({"hook_event_name": "UserPromptSubmit"}),
         );
         assert!(
@@ -2728,7 +2965,7 @@ mod tests {
             &hub,
             "s1",
             &arc,
-            Some(200),
+            HookHeaders::injected(Some(200)),
             &json!({
                 "hook_event_name": "SessionStart",
                 "source": "startup",
@@ -2742,6 +2979,53 @@ mod tests {
         assert!(
             hub.sessions.discovery().deregister("s1").is_none(),
             "the hook's id stopped the waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_conversation_id_deregisters_the_discovery_waiter() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("replay-id-deregisters");
+        hub.sessions
+            .discovery()
+            .register(default_agent_waiter("s1"));
+        let start = json!({
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": "conv-hook",
+        });
+        hold(&hub, "s1", 100, start, 64);
+        insert(
+            &hub,
+            crate::history::test_support::record("s1", SessionMode::Interactive),
+        );
+        let arc = hub.sessions.get("s1").expect("inserted");
+        assert_eq!(
+            crate::sync::lock(&arc).conversation_id.as_deref(),
+            Some("conv-hook")
+        );
+        assert!(
+            hub.sessions.discovery().waiter("s1").is_none(),
+            "the replayed id stopped the waiter"
+        );
+
+        // A replayed event naming no conversation leaves the waiter waiting.
+        hub.sessions
+            .discovery()
+            .register(default_agent_waiter("s2"));
+        hold(
+            &hub,
+            "s2",
+            100,
+            json!({"hook_event_name": "UserPromptSubmit"}),
+            64,
+        );
+        insert(
+            &hub,
+            crate::history::test_support::record("s2", SessionMode::Interactive),
+        );
+        assert!(
+            hub.sessions.discovery().waiter("s2").is_some(),
+            "no id, so discovery still waits"
         );
     }
 }

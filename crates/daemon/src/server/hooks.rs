@@ -36,10 +36,15 @@ const HOOK_BODY_LIMIT: usize = 1 << 20;
 /// last one applied for the session. A missing or unparsable time is the
 /// oldest possible and is dropped.
 ///
-/// A `SessionStart` carrying `X-RT-Hook-Source: user` (the user-layer shim)
-/// for a plain shell with no hook agent first promotes the shell, as a screen
-/// sighting would but without a discovery waiter, so the event maps; any
-/// other user-layer event on such a shell maps to nothing, as before.
+/// The event's source (`X-RT-Hook-Source: user` from the user-layer shim,
+/// else injected) travels with it on every route, held or not, and the same
+/// user-layer rules run on each ([`crate::hook_status::deliver`] live,
+/// [`crate::hook_status::PendingHooks::insert_with_pending`] on replay): a
+/// user-layer event from another conversation below a hook-driven shell is
+/// dropped, and a user-layer `SessionStart` for a plain shell with no hook
+/// agent first promotes the shell, as a screen sighting would but without a
+/// discovery waiter, so the event maps; any other user-layer event on such a
+/// shell maps to nothing, as before.
 ///
 /// An elevated daemon first refuses a peer below its integrity with `403`
 /// ([`super::loopback_door`]).
@@ -81,7 +86,10 @@ pub(super) async fn hook_handler(
         event,
         "hook received"
     );
-    let event_time = hook_time(&headers);
+    let hook_headers = crate::hook_status::HookHeaders {
+        time: hook_time(&headers),
+        source: hook_source(&headers),
+    };
     let Some(record) = hub.sessions.get(&session_id) else {
         // A spawn may have started the child — whose hooks fire from its
         // argv — before its record is inserted. Hold the event for the
@@ -94,98 +102,24 @@ pub(super) async fn hook_handler(
             "hook held for its spawn"
         );
         hub.pending_hooks
-            .defer(&hub, &session_id, event_time, value, body.len());
+            .defer(&hub, &session_id, hook_headers, value, body.len());
         return StatusCode::NO_CONTENT.into_response();
     };
-    if from_user_layer(&headers) {
-        if is_another_conversation(&record, &value) {
-            tracing::debug!(
-                target: "status_trace",
-                session = %session_id,
-                event,
-                reason = "another conversation below the shell",
-                "hook dropped"
-            );
-            return StatusCode::NO_CONTENT.into_response();
-        }
-        if event == "SessionStart"
-            && is_unpromoted_shell(&record)
-            && would_apply(&record, event_time)
-        {
-            promote_for_user_hook(&hub, &session_id);
-        }
-    }
-    crate::hook_status::deliver(&hub, &session_id, &record, event_time, &value);
+    crate::hook_status::deliver(&hub, &session_id, &record, hook_headers, &value);
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Whether a user-layer event belongs to a conversation other than the one
-/// driving `record`: while the record is hook-driven, an event naming a
-/// different conversation came from an agent the shell's agent ran (every
-/// descendant of the PTY inherits its session variables), and must neither
-/// take the session over nor end its run. An event naming no conversation is
-/// not judged.
-///
-/// The plugin seam reports a conversation id only for a `SessionStart`, so
-/// the id is read with the hook vocabulary's own payload reader.
-fn is_another_conversation(
-    record: &std::sync::Mutex<crate::session::SessionRecord>,
-    body: &serde_json::Value,
-) -> bool {
-    let Some(id) = agent_api::hook_vocabulary::details(body).session_id else {
-        return false;
-    };
-    let record = crate::sync::lock(record);
-    record.hook_driven && record.conversation_id.as_deref() != Some(id.as_str())
-}
-
-/// Whether an event at `event_time` would be applied to `record` rather than
-/// dropped by [`crate::hook_status::apply_to_record`]'s checks that do not
-/// depend on the promotion: it has a usable time, newer than the last one
-/// applied, and the record has not ended.
-fn would_apply(
-    record: &std::sync::Mutex<crate::session::SessionRecord>,
-    event_time: Option<u128>,
-) -> bool {
-    let Some(event_time) = event_time else {
-        return false;
-    };
-    let record = crate::sync::lock(record);
-    record.last_hook_time.is_none_or(|last| event_time > last)
-        && !matches!(
-            record.status,
-            protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
-        )
-}
-
-/// Whether the request came from a hook in the agent's own user settings
-/// (`rt-tracer hook --from-env`), which sends `X-RT-Hook-Source: user`. An
+/// Which hook layer sent the request: a hook in the agent's own user
+/// settings (`rt-tracer hook --from-env`) sends `X-RT-Hook-Source: user`; an
 /// absent header or any other value is an injected hook.
-fn from_user_layer(headers: &HeaderMap) -> bool {
-    headers
+fn hook_source(headers: &HeaderMap) -> crate::hook_status::HookSource {
+    if headers
         .get("x-rt-hook-source")
         .is_some_and(|value| value.as_bytes() == b"user")
-}
-
-/// Whether `record` is a plain shell no screen sighting, spawn or recovery
-/// gave a hook agent, whose hook events therefore map to nothing.
-fn is_unpromoted_shell(record: &std::sync::Mutex<crate::session::SessionRecord>) -> bool {
-    let record = crate::sync::lock(record);
-    record.mode == protocol::SessionMode::PlainShell && record.hook_agent.is_none()
-}
-
-/// A user-layer `SessionStart` in an unpromoted plain shell: the agent was
-/// started there by hand. The shell is promoted the way a screen sighting
-/// promotes it, but no discovery waiter starts, since the event itself names
-/// the conversation; the event is then mapped as usual.
-fn promote_for_user_hook(hub: &Hub, session_id: &str) {
-    let shown = crate::pty_state::promote_plain_shell(&hub.sessions, session_id);
-    if shown != crate::session::ShownAgent::Ignored {
-        tracing::info!(
-            session_id,
-            ?shown,
-            "plain shell: a user-settings hook reports an agent running in it"
-        );
+    {
+        crate::hook_status::HookSource::User
+    } else {
+        crate::hook_status::HookSource::Injected
     }
 }
 
@@ -1384,6 +1318,207 @@ mod tests {
             .expect("router answers");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(promotion_of(&hub, "s1"), (false, None, false, None));
+    }
+
+    /// `id`'s shell label, read under its record lock.
+    fn shell_label_of(hub: &Hub, id: &str) -> Option<String> {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).shell_label.clone()
+    }
+
+    /// Insert `record` with every event held for it replayed, and publish it.
+    fn insert_held(hub: &Hub, record: crate::session::SessionRecord) {
+        let (pending, _awaiting) = hub.pending_hooks.insert_with_pending(hub, record);
+        pending.publish();
+    }
+
+    const PROMPT: &str = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+
+    /// The promotion fields of a shell promoted by the user-layer `STARTUP`.
+    fn promoted_by_startup() -> (bool, Option<protocol::AgentId>, bool, Option<String>) {
+        (
+            true,
+            Some(agent_registry::default_agent()),
+            true,
+            Some("conv-user".to_owned()),
+        )
+    }
+
+    #[tokio::test]
+    async fn held_user_session_start_promotes_an_unpromoted_plain_shell() {
+        let (hub, _scratch) = test_hub("hook-held-user-promote");
+        send_user(&hub, "100", STARTUP).await;
+        send_user(&hub, "200", PROMPT).await;
+        assert!(hub.sessions.get("s1").is_none(), "both events were held");
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(
+            promotion_of(&hub, "s1"),
+            promoted_by_startup(),
+            "the held start promoted the shell, as it would live"
+        );
+        assert_eq!(
+            snapshot_of(&hub, "s1").status,
+            SessionStatus::Working,
+            "the held prompt mapped once the shell was promoted"
+        );
+        assert_eq!(shell_label_of(&hub, "s1").as_deref(), Some("pwsh"));
+        assert!(
+            hub.sessions.discovery().waiter("s1").is_none(),
+            "the replay starts no discovery waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_user_event_before_its_session_start_is_dropped_as_live() {
+        let (hub, _scratch) = test_hub("hook-held-user-order");
+        send_user(&hub, "150", PROMPT).await;
+        send_user(&hub, "100", STARTUP).await;
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(promotion_of(&hub, "s1"), promoted_by_startup());
+        assert_eq!(
+            snapshot_of(&hub, "s1").status,
+            SessionStatus::Idle,
+            "the prompt held before the start mapped to nothing, as live"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_user_other_event_on_an_unpromoted_shell_maps_nothing() {
+        let (hub, _scratch) = test_hub("hook-held-user-other");
+        send_user(&hub, "100", PROMPT).await;
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(promotion_of(&hub, "s1"), (false, None, false, None));
+        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn held_injected_session_start_does_not_promote_a_plain_shell() {
+        let (hub, _scratch) = test_hub("hook-held-injected");
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request("s1", Some("test-token"), Some("100"), STARTUP))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(promotion_of(&hub, "s1"), (false, None, false, None));
+    }
+
+    #[tokio::test]
+    async fn held_user_session_start_without_a_hook_time_does_not_promote() {
+        let (hub, _scratch) = test_hub("hook-held-user-no-time");
+        let mut request = hook_request("s1", Some("test-token"), None, STARTUP);
+        request.headers_mut().insert(
+            "x-rt-hook-source",
+            axum::http::HeaderValue::from_static("user"),
+        );
+        let response = build_loopback_router(hub.clone())
+            .oneshot(request)
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(promotion_of(&hub, "s1"), (false, None, false, None));
+    }
+
+    #[tokio::test]
+    async fn held_user_event_from_a_nested_conversation_is_dropped() {
+        let (hub, _scratch) = test_hub("hook-held-user-nested");
+        send_user(&hub, "100", &user_start("conv-a")).await;
+        send_user(&hub, "200", &user_start("conv-b")).await;
+        send_user(&hub, "300", &user_end("conv-b")).await;
+        insert_held(&hub, unpromoted_shell("s1"));
+        let rec = hub.sessions.get("s1").expect("session is in the registry");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(rec.conversation_id.as_deref(), Some("conv-a"));
+        assert!(rec.hook_driven, "the pinned run still drives the shell");
+        assert!(rec.agent_in_shell, "the shell is promoted");
+        assert!(
+            !rec.agent_exit_announced,
+            "the nested end did not end the shell's run"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_user_run_ended_then_live_session_start_pins_again() {
+        let (hub, _scratch) = test_hub("hook-held-user-repin");
+        let mut events = hub.sessions.subscribe();
+        send_user(&hub, "100", &user_start("conv-a")).await;
+        send_user(&hub, "200", &user_end("conv-a")).await;
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(conversation_id_of(&hub, "s1").as_deref(), Some("conv-a"));
+        assert!(!hook_driven_of(&hub, "s1"), "the held run ended");
+        send_user(&hub, "300", &user_start("conv-b")).await;
+        assert_eq!(conversation_id_of(&hub, "s1").as_deref(), Some("conv-b"));
+        assert!(hook_driven_of(&hub, "s1"), "the new run drives the shell");
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, crate::session::SessionEvent::AgentExited { .. }),
+                "the held end is not announced"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_user_hook_after_the_replay_sees_one_promotion() {
+        let (hub, _scratch) = test_hub("hook-held-then-live");
+        send_user(&hub, "100", &user_start("conv-a")).await;
+        let (pending, _awaiting) = hub
+            .pending_hooks
+            .insert_with_pending(&hub, unpromoted_shell("s1"));
+        send_user(&hub, "200", PROMPT).await;
+        send_user(&hub, "50", &user_start("conv-x")).await;
+        pending.publish();
+        assert_eq!(
+            snapshot_of(&hub, "s1").status,
+            SessionStatus::Working,
+            "the live prompt mapped on the shell the replay promoted"
+        );
+        assert_eq!(
+            shell_label_of(&hub, "s1").as_deref(),
+            Some("pwsh"),
+            "the shell was promoted once"
+        );
+        assert_eq!(conversation_id_of(&hub, "s1").as_deref(), Some("conv-a"));
+    }
+
+    #[tokio::test]
+    async fn a_user_hook_deferred_after_the_insert_runs_the_user_rules() {
+        let (hub, _scratch) = test_hub("hook-user-defer-race");
+        // The handler missed the record, then the spawn inserted it before
+        // the event was held.
+        hub.sessions.insert(unpromoted_shell("s1"));
+        let body: serde_json::Value = serde_json::from_str(STARTUP).expect("parse hook body");
+        hub.pending_hooks.defer(
+            &hub,
+            "s1",
+            crate::hook_status::HookHeaders::user(Some(100)),
+            body,
+            STARTUP.len(),
+        );
+        assert_eq!(promotion_of(&hub, "s1"), promoted_by_startup());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_promotion_leaves_the_screen_nothing_to_discover() {
+        let (hub, _scratch) = test_hub("hook-held-then-screen");
+        send_user(&hub, "100", STARTUP).await;
+        send_user(&hub, "200", PROMPT).await;
+        insert_held(&hub, unpromoted_shell("s1"));
+        assert_eq!(
+            pty_state::promote_plain_shell(&hub.sessions, "s1"),
+            crate::session::ShownAgent::Redetected,
+            "the screen sees the agent the replay promoted"
+        );
+        crate::conversations::discovery::watch_promoted_shell(
+            &hub.sessions,
+            "s1",
+            chrono::Utc::now(),
+            None,
+        );
+        assert!(
+            hub.sessions.discovery().waiter("s1").is_none(),
+            "the shell holds the hook's conversation, so nothing is looked for"
+        );
     }
 
     /// The id the hook wrote is the one an ended session's history entry

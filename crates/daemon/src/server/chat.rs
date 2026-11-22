@@ -915,14 +915,26 @@ mod tests {
 
         fn deliver(&self, body: &serde_json::Value) {
             let record = self.hub.sessions.get("s1").expect("s1 is registered");
-            crate::hook_status::deliver(&self.hub, "s1", &record, None, body);
+            crate::hook_status::deliver(
+                &self.hub,
+                "s1",
+                &record,
+                crate::hook_status::HookHeaders::injected(None),
+                body,
+            );
         }
 
         /// Deliver `body` as a hook event stamped `time`, in nanoseconds
         /// since the epoch.
         fn deliver_at(&self, time: u128, body: &serde_json::Value) {
             let record = self.hub.sessions.get("s1").expect("s1 is registered");
-            crate::hook_status::deliver(&self.hub, "s1", &record, Some(time), body);
+            crate::hook_status::deliver(
+                &self.hub,
+                "s1",
+                &record,
+                crate::hook_status::HookHeaders::injected(Some(time)),
+                body,
+            );
         }
     }
 
