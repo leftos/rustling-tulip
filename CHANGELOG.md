@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A session's background marker clears when its background shell ends, even after an idle notice, so keep-awake and the Finished alert no longer wait for your next turn.
+
 ## v0.18.3-alpha
 
 ### Highlights

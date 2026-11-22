@@ -189,8 +189,11 @@ struct Sight {
 /// Beside an `Idle` record whose screen body reads `Idle`, the agent's
 /// background rules ([`CompiledRules::read_background`]) set the record's
 /// `background` flag after the same window, and clear it after one only when
-/// this watcher set it: a flag a hook set, or one set before another writer's
-/// change or a status change, is left for its own writer to clear.
+/// this watcher set it: a flag a hook set, or one set before another writer
+/// moved the status, the flag, the turn end, the pending prompt or the chat
+/// answers or ended hook driving, is left for its own writer to clear. A hook
+/// event that only moves the main hook stamp, or starts hook driving, leaves
+/// the flag the screen's own.
 ///
 /// When another writer (a hook event, a chat answer, an exit) changes the
 /// record's status, hook stamp or hook-driven flag, the screen is left unread
@@ -326,8 +329,11 @@ struct ScreenWatch {
     /// forgets them first ([`Self::key_dialog_memory`]).
     prompt_raise: Option<u128>,
     /// Whether the record's background flag is this watcher's own write: the
-    /// screen clears only a flag it set. Any other writer's change to the
-    /// record, and any status change, drops it.
+    /// screen clears only a flag it set. Another writer's move of the status,
+    /// the flag, the turn end, the pending prompt or the chat answers, or an
+    /// end of hook driving, drops it ([`moves_status_or_background`]); a move
+    /// of the main hook stamp alone, or a start of hook driving, keeps it.
+    /// A hook that writes the flag's current value keeps it too.
     screen_set_background: bool,
     /// What the checks have read of the turn end the record holds.
     turn_end: TurnEndWatch,
@@ -1324,6 +1330,11 @@ impl ScreenWatch {
             && apply_screen_background(&self.registry, &self.session_id, read, on)
         {
             self.screen_set_background = on;
+            // The write is this watcher's own: the next foreign move must not
+            // read it as another writer's.
+            if let Some(seen) = self.wake.seen.as_mut() {
+                seen.background = on;
+            }
         }
     }
 
@@ -1443,6 +1454,7 @@ impl ScreenWatch {
                 pending: from.pending && !left_prompt,
                 held: None,
                 raise: from.raise.filter(|_| !left_prompt),
+                background: written_background(from, next, shown),
                 ..from
             });
             self.screen_set_background = next == SessionStatus::Idle
@@ -1461,9 +1473,13 @@ impl ScreenWatch {
     /// The record moved from `before` to what the wake now holds. A shell's
     /// hook-driven flip is left to the shell watcher; a shell not running
     /// an agent ignores any other move; otherwise the screen is held off.
-    /// Whichever, a background flag the screen set is no longer its own.
+    /// Whichever, a background flag the screen set stays its own only when
+    /// the move touched neither the status nor the flag
+    /// ([`moves_status_or_background`]).
     fn record_moved(&mut self, before: Option<StatusRead>, mode: Mode, now: Instant) -> Moved {
-        self.screen_set_background = false;
+        if moves_status_or_background(before, self.wake.seen) {
+            self.screen_set_background = false;
+        }
         let hooks = |read: Option<StatusRead>| read.is_some_and(|read| read.hook_driven);
         if mode != Mode::Agent && hooks(before) != hooks(self.wake.seen) {
             return Moved::HooksFlipped;
@@ -1710,6 +1726,7 @@ fn hand_shell_back(
             held: None,
             raise: status_read(rec).raise,
             chat_answers: rec.chat_answers,
+            background: false,
         });
         let alert = held.and_then(|held| held.alert);
         changed.then(|| alert.map(|alert| alert.event(session_id)))
@@ -2274,6 +2291,39 @@ struct StatusRead {
     /// The record's [`SessionRecord::chat_answers`]. Not compared: a chat
     /// answer moves the status or the pending flag, which are.
     chat_answers: u64,
+    /// The record's background flag. Not compared: the screen's own write of
+    /// it must not read as the record moving; [`moves_status_or_background`]
+    /// reads it to tell another writer's flag from a stamp-only move.
+    background: bool,
+}
+
+/// Whether another writer's move from `before` to `seen` ends the screen's
+/// ownership of the background flag: it touched the status, the flag, the
+/// turn end, the pending prompt or the chat answers, or ended hook driving.
+/// A move of the main hook stamp alone, or a start of hook driving (the first
+/// hook event after a restart), keeps it.
+fn moves_status_or_background(before: Option<StatusRead>, seen: Option<StatusRead>) -> bool {
+    let (Some(before), Some(seen)) = (before, seen) else {
+        return true;
+    };
+    before.status != seen.status
+        || (before.hook_driven && !seen.hook_driven)
+        || before.held != seen.held
+        || before.pending != seen.pending
+        || before.chat_answers != seen.chat_answers
+        || before.background != seen.background
+}
+
+/// The background flag a screen write of `next` over `from` leaves on the
+/// record, with `shown` the frame's background reading
+/// ([`apply_screen_status`]): an `Idle` landing writes the reading or the
+/// held turn end's flag, any other status change clears it.
+fn written_background(from: StatusRead, next: SessionStatus, shown: bool) -> bool {
+    if next == SessionStatus::Idle {
+        shown || from.held.is_some_and(|held| held.background)
+    } else {
+        from.background && from.status == next
+    }
 }
 
 /// The hook raise of a pending prompt a [`StatusRead`] saw.
@@ -2330,6 +2380,7 @@ fn status_read(record: &SessionRecord) -> StatusRead {
             deadline: raise.at + DIALOG_DRAW_DEADLINE,
         }),
         chat_answers: record.chat_answers,
+        background: record.background,
     }
 }
 
@@ -8280,6 +8331,54 @@ mod hysteresis_tests {
         assert!(
             h.background(),
             "a footer-less frame cleared the hooks' background"
+        );
+    }
+
+    /// A main `Notification` `idle_prompt` moves only the main hook stamp:
+    /// the flag the screen set stays its own, so the footer's going clears it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_only_hook_event_keeps_the_screens_background_ownership() {
+        let h = start_record(
+            "stamp-keeps-ownership",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "the footer's shell set no background");
+        h.hook(
+            2,
+            &serde_json::json!({
+                "hook_event_name": "Notification",
+                "notification_type": "idle_prompt",
+            }),
+        );
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(
+            !h.background(),
+            "an idle_prompt took the screen's background from it"
+        );
+    }
+
+    /// The first hook event after a restart flips only `hook_driven` in the
+    /// watcher's read: the flag the screen set stays its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_hook_event_after_a_restart_keeps_the_screens_background_ownership() {
+        let h = start("restart-keeps-ownership", false);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "the footer's shell set no background");
+        h.hook(2, &subagent_tool());
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(
+            !h.background(),
+            "the first hook event took the screen's background from it"
         );
     }
 
