@@ -459,6 +459,10 @@ impl Agent for ClaudePlugin {
         transcripts::subagent_transcript_path(folder, conversation_id, agent_id, rows)
     }
 
+    fn tool_result_text(&self, transcript: &Path, tool_use_id: &str) -> Option<(String, bool)> {
+        chat_entries::tool_result_text(transcript, tool_use_id)
+    }
+
     fn chat_entries(
         &self,
         line: &str,

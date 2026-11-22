@@ -29,8 +29,8 @@ use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
     AgentDescriptor, CatalogEntry, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind,
     ChatScreen, ClientMessage, ComposerState, DaemonMessage, FEATURE_CHAT_CATALOG,
-    FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL,
-    FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
+    FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_CHAT_TOOL_RESULT, FEATURE_FILE_SEARCH,
+    FEATURE_FILE_TAIL, FileMatch, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
@@ -46,6 +46,7 @@ use crate::chat_cards::{
     KeyAction, OnPress, box_placeholder, card_answer_message, key_action, prompt_card,
     restored_box_text, typed_option,
 };
+use crate::chat_full_result::{self, FullResult, FullResults};
 use crate::chat_select::{self, Selection, TextPos, UnitSource, Units};
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
 use crate::completion::{self, CompletionItem, CompletionState, Token};
@@ -634,6 +635,9 @@ pub(crate) struct ChatPanes {
     /// The followed files the Tail boxes under the chats' tool cards and
     /// the follow tabs read, and each box's scroll by session id and path.
     pub(crate) tails: ChatTails,
+    /// The whole tool results the cut tool cards asked their hosts for, by
+    /// session and tool id.
+    pub(crate) full_results: FullResults,
     tail_scrolls: HashMap<(String, String), ScrollHandle>,
     wall: WallClock,
     /// Repaints the running-work strips while one shows, so their ages and
@@ -1032,13 +1036,24 @@ fn handle_measure(
 
 /// The phone chat's selectable texts, in the order it draws them: Compact,
 /// folding only runs of four or more calls.
-fn phone_units(chat: &SessionChat) -> Units {
+fn phone_units(chat: &SessionChat, results: &FullResults, session_id: &str) -> Units {
     let rows = chat::display_rows_folding(chat.log.entries(), ChatMode::Compact, PHONE_MIN_RUN);
+    let result_of = |tool_id: &str| {
+        let Some(ChatEntry::Tool {
+            result: Some(outcome),
+            ..
+        }) = chat.log.get(tool_id)
+        else {
+            return None;
+        };
+        Some(drawn_tool_result(results.get(session_id, tool_id), outcome).to_owned())
+    };
     Units::build(
         &rows,
         |id| chat.docs.get(id).map(|answer| answer.doc.as_ref()),
         |id| chat.log.is_expanded(id),
         |id| chat.log.is_run_open(id),
+        result_of,
     )
 }
 
@@ -1106,6 +1121,7 @@ impl ChatPanes {
             refused_loads: BTreeSet::new(),
             hosts: HashMap::new(),
             tails: ChatTails::default(),
+            full_results: FullResults::default(),
             tail_scrolls: HashMap::new(),
             wall,
             work_strip_timer: None,
@@ -1163,6 +1179,7 @@ impl ChatPanes {
     /// its chat loads again.
     pub(crate) fn reset_connection(&mut self, host: &HostKey, cx: &App) {
         self.tails.reset_host(host);
+        self.full_results.forget_pending_on(host);
         if self
             .phone
             .as_ref()
@@ -1283,8 +1300,17 @@ pub(crate) struct RowLook<'a> {
     /// Whether the session's host follows files, so its tool cards offer
     /// Tail buttons.
     pub(crate) can_tail: bool,
+    /// Whether the pane draws its session's own chat, the only place a cut
+    /// tool card's Show all asks the session's host; a summary pane draws
+    /// the session's rows without it.
+    pub(crate) session_chat: bool,
+    /// Whether the session's host answers for a tool result's whole text, so
+    /// its cut tool cards offer Show all.
+    pub(crate) can_show_all: bool,
     /// The open Tail boxes, and each one's scroll.
     pub(crate) tails: &'a ChatTails,
+    /// The whole tool results fetched so far, by session and tool id.
+    pub(crate) full_results: &'a FullResults,
     pub(crate) tail_scrolls: &'a HashMap<(String, String), ScrollHandle>,
     /// How the chat pane draws tool calls.
     pub(crate) mode: ChatMode,
@@ -1314,6 +1340,9 @@ struct ToolRow<'a> {
     result: Option<&'a ToolOutcome>,
     /// The files it offers a Tail of; none where its card draws no Tail.
     tail_paths: &'a [String],
+    /// Whether the call ran a script, whose result comes from a poll event
+    /// rather than the call's own tool result.
+    script: bool,
 }
 
 impl RootView {
@@ -1419,6 +1448,19 @@ impl RootView {
     #[must_use]
     pub fn chat_tail_following(&self, session_id: &str, path: &str) -> Option<bool> {
         self.chat.tails.get(session_id, path).map(Tail::following)
+    }
+
+    /// The text tool card `tool_id` of session `session_id`'s chat draws for
+    /// its result: the whole text once the host answered the card's Show
+    /// all, else the entry's own, cut; none while the tool has no result.
+    #[must_use]
+    pub fn chat_tool_result_text(&self, session_id: &str, tool_id: &str) -> Option<String> {
+        let outcome = match self.chat.sessions.get(session_id)?.log.get(tool_id) {
+            Some(ChatEntry::Tool { result, .. }) => result.as_ref()?,
+            _ => return None,
+        };
+        let full = self.chat.full_results.get(session_id, tool_id);
+        Some(drawn_tool_result(full, outcome).to_owned())
     }
 
     /// How far, in pixels, chat pane `pane_id`'s rows are scrolled from
@@ -1904,7 +1946,11 @@ impl RootView {
             .hit_inside(point, self.phone_viewport());
         let word = self.chat.sessions.get(session_id).and_then(|chat| {
             let (entry, unit, byte) = hit?;
-            phone_units(chat).word_around(&TextPos { entry, unit, byte })
+            phone_units(chat, &self.chat.full_results, session_id).word_around(&TextPos {
+                entry,
+                unit,
+                byte,
+            })
         });
         let Some(chat) = self.chat.sessions.get_mut(session_id) else {
             return false;
@@ -1947,7 +1993,8 @@ impl RootView {
             return;
         };
         let focus = TextPos { entry, unit, byte };
-        let widened = chat_select::widen(&phone_units(chat), word, focus);
+        let units = phone_units(chat, &self.chat.full_results, session_id);
+        let widened = chat_select::widen(&units, word, focus);
         if widened.is_some() && widened != chat.selection {
             chat.selection = widened;
             cx.notify();
@@ -1974,7 +2021,7 @@ impl RootView {
         let Some(chat) = self.chat.sessions.get_mut(session_id) else {
             return;
         };
-        let units = phone_units(chat);
+        let units = phone_units(chat, &self.chat.full_results, session_id);
         let ordered = chat
             .selection
             .as_ref()
@@ -2168,7 +2215,7 @@ impl RootView {
     /// in its texts.
     fn phone_selection_resolves(&self, session_id: &str) -> bool {
         self.chat.sessions.get(session_id).is_some_and(|chat| {
-            let units = phone_units(chat);
+            let units = phone_units(chat, &self.chat.full_results, session_id);
             chat.selection
                 .as_ref()
                 .and_then(|selection| clamped(&units, selection))
@@ -2268,7 +2315,7 @@ impl RootView {
         let Some(chat) = self.chat.sessions.get(session_id) else {
             return String::new();
         };
-        let units = phone_units(chat);
+        let units = phone_units(chat, &self.chat.full_results, session_id);
         chat.selection
             .as_ref()
             .and_then(|selection| clamped(&units, selection))
@@ -2380,8 +2427,9 @@ impl RootView {
     }
 
     /// A message no earlier fold took: a chat message updates its chat, a
-    /// summary message its summary, a file's tail its Tail box, a removed
-    /// session closes its Tail boxes, and anything else goes to the agents'
+    /// summary message its summary, a file's tail its Tail box, a whole tool
+    /// result its card's Show all, a removed session closes its Tail boxes
+    /// and forgets its whole results, and anything else goes to the agents'
     /// fold.
     pub(crate) fn fold_chat_or_agents(
         &mut self,
@@ -2428,13 +2476,42 @@ impl RootView {
                 entries,
                 request_id,
             } => self.on_catalog(&session_id, entries, request_id.as_deref(), cx),
+            DaemonMessage::ToolResult {
+                session_id,
+                tool_id,
+                text,
+                request_id,
+                ..
+            } => self.on_tool_result(&session_id, &tool_id, text, request_id.as_deref(), cx),
             DaemonMessage::SessionRemoved { session_id } => {
                 let untails = self.chat.tails.close_session(&session_id);
+                self.chat.full_results.forget_session(&session_id);
                 self.send_untails(untails);
                 self.chat.tails.session_ended(&session_id);
                 self.fold_agents(host, DaemonMessage::SessionRemoved { session_id }, cx);
             }
             other => self.fold_agents(host, other, cx),
+        }
+    }
+
+    /// The daemon's answer to tool call `tool_id`'s Show all in session
+    /// `session_id`: the whole result's `text`, or `None` when the
+    /// transcript holds none, taken while it is the answer the card waits
+    /// for. The card draws again once it was taken.
+    fn on_tool_result(
+        &mut self,
+        session_id: &str,
+        tool_id: &str,
+        text: Option<String>,
+        request_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chat
+            .full_results
+            .apply(session_id, tool_id, request_id, text)
+        {
+            cx.notify();
         }
     }
 
@@ -3798,6 +3875,25 @@ impl RootView {
         }
     }
 
+    /// A press on a cut tool card's Show all in session `session_id`'s chat:
+    /// asks the session's host for tool call `tool_id`'s whole result, once
+    /// the card holds none and no request for it is awaited.
+    fn show_full_tool_result(&mut self, session_id: &str, tool_id: &str, cx: &mut Context<Self>) {
+        let host = self.chat.host_of(session_id);
+        let Some(request_id) = self.chat.full_results.request(session_id, tool_id, &host) else {
+            return;
+        };
+        self.send_to(
+            &host,
+            ClientMessage::GetToolResult {
+                session_id: session_id.to_owned(),
+                tool_id: tool_id.to_owned(),
+                request_id: Some(request_id),
+            },
+        );
+        cx.notify();
+    }
+
     /// How chat panes draw tool calls.
     #[must_use]
     pub fn chat_mode(&self) -> ChatMode {
@@ -4028,6 +4124,7 @@ impl RootView {
         let chat = self.chat.sessions.get(session_id);
         let cap = self.sidebar.chat_max_width();
         let look = RowLook {
+            session_chat: true,
             max_width: (cap > 0).then(|| u16::try_from(cap).map_or(f32::from(u16::MAX), f32::from)),
             finals: chat
                 .map(|chat| chat::final_replies(chat.log.entries()))
@@ -4119,6 +4216,7 @@ impl RootView {
         let select = self.phone_select_draw(session_id, cx);
         let ends = select.as_ref().and_then(|select| select.ends.clone());
         let look = RowLook {
+            session_chat: true,
             mode: ChatMode::Compact,
             max_width: None,
             finals: BTreeSet::new(),
@@ -4249,7 +4347,7 @@ impl RootView {
     fn phone_select_draw(&self, session_id: &str, cx: &App) -> Option<SelectDraw> {
         self.chat.phone_text.borrow_mut().forget();
         let chat = self.chat.sessions.get(session_id)?;
-        let units = phone_units(chat);
+        let units = phone_units(chat, &self.chat.full_results, session_id);
         let ends = chat
             .selection
             .as_ref()
@@ -4316,7 +4414,12 @@ impl RootView {
             can_tail: self
                 .conn_of(&self.chat.host_of(session_id))
                 .is_some_and(|conn| conn.supports(FEATURE_FILE_TAIL)),
+            session_chat: false,
+            can_show_all: self
+                .conn_of(&self.chat.host_of(session_id))
+                .is_some_and(|conn| conn.supports(FEATURE_CHAT_TOOL_RESULT)),
             tails: &self.chat.tails,
+            full_results: &self.chat.full_results,
             tail_scrolls: &self.chat.tail_scrolls,
             mode: self.sidebar.chat_mode(),
             max_width: None,
@@ -5230,6 +5333,7 @@ pub(crate) fn chat_row(
             input,
             result,
             tail_paths,
+            script,
             ..
         } => {
             let tool = ToolRow {
@@ -5239,6 +5343,7 @@ pub(crate) fn chat_row(
                 input,
                 result: result.as_ref(),
                 tail_paths: if prefix == CHAT_ROW { tail_paths } else { &[] },
+                script: script.is_some(),
             };
             tool_card(look, &tool, chat.log.is_expanded(id), cx)
         }
@@ -5439,15 +5544,18 @@ fn tool_card(
                 tool.input,
                 (tool.id, UnitSource::ToolInput),
             ))
-            .children(tool.result.map(|outcome| {
+            .when_some(tool.result, |card, outcome| {
                 let label = if outcome.is_error { "Error" } else { "Result" };
-                tool_detail(
+                let text =
+                    drawn_tool_result(look.full_results.get(look.session_id, tool.id), outcome);
+                card.child(tool_detail(
                     look,
                     label,
-                    &outcome.text,
+                    text,
                     (tool.id, UnitSource::ToolResult),
-                )
-            }))
+                ))
+                .children(show_all_control(look, tool, outcome, cx))
+            })
         });
     let boxes: Vec<AnyElement> = tool
         .tail_paths
@@ -5476,6 +5584,89 @@ fn tool_card(
         .gap(px(4.0))
         .child(card)
         .children(boxes)
+}
+
+/// What a cut tool result's card says when the transcript holds no whole
+/// text for it.
+const MISSING_RESULT: &str = "The rest is not in the transcript";
+
+/// The text a tool card draws for `outcome`'s result: `full`'s whole text
+/// once it arrived, else the entry's own, cut.
+fn drawn_tool_result<'a>(full: Option<&'a FullResult>, outcome: &'a ToolOutcome) -> &'a str {
+    match full {
+        Some(FullResult::Ready { text }) => text,
+        _ => &outcome.text,
+    }
+}
+
+/// The Show all a cut tool result offers on a host that answers for whole
+/// results: a press asks for the rest, the button reading "Loading…" while
+/// the answer is awaited, and a result the transcript does not hold says
+/// [`MISSING_RESULT`] instead. A result whose whole text is here offers
+/// nothing more.
+fn show_all_control(
+    look: &RowLook<'_>,
+    tool: &ToolRow<'_>,
+    outcome: &ToolOutcome,
+    cx: &mut Context<RootView>,
+) -> Option<AnyElement> {
+    if !look.session_chat
+        || !look.can_show_all
+        || tool.script
+        || !chat_full_result::is_cut(&outcome.text)
+    {
+        return None;
+    }
+    match look.full_results.get(look.session_id, tool.id) {
+        Some(FullResult::Ready { .. }) => None,
+        Some(FullResult::Missing) => Some(missing_result_line(look, tool.id)),
+        Some(FullResult::Pending { .. }) => Some(show_all_button(look, tool.id, false, cx)),
+        None => Some(show_all_button(look, tool.id, true, cx)),
+    }
+}
+
+/// A tool card's Show all button, tagged `chat-show-all-<id>`: a press asks
+/// the session's host for the whole result without opening or closing the
+/// card; `enabled` false draws it loading and takes no press.
+fn show_all_button(
+    look: &RowLook<'_>,
+    tool_id: &str,
+    enabled: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let shift = fonts::ui_weight_shift(cx);
+    let selector = format!("chat-show-all-{tool_id}");
+    let (session_id, tool_id) = (look.session_id.to_owned(), tool_id.to_owned());
+    let button = outlined_button(
+        look.text_offset,
+        shift,
+        &selector,
+        ButtonSize::Compact,
+        enabled,
+        Layer::Base,
+        &look.theme,
+    )
+    .child(if enabled { "Show all" } else { "Loading…" });
+    let button = if enabled {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.show_full_tool_result(&session_id, &tool_id, cx);
+        }))
+    } else {
+        button
+    };
+    button.into_any_element()
+}
+
+/// The muted line a cut tool result's card draws instead of Show all when
+/// the transcript holds no whole text (tagged `chat-show-all-missing-<id>`).
+fn missing_result_line(look: &RowLook<'_>, tool_id: &str) -> AnyElement {
+    let id = format!("chat-show-all-missing-{tool_id}");
+    div()
+        .driver_id(move || id.clone())
+        .text_color(gpui::rgb(look.theme.muted))
+        .child(MISSING_RESULT)
+        .into_any_element()
 }
 
 /// A tool card's header line: the tool's name, its one-liner and its status

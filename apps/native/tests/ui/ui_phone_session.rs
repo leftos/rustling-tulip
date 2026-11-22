@@ -17,9 +17,9 @@ use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
     CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ChatEntry, ChatOption,
     ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
-    FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH,
-    FEATURE_FILE_TAIL, FEATURE_UPLOAD_FILE, FileMatch, ScriptFacts, SessionSnapshot, ToolKind,
-    ToolOutcome, WorkShell,
+    FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT, FEATURE_CHAT_DRAFT, FEATURE_CHAT_TOOL_RESULT,
+    FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FEATURE_UPLOAD_FILE, FileMatch, ScriptFacts,
+    SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::{self, RowShape};
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
@@ -4598,4 +4598,151 @@ fn a_session_without_a_context_figure_draws_no_label(cx: &mut TestAppContext) {
 
     assert!(drawn(&mut h, "phone-session-status"));
     assert!(!drawn(&mut h, "phone-session-context"));
+}
+
+const SHOW_ALL_PHONE: &str = "chat-show-all-t1";
+
+/// A finished `Read` call `id` whose result the agent cut at its cap.
+fn cut_tool(id: &str) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "Read".to_owned(),
+        summary: "apps/native/src/chat.rs".to_owned(),
+        input: "{\"file_path\": \"apps/native/src/chat.rs\"}".to_owned(),
+        result: Some(ToolOutcome {
+            text: "kept line\n\u{2026} 40 more lines".to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind: ToolKind::Other,
+        script: None,
+    }
+}
+
+/// Session `a`'s page over a daemon that answers for whole tool results,
+/// its chat's load answered with `entries`, on a phone's screen.
+fn chat_loaded_offering_the_rest<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(&[FEATURE_CHAT_TOOL_RESULT]);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.send(DaemonMessage::Sessions { sessions: listed() });
+    h.click_on(&row("a"));
+    let sent = h.host(&saved_remote()).sent();
+    let request = loads_of(&sent, "a")
+        .pop()
+        .expect("opening the page loads its chat");
+    h.host(&saved_remote())
+        .send(chat_reply("a", request, entries));
+    h.cx.simulate_resize(gpui::size(px(390.0), px(874.0)));
+    h.cx.run_until_parked();
+    h
+}
+
+/// The first point, from the chat's bottom up, that it maps to a byte in
+/// `bytes` of entry `entry`'s unit `unit`.
+fn on_unit_bytes(
+    h: &mut Harness<'_>,
+    row: &str,
+    entry: &str,
+    unit: u32,
+    bytes: std::ops::Range<usize>,
+) -> Point<Pixels> {
+    let bounds = h.bounds(row);
+    let mut found = None;
+    let mut y = bounds.bottom();
+    while found.is_none() && y > bounds.top() {
+        let mut x = bounds.left();
+        while x < bounds.right() {
+            if let Some((hit_entry, hit_unit, byte)) = hit(h, point(x, y))
+                && hit_entry == entry
+                && hit_unit == unit
+                && bytes.contains(&byte)
+            {
+                found = Some(point(x, y));
+                break;
+            }
+            x += px(2.0);
+        }
+        y -= px(2.0);
+    }
+    found.expect("the row draws those bytes")
+}
+
+/// Session `a`'s page holding tool card `t1` open, its cut result shown
+/// whole as `whole` once Show all is pressed and answered.
+fn whole_result_shown<'a>(cx: &'a mut TestAppContext, dir: &TestDir, whole: &str) -> Harness<'a> {
+    let mut h = chat_loaded_offering_the_rest(cx, dir, vec![user("u1"), cut_tool("t1")]);
+    h.tap_on("chat-tool-done-phone-t1");
+    assert!(drawn(&mut h, SHOW_ALL_PHONE), "the card offers the rest");
+    h.tap_on(SHOW_ALL_PHONE);
+    let sent = h.host(&saved_remote()).sent();
+    let requests: Vec<Option<String>> = sent
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetToolResult {
+                tool_id,
+                request_id,
+                ..
+            } if tool_id == "t1" => Some(request_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 1, "one GetToolResult: {requests:?}");
+    h.host(&saved_remote()).send(DaemonMessage::ToolResult {
+        session_id: "a".to_owned(),
+        tool_id: "t1".to_owned(),
+        text: Some(whole.to_owned()),
+        truncated: false,
+        request_id: requests.into_iter().flatten().next(),
+    });
+    h.cx.run_until_parked();
+    h
+}
+
+/// The whole text of a cut tool result: its last line is past the cut.
+const WHOLE_TOOL_RESULT: &str = "kept line\nsecond line\nclosing words";
+
+#[gpui::test]
+fn a_long_press_past_the_cut_selects_in_the_whole_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = whole_result_shown(cx, &dir, WHOLE_TOOL_RESULT);
+    let at = on_unit_bytes(&mut h, "chat-row-phone-t1", "t1", 2, 23..29);
+
+    // A hold that moves keeps the card's own press from closing it.
+    h.long_press_drag(at, point(at.x + px(2.0), at.y));
+
+    assert_eq!(
+        selected_text(&mut h),
+        "closing",
+        "the word past the cut is one the card draws"
+    );
+}
+
+#[gpui::test]
+fn copy_after_show_all_copies_the_whole_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = whole_result_shown(cx, &dir, WHOLE_TOOL_RESULT);
+    let end = WHOLE_TOOL_RESULT.len();
+
+    select(&mut h, "a", pos("t1", 2, 0), pos("t1", 2, end));
+
+    assert_eq!(selected_text(&mut h), WHOLE_TOOL_RESULT);
+    assert_eq!(
+        painted_selection(&mut h),
+        vec![("t1".to_owned(), 2, 0..end)],
+        "the whole text is drawn selected"
+    );
 }

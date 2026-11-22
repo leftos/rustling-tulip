@@ -9,6 +9,10 @@ use agent_api::{ModelSwitch, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
 use serde_json::{Map, Value};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use tracing::debug;
 
 use crate::records;
 use crate::scripts::{self, Origin, ReplEvent, ScriptBook, Tie};
@@ -657,6 +661,80 @@ fn answer_text(answer: &Value) -> String {
     }
 }
 
+/// The text of the result of tool call `tool_use_id` in the transcript at
+/// `path`, as the chat shows a tool result before its cut, and whether the
+/// cut at [`protocol::TOOL_RESULT_FULL_CAP`] left any of it out; the last
+/// matching block wins. `None` for a missing or unreadable file, for an id
+/// the file holds no result for, and for a background script's dispatch
+/// receipt, which carries no result of its own.
+pub(crate) fn tool_result_text(path: &Path, tool_use_id: &str) -> Option<(String, bool)> {
+    let text = read_transcript(path, tool_use_id)?;
+    if scripts::dispatched_eval(&text).is_some() {
+        return None;
+    }
+    let truncated = text.len() > protocol::TOOL_RESULT_FULL_CAP;
+    Some((cap_output(&text, protocol::TOOL_RESULT_FULL_CAP), truncated))
+}
+
+/// The uncut text of `tool_use_id`'s last result in the transcript at `path`,
+/// a line that names another id or is not a record skipped, and a line that
+/// is not valid UTF-8 read with its invalid bytes replaced. `None` for a
+/// missing or unreadable file, and for an id the file holds no result for.
+fn read_transcript(path: &Path, tool_use_id: &str) -> Option<String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            debug!(
+                error = %err,
+                path = %path.display(),
+                "tool result: the transcript does not open"
+            );
+            return None;
+        }
+    };
+    let mut found = None;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) => {
+                debug!(
+                    error = %err,
+                    path = %path.display(),
+                    "tool result: the transcript stops reading"
+                );
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&line);
+        if !text.contains(tool_use_id) {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if let Some(block) = result_block(&record, tool_use_id) {
+            found = block.get("content").and_then(content_text);
+        }
+    }
+    found
+}
+
+/// The last of `record`'s message blocks that is `tool_use_id`'s tool result.
+fn result_block<'a>(record: &'a Value, tool_use_id: &str) -> Option<&'a Value> {
+    record
+        .pointer("/message/content")
+        .and_then(Value::as_array)?
+        .iter()
+        .rfind(|block| {
+            str_at(block, "type") == Some("tool_result")
+                && str_at(block, "tool_use_id") == Some(tool_use_id)
+        })
+}
+
 /// A content value's text: the string itself, or its text blocks joined by
 /// newlines. Anything else has none.
 fn content_text(content: &Value) -> Option<String> {
@@ -1124,16 +1202,188 @@ pub(crate) fn cap_chars(text: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect and fail on an unexpected value"
+)]
 mod tests {
     use super::{
         CUT_MARKER, Known, TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, cap_output, line_facts,
-        split_at_limit, tool_kind,
+        split_at_limit, tool_kind, tool_result_text,
     };
     use crate::scripts::ScriptBook;
     use agent_api::{ModelSwitch, TranscriptLineFacts};
     use chrono::{TimeDelta, TimeZone as _, Utc};
-    use protocol::{ChatEntry, ScriptFacts, ToolKind, ToolOutcome};
+    use protocol::{ChatEntry, ScriptFacts, TOOL_RESULT_FULL_CAP, ToolKind, ToolOutcome};
     use serde_json::{Value, json};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    /// RAII scratch folder under the OS temp root. Drop removes the tree.
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rt-chat-entries-{label}-{}",
+                Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        /// Write `body` to `name` under the scratch root and answer its path.
+        fn transcript(&self, name: &str, body: &str) -> PathBuf {
+            let path = self.path.join(name);
+            std::fs::write(&path, body).expect("write the transcript");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A transcript body calling tool `tool_id` and answering it with `text`.
+    fn transcript_with_result(tool_id: &str, text: &str) -> String {
+        let call = json!({
+            "type": "assistant", "uuid": uid("61"),
+            "timestamp": "2026-09-27T10:00:01.500Z",
+            "message": {"id": "msg-1", "role": "assistant", "type": "message",
+                "content": [{"type": "tool_use", "id": tool_id, "name": "Bash",
+                    "input": {"command": "ls"}}]},
+        });
+        let result = json!({
+            "type": "user", "uuid": uid("62"),
+            "timestamp": "2026-09-27T10:00:02.500Z",
+            "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]},
+        });
+        format!("{call}\n{result}\n")
+    }
+
+    #[test]
+    fn tool_result_text_returns_the_whole_result_by_tool_use_id() {
+        let full: String = (0..200)
+            .map(|n| format!("line {n}: {}", "x".repeat(64)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full.len() > 9_000);
+        let body = transcript_with_result("toolu_full", &full);
+        let scratch = Scratch::new("full-result");
+        let path = scratch.transcript("session.jsonl", &body);
+
+        let (_, chat) = replay(&body);
+        let cut = chat
+            .iter()
+            .find_map(|entry| match entry {
+                ChatEntry::Tool {
+                    id,
+                    result: Some(ToolOutcome { text, .. }),
+                    ..
+                } if id == "toolu_full" => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the chat holds the tool's cut result");
+        assert!(cut.len() > TOOL_RESULT_CAP, "{cut:?}");
+        assert!(cut.len() < TOOL_RESULT_CAP + 100, "{cut:?}");
+        assert!(cut.ends_with(" more lines"), "{cut:?}");
+
+        assert_eq!(
+            tool_result_text(&path, "toolu_full"),
+            Some((full, false)),
+            "the whole result comes back uncut"
+        );
+    }
+
+    #[test]
+    fn tool_result_text_reads_a_result_given_as_text_blocks() {
+        let record = json!({
+            "type": "user", "uuid": uid("63"),
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_blocks",
+                    "content": [{"type": "text", "text": "first"},
+                        {"type": "text", "text": "second"}]}]},
+        });
+        let scratch = Scratch::new("blocks");
+        let path = scratch.transcript("blocks.jsonl", &format!("{record}\n"));
+        assert_eq!(
+            tool_result_text(&path, "toolu_blocks"),
+            Some(("first\nsecond".to_owned(), false))
+        );
+    }
+
+    #[test]
+    fn tool_result_text_is_none_for_an_unknown_id() {
+        let scratch = Scratch::new("unknown-id");
+        let path = scratch.transcript(
+            "session.jsonl",
+            &transcript_with_result("toolu_known", "the result"),
+        );
+        assert_eq!(tool_result_text(&path, "toolu_other"), None);
+    }
+
+    #[test]
+    fn tool_result_text_is_none_for_a_missing_file() {
+        let scratch = Scratch::new("missing");
+        let path = scratch.path.join("gone.jsonl");
+        assert_eq!(tool_result_text(&path, "toolu_any"), None);
+    }
+
+    #[test]
+    fn tool_result_text_skips_a_torn_line() {
+        let body = format!(
+            "{{\"type\": \"user\", \"uuid\": \"torn\n{}not a record\n",
+            transcript_with_result("toolu_torn", "the result")
+        );
+        let scratch = Scratch::new("torn");
+        let path = scratch.transcript("torn.jsonl", &body);
+        assert_eq!(
+            tool_result_text(&path, "toolu_torn"),
+            Some(("the result".to_owned(), false))
+        );
+    }
+
+    #[test]
+    fn tool_result_text_is_none_for_a_script_receipt() {
+        let scratch = Scratch::new("receipt");
+        let path = scratch.transcript(
+            "receipt.jsonl",
+            &transcript_with_result("toolu_receipt", "(dispatched #7)"),
+        );
+        assert_eq!(tool_result_text(&path, "toolu_receipt"), None);
+    }
+
+    #[test]
+    fn tool_result_text_reads_past_a_line_that_is_not_utf8() {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"{\"type\": \"user\", \"uuid\": \"bad\", \"text\": \"\xff\xfe\"}\n",
+        );
+        body.extend_from_slice(transcript_with_result("toolu_utf8", "the result").as_bytes());
+        let scratch = Scratch::new("utf8");
+        let path = scratch.path.join("utf8.jsonl");
+        std::fs::write(&path, &body).expect("write the transcript");
+        assert_eq!(
+            tool_result_text(&path, "toolu_utf8"),
+            Some(("the result".to_owned(), false))
+        );
+    }
+
+    #[test]
+    fn a_tool_result_past_the_full_cap_is_cut_with_its_marker() {
+        let full = "y".repeat(TOOL_RESULT_FULL_CAP + 10);
+        let scratch = Scratch::new("full-cap");
+        let path = scratch.transcript("huge.jsonl", &transcript_with_result("toolu_huge", &full));
+        let (text, truncated) = tool_result_text(&path, "toolu_huge").expect("the result");
+        assert!(truncated);
+        assert!(text.len() < TOOL_RESULT_FULL_CAP + 64, "{}", text.len());
+        assert!(text.ends_with(" 10 more characters"), "{text:?}");
+    }
 
     #[test]
     fn a_typed_prompt_carries_its_prompt_id() {

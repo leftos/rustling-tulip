@@ -86,18 +86,24 @@ impl Units {
     /// files; a closed run lists only its scripts (as standing ones), an open
     /// run each of its cards' texts as a single row's; empty texts left out
     /// except an answer's empty code line, which a copy keeps. `doc_of` and `is_open` take an entry id, `is_run_open`
-    /// a run's first entry id.
+    /// a run's first entry id, and `result_of` a tool id, answering the text
+    /// that card draws for its result.
     pub(crate) fn build<'a>(
         rows: &[DisplayRow<'a>],
         doc_of: impl Fn(&str) -> Option<&'a MdDoc>,
         is_open: impl Fn(&str) -> bool,
         is_run_open: impl Fn(&str) -> bool,
+        result_of: impl Fn(&str) -> Option<String>,
     ) -> Units {
         let mut units = Vec::new();
         for row in rows {
             match row {
-                DisplayRow::Single(entry) => push_entry(&mut units, entry, &doc_of, &is_open),
-                DisplayRow::Script(script) => push_script(&mut units, script, &doc_of, &is_open),
+                DisplayRow::Single(entry) => {
+                    push_entry(&mut units, entry, &doc_of, &is_open, &result_of);
+                }
+                DisplayRow::Script(script) => {
+                    push_script(&mut units, script, &doc_of, &is_open, &result_of);
+                }
                 DisplayRow::Run { entries, .. } => {
                     let open = entries
                         .first()
@@ -106,11 +112,11 @@ impl Units {
                     for item in entries {
                         match item {
                             RunItem::Entry(entry) if open => {
-                                push_entry(&mut units, entry, &doc_of, &is_open);
+                                push_entry(&mut units, entry, &doc_of, &is_open, &result_of);
                             }
                             RunItem::Entry(_) => {}
                             RunItem::Script(script) => {
-                                push_script(&mut units, script, &doc_of, &is_open);
+                                push_script(&mut units, script, &doc_of, &is_open, &result_of);
                             }
                         }
                     }
@@ -298,6 +304,7 @@ fn push_script<'a>(
     script: &ScriptRow<'_>,
     doc_of: &impl Fn(&str) -> Option<&'a MdDoc>,
     is_open: &impl Fn(&str) -> bool,
+    result_of: &impl Fn(&str) -> Option<String>,
 ) {
     let open = chat::entry_id(script.call).is_some_and(is_open);
     let cards = open
@@ -305,7 +312,7 @@ fn push_script<'a>(
         .into_iter()
         .chain(script.shown_inner(open));
     for entry in cards {
-        push_entry(units, entry, doc_of, is_open);
+        push_entry(units, entry, doc_of, is_open, result_of);
     }
 }
 
@@ -316,11 +323,12 @@ fn push_entry<'a>(
     entry: &ChatEntry,
     doc_of: &impl Fn(&str) -> Option<&'a MdDoc>,
     is_open: &impl Fn(&str) -> bool,
+    result_of: &impl Fn(&str) -> Option<String>,
 ) {
     let Some(id) = chat::entry_id(entry) else {
         return;
     };
-    let parts = entry_parts(entry, id, doc_of, is_open);
+    let parts = entry_parts(entry, id, doc_of, is_open, result_of);
     for (index, (source, text)) in parts
         .into_iter()
         .filter(|(source, text)| !text.is_empty() || matches!(source, UnitSource::AnswerRow { .. }))
@@ -342,6 +350,7 @@ fn entry_parts<'a>(
     id: &str,
     doc_of: &impl Fn(&str) -> Option<&'a MdDoc>,
     is_open: &impl Fn(&str) -> bool,
+    result_of: &impl Fn(&str) -> Option<String>,
 ) -> Vec<(UnitSource, String)> {
     match entry {
         ChatEntry::User { text, .. } => vec![(UnitSource::User, text.clone())],
@@ -378,7 +387,8 @@ fn entry_parts<'a>(
                 );
                 parts.push((UnitSource::ToolInput, input.clone()));
                 if let Some(outcome) = result {
-                    parts.push((UnitSource::ToolResult, outcome.text.clone()));
+                    let text = result_of(id).unwrap_or_else(|| outcome.text.clone());
+                    parts.push((UnitSource::ToolResult, text));
                 }
             }
             parts
@@ -699,7 +709,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false, |_| None);
         let expected = vec![
             (
                 "u1".to_owned(),
@@ -758,7 +768,7 @@ mod tests {
         let input = r#"{"command":"echo hi\nls -la"}"#;
         let entries = [tool("t1", "Bash", "run two commands", input, Some("done"))];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| true, |_| false);
+        let units = Units::build(&rows, |_| None, |_| true, |_| false, |_| None);
         let expected = vec![
             (
                 "t1".to_owned(),
@@ -824,7 +834,7 @@ mod tests {
             DisplayRow::Single(&entries[5]),
             DisplayRow::Single(&entries[6]),
         ];
-        let units = Units::build(&rows, |_| None, |_| true, |_| false);
+        let units = Units::build(&rows, |_| None, |_| true, |_| false, |_| None);
         assert!(units.units.is_empty(), "{:?}", units.units);
     }
 
@@ -832,7 +842,7 @@ mod tests {
     fn ordered_swaps_a_focus_before_its_anchor() {
         let entries = [user("u1", "one"), user("u2", "two")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         let selection = Selection {
             anchor: pos("u2", 0, 2),
             focus: pos("u1", 0, 1),
@@ -850,7 +860,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false, |_| None);
         let selection = Selection {
             anchor: pos("u1", 0, 6),
             focus: pos("a1", 4, 1),
@@ -868,7 +878,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false, |_| None);
         let selection = Selection {
             anchor: pos("a1", 0, 0),
             focus: pos("a1", 1, 3),
@@ -883,7 +893,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false, |_| None);
         let blank = pos("a1", 1, 0);
         assert!(units.units[1].text.is_empty(), "the blank line is a unit");
         assert_eq!(units.clamp(&blank), Some(blank));
@@ -906,7 +916,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| false, |_| false, |_| None);
         assert_eq!(units.clamp(&pos("u1", 0, 40)), Some(pos("u1", 0, 10)));
         assert_eq!(units.clamp(&pos("a1", 9, 0)), Some(pos("a1", 1, 3)));
         assert_eq!(units.clamp(&pos("zz", 0, 0)), None);
@@ -917,7 +927,7 @@ mod tests {
     fn an_empty_or_dangling_selection_copies_nothing() {
         let entries = [user("u1", "hello")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         let empty = Selection {
             anchor: pos("u1", 0, 2),
             focus: pos("u1", 0, 2),
@@ -938,7 +948,7 @@ mod tests {
             user("u3", "café x"),
         ];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         let across = (pos("u1", 0, 2), pos("u3", 0, 4));
         assert_eq!(units.selected_range(&across, "u1", 0), Some(2..5));
         assert_eq!(units.selected_range(&across, "u2", 0), Some(0..6));
@@ -969,7 +979,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false, |_| None);
         assert_eq!(units.index_of_source("u1", UnitSource::User), Some(0));
         let cell = UnitSource::AnswerRow { row: 1, part: 1 };
         assert_eq!(units.index_of_source("a1", cell), Some(2));
@@ -995,7 +1005,7 @@ mod tests {
             entries: vec![RunItem::Entry(&entries[0]), RunItem::Entry(&entries[1])],
             summary: RunSummary::default(),
         }];
-        let units = Units::build(&rows, |_| None, |_| false, |id| id == "t1");
+        let units = Units::build(&rows, |_| None, |_| false, |id| id == "t1", |_| None);
         let expected = vec![
             (
                 "t1".to_owned(),
@@ -1011,7 +1021,7 @@ mod tests {
             ),
         ];
         assert_eq!(shape(&units), expected);
-        let folded = Units::build(&rows, |_| None, |_| false, |_| false);
+        let folded = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         assert!(folded.units.is_empty(), "{:?}", folded.units);
     }
 
@@ -1021,7 +1031,13 @@ mod tests {
             tool("s1", "REPL", "run a script", "{}", Some("done")),
             tool("r1", "Read", "read a", "", Some("text")),
         ];
-        let before = Units::build(&single_rows(&entries), |_| None, |_| true, |_| false);
+        let before = Units::build(
+            &single_rows(&entries),
+            |_| None,
+            |_| true,
+            |_| false,
+            |_| None,
+        );
         assert_ne!(before.units, Vec::new());
         let script = ScriptRow {
             call: &entries[0],
@@ -1029,13 +1045,13 @@ mod tests {
             running: false,
         };
         let standing = vec![DisplayRow::Script(script.clone())];
-        let units = Units::build(&standing, |_| None, |_| true, |_| false);
+        let units = Units::build(&standing, |_| None, |_| true, |_| false, |_| None);
         assert_eq!(
             shape(&units),
             shape(&before),
             "an open script standing alone"
         );
-        let closed = Units::build(&standing, |_| None, |id| id != "s1", |_| false);
+        let closed = Units::build(&standing, |_| None, |id| id != "s1", |_| false, |_| None);
         assert!(
             closed.units.is_empty(),
             "a closed script: {:?}",
@@ -1045,15 +1061,15 @@ mod tests {
             entries: vec![RunItem::Script(script)],
             summary: RunSummary::default(),
         }];
-        let open = Units::build(&in_run, |_| None, |_| true, |id| id == "s1");
+        let open = Units::build(&in_run, |_| None, |_| true, |id| id == "s1", |_| None);
         assert_eq!(shape(&open), shape(&before), "a script in an open run");
-        let closed_run = Units::build(&in_run, |_| None, |_| true, |_| false);
+        let closed_run = Units::build(&in_run, |_| None, |_| true, |_| false, |_| None);
         assert_eq!(
             shape(&closed_run),
             shape(&before),
             "an open script under a closed run's line"
         );
-        let closed = Units::build(&in_run, |_| None, |id| id != "s1", |_| false);
+        let closed = Units::build(&in_run, |_| None, |id| id != "s1", |_| false, |_| None);
         assert!(closed.units.is_empty(), "{:?}", closed.units);
     }
 
@@ -1067,7 +1083,13 @@ mod tests {
         if let ChatEntry::Tool { tail_paths, .. } = &mut entries[2] {
             tail_paths.push("build.log".to_owned());
         }
-        let tailing = Units::build(&single_rows(&entries[2..]), |_| None, |_| false, |_| false);
+        let tailing = Units::build(
+            &single_rows(&entries[2..]),
+            |_| None,
+            |_| false,
+            |_| false,
+            |_| None,
+        );
         assert_ne!(tailing.units, Vec::new());
         let in_run = vec![DisplayRow::Run {
             entries: vec![RunItem::Script(ScriptRow {
@@ -1077,7 +1099,7 @@ mod tests {
             })],
             summary: RunSummary::default(),
         }];
-        let units = Units::build(&in_run, |_| None, |_| false, |_| false);
+        let units = Units::build(&in_run, |_| None, |_| false, |_| false, |_| None);
         assert_eq!(shape(&units), shape(&tailing));
     }
 
@@ -1093,7 +1115,7 @@ mod tests {
         let rows = single_rows(&entries);
         let mut docs = HashMap::new();
         docs.insert("a1".to_owned(), doc(answer_text));
-        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false);
+        let units = Units::build(&rows, |id| docs.get(id), |_| true, |_| false, |_| None);
         assert!(units.units.len() > 10, "{:?}", units.units);
         for unit in &units.units {
             let linear = units
@@ -1115,7 +1137,7 @@ mod tests {
     fn word_around_picks_the_word_under_the_byte() {
         let entries = [user("u1", "alpha bravo, charlie")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         assert_eq!(
             units.word_around(&pos("u1", 0, 8)),
             Some((pos("u1", 0, 6), pos("u1", 0, 11)))
@@ -1131,7 +1153,7 @@ mod tests {
     fn word_around_white_space_the_end_or_no_unit_is_none() {
         let entries = [user("u1", "alpha  bravo")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         assert_eq!(units.word_around(&pos("u1", 0, 5)), None, "a space");
         assert_eq!(units.word_around(&pos("u1", 0, 12)), None, "the end");
         assert_eq!(units.word_around(&pos("u1", 1, 0)), None, "no unit");
@@ -1143,7 +1165,7 @@ mod tests {
     fn bravo() -> (Units, (TextPos, TextPos)) {
         let entries = [user("u1", "alpha bravo charlie"), user("u2", "delta echo")];
         let rows = single_rows(&entries);
-        let units = Units::build(&rows, |_| None, |_| false, |_| false);
+        let units = Units::build(&rows, |_| None, |_| false, |_| false, |_| None);
         (units, (pos("u1", 0, 6), pos("u1", 0, 11)))
     }
 

@@ -26,8 +26,9 @@ use protocol::{
     CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ChatEntry, ChatOption,
     ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen, ClientMessage, ComposerState,
     DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_CHAT_CATALOG, FEATURE_CHAT_CLEAR_DRAFT,
-    FEATURE_CHAT_DRAFT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL, FileMatch, GridNode, ScriptFacts,
-    SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
+    FEATURE_CHAT_DRAFT, FEATURE_CHAT_TOOL_RESULT, FEATURE_FILE_SEARCH, FEATURE_FILE_TAIL,
+    FileMatch, GridNode, ScriptFacts, SplitDirection, ToolKind, ToolOutcome, WorkShell,
+    WorkSubagent,
 };
 use rustling_tulip_native::chat::{self, ChatMode, PaneView, RowShape};
 use rustling_tulip_native::completion::CompletionItem;
@@ -5298,4 +5299,199 @@ fn an_armed_stop_hides_the_context_label_in_a_collapsed_header(cx: &mut TestAppC
         !painted(&mut h, "pane-p1-context"),
         "Confirm stop and Cancel take the label's room, so the header drops it"
     );
+}
+
+/// A tool result the agent cut at its cap: its marker on the last line.
+const CUT_RESULT: &str = "line one\nline two\n\u{2026} 400 more lines";
+/// The whole text of a tool result, which Show all fetches.
+const WHOLE_RESULT: &str = "line one\nline two\nline three";
+const SHOW_ALL: &str = "chat-show-all-t1";
+const SHOW_ALL_MISSING: &str = "chat-show-all-missing-t1";
+
+/// `p1` on its chat over a host listing `features`, holding the cut tool
+/// card `t1` open, everything sent so far drained.
+fn cut_result<'a>(cx: &'a mut TestAppContext, dir: &TestDir, features: &[&str]) -> Harness<'a> {
+    let mut h = loaded_listing(cx, dir, features);
+    h.send(append(vec![user("u1"), tool("t1", Some(CUT_RESULT))], &[]));
+    h.sent();
+    h.click_on("chat-tool-done-p1-t1");
+    h
+}
+
+/// The request ids of the `GetToolResult`s for `t1` sent since the last
+/// drain.
+fn show_all_requests(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetToolResult {
+                session_id,
+                tool_id,
+                request_id,
+            } if session_id == "s1" && tool_id == "t1" => Some(request_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Show all button pressed: the request id its `GetToolResult` went out
+/// under.
+fn press_show_all(h: &mut Harness<'_>) -> String {
+    h.click_on(SHOW_ALL);
+    let requests = show_all_requests(h);
+    assert_eq!(requests.len(), 1, "one GetToolResult: {requests:?}");
+    requests.into_iter().flatten().next().unwrap_or_default()
+}
+
+/// The daemon's answer to the card's Show all: `text`, and no whole text at
+/// all when it is `None`.
+fn tool_result(request_id: &str, text: Option<&str>) -> DaemonMessage {
+    DaemonMessage::ToolResult {
+        session_id: "s1".to_owned(),
+        tool_id: "t1".to_owned(),
+        text: text.map(str::to_owned),
+        truncated: false,
+        request_id: Some(request_id.to_owned()),
+    }
+}
+
+/// The result text the card draws for `t1`.
+fn result_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_tool_result_text("s1", "t1"))
+}
+
+#[gpui::test]
+fn show_all_appears_on_a_cut_result_and_swaps_in_the_full_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    assert!(painted(&mut h, SHOW_ALL), "the cut result offers the rest");
+    assert_eq!(result_text(&mut h).as_deref(), Some(CUT_RESULT));
+    let request_id = press_show_all(&mut h);
+    assert!(!request_id.is_empty(), "the request carries an id");
+    h.send(tool_result(&request_id, Some(WHOLE_RESULT)));
+    assert_eq!(
+        result_text(&mut h).as_deref(),
+        Some(WHOLE_RESULT),
+        "the whole text takes the cut one's place"
+    );
+    assert!(
+        !drawn_now(&mut h, SHOW_ALL),
+        "nothing more is left to fetch"
+    );
+}
+
+#[gpui::test]
+fn show_all_is_not_offered_on_a_host_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[]);
+    assert!(
+        !painted(&mut h, SHOW_ALL),
+        "a host that answers for no whole result offers none"
+    );
+}
+
+#[gpui::test]
+fn show_all_is_not_offered_on_an_uncut_result(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_listing(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    h.send(append(
+        vec![user("u1"), tool("t1", Some(WHOLE_RESULT))],
+        &[],
+    ));
+    h.sent();
+    h.click_on("chat-tool-done-p1-t1");
+    assert!(
+        !painted(&mut h, SHOW_ALL),
+        "nothing of an uncut result is missing"
+    );
+}
+
+/// A script call `id` whose card holds `result` as its text.
+fn script_tool(id: &str, result: &str) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "REPL".to_owned(),
+        summary: "eval".to_owned(),
+        input: "{}".to_owned(),
+        result: Some(ToolOutcome {
+            text: result.to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind: ToolKind::Script,
+        script: Some(ScriptFacts {
+            description: "eval".to_owned(),
+            ..ScriptFacts::default()
+        }),
+    }
+}
+
+#[gpui::test]
+fn show_all_is_not_offered_on_a_script_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_listing(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    h.send(append(vec![user("u1"), script_tool("t1", CUT_RESULT)], &[]));
+    h.sent();
+    assert!(
+        painted(&mut h, "chat-script-done-p1-t1"),
+        "a script call draws its own line, not a tool card"
+    );
+    h.click_on("chat-script-done-p1-t1");
+    assert!(
+        !painted(&mut h, SHOW_ALL),
+        "a script's result comes from a poll event, not the call's own"
+    );
+}
+
+#[gpui::test]
+fn a_missing_result_says_the_rest_is_not_in_the_transcript(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    let request_id = press_show_all(&mut h);
+    h.send(tool_result(&request_id, None));
+    assert!(
+        painted(&mut h, SHOW_ALL_MISSING),
+        "the card says the transcript holds no whole text"
+    );
+    assert!(
+        !drawn_now(&mut h, SHOW_ALL),
+        "no button stands beside the line"
+    );
+}
+
+#[gpui::test]
+fn a_second_show_all_press_while_loading_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    press_show_all(&mut h);
+    assert!(painted(&mut h, SHOW_ALL), "the button stays while loading");
+    h.click_on(SHOW_ALL);
+    assert!(
+        show_all_requests(&mut h).is_empty(),
+        "one request for a result at a time"
+    );
+}
+
+#[gpui::test]
+fn show_all_works_again_after_a_reconnect_while_loading(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    let first = press_show_all(&mut h);
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let sent = h.sent();
+    let load = load_request(&sent).expect("the new connection asks for the chat again");
+    h.send(reply(
+        Some(&load),
+        vec![user("u1"), tool("t1", Some(CUT_RESULT))],
+    ));
+    h.sent();
+    h.click_on("chat-tool-done-p1-t1");
+    assert!(
+        painted(&mut h, SHOW_ALL),
+        "the card offers the rest once more"
+    );
+    let again = press_show_all(&mut h);
+    assert_ne!(again, first, "under a request id of its own");
 }

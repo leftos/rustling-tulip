@@ -300,6 +300,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CHAT_CLEAR_DRAFT,
     protocol::FEATURE_FILE_SEARCH,
     protocol::FEATURE_CHAT_CATALOG,
+    protocol::FEATURE_CHAT_TOOL_RESULT,
     protocol::FEATURE_CHAT_MODEL,
     protocol::FEATURE_RESUME_SESSION,
     protocol::FEATURE_LAUNCH_LAST,
@@ -862,6 +863,10 @@ mod tests {
         assert!(
             DAEMON_FEATURES.contains(&protocol::FEATURE_HOST_PATHS),
             "every daemon serves a host path fetch and stat"
+        );
+        assert!(
+            DAEMON_FEATURES.contains(&protocol::FEATURE_CHAT_TOOL_RESULT),
+            "every daemon reads a tool result's whole text out of its transcript"
         );
     }
 

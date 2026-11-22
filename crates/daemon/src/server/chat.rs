@@ -15,7 +15,9 @@
 //! `@` mentions ([`search_files`]), answering the requester with a
 //! `FileMatches`. `ListCatalog` lists the commands and skills the session's
 //! agent can invoke for the composer's `/` catalog ([`list_catalog`]),
-//! answering the requester with a `Catalog`.
+//! answering the requester with a `Catalog`. `GetToolResult` reads one tool
+//! result's whole text out of the session's transcript ([`get_tool_result`]),
+//! answering the requester with a `ToolResult`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,6 +32,7 @@ use crate::git_inspect::run_git_read;
 use crate::inject::{TypeTarget, check_typed_text, type_message};
 use crate::sync::lock;
 use crate::{chat_answer, chat_draft, inject};
+use agent_api::AgentPlugin;
 use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
 use protocol::{
     AgentId, CatalogEntry, CatalogEntryKind, CatalogEntrySource, ChatAnswerKind, ClientMessage,
@@ -116,6 +119,19 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             session_id,
             request_id,
         } => list_catalog(hub, ctx, session_id, request_id),
+        ClientMessage::GetToolResult {
+            session_id,
+            tool_id,
+            request_id,
+        } => get_tool_result(
+            hub,
+            ctx,
+            ToolResultAsk {
+                session_id,
+                tool_id,
+                request_id,
+            },
+        ),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
 }
@@ -459,6 +475,93 @@ fn list_catalog(hub: &Hub, ctx: &ConnCtx<'_>, session_id: String, request_id: Op
             request_id,
         });
     });
+}
+
+/// One tool-result request's parts.
+#[expect(
+    clippy::struct_field_names,
+    reason = "each field is one id the request carries, named as the wire message names it"
+)]
+struct ToolResultAsk {
+    session_id: String,
+    tool_id: String,
+    request_id: Option<String>,
+}
+
+/// Answer a `GetToolResult` request: the whole text of a tool result, read
+/// from the session's transcript on a task of its own. An unknown session,
+/// one with no conversation, folder or agent, an agent that is not
+/// registered, one that keeps no transcript, and a tool id its transcript
+/// holds no result for, are all answered with no text.
+fn get_tool_result(hub: &Hub, ctx: &ConnCtx<'_>, ask: ToolResultAsk) {
+    let ToolResultAsk {
+        session_id,
+        tool_id,
+        request_id,
+    } = ask;
+    let Some((plugin, path)) = tool_result_source(hub, &session_id) else {
+        debug!(
+            session_id = %session_id,
+            tool_id = %tool_id,
+            "tool result: the session has no transcript to read it from"
+        );
+        let _ = ctx.out_tx.send(DaemonMessage::ToolResult {
+            session_id,
+            tool_id,
+            text: None,
+            truncated: false,
+            request_id,
+        });
+        return;
+    };
+    let asked = tool_id.clone();
+    let out_tx = (*ctx.out_tx).clone();
+    tokio::spawn(async move {
+        let joined =
+            tokio::task::spawn_blocking(move || plugin.tool_result_text(&path, &asked)).await;
+        let (text, truncated) = joined
+            .unwrap_or_else(|err| {
+                warn!(
+                    session_id = %session_id,
+                    error = %err,
+                    "tool result: the read task failed"
+                );
+                None
+            })
+            .map_or((None, false), |(text, truncated)| (Some(text), truncated));
+        // A closed outbox is a connection already ending.
+        let _ = out_tx.send(DaemonMessage::ToolResult {
+            session_id,
+            tool_id,
+            text,
+            truncated,
+            request_id,
+        });
+    });
+}
+
+/// The plugin and transcript file a session's tool results are read from:
+/// `None` for an unknown session, one with no conversation, folder or agent,
+/// an agent that is not registered, and one that keeps no transcript.
+fn tool_result_source(hub: &Hub, session_id: &str) -> Option<(&'static dyn AgentPlugin, PathBuf)> {
+    let record = hub.sessions.get(session_id)?;
+    let (agent, conversation_id, folder, extra_env) = {
+        let record = lock(&record);
+        (
+            record.agent.clone(),
+            record.conversation_id.clone()?,
+            crate::history::primary_cwd(&record)?,
+            record
+                .spawn_config
+                .as_ref()
+                .map(|config| config.extra_env.clone())
+                .unwrap_or_default(),
+        )
+    };
+    let plugin = agent_registry::plugin(&agent)?;
+    let rows = crate::conversations::lookup_rows(&extra_env);
+    let path = plugin.transcript_path(Path::new(&folder), &conversation_id, &rows)?;
+    Some((plugin, path))
 }
 
 /// The folders a session's catalog is read from and its agent: every
@@ -938,6 +1041,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn get_tool_result_answers_the_full_text_and_echoes_the_request_id() {
+        let fixture = Fixture::new("tool-result", Some("conv-tool-result"));
+        fixture.append(
+            "conv-tool-result",
+            &[
+                tool_call("c1", 1, "toolu_1"),
+                tool_done_with("c2", 2, "toolu_1", "the whole result"),
+            ],
+        );
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::GetToolResult {
+            session_id: "s1".to_owned(),
+            tool_id: "toolu_1".to_owned(),
+            request_id: Some("req-42".to_owned()),
+        };
+        dispatch_on(&fixture.hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::ToolResult {
+                session_id,
+                tool_id,
+                text,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "toolu_1");
+                assert_eq!(text.as_deref(), Some("the whole result"));
+                assert!(!truncated);
+                assert_eq!(request_id.as_deref(), Some("req-42"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_tool_result_answers_none_for_an_unknown_session() {
+        let (hub, _scratch) = test_hub("tool-result-unknown");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let request = ClientMessage::GetToolResult {
+            session_id: "nope".to_owned(),
+            tool_id: "toolu_1".to_owned(),
+            request_id: Some("req-1".to_owned()),
+        };
+        dispatch_on(&hub, request, 1, &out_tx).await;
+        match next_message(&mut out_rx).await {
+            DaemonMessage::ToolResult {
+                session_id,
+                tool_id,
+                text,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "nope");
+                assert_eq!(tool_id, "toolu_1");
+                assert_eq!(text, None);
+                assert!(!truncated);
+                assert_eq!(request_id.as_deref(), Some("req-1"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Whether `msg` is a strip or a model, which follow a load's reply and
     /// which the tests of other messages skip.
     fn is_strip_or_model(msg: &DaemonMessage) -> bool {
@@ -1189,6 +1355,17 @@ mod tests {
             "type": "user", "uuid": uuid, "timestamp": stamp(n),
             "message": {"role": "user",
                 "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}]},
+        })
+        .to_string()
+    }
+
+    /// A user record `uuid` at second `n` carrying tool `tool_id`'s result
+    /// `text`.
+    fn tool_done_with(uuid: &str, n: usize, tool_id: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]},
         })
         .to_string()
     }

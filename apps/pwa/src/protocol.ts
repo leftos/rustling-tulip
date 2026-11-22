@@ -246,6 +246,14 @@ export const FEATURE_FILE_SEARCH = "file_search";
 export const FEATURE_CHAT_CATALOG = "chat_catalog";
 
 /**
+ * `Welcome.features` entry: the daemon answers [`ClientMessage::GetToolResult`]
+ * with a tool result's whole text from the session's transcript
+ * ([`DaemonMessage::ToolResult`]). A client offers to show the rest of a
+ * cut tool result only on a host that lists it.
+ */
+export const FEATURE_CHAT_TOOL_RESULT = "chat_tool_result";
+
+/**
  * `Welcome.features` entry: the daemon tells a session's chat loaders which
  * model the session's main agent answers with ([`DaemonMessage::ChatModel`]).
  */
@@ -5195,6 +5203,13 @@ export type ClientMessage =
    */
   | { type: "list_catalog"; session_id: string; request_id?: string | null }
   /**
+   * Ask for the whole text of the result of tool call `tool_id` (a chat
+   * tool entry's id) in the session's transcript: answered to the
+   * requester alone with [`DaemonMessage::ToolResult`] carrying this
+   * `request_id`. Sent only to a daemon that lists [`FEATURE_CHAT_TOOL_RESULT`].
+   */
+  | { type: "get_tool_result"; session_id: string; tool_id: string; request_id?: string | null }
+  /**
    * Ask for the Linear issues a client saw identified in terminal text:
    * answered to every client with [`DaemonMessage::LinearIssues`], since
    * the cache is shared. `request_id` is echoed only on an
@@ -6495,6 +6510,18 @@ export type DaemonMessage =
    * plain shell no agent was typed into), is answered with no entries.
    */
   | { type: "catalog"; session_id: string; entries?: CatalogEntry[]; request_id?: string | null }
+  /**
+   * The answer to [`ClientMessage::GetToolResult`], sent to the requester
+   * with its `request_id`: the tool result's text, which keeps at most
+   * [`TOOL_RESULT_FULL_CAP`] bytes of the result, cut at a character
+   * boundary and closed with a line saying how much it left out ("… N more
+   * lines", or "… N more characters" for text of one line), with
+   * `truncated` set when it left anything out; `text` is `None` for an
+   * unknown session, one whose agent keeps no transcript, a tool id the
+   * transcript holds no result for, or a background script's dispatch
+   * receipt.
+   */
+  | { type: "tool_result"; session_id: string; tool_id: string; text?: string | null; truncated?: boolean; request_id?: string | null }
   /**
    * The host's Linear context, sent to every client at connect and again
    * whenever any of it changes: `team_keys` are the workspace's team keys,

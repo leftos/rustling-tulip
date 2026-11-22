@@ -784,6 +784,16 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The text of the result of tool call `tool_use_id` in transcript file
+    /// `transcript`, as the chat shows a tool result before its cut, and
+    /// whether the cut at [`protocol::TOOL_RESULT_FULL_CAP`] left any of it
+    /// out; `None` for an agent that keeps no tool results, a missing or
+    /// unreadable file, or an id the file holds no result for. Reads the
+    /// file, so it runs off the async runtime.
+    fn tool_result_text(&self, _transcript: &Path, _tool_use_id: &str) -> Option<(String, bool)> {
+        None
+    }
+
     /// What one complete transcript line adds to the chat, in order. `known`
     /// returns the entry already held under an id, so a record that completes
     /// an earlier entry (a tool result) answers with the whole updated entry.
@@ -1164,6 +1174,9 @@ pub trait AgentPlugin: Send + Sync {
         rows: &ResolvedRows,
     ) -> Option<PathBuf>;
 
+    /// See [`Agent::tool_result_text`].
+    fn tool_result_text(&self, transcript: &Path, tool_use_id: &str) -> Option<(String, bool)>;
+
     /// A fresh [`Agent::ChatContext`] for one chat, type-erased.
     fn new_chat_context(&self) -> Box<dyn Any + Send>;
 
@@ -1444,6 +1457,10 @@ impl<A: Agent> AgentPlugin for A {
         rows: &ResolvedRows,
     ) -> Option<PathBuf> {
         Agent::subagent_transcript_path(self, folder, conversation_id, agent_id, rows)
+    }
+
+    fn tool_result_text(&self, transcript: &Path, tool_use_id: &str) -> Option<(String, bool)> {
+        Agent::tool_result_text(self, transcript, tool_use_id)
     }
 
     fn new_chat_context(&self) -> Box<dyn Any + Send> {

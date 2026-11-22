@@ -197,6 +197,12 @@ pub const FEATURE_FILE_SEARCH: &str = "file_search";
 /// A client offers its `/` catalog only on a host that lists it.
 pub const FEATURE_CHAT_CATALOG: &str = "chat_catalog";
 
+/// `Welcome.features` entry: the daemon answers [`ClientMessage::GetToolResult`]
+/// with a tool result's whole text from the session's transcript
+/// ([`DaemonMessage::ToolResult`]). A client offers to show the rest of a
+/// cut tool result only on a host that lists it.
+pub const FEATURE_CHAT_TOOL_RESULT: &str = "chat_tool_result";
+
 /// `Welcome.features` entry: the daemon tells a session's chat loaders which
 /// model the session's main agent answers with ([`DaemonMessage::ChatModel`]).
 pub const FEATURE_CHAT_MODEL: &str = "chat_model";
@@ -265,6 +271,12 @@ pub const CLIENT_FEATURE_UPDATE_YOURSELF: &str = "update_yourself";
 /// The most file bytes one [`ClientMessage::UploadFile`] carries, checked by
 /// the client before sending and by the daemon.
 pub const UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most bytes of a tool result a [`DaemonMessage::ToolResult`]'s `text`
+/// keeps: a longer result is cut at a character boundary and closed with a
+/// line saying how much it left out, "… N more lines" or, for text of one
+/// line, "… N more characters", with `truncated` set.
+pub const TOOL_RESULT_FULL_CAP: usize = 1_048_576;
 
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
@@ -6507,6 +6519,16 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Ask for the whole text of the result of tool call `tool_id` (a chat
+    /// tool entry's id) in the session's transcript: answered to the
+    /// requester alone with [`DaemonMessage::ToolResult`] carrying this
+    /// `request_id`. Sent only to a daemon that lists [`FEATURE_CHAT_TOOL_RESULT`].
+    GetToolResult {
+        session_id: String,
+        tool_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Ask for the Linear issues a client saw identified in terminal text:
     /// answered to every client with [`DaemonMessage::LinearIssues`], since
     /// the cache is shared. `request_id` is echoed only on an
@@ -8175,6 +8197,25 @@ pub enum DaemonMessage {
         session_id: String,
         #[serde(default)]
         entries: Vec<CatalogEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// The answer to [`ClientMessage::GetToolResult`], sent to the requester
+    /// with its `request_id`: the tool result's text, which keeps at most
+    /// [`TOOL_RESULT_FULL_CAP`] bytes of the result, cut at a character
+    /// boundary and closed with a line saying how much it left out ("… N more
+    /// lines", or "… N more characters" for text of one line), with
+    /// `truncated` set when it left anything out; `text` is `None` for an
+    /// unknown session, one whose agent keeps no transcript, a tool id the
+    /// transcript holds no result for, or a background script's dispatch
+    /// receipt.
+    ToolResult {
+        session_id: String,
+        tool_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default)]
+        truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -19171,6 +19212,87 @@ mod tests {
                 ..
             } => {
                 assert_eq!(entries.len(), 0);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_tool_result_and_tool_result_round_trip() {
+        let msg = ClientMessage::GetToolResult {
+            session_id: "s1".to_string(),
+            tool_id: "toolu_1".to_string(),
+            request_id: Some("req-tr".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"get_tool_result","session_id":"s1","tool_id":"toolu_1","request_id":"req-tr"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::GetToolResult {
+                session_id,
+                tool_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "toolu_1");
+                assert_eq!(request_id.as_deref(), Some("req-tr"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare = r#"{"type":"get_tool_result","session_id":"s1","tool_id":"toolu_1"}"#;
+        match serde_json::from_str::<ClientMessage>(bare).expect("deserialize") {
+            ClientMessage::GetToolResult { request_id, .. } => assert_eq!(request_id, None),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let reply = DaemonMessage::ToolResult {
+            session_id: "s1".to_string(),
+            tool_id: "toolu_1".to_string(),
+            text: Some("the whole result".to_string()),
+            truncated: true,
+            request_id: Some("req-tr".to_string()),
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"tool_result","session_id":"s1","tool_id":"toolu_1","text":"the whole result","truncated":true,"request_id":"req-tr"}"#
+        );
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ToolResult {
+                session_id,
+                tool_id,
+                text,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "toolu_1");
+                assert_eq!(text.as_deref(), Some("the whole result"));
+                assert!(truncated);
+                assert_eq!(request_id.as_deref(), Some("req-tr"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_result_without_text_or_truncated_decodes() {
+        let bare = r#"{"type":"tool_result","session_id":"s1","tool_id":"toolu_1"}"#;
+        match serde_json::from_str::<DaemonMessage>(bare).expect("deserialize") {
+            DaemonMessage::ToolResult {
+                session_id,
+                tool_id,
+                text,
+                truncated,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "toolu_1");
+                assert_eq!(text, None);
+                assert!(!truncated);
                 assert_eq!(request_id, None);
             }
             other => panic!("unexpected variant: {other:?}"),
