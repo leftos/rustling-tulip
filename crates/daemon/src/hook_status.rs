@@ -521,6 +521,18 @@ fn turn_report(record: &SessionRecord, report: &HookReport) -> Option<String> {
     (!message.is_empty()).then(|| message.to_owned())
 }
 
+/// Whether `report` confirms the main agent's turn, so a `Working` the screen
+/// promoted counts as one: a prompt or a tool call (each maps to `Working`)
+/// or a turn end (a `Stop`, which reports its background flag, or a
+/// `StopFailure`, which reports its failure). A subagent's event confirms
+/// nothing of the main agent's.
+fn confirms_turn(report: &HookReport) -> bool {
+    !report.subagent
+        && (report.status == Some(SessionStatus::Working)
+            || report.background.is_some()
+            || report.failure.is_some())
+}
+
 /// Apply one mapped event to `record`: the ordering check, the stamp and the
 /// state writes, as [`apply_signal`] and the pending-event replay both need.
 pub(crate) fn apply_to_record(
@@ -550,6 +562,9 @@ pub(crate) fn apply_to_record(
 
 /// The state writes of one ordered event on a running `record`.
 fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u128) -> Applied {
+    if confirms_turn(report) {
+        record.turn_unconfirmed = false;
+    }
     // An agent typed into its shell starts a new run: the leaf names it again
     // and the run's end will be announced.
     if report.agent_started {

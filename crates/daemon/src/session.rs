@@ -366,6 +366,17 @@ pub struct SessionRecord {
     /// classifier owns its status again. Runtime-only: neither mirrored into the sidecar
     /// nor sent on the wire.
     pub hook_driven: bool,
+    /// True while the session's last entry into `Working` was the screen's
+    /// promotion from `Idle` with no background work pending, and no
+    /// main-agent prompt, tool call or turn end has been applied since: a
+    /// `/compact`'s spinner, not a turn. Set by that promotion, kept by the
+    /// screen's move from `AwaitingInput` back to `Working`, cleared by any
+    /// other entry into `Working` ([`crate::pty_state::apply_status`]) and by
+    /// a hook that confirms the turn; leaving `Working` keeps it, so the `Idle` that ends
+    /// such a run carries it. Copied into
+    /// [`SessionSnapshot::turn_unconfirmed`], read as false while hooks do not
+    /// drive the session. Runtime-only, like [`Self::hook_driven`].
+    pub turn_unconfirmed: bool,
     /// The assistant message the last `Stop` ended its turn with, trimmed and
     /// capped at 8 KiB, as the agent CLI's own hook reported it. `None` until
     /// a `Stop` reports one; a `Stop` with no message keeps the previous one.
@@ -740,6 +751,7 @@ impl SessionRecord {
                     .conversation_id
                     .as_deref()
                     .is_some_and(|id| self.dispatch_links.is_linked(id)),
+            turn_unconfirmed: self.hook_driven && self.turn_unconfirmed,
             resumed_from: self.resumed_from.clone(),
             role: self.role,
             status_label: protocol::StatusLabel::Unknown,
@@ -2263,6 +2275,7 @@ impl SessionRegistry {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,
@@ -2362,6 +2375,7 @@ impl SessionRegistry {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,
@@ -2438,6 +2452,7 @@ impl SessionRegistry {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,
@@ -2543,6 +2558,7 @@ mod tests {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,

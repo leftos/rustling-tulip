@@ -298,8 +298,9 @@ impl FinishedHolds {
 
 /// The desktop's Finished rule (`apps/native/src/notify.rs` `finished`):
 /// `after` is idle with no background work left and is an agent rather than
-/// a plain shell, and `before` was working, or idle waiting on background
-/// work.
+/// a plain shell, and `before` was working on a turn a hook confirmed (not
+/// one `after` marks `turn_unconfirmed`, such as a `/compact`'s spinner), or
+/// idle waiting on background work.
 fn finished(before: Prior, after: &SessionSnapshot) -> bool {
     if after.status != SessionStatus::Idle
         || after.background
@@ -307,7 +308,7 @@ fn finished(before: Prior, after: &SessionSnapshot) -> bool {
     {
         return false;
     }
-    before.status == SessionStatus::Working
+    (before.status == SessionStatus::Working && !after.turn_unconfirmed)
         || (before.status == SessionStatus::Idle && before.background)
 }
 
@@ -1819,6 +1820,31 @@ mod tests {
     fn finished_fires_when_background_work_ends() {
         let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
         assert_eq!(raised(&holding, &status("idle")), Some(PushKind::Finished));
+    }
+
+    #[test]
+    fn finished_ignores_a_screen_only_turn() {
+        let idle = snapshot(&serde_json::json!({ "status": "idle", "turn_unconfirmed": true }));
+        assert_eq!(
+            raised(&status("working"), &idle),
+            None,
+            "a Working no hook confirmed is no turn"
+        );
+    }
+
+    #[test]
+    fn finished_still_counts_a_background_release_after_a_screen_only_turn() {
+        let holding = snapshot(&serde_json::json!({
+            "status": "idle",
+            "background": true,
+            "turn_unconfirmed": true,
+        }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle", "turn_unconfirmed": true }));
+        assert_eq!(
+            raised(&holding, &idle),
+            Some(PushKind::Finished),
+            "the background work really finished"
+        );
     }
 
     #[test]

@@ -1291,6 +1291,13 @@ pub struct SessionSnapshot {
     /// pending one-shot wakeup. Always false beside any other status.
     #[serde(default)]
     pub background: bool,
+    /// The session's current or last `Working` was promoted from its screen
+    /// while hooks drive the session, and no hook has confirmed it as a turn
+    /// (a prompt, a tool call or a Stop): a `/compact`'s spinner, not a turn
+    /// the user started. A client counts no Finished when such a `Working`
+    /// ends. A daemon that predates the field sends none, read as false.
+    #[serde(default)]
+    pub turn_unconfirmed: bool,
     /// The abandoned sessions this one replaced in place, oldest first: a
     /// Resume, an auto-resume or a Recover of an abandoned session names its
     /// predecessor here and keeps that predecessor's own list, the newest few
@@ -17087,6 +17094,24 @@ mod tests {
         assert_eq!(json.get("background"), Some(&serde_json::json!(true)));
         let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
         assert!(back.background, "the flag round-trips");
+    }
+
+    #[test]
+    fn a_session_snapshot_without_turn_unconfirmed_reads_false() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert!(
+            !snapshot.turn_unconfirmed,
+            "a snapshot from before the field reads as a confirmed turn"
+        );
+        let json = serde_json::to_value(SessionSnapshot {
+            turn_unconfirmed: true,
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(json.get("turn_unconfirmed"), Some(&serde_json::json!(true)));
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert!(back.turn_unconfirmed, "the flag round-trips");
     }
 
     /// A subagent snapshot with its id, depth and state set and nothing else.

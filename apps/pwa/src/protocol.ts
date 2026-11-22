@@ -1075,6 +1075,14 @@ export interface SessionSnapshot {
    */
   background?: boolean;
   /**
+   * The session's current or last `Working` was promoted from its screen
+   * while hooks drive the session, and no hook has confirmed it as a turn
+   * (a prompt, a tool call or a Stop): a `/compact`'s spinner, not a turn
+   * the user started. A client counts no Finished when such a `Working`
+   * ends. A daemon that predates the field sends none, read as false.
+   */
+  turn_unconfirmed?: boolean;
+  /**
    * The abandoned sessions this one replaced in place, oldest first: a
    * Resume, an auto-resume or a Recover of an abandoned session names its
    * predecessor here and keeps that predecessor's own list, the newest few

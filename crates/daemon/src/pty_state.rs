@@ -1639,10 +1639,14 @@ fn apply_screen_status(
             return None;
         }
         let held = rec.turn_end.take_if(|_| next == SessionStatus::Idle);
+        let before = (rec.status, rec.background, rec.turn_unconfirmed);
         entered_awaiting = apply_watcher_status(rec, next);
         wrote = rec.status == next;
         if !wrote {
             return None;
+        }
+        if next == SessionStatus::Working && before.0 != SessionStatus::Working {
+            rec.turn_unconfirmed = promoted_unconfirmed(before);
         }
         if next == SessionStatus::Idle {
             rec.background = shown || held.as_ref().is_some_and(|held| held.background);
@@ -1656,6 +1660,22 @@ fn apply_screen_status(
         announce_awaiting_input(session_id, attention_tx);
     }
     wrote
+}
+
+/// What the screen's promotion into `Working` leaves in
+/// `turn_unconfirmed`, from the record's `(status, background,
+/// turn_unconfirmed)` before the write. From `Idle` with no background work
+/// pending no hook has said a turn started (a `/compact`'s spinner, also after
+/// a reattach, before any hook drives the session; the snapshot hides it
+/// while none does). From `Idle` holding background work, the work's release
+/// still counts as its Finished. From `AwaitingInput` the turn the prompt
+/// paused goes on, so the value stands.
+fn promoted_unconfirmed((status, background, unconfirmed): (SessionStatus, bool, bool)) -> bool {
+    match status {
+        SessionStatus::Idle => !background,
+        SessionStatus::AwaitingInput => unconfirmed,
+        _ => false,
+    }
 }
 
 /// Forget the turn end `from` held, refused unless the record still holds
@@ -2548,6 +2568,10 @@ pub fn apply_status(record: &mut SessionRecord, next: SessionStatus) -> bool {
     }
     record.status = next;
     record.background = false;
+    if next == SessionStatus::Working {
+        // The screen's own promotion marks itself after this write.
+        record.turn_unconfirmed = false;
+    }
     if next == SessionStatus::AwaitingInput {
         push_recent_action(record, "awaiting input".to_string());
         return true;
@@ -2869,6 +2893,7 @@ mod hysteresis_tests {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,
@@ -6733,6 +6758,241 @@ mod hysteresis_tests {
             idle_without_flag, 0,
             "a broadcast read Idle with no background work"
         );
+    }
+
+    /// A phone push tracker that has already seen the session as it stands.
+    fn seeded_tracker(h: &Harness) -> crate::push::trigger::Tracker {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let snapshot = rec.lock().expect("record lock").snapshot();
+        let mut tracker = crate::push::trigger::Tracker::default();
+        tracker.seed([&snapshot]);
+        tracker
+    }
+
+    /// How many of the session's snapshots `events` carried raise a Finished
+    /// push on `tracker`, fed in order.
+    fn finished_pushes(
+        tracker: &mut crate::push::trigger::Tracker,
+        events: &mut broadcast::Receiver<crate::session::SessionEvent>,
+    ) -> usize {
+        let mut finished = 0;
+        while let Ok(event) = events.try_recv() {
+            if let crate::session::SessionEvent::Updated(snapshot, _) = event
+                && tracker.observe(&snapshot) == Some(crate::push::trigger::PushKind::Finished)
+            {
+                finished += 1;
+            }
+        }
+        finished
+    }
+
+    /// A main-agent prompt, the way the owner submits one.
+    fn prompt_submit() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_compact_with_nothing_running_is_not_a_finished_turn() {
+        let h = start_record("compact-idle", false, hook_record(SessionStatus::Idle));
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(box_frame(
+            &["✶ Compacting conversation… (2s)"],
+            &["  ⏵⏵ bypass permissions on · esc to interrupt"],
+        ));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(
+            finished_pushes(&mut tracker, &mut events),
+            0,
+            "a compact is no turn the owner started"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_started_turn_whose_stop_is_lost_still_finishes() {
+        let h = start_record(
+            "lost-stop-finishes",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.hook(2, &prompt_submit());
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the prompt starts a turn"
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(finished_pushes(&mut tracker, &mut events), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_promoted_turn_confirmed_by_a_late_prompt_hook_finishes() {
+        let h = start_record("late-prompt", false, hook_record(SessionStatus::Idle));
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.hook(2, &prompt_submit());
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(finished_pushes(&mut tracker, &mut events), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_compact_with_background_work_finishes_only_when_the_work_ends() {
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("compact-shell-finishes", false, record);
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(box_frame(
+            &["✶ Compacting conversation… (2s)"],
+            &["  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ↓ to manage"],
+        ));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the screen shows the shell");
+        assert_eq!(
+            finished_pushes(&mut tracker, &mut events),
+            0,
+            "the compact's landing is no turn's end"
+        );
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(10)).await;
+        assert!(!h.background(), "the shell ended");
+        assert_eq!(
+            finished_pushes(&mut tracker, &mut events),
+            1,
+            "the background work finished"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_turn_with_no_hooks_still_finishes() {
+        let h = start("hookless-turn", false);
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(5)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(finished_pushes(&mut tracker, &mut events), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_compact_while_background_work_ends_during_it_still_finishes() {
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("compact-shell-ends", false, record);
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(box_frame(
+            &["✶ Compacting conversation… (2s)"],
+            &["  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ↓ to manage"],
+        ));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.chunk(box_frame(
+            &["✶ Compacting conversation… (4s)"],
+            &["  ⏵⏵ bypass permissions on · esc to interrupt"],
+        ));
+        advance(ms(200)).await;
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(!h.background(), "the shell ended during the compact");
+        assert_eq!(
+            finished_pushes(&mut tracker, &mut events),
+            1,
+            "the held background work finished"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_compact_after_a_reattach_is_not_a_finished_turn() {
+        let h = start("compact-reattached", false);
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.chunk(box_frame(
+            &["✶ Compacting conversation… (2s)"],
+            &["  ⏵⏵ bypass permissions on · esc to interrupt"],
+        ));
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the spinner promotes");
+        h.hook(
+            2,
+            &serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "session_id": "c1",
+            }),
+        );
+        assert!(h.hook_driven(), "the compact's hook drives the session");
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(
+            finished_pushes(&mut tracker, &mut events),
+            0,
+            "a compact is no turn the owner started"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_answered_at_the_terminal_keeps_its_turn_confirmed() {
+        let h = start_record("answered-prompt", false, hook_record(SessionStatus::Idle));
+        let mut events = h.registry.subscribe();
+        let mut tracker = seeded_tracker(&h);
+        pass_hold().await;
+        h.hook(2, &prompt_submit());
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the prompt starts a turn"
+        );
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(ms(200)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput, "the dialog asks");
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the answer resumes the turn"
+        );
+        h.chunk(idle_frame(&[]));
+        advance(IDLE_WITHOUT_STOP + Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(finished_pushes(&mut tracker, &mut events), 1);
     }
 
     #[test]

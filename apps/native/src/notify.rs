@@ -859,7 +859,9 @@ fn needs_you_body(session: Option<&SessionSnapshot>, agents: &[AgentDescriptor])
 /// Whether `after` ends a turn the session was running: it is idle with no
 /// background work left, an agent rather than a plain shell, and the copy the
 /// client still held was working with its agent still up in the pane after
-/// (`after_agent_up`, so an agent killed mid-turn raises nothing), or idle
+/// (`after_agent_up`, so an agent killed mid-turn raises nothing) and a hook
+/// confirmed that `Working` as a turn (`after` is not `turn_unconfirmed`, as
+/// a `/compact`'s spinner is), or idle
 /// waiting on background work the agent left running, whose turn had already
 /// finished, so it releases even when the agent ends. A session seen for the
 /// first time raises nothing.
@@ -876,7 +878,7 @@ pub(crate) fn finished(
         return false;
     }
     before.is_some_and(|before| {
-        (before.status == SessionStatus::Working && after_agent_up)
+        (before.status == SessionStatus::Working && after_agent_up && !after.turn_unconfirmed)
             || (before.status == SessionStatus::Idle && before.background)
     })
 }
@@ -2220,6 +2222,30 @@ mod tests {
         let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
         let idle = snapshot(&serde_json::json!({ "status": "idle" }));
         assert!(finished(Some(&holding), &idle, true));
+    }
+
+    #[test]
+    fn finished_ignores_a_screen_only_turn() {
+        let working = snapshot(&serde_json::json!({ "status": "working" }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle", "turn_unconfirmed": true }));
+        assert!(
+            !finished(Some(&working), &idle, true),
+            "a Working no hook confirmed is no turn"
+        );
+    }
+
+    #[test]
+    fn finished_still_counts_a_background_release_after_a_screen_only_turn() {
+        let holding = snapshot(&serde_json::json!({
+            "status": "idle",
+            "background": true,
+            "turn_unconfirmed": true,
+        }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle", "turn_unconfirmed": true }));
+        assert!(
+            finished(Some(&holding), &idle, true),
+            "the background work really finished"
+        );
     }
 
     #[test]

@@ -367,6 +367,7 @@ mod tests {
             pending_owner: crate::session::PromptOwner::Main,
             pending_raise: None,
             hook_driven: false,
+            turn_unconfirmed: false,
             background: false,
             turn_end: None,
             last_assistant_message: None,

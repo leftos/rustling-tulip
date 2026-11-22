@@ -22,6 +22,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone's Needs you tray, the options of a question it cannot answer no longer flash as if pressed when tapped.
 - Answering from the phone's Needs you tray or a desktop toast reaches the host whose card you used, even when two saved hosts list the same session.
 - On the phone, opening an ended session from the Needs you tray clears its card.
+- A `/compact` with nothing else running no longer raises a Finished alert on the desktop or the phone.
 - An agent killed mid-turn no longer raises a Finished alert, and the Needs you list and pane headers stop showing it as waiting.
 - A prompt or error a session raises while still starting now shows once the sidebar lists the session, not before.
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.
