@@ -24,6 +24,9 @@ pub(crate) const OPEN_IN_LINEAR: &str = "Open in Linear";
 /// The foot of a session title chip's card: a plain click on the chip
 /// opens the issue.
 pub(crate) const CHIP_FOOT: &str = "Click to open";
+/// The pane id of a phone card raised from the chat or a title, which no
+/// pane owns.
+pub(crate) const PHONE_CARD_PANE: &str = "phone-card";
 
 /// Every host's Linear issues, key flag and requests in flight.
 #[derive(Debug, Default)]

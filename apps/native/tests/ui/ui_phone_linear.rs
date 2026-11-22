@@ -14,14 +14,15 @@ use std::time::Duration;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    BackGesturePhase, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext,
-    TouchPhase, point, px,
+    BackGesturePhase, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
+    TestAppContext, TouchPhase, point, px,
 };
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
     DaemonMessage,
 };
 use rustling_tulip_native::keyboard::{clear_keyboard_calls, keyboard_calls};
+use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::HostKey;
 use serde_json::json;
 use support::{Harness, Opened, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
@@ -626,4 +627,276 @@ fn open_opens_the_issue_and_takes_the_card_down(cx: &mut TestAppContext) {
     assert_eq!(h.opened(), [Opened::Url(ISSUE_WEB.to_owned())]);
     assert!(!drawn(&mut h, SHEET));
     assert_eq!(card(&mut h), None);
+}
+
+/// The phone on the saved [`REMOTE`]'s session `a`, an agent's, on its chat
+/// page, over a host listing `features`; `context` is what the host sends
+/// as its Linear context, when it sends one. Its chat is loaded with
+/// answer `a1` reading `text`, and everything sent so far is drained.
+fn chat_page<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    features: &[&str],
+    text: &str,
+    context: Option<DaemonMessage>,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(features);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let agent = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("working")
+        .build();
+    let shell = session("b")
+        .label("Bravo")
+        .in_repo("r1")
+        .status("idle")
+        .no_agent()
+        .build();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![agent, shell],
+    });
+    if let Some(context) = context {
+        host.send(context);
+    }
+    h.click_on(&row("a"));
+    let request = h
+        .host(&saved_remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::Answer {
+            id: "a1".to_owned(),
+            text: text.to_owned(),
+            live: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request.flatten(),
+    });
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h.bounds("phone-session-chat");
+    h
+}
+
+/// [`chat_page`] over a host whose Linear context is out and that lists
+/// `linear_links`.
+fn chat_on<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> Harness<'a> {
+    chat_page(
+        cx,
+        dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        text,
+        Some(linear()),
+    )
+}
+
+/// The first point, scanning answer `a1`'s row from its left edge at its
+/// middle height, that the phone's chat maps to a byte in `bytes`.
+fn on_bytes(h: &mut Harness<'_>, bytes: std::ops::Range<usize>) -> Point<Pixels> {
+    let bounds = h.bounds("chat-row-phone-a1");
+    let y = bounds.top() + bounds.size.height / 2.0;
+    let mut x = bounds.left();
+    let mut found = None;
+    while found.is_none() && x < bounds.right() {
+        let at = point(x, y);
+        if let Some((entry, 0, byte)) = h.root(|root, _| root.phone_chat_hit(at))
+            && entry == "a1"
+            && bytes.contains(&byte)
+        {
+            found = Some(at);
+        }
+        x += px(1.0);
+    }
+    found.expect("answer a1 draws those bytes")
+}
+
+/// A finger down and straight up on answer `a1`'s bytes `bytes`, a second
+/// after any earlier tap, so no two make a double tap.
+fn tap_answer(h: &mut Harness<'_>, bytes: std::ops::Range<usize>) {
+    h.advance(Duration::from_secs(1));
+    let at = on_bytes(h, bytes);
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+    h.cx.run_until_parked();
+}
+
+/// Runs `drive` on the window's phone root, then lets it settle.
+fn phone_update(
+    h: &mut Harness<'_>,
+    drive: impl FnOnce(&mut PhoneRoot, &mut gpui::Context<PhoneRoot>),
+) {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, drive);
+    });
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_tap_on_an_issue_in_the_phone_chat_asks_once_and_raises_the_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_on(cx, &dir, "RT-12 now");
+
+    tap_answer(&mut h, 0..5);
+
+    assert_eq!(asked(&mut h), [vec!["RT-12".to_owned()]], "one ask");
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+    assert!(
+        in_sheet(&mut h, "linear-card-notice-phone=Fetching from Linear"),
+        "while asked it says so"
+    );
+    assert!(in_sheet(&mut h, "linear-card-id-phone=RT-12"));
+    assert_eq!(h.opened(), [], "a tap on an issue opens nothing");
+
+    h.host(&saved_remote())
+        .send(support::linear_issues(vec![support::linear_issue(
+            "RT-12",
+            "Phone card",
+        )]));
+
+    assert!(in_sheet(&mut h, "linear-card-title-phone=Phone card"));
+    assert!(!drawn(
+        &mut h,
+        "linear-card-notice-phone=Fetching from Linear"
+    ));
+}
+
+#[gpui::test]
+fn a_chat_issue_tap_on_a_host_without_linear_links_opens_the_link(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_page(cx, &dir, &[], "RT-12 now", Some(linear()));
+
+    tap_answer(&mut h, 0..5);
+
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new(), "no linear_links");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(ISSUE_WEB.to_owned())],
+        "a host that cannot answer opens the link"
+    );
+    assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
+#[gpui::test]
+fn a_chat_issue_tap_with_linear_off_opens_the_link(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_on(cx, &dir, "RT-12 now");
+    h.host(&saved_remote()).send(linear_status(false));
+    h.cx.run_until_parked();
+
+    tap_answer(&mut h, 0..5);
+
+    assert_eq!(
+        asked(&mut h),
+        Vec::<Vec<String>>::new(),
+        "Linear off asks nothing"
+    );
+    assert_eq!(
+        h.opened(),
+        [],
+        "and the identifier is no link to open either"
+    );
+    assert!(!drawn(&mut h, SHEET), "and no card rises");
+}
+
+#[gpui::test]
+fn a_chat_card_sheet_goes_with_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_on(cx, &dir, "RT-12 now");
+    tap_answer(&mut h, 0..5);
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+
+    phone_update(&mut h, |phone, cx| {
+        assert!(phone.open_session_on("b", cx), "Home lists b");
+    });
+
+    assert!(drawn(&mut h, "phone-session"), "another session's page");
+    assert!(!drawn(&mut h, SHEET), "the sheet went with the session");
+}
+
+#[gpui::test]
+fn a_chat_card_survives_the_page_toggle(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_on(cx, &dir, "RT-12 now");
+    tap_answer(&mut h, 0..5);
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+
+    phone_update(&mut h, PhoneRoot::tap_session_toggle);
+
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the Terminal page shows"
+    );
+    assert!(drawn(&mut h, SHEET), "and the sheet stays over it");
+
+    phone_update(&mut h, PhoneRoot::tap_session_toggle);
+
+    assert!(drawn(&mut h, "phone-session-chat"), "the Chat page again");
+    assert!(drawn(&mut h, SHEET), "and the sheet too");
+}
+
+#[gpui::test]
+fn back_takes_a_chat_card_down_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_on(cx, &dir, "RT-12 now");
+    tap_answer(&mut h, 0..5);
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+
+    back(&mut h);
+
+    assert!(!drawn(&mut h, SHEET), "the sheet is down");
+    assert!(drawn(&mut h, "phone-session-chat"), "the page is unchanged");
+}
+
+#[gpui::test]
+fn a_chat_identifier_links_once_the_linear_context_arrives(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_page(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 now",
+        None,
+    );
+
+    tap_answer(&mut h, 0..5);
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new(), "no link yet");
+    assert!(!drawn(&mut h, SHEET), "and no card rises");
+
+    h.host(&saved_remote()).send(linear());
+    h.cx.run_until_parked();
+
+    tap_answer(&mut h, 0..5);
+
+    assert_eq!(
+        asked(&mut h),
+        [vec!["RT-12".to_owned()]],
+        "the identifier links once the context arrives"
+    );
+    assert!(drawn(&mut h, SHEET), "and raises the sheet");
 }

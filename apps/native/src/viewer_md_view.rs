@@ -24,7 +24,7 @@ use crate::chat_view::SelectDraw;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, ui_px_at};
 use crate::link_menu_view::ChatFileLink;
-use crate::links::TerminalLinkCandidate;
+use crate::links::{IssueContext, TerminalLinkCandidate};
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::{LinkAction, OpenJob};
@@ -192,9 +192,10 @@ pub(crate) enum LinkRoute {
     /// A desktop chat answer's: what [`Self::WebOnly`] follows, and a file
     /// link, opened in its default app, or its link menu on Shift.
     Chat,
-    /// A phone chat answer's: what [`Self::WebOnly`] follows, and a file
-    /// link, its path (the fragment dropped) opened as a tapped path on the
-    /// phone: the viewer for a file, the browser for a folder.
+    /// A phone chat answer's: what [`Self::WebOnly`] follows, a file link,
+    /// its path (the fragment dropped) opened as a tapped path on the phone
+    /// (the viewer for a file, the browser for a folder), and an issue link,
+    /// raised as its card.
     Phone,
 }
 
@@ -204,9 +205,16 @@ impl LinkRoute {
         match self {
             Self::ViewerTab => true,
             Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
-            Self::Chat | Self::Phone => matches!(
+            Self::Chat => matches!(
                 target,
                 LinkTarget::Url(_) | LinkTarget::Stretchtext { .. } | LinkTarget::File { .. }
+            ),
+            Self::Phone => matches!(
+                target,
+                LinkTarget::Url(_)
+                    | LinkTarget::Stretchtext { .. }
+                    | LinkTarget::File { .. }
+                    | LinkTarget::Issue { .. }
             ),
         }
     }
@@ -258,11 +266,18 @@ impl LinkClick {
             (LinkRoute::Phone, LinkTarget::File { path, .. }) => {
                 self.phone_file(root, &path, window, cx);
             }
+            (
+                LinkRoute::Phone,
+                LinkTarget::Issue {
+                    identifier,
+                    web_url,
+                },
+            ) => self.phone_issue(root, &identifier, &web_url, window, cx),
             (LinkRoute::WebOnly, _) => {
                 tracing::debug!("a chat answer follows only web links");
             }
             (LinkRoute::Chat | LinkRoute::Phone, _) => {
-                tracing::debug!("a chat answer follows only web and file links");
+                tracing::debug!("a chat answer follows only web, file and issue links");
             }
         }
     }
@@ -302,6 +317,23 @@ impl LinkClick {
             return;
         };
         root.phone_chat_file_link(session_id, path, window, cx);
+    }
+
+    /// Raises a phone chat answer's issue link: `identifier`, whose web
+    /// address is `web_url`.
+    fn phone_issue(
+        &self,
+        root: &mut RootView,
+        identifier: &str,
+        web_url: &str,
+        window: &mut Window,
+        cx: &mut Context<RootView>,
+    ) {
+        let Some((session_id, _)) = &self.stretchtext else {
+            tracing::debug!("an issue link outside a chat answer");
+            return;
+        };
+        root.phone_chat_issue_link(session_id, identifier, web_url, window, cx);
     }
 }
 
@@ -439,16 +471,22 @@ pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc
 }
 
 /// A chat answer as [`crate::stretchtext::compose`] wrote it, parsed into rows
-/// with its stretches lifted into stretchtext links and the paths in its
-/// prose and inline code made file links, its code coloured as [`prepare`]
-/// colours it. A Windows path keeps its backslashes, since an answer's `\.`
-/// means the backslash and not `CommonMark`'s escape; a Markdown file, which
+/// with its stretches lifted into stretchtext links, the paths in its prose
+/// and inline code made file links and its Linear issue identifiers made
+/// issue links against `issues`, its code coloured as [`prepare`] colours it.
+/// A Windows path keeps its backslashes, since an answer's `\.` means the
+/// backslash and not `CommonMark`'s escape; a Markdown file, which
 /// [`prepare`] reads, keeps `CommonMark`'s reading.
-pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc {
+pub(crate) fn prepare_answer(
+    composed: &Composed,
+    issues: &IssueContext,
+    cancel: &AtomicBool,
+) -> MdDoc {
     let source = md_blocks::keep_path_backslashes(&composed.source);
     let mut document = md_blocks::parse(&source, Path::new(""), md_blocks::SoftBreaks::Line);
     md_blocks::lift_stretchtext(&mut document, &composed.keys);
     md_blocks::link_paths(&mut document);
+    md_blocks::link_issues(&mut document, issues);
     flatten(document, cancel)
 }
 
@@ -1295,6 +1333,9 @@ impl RootView {
             LinkTarget::Stretchtext { .. } => {
                 tracing::debug!(tab_id, "a viewer tab has no stretchtext to open");
             }
+            LinkTarget::Issue { identifier, .. } => {
+                tracing::debug!(tab_id, %identifier, "a viewer tab has no issue to raise");
+            }
             LinkTarget::Refused => {
                 tracing::warn!(tab_id, "refusing a Markdown link that is not http or https");
                 self.push_toast(
@@ -1606,6 +1647,53 @@ mod tests {
     }
 
     #[test]
+    fn the_phone_route_follows_issue_links_and_the_others_do_not() {
+        let issue = LinkTarget::Issue {
+            identifier: "RT-12".to_owned(),
+            web_url: "https://linear.app/ws/issue/RT-12".to_owned(),
+        };
+        assert!(LinkRoute::Phone.follows(&issue));
+        assert!(
+            !LinkRoute::Chat.follows(&issue),
+            "the desktop chat keeps an identifier plain"
+        );
+        assert!(!LinkRoute::WebOnly.follows(&issue));
+        assert!(LinkRoute::ViewerTab.follows(&issue));
+    }
+
+    #[test]
+    fn a_desktop_chat_answer_draws_an_issue_identifier_as_plain_text() {
+        let context = IssueContext::new(&["RT".to_owned()], Some("ws"), true);
+        let answer = prepare_answer(
+            &Composed {
+                source: "see RT-12 for it".to_owned(),
+                keys: Vec::new(),
+            },
+            &context,
+            &AtomicBool::new(false),
+        );
+        let spans = match &answer.rows[0].kind {
+            RowKind::Text(spans) => spans.as_slice(),
+            other => panic!("one paragraph, got {other:?}"),
+        };
+        let issue = spans
+            .iter()
+            .find(|span| matches!(&span.link, Some(LinkTarget::Issue { .. })))
+            .expect("the identifier parses as an issue link");
+        assert_eq!(issue.text, "RT-12");
+        assert!(
+            link_ranges(spans, LinkRoute::Chat).is_empty(),
+            "no click on the desktop"
+        );
+        let style = span_style(issue, LinkRoute::Chat, &UiTheme::CONTRAST);
+        assert!(
+            style.underline.is_none() && style.color.is_none(),
+            "{style:?}"
+        );
+        assert_eq!(link_ranges(spans, LinkRoute::Phone).len(), 1);
+    }
+
+    #[test]
     fn a_chat_answer_follows_its_file_links_and_not_its_anchors() {
         let spans = spans_of("[log](logs/app.log) [top](#top)\n");
         let (text, _) = inline_text(&spans);
@@ -1707,6 +1795,7 @@ mod tests {
                 source: "1\n2\n3\n".to_owned(),
                 keys: Vec::new(),
             },
+            &IssueContext::default(),
             &AtomicBool::new(false),
         );
         assert_eq!(answer.drawn_text(), "1\n2\n3");
@@ -1725,6 +1814,7 @@ mod tests {
                 source: r"Open X:\dev\.tmp\repo\src\main.rs now".to_owned(),
                 keys: Vec::new(),
             },
+            &IssueContext::default(),
             &AtomicBool::new(false),
         );
         assert_eq!(

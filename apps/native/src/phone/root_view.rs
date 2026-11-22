@@ -1001,6 +1001,7 @@ impl PhoneRoot {
         self.sort_menu = false;
         // The page's context label reads the host's Dashboard facts.
         self.root.update(cx, |root, cx| {
+            root.dismiss_phone_card(cx);
             root.show_phone_chat(Some(shown), cx);
             root.sync_dashboard_watch();
         });
@@ -1257,6 +1258,7 @@ impl PhoneRoot {
         self.composer_dock = super::composer::Dock::None;
         self.prompt_sheet = SheetState::default();
         self.root.update(cx, |root, cx| {
+            root.dismiss_phone_card(cx);
             root.show_phone_chat(None, cx);
             root.sync_dashboard_watch();
         });
@@ -1293,6 +1295,7 @@ impl PhoneRoot {
             self.composer_dock = super::composer::Dock::None;
             self.prompt_sheet = SheetState::default();
             self.root.update(cx, |root, cx| {
+                root.dismiss_phone_card(cx);
                 root.show_phone_chat(None, cx);
                 root.sync_dashboard_watch();
             });

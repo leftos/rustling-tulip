@@ -1468,7 +1468,7 @@ impl RootView {
     /// Whether a phone tap on an issue link of `host` raises its card:
     /// Linear is on for `host` and it lists `linear_links`, so it can
     /// answer; else the tap opens the link.
-    fn phone_raises_card(&self, host: &HostKey) -> bool {
+    pub(crate) fn phone_raises_card(&self, host: &HostKey) -> bool {
         self.linear_enabled(host)
             && self
                 .conn_of(host)

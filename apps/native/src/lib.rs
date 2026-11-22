@@ -5674,6 +5674,7 @@ impl RootView {
                 for view in self.pane_views_on(host) {
                     view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
                 }
+                self.set_chat_issue_context(host, &context);
                 self.refresh_linear_card(host, cx);
             }
             DaemonMessage::LinearIssues { issues } => {
@@ -5726,6 +5727,7 @@ impl RootView {
         for view in self.pane_views_on(host) {
             view.update(cx, |pane, cx| pane.set_issue_context(context.clone(), cx));
         }
+        self.set_chat_issue_context(host, &context);
         if enabled {
             return;
         }
@@ -5850,14 +5852,54 @@ impl RootView {
         cx.notify();
     }
 
-    /// The card the phone's card sheet draws: that of the issue
-    /// `self.linear_card` names, while the pane it anchors on is the
-    /// phone's terminal; `None` otherwise.
-    pub(crate) fn phone_linear_card(&self) -> Option<linear_card::Card> {
-        let anchor = self
+    /// A tap on issue `identifier`, whose web address is `web_url`, in a
+    /// phone chat or a session title: asks `host` for the issue once and
+    /// raises its card as the phone's sheet, or, on a host that cannot
+    /// answer, opens the link.
+    pub(crate) fn phone_raise_card(
+        &mut self,
+        host: &HostKey,
+        identifier: &str,
+        web_url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.phone_raises_card(host) {
+            self.open_issue_link(web_url, host, window, cx);
+            return;
+        }
+        self.ask_linear_issue(host, identifier);
+        let anchor = linear_card::CardAnchor {
+            host: host.clone(),
+            pane_id: linear_card::PHONE_CARD_PANE.to_owned(),
+            identifier: identifier.to_owned(),
+            web_url: web_url.to_owned(),
+        };
+        self.show_linear_card(anchor, cx);
+        cx.notify();
+    }
+
+    /// Takes down the card a phone chat or a title raised, while one is up;
+    /// a terminal's own card stays its pane's to take down.
+    pub(crate) fn dismiss_phone_card(&mut self, cx: &mut Context<Self>) {
+        let raised = self
             .linear_card
             .as_ref()
-            .filter(|anchor| self.is_phone_terminal(&anchor.pane_id))?;
+            .is_some_and(|anchor| anchor.pane_id == linear_card::PHONE_CARD_PANE);
+        if raised {
+            self.dismiss_linear_card(cx);
+        }
+    }
+
+    /// The card the phone's card sheet draws: that of the issue
+    /// `self.linear_card` names, while the pane it anchors on is the
+    /// phone's terminal or a phone chat or title raised it; `None`
+    /// otherwise.
+    pub(crate) fn phone_linear_card(&self) -> Option<linear_card::Card> {
+        let anchor = self.linear_card.as_ref().filter(|anchor| {
+            anchor.pane_id == linear_card::PHONE_CARD_PANE
+                || self.is_phone_terminal(&anchor.pane_id)
+        })?;
         Some(self.linear_issues.card(
             &anchor.host,
             &anchor.identifier,

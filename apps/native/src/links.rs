@@ -13,6 +13,7 @@
 //! Every stitch is a boundary a reading of the path can stop at, so an
 //! over-eager stitch degrades into the fragment that was on screen.
 
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -467,8 +468,7 @@ pub fn issue_identifier(link: &TerminalLink) -> Option<String> {
         return None;
     }
     let text = if is_issue_url(&link.text) {
-        let at = link.text.find(ISSUE_URL_PATH)? + ISSUE_URL_PATH.len();
-        link.text.get(at..)?
+        issue_url_identifier(&link.text)?
     } else {
         link.text.as_str()
     };
@@ -648,6 +648,13 @@ fn issue_segment_links(segments: &[Segment], context: &IssueContext) -> Vec<Term
     }
     links.sort_by_key(|link| link.start_index);
     links
+}
+
+/// The identifier of `url`, a `linear.app` issue URL, such as `RT-12`.
+fn issue_url_identifier(url: &str) -> Option<&str> {
+    let at = url.find(ISSUE_URL_PATH)? + ISSUE_URL_PATH.len();
+    let text = url.get(at..)?;
+    text.get(..identifier_at(text, 0)?)
 }
 
 /// The text before the workspace in a Linear issue URL.
@@ -1785,6 +1792,80 @@ pub(crate) fn text_links(text: &str, urls: bool) -> Vec<TextLink> {
     links.extend(paths);
     links.sort_by_key(|link| link.range.start);
     links
+}
+
+/// Every Linear issue link in plain `text`, in order: each `linear.app` issue
+/// URL as the address it is written as, and each bare identifier of one of
+/// `context`'s teams as the address it opens; none at all while Linear is
+/// off. A URL of any other kind is no link, an identifier a URL covers is no
+/// second link, and neither is one between two path separators, which a path
+/// or a branch name holds.
+pub(crate) fn text_issue_links(
+    text: &str,
+    context: &IssueContext,
+) -> Vec<(Range<usize>, String, String)> {
+    if !context.is_enabled() {
+        return Vec::new();
+    }
+    let urls: Vec<Range<usize>> = URL_PATTERN
+        .find_iter(text)
+        .map(|found| {
+            let trimmed = trim_link_candidate(found.as_str());
+            found.start()..found.start() + trimmed.len()
+        })
+        .collect();
+    let mut links: Vec<(Range<usize>, String, String)> = urls
+        .iter()
+        .filter_map(|range| {
+            let (identifier, web_url) = issue_url_link(text, range)?;
+            Some((range.clone(), identifier, web_url))
+        })
+        .collect();
+    for (start, identifier) in bare_identifiers(text) {
+        let range = start..start + identifier.len();
+        if in_a_path(text, &range) || overlaps_any(&urls, &range) {
+            continue;
+        }
+        let Some(web_url) = context.bare_address(identifier) else {
+            continue;
+        };
+        links.push((range, identifier.to_owned(), web_url));
+    }
+    links.sort_by_key(|(range, ..)| range.start);
+    links
+}
+
+/// `range` of `text` as an issue link, when it is a `linear.app` issue URL:
+/// its identifier and the address it is written as.
+fn issue_url_link(text: &str, range: &Range<usize>) -> Option<(String, String)> {
+    let url = text.get(range.clone())?;
+    if !is_issue_url(url) {
+        return None;
+    }
+    let identifier = issue_url_identifier(url)?;
+    Some((identifier.to_owned(), url.to_owned()))
+}
+
+/// Whether `range` overlaps any of `ranges`.
+fn overlaps_any(ranges: &[Range<usize>], range: &Range<usize>) -> bool {
+    ranges
+        .iter()
+        .any(|other| other.start < range.end && range.start < other.end)
+}
+
+/// Whether `range` of `text` sits inside a path or a branch name: a `/` or a
+/// `\` just before it or just after it.
+fn in_a_path(text: &str, range: &Range<usize>) -> bool {
+    let before = text
+        .get(..range.start)
+        .and_then(|rest| rest.chars().next_back());
+    let after = text.get(range.end..).and_then(|rest| rest.chars().next());
+    before.is_some_and(is_path_separator) || after.is_some_and(is_path_separator)
+}
+
+/// Whether `character` separates the parts of a path or a branch name.
+fn is_path_separator(character: char) -> bool {
+    matches!(character, '/' | '\\')
 }
 
 /// Whether `value` is a path [`text_links`] links: a drive or current-folder
@@ -3783,5 +3864,92 @@ mod title_tests {
             ]
         );
         assert_eq!(text_links_in(text, false), [("/tmp/x", LinkKind::Path)]);
+    }
+
+    /// A host's context with Linear on, its team `RT` and workspace `ws`
+    /// known.
+    fn issue_context() -> super::IssueContext {
+        super::IssueContext::new(&["RT".to_owned()], Some("ws"), true)
+    }
+
+    /// The text each of [`super::text_issue_links`]'s links in `text` covers,
+    /// with its identifier and its web address.
+    fn issue_links_in(text: &str) -> Vec<(&str, String, String)> {
+        super::text_issue_links(text, &issue_context())
+            .into_iter()
+            .map(|(range, identifier, web_url)| (&text[range], identifier, web_url))
+            .collect()
+    }
+
+    #[test]
+    fn text_issue_links_find_a_team_identifier_in_prose() {
+        let address = |identifier: &str| format!("https://linear.app/ws/issue/{identifier}");
+        for text in ["see RT-12 for it", "RT-12", "(RT-12)"] {
+            assert_eq!(
+                issue_links_in(text),
+                [("RT-12", "RT-12".to_owned(), address("RT-12"))],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_issue_links_leave_another_teams_identifier_alone() {
+        assert_eq!(issue_links_in("see XY-12 for it"), Vec::new());
+    }
+
+    #[test]
+    fn text_issue_links_find_a_linear_url_and_not_its_identifier_twice() {
+        let url = "https://linear.app/ws/issue/RT-12/slug";
+        assert_eq!(
+            issue_links_in(&format!("see {url} now")),
+            [(url, "RT-12".to_owned(), url.to_owned())]
+        );
+    }
+
+    #[test]
+    fn text_issue_links_are_none_while_linear_is_off() {
+        let off = issue_context().with_enabled(false);
+        for text in ["see RT-12 now", "see https://linear.app/ws/issue/RT-12 now"] {
+            let links = super::text_issue_links(text, &off);
+            assert_eq!(links, Vec::new(), "{text}");
+        }
+    }
+
+    #[test]
+    fn text_issue_links_leave_an_identifier_in_a_path_alone() {
+        for text in [
+            "open docs/RT-12/x.md now",
+            "on branch feat/RT-12-x now",
+            r"open docs\RT-12\x.md now",
+        ] {
+            assert_eq!(issue_links_in(text), Vec::new(), "{text}");
+        }
+    }
+
+    #[test]
+    fn text_issue_links_leave_a_non_linear_issue_url_alone() {
+        let context =
+            super::IssueContext::new(&["RT".to_owned(), "RUST".to_owned()], Some("ws"), true);
+        for text in [
+            "Upstream: https://youtrack.jetbrains.com/issue/RUST-1234",
+            "see https://linear.app/ws/issue/RT-12-x now",
+        ] {
+            assert_eq!(
+                super::text_issue_links(text, &context),
+                Vec::new(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_issue_links_leave_an_identifier_inside_another_url_alone() {
+        for text in [
+            "see https://github.com/leftos/rustling-tulip/pulls?q=RT-12 now",
+            "see https://example.com/docs#RT-12 now",
+        ] {
+            assert_eq!(issue_links_in(text), Vec::new(), "{text}");
+        }
     }
 }

@@ -52,6 +52,7 @@ use crate::completion::{self, CompletionItem, CompletionState, Token};
 use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
+use crate::links::IssueContext;
 use crate::phone::quick_replies::{self, ReplySet};
 use crate::scrollbar::Scrollbar;
 use crate::session_menu::{on_press, popover_frame};
@@ -164,6 +165,9 @@ pub(crate) struct SessionChat {
     request: Option<String>,
     /// By answer id, its parsed document and what it was parsed at.
     docs: HashMap<String, AnswerDoc>,
+    /// The Linear context its answers link issue identifiers against, as its
+    /// host last gave it.
+    issues: IssueContext,
     /// The work running beside the chat, for its strip; a `Chat` reply
     /// leaves it as it is.
     work: RunningWork,
@@ -236,12 +240,14 @@ impl ChatRefusal {
     }
 }
 
-/// An answer's parsed document, with the text length, live flag and open
-/// stretches it was parsed at: a change to any of them parses it again.
+/// An answer's parsed document, with the text length, live flag, open
+/// stretches and Linear issue context it was parsed at: a change to any of
+/// them parses it again.
 struct AnswerDoc {
     len: usize,
     live: bool,
     open: BTreeSet<String>,
+    issues: IssueContext,
     doc: Arc<MdDoc>,
 }
 
@@ -556,13 +562,24 @@ impl SessionChat {
         true
     }
 
+    /// Links its answers' issue identifiers against `context`, parsing every
+    /// answer again when it is not the context they were parsed with.
+    pub(crate) fn set_issue_context(&mut self, context: IssueContext) {
+        if self.issues == context {
+            return;
+        }
+        self.issues = context;
+        self.refresh_docs();
+    }
+
     /// Parses each answer whose text is new or changed length, whose live
-    /// flag changed or whose stretches opened or closed since its last
-    /// parse, and forgets the answers that left.
+    /// flag changed, whose stretches opened or closed, or whose issue context
+    /// changed since its last parse, and forgets the answers that left.
     fn refresh_docs(&mut self) {
         let mut parsed = std::mem::take(&mut self.docs);
         let cancel = AtomicBool::new(false);
         let none = BTreeSet::new();
+        let issues = self.issues.clone();
         for entry in self.log.entries() {
             let ChatEntry::Answer { id, text, live } = entry else {
                 continue;
@@ -570,14 +587,20 @@ impl SessionChat {
             let open = self.log.open_stretchtext(id).unwrap_or(&none);
             let doc = parsed
                 .remove(id)
-                .filter(|doc| doc.len == text.len() && doc.live == *live && doc.open == *open)
+                .filter(|doc| {
+                    doc.len == text.len()
+                        && doc.live == *live
+                        && doc.open == *open
+                        && doc.issues == issues
+                })
                 .unwrap_or_else(|| {
                     let composed = stretchtext::compose(text, open, *live);
                     AnswerDoc {
                         len: text.len(),
                         live: *live,
                         open: open.clone(),
-                        doc: Arc::new(prepare_answer(&composed, &cancel)),
+                        issues: issues.clone(),
+                        doc: Arc::new(prepare_answer(&composed, &issues, &cancel)),
                     }
                 });
             self.docs.insert(id.clone(), doc);
@@ -1710,12 +1733,14 @@ impl RootView {
         }
         for session_id in changes.load {
             let request_id = new_request_id();
-            let chat = SessionChat {
+            let host = self.chat.host_of(&session_id);
+            let issues = self.issue_context_of(&host);
+            let mut chat = SessionChat {
                 request: Some(request_id.clone()),
                 ..SessionChat::default()
             };
+            chat.set_issue_context(issues);
             self.chat.sessions.insert(session_id.clone(), chat);
-            let host = self.chat.host_of(&session_id);
             self.send_to(
                 &host,
                 ClientMessage::LoadChat {
@@ -1738,6 +1763,24 @@ impl RootView {
             self.send_to(&host, msg);
         }
         self.chat.retain_loaded_hosts();
+    }
+
+    /// Hands `host`'s Linear issue context `context` to each of its loaded
+    /// chats, so an answer parsed before the context arrived links its issue
+    /// identifiers.
+    pub(crate) fn set_chat_issue_context(&mut self, host: &HostKey, context: &IssueContext) {
+        let sessions: Vec<String> = self
+            .chat
+            .sessions
+            .keys()
+            .filter(|session_id| self.chat.host_of(session_id) == *host)
+            .cloned()
+            .collect();
+        for session_id in sessions {
+            if let Some(chat) = self.chat.sessions.get_mut(&session_id) {
+                chat.set_issue_context(context.clone());
+            }
+        }
     }
 
     /// Every pane drawing its chat or summary, as its pane id, its session,
@@ -3913,6 +3956,22 @@ impl RootView {
         self.chat_file_link(session_id, link, window, cx);
     }
 
+    /// Raises issue `identifier`, whose web address is `web_url`, tapped in
+    /// session `session_id`'s phone chat: its host is asked for the issue
+    /// once and its card shows as the phone's sheet, or, on a host that
+    /// cannot answer, the link opens.
+    pub fn phone_chat_issue_link(
+        &mut self,
+        session_id: &str,
+        identifier: &str,
+        web_url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self.chat.host_of(session_id);
+        self.phone_raise_card(&host, identifier, web_url, window, cx);
+    }
+
     fn answer_doc(&self, session_id: &str, answer_id: &str) -> Option<&MdDoc> {
         let chat = self.chat.sessions.get(session_id)?;
         chat.docs.get(answer_id).map(|answer| answer.doc.as_ref())
@@ -5703,6 +5762,33 @@ fn span(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_reparses_when_the_issue_context_arrives() {
+        let mut chat = SessionChat::default();
+        chat.log.load(
+            vec![ChatEntry::Answer {
+                id: "a1".to_owned(),
+                text: "see RT-12 for it".to_owned(),
+                live: false,
+            }],
+            0,
+        );
+        chat.refresh_docs();
+        let before = chat.docs["a1"].doc.clone();
+        let context = IssueContext::new(&["RT".to_owned()], Some("ws"), true);
+        chat.set_issue_context(context.clone());
+        assert!(
+            !Arc::ptr_eq(&before, &chat.docs["a1"].doc),
+            "the answer parses again against the new context"
+        );
+        let reparsed = chat.docs["a1"].doc.clone();
+        chat.set_issue_context(context);
+        assert!(
+            Arc::ptr_eq(&reparsed, &chat.docs["a1"].doc),
+            "an unchanged context parses nothing"
+        );
+    }
 
     #[test]
     fn the_phone_composer_keyboard_has_autocorrect_and_sentence_caps_without_predictions() {

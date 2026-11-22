@@ -574,6 +574,7 @@ mod tests {
 
     use super::*;
     use crate::chat::RunSummary;
+    use crate::links::IssueContext;
     use crate::stretchtext;
     use crate::viewer_md_view::prepare_answer;
 
@@ -614,6 +615,7 @@ mod tests {
     fn doc(text: &str) -> MdDoc {
         prepare_answer(
             &stretchtext::compose(text, &BTreeSet::new(), false),
+            &IssueContext::default(),
             &AtomicBool::new(false),
         )
     }

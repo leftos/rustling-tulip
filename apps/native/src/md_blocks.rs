@@ -125,6 +125,9 @@ pub(crate) enum LinkTarget {
     /// A stretch of a chat answer, by its key: a click on its short form
     /// opens it, a click on its closer closes it.
     Stretchtext { key: String },
+    /// A Linear issue: the identifier a click raises and the web address it
+    /// opens.
+    Issue { identifier: String, web_url: String },
 }
 
 /// Lifts the marker runs [`stretchtext::compose`] wrote out of `document`:
@@ -399,6 +402,70 @@ fn text_target(text: &str, kind: LinkKind) -> Option<LinkTarget> {
             .map(|url| LinkTarget::Url(url.to_owned())),
         LinkKind::Issue => None,
     }
+}
+
+/// Links each Linear issue [`links::text_issue_links`] finds in `document`'s
+/// prose and inline code outside every link to [`LinkTarget::Issue`], as a
+/// phone chat answer draws it: a code block, raw HTML and an image's alt text
+/// stay plain, and a Markdown link or a stretch keeps its own target.
+pub(crate) fn link_issues(document: &mut Document, context: &links::IssueContext) {
+    for block in &mut document.blocks {
+        issue_block(block, context);
+    }
+}
+
+fn issue_block(block: &mut Block, context: &links::IssueContext) {
+    match block {
+        Block::Heading { spans, .. } | Block::Paragraph(spans) => issue_spans(spans, context),
+        Block::List { items, .. } => {
+            for inner in items.iter_mut().flat_map(|item| item.blocks.iter_mut()) {
+                issue_block(inner, context);
+            }
+        }
+        Block::Quote(blocks) => {
+            for inner in blocks {
+                issue_block(inner, context);
+            }
+        }
+        Block::Table { head, rows, .. } => {
+            for cell in head.iter_mut().chain(rows.iter_mut().flatten()) {
+                issue_spans(cell, context);
+            }
+        }
+        Block::Code { .. } | Block::Html(_) | Block::Rule => {}
+    }
+}
+
+/// `spans` with each run of plain text joined into one span, so an identifier
+/// the parser cut apart is read whole, then each issue in a span outside every
+/// link cut out as a span of its own, linked to it.
+fn issue_spans(spans: &mut Vec<Span>, context: &links::IssueContext) {
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for span in join_plain(std::mem::take(spans)) {
+        split_issues(span, context, &mut out);
+    }
+    *spans = out;
+}
+
+/// Pushes `span` onto `out`, cut around each issue
+/// [`links::text_issue_links`] finds in its text, each issue a span of its
+/// own; a span already in a link, or muted, is pushed whole.
+fn split_issues(span: Span, context: &links::IssueContext, out: &mut Vec<Span>) {
+    if span.link.is_some() || span.muted {
+        out.push(span);
+        return;
+    }
+    let mut at = 0;
+    for (range, identifier, web_url) in links::text_issue_links(&span.text, context) {
+        out.extend(piece(&span, at..range.start, None));
+        let target = LinkTarget::Issue {
+            identifier,
+            web_url,
+        };
+        out.extend(piece(&span, range.clone(), Some(target)));
+        at = range.end;
+    }
+    out.extend(piece(&span, at..span.text.len(), None));
 }
 
 /// How a soft break, a single line break inside a paragraph, draws.
@@ -2297,5 +2364,53 @@ mod tests {
             [("/tmp/a.txt".to_owned(), false, file("/tmp/a.txt"))]
         );
         assert_eq!(texts(&spans), "Keep `/tmp/a.txt` as is");
+    }
+
+    /// A host's context with Linear on, its team `RT` and workspace `ws`
+    /// known.
+    fn issue_context() -> links::IssueContext {
+        links::IssueContext::new(&["RT".to_owned()], Some("ws"), true)
+    }
+
+    #[test]
+    fn link_issues_links_prose_and_inline_code_not_a_code_block() {
+        let mut doc = answer_doc("See RT-12 and `RT-13`.\n\n```\nRT-14\n```\n");
+        link_issues(&mut doc, &issue_context());
+        let issue = |identifier: &str| LinkTarget::Issue {
+            identifier: identifier.to_owned(),
+            web_url: format!("https://linear.app/ws/issue/{identifier}"),
+        };
+        let spans = spans_at(&doc.blocks, 0);
+        let links: Vec<(String, Option<LinkTarget>)> = spans
+            .iter()
+            .map(|span| (span.text.clone(), span.link.clone()))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                ("See ".to_owned(), None),
+                ("RT-12".to_owned(), Some(issue("RT-12"))),
+                (" and ".to_owned(), None),
+                ("RT-13".to_owned(), Some(issue("RT-13"))),
+                (".".to_owned(), None),
+            ]
+        );
+        let (_, code) = code_at(&doc.blocks, 1);
+        assert_eq!(code, "RT-14", "a code block stays plain");
+    }
+
+    #[test]
+    fn link_issues_keeps_a_markdown_links_own_target() {
+        let mut doc = answer_doc("[RT-12](https://linear.app/ws/issue/RT-12)\n");
+        link_issues(&mut doc, &issue_context());
+        let spans = spans_at(&doc.blocks, 0);
+        assert_eq!(texts(spans), "RT-12");
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(
+            spans[0].link,
+            Some(LinkTarget::Url(
+                "https://linear.app/ws/issue/RT-12".to_owned()
+            ))
+        );
     }
 }

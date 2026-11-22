@@ -2224,3 +2224,23 @@ fn a_plain_click_on_a_chat_file_link_opens_the_default_app(cx: &mut TestAppConte
         ]
     );
 }
+
+#[gpui::test]
+fn the_desktop_chat_does_not_link_an_issue_identifier(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_in(cx, &dir, dir.path(), false, "See RT-12 for it.");
+    h.send(linear(&["RT"], true));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        click_until_opened(&mut h, "chat-row-p1-a1"),
+        Vec::<Opened>::new(),
+        "a click on the identifier opens nothing"
+    );
+    let asked = h
+        .sent()
+        .into_iter()
+        .filter(|msg| matches!(msg, ClientMessage::GetLinearIssues { .. }))
+        .count();
+    assert_eq!(asked, 0, "the desktop chat asks nothing");
+}
