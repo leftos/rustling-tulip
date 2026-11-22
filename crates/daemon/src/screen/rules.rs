@@ -707,7 +707,11 @@ mod tests {
     fn claude_rules_all_compile() {
         let compiled =
             CompiledRules::try_compile(claude_table()).expect("Claude's rule table compiles");
-        assert_eq!(compiled.rules.len(), 20, "no Claude rule was dropped");
+        assert_eq!(
+            compiled.rules.len(),
+            claude_table().rules.len(),
+            "no Claude rule was dropped"
+        );
         let background = compiled
             .rules
             .iter()
