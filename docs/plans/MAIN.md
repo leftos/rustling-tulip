@@ -10,14 +10,10 @@
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 - [ ] RT-289 Classify a plain shell by its command marks, child processes and prompt, not by output volume
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
-- [ ] RT-1898 Find what ends a hook-raised question at Idle with no answer (two cases on 2026-11-17) · release vNext
-- [ ] RT-546 Keep the screen's ownership of the background flag across stamp-only hook events · release vNext
-- [ ] RT-547 Clear the background flag when an agent typed into the shell ends · release vNext
 - [ ] RT-548 Read running-subagent rows past an hour in the background rule · release vNext
 - [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay · release vNext
 - [ ] RT-557 Read the "Background this session?" dialog as a dialog · release vNext
 - [ ] RT-755 Log every status writer and every toast decision
-- [ ] RT-766 Stop the status watcher spinning on a ShellAgent frame with no agent and no prompt · release vNext
 - [ ] RT-767 Work through the held turn end's leftover cases
 - [ ] RT-777 Stop the daemon's screen losing output when its watcher lags · release vNext
 - [ ] RT-850 Read background counts on a default-mode Claude footer · release vNext
@@ -46,6 +42,7 @@
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule · release vNext
 - [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
 - [ ] RT-2100 Slice the model picker's description column on a character boundary · release vNext
+- [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 
 ## Updates and installer
 
@@ -140,6 +137,9 @@
   - [ ] RT-795 Report rt-driver-mcp's and the client's versions from launch, and list sessions on an older server at install
   - [ ] RT-796 Make the driver's and rt-driver-mcp's timeouts load-adjusted instead of wall-clock · release vNext
   - [ ] RT-797 Cancel a timed-out driver request and diagnose busy or stuck after a timeout · release vNext
+    - [ ] RT-2105 Add a cancel method to the driver endpoint and cancel a closed connection's requests · release vNext
+    - [ ] RT-2106 Send a cancel from rt-driver-mcp when a request times out · release vNext
+    - [ ] RT-2107 Diagnose a timed-out driver call as busy, stuck or paused at a breakpoint · release vNext
   - [ ] RT-798 Drop a queued driver request once its connection has closed
   - [ ] RT-799 Put rt-driver-mcp's launched clients and daemons in a job object and report leftovers on stop
   - [ ] RT-800 Give rt-driver-mcp tool classes and have install.ps1 write agents' tools lines
@@ -157,7 +157,6 @@
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-854 Refuse an isolated daemon launch whose checkout has no fake agent CLI
 - [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
-- [ ] RT-1046 Stop four agent-api icon conformance tests leaking past nextest's leak timeout · release vNext
 - [ ] RT-1128 Harden the protocol TypeScript generator against module files, cfg_attr derives and duplicate consts
 - [ ] RT-1236 Strip the owner's other Claude variables from a driven run's children
 - [ ] RT-1244 Refuse a driven run's add_repo under any checkout or agent instruction file
@@ -206,7 +205,7 @@
 ## Chat mirror
 
 - [ ] RT-293 Show a running shell command's live output beside its session
-- [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
+- [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
 - [ ] RT-556 Fix one-shot wakeup times across daylight-saving changes
@@ -226,7 +225,7 @@
 - [ ] RT-1226 End a turn's live answers in Chat when its prompt line had no prompt id
 - [ ] RT-1227 Order live and confirmed Chat rows the same on an append and on a reload
 - [ ] RT-1231 Clear a pending Chat send whose transcript text does not match it
-- [ ] RT-1233 Offer the rest of a tool result Chat cut
+- [ ] RT-1233 Offer the rest of a tool result Chat cut · release vNext
 - [ ] RT-1234 Show a long plan uncut in the Chat plan card
 - [ ] RT-1235 Count a transcript record as a prompt only when it makes a prompt entry
 - [ ] RT-1238 Drop the Markdown heading marker from a filled plan card's title
@@ -309,7 +308,7 @@
 - [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
 - [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
-- [ ] RT-99 Pick between candidates when a clicked path matches several files
+- [ ] RT-99 Pick between candidates when a clicked path matches several files · release vNext
 - [ ] RT-121 Peek at a path's lines on hover, without opening
 - [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
 - [ ] RT-575 Compact the pane header's view switch so titles and branch chips keep their room
@@ -321,7 +320,7 @@
 - [ ] RT-843 Send Home and End in application-cursor form when DECCKM is set
 - [ ] RT-987 Open pop-out toolbar tooltips below the toolbar row, like the pane header's
 - [ ] RT-1056 Get colour query replies (OSC 10/11) through ConPTY to programs on Windows hosts
-- [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line
+- [ ] RT-1086 Open a Ctrl+clicked path that ends in a ?query or #fragment, reading #L4 as a line · release vNext
 - [ ] RT-1171 Anchor a multi-line nu prompt's gutter mark on its first line under ConPTY
 - [ ] RT-1174 Stop a pane header flickering for one frame on each resize step
 - [ ] RT-1175 Measure pane header fit once per tab render instead of per pane per frame
@@ -502,23 +501,20 @@
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
-- [ ] RT-142 Phone: tap a Linear identifier to see its card
+- [ ] RT-142 Phone: tap a Linear identifier to see its card · release vNext
+  - [ ] RT-2110 Phone: link Linear identifiers in chat answers and session titles · release vNext
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
   - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
 - [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards
-- [ ] RT-1347 Treat the phone terminal's private cursor-position reply as an automatic reply · release vNext
 - [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
 - [ ] RT-1391 Align the phone's resume order with the daemon's and close ResumeSession's test gaps
 - [ ] RT-1453 Show a plan longer than 2000 characters in full on the phone before approving
 - [ ] RT-1519 PR.9: Add the FCM sender to the push relay for the Android app
-- [ ] RT-1647 Drop the relay's cached APNs provider token when APNs refuses it · release vNext
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
 - [ ] RT-1681 Polish the phone's add-host form and Pair dialog: Return, keys, scrim, Cancel
-- [ ] RT-1695 Widen the phone's subagent fold chevron to a 44 pt touch target · release vNext
 - [ ] RT-1704 Clear the signing values from testflight.ps1's environment once each is used · release vNext
-- [ ] RT-1708 Fix the iOS-only clippy warnings so the phone app's iOS clippy passes · release vNext
 - [ ] RT-1709 Find why the notification extension does not launch for a simulator push · release vNext
 - [ ] RT-1726 Answer the right host from the phone tray, let a tap through after a swipe, and clear an ended card after Open · release vNext
 - [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
@@ -541,12 +537,12 @@
 - [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone · release vNext
 - [ ] RT-1879 Copy a phone Terminal selection to the clipboard · release vNext
 - [ ] RT-1881 Flush a pending dead key before a phone grid key sends · release vNext
-- [ ] RT-1909 Take a hardware keyboard and pointer on the iPad
-- [ ] RT-1910 Send photos and files from the phone into a session
+- [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
+- [ ] RT-1910 Send photos and files from the phone into a session · release vNext
 - [ ] RT-1913 Keep the phone's Quick dock and Show prompt from re-sizing the session's PTY · release vNext
 - [ ] RT-1914 Keep the phone terminal's keyboard-down height when the fixed rows outgrow the keyboard-up page · release vNext
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
-- [ ] RT-1931 Pinch to zoom an image in the phone viewer
+- [ ] RT-1931 Pinch to zoom an image in the phone viewer · release vNext
 - [ ] RT-1959 Fit two-digit line numbers in the phone viewer's gutter · release vNext
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-1975 Say on the phone why a tapped path could not open when no reading fits · release vNext
@@ -720,6 +716,7 @@
 - [ ] RT-1571 Fix the missing reboot-resume design link in RT-277 and RT-725
 - [ ] RT-1767 Define the phone's key bar, composer, Quick dock and Keys tray in the glossary, and index the phone screens
 - [ ] RT-1839 Make the TailFile docs say a link to a network or device path is followed, not refused
+- [ ] RT-2101 Re-point issue descriptions that cite deleted docs/plans files
 
 ## Backlog
 
@@ -812,6 +809,10 @@
 - [ ] RT-2077 Check whether the phone shell's chat drops the backslash before a dot in a Windows path
 - [ ] RT-2078 Keep double underscores in a Windows path in a chat answer from turning into bold or italic
 
+## No project
+
+- [ ] RT-2111 Keep a detached script's question waiting when a UserPromptSubmit arrives with no typed prompt
+
 ## Design files
 
 - [accounts-fleet.md](accounts-fleet.md) — RT-1106, RT-1107, RT-1108, RT-1109, RT-1110, RT-1111, RT-1112, RT-1113, RT-1114, RT-1115, RT-1117
@@ -828,7 +829,7 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1695, RT-1735, RT-1913, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-142, RT-363, RT-369, RT-881, RT-1735, RT-1913, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
