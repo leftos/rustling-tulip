@@ -18,8 +18,10 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 /// How long a spec waits on one stdout line before it fails as hung; a
-/// live `launch` starts a daemon (its own guard is 300 s) and a client.
-const HANG_GUARD: Duration = Duration::from_secs(290);
+/// live `launch` starts a daemon (its own guard is 300 s) and a client. It
+/// sits above the MCP's own 350 s reply backstop, so a 60 s `wait_for`
+/// (300 s wall backstop) is never cut short.
+const HANG_GUARD: Duration = Duration::from_secs(360);
 
 /// The server exe, started as `.mcp.json`'s launcher starts it.
 struct Server {

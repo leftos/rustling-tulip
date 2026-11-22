@@ -1340,11 +1340,12 @@ mod driven {
 
     /// A hang guard on each wait for the driver: its discovery file, one
     /// reply, or an effect read back through it; not an expected duration.
-    const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
+    const DRIVER_TIMEOUT: Duration = Duration::from_secs(160);
     /// A hang guard on a panicked client exiting, and on a next start after
     /// two panics closing its tabs: not an expected duration.
     const SAFE_START_TIMEOUT: Duration = Duration::from_secs(120);
-    /// How long a spec's `wait_for` waits at most, inside [`DRIVER_TIMEOUT`].
+    /// How long a spec's `wait_for` waits at most in load-adjusted time; its
+    /// 5x wall-time backstop (150 s) stays inside [`DRIVER_TIMEOUT`].
     const WAIT_FOR_MS: u64 = 30_000;
     /// The sidebar's narrowest width (`MIN_WIDTH` in
     /// `apps/native/src/sidebar.rs`): `clamp_width` keeps the panes at least

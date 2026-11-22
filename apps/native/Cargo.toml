@@ -38,6 +38,8 @@ driver = [
 # The driver gate requires each registered agent's binary override.
 agent-registry = { workspace = true }
 daemon-client = { workspace = true }
+# The driver endpoint's wait_for, frame, cloak and capture waits count load-adjusted time.
+load-clock = { workspace = true }
 protocol = { workspace = true }
 # The phone's Notifications switch: the install's push keys and the `p256dh`
 # and `auth` a registration carries.

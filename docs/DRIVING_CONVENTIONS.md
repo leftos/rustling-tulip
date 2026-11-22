@@ -55,7 +55,6 @@ Every ceiling the server enforces, caller-set timeouts included, should run on a
 
 Durations of an action (a drag's steps) are not ceilings, and a timeout is never a pause: holding for a span of app time needs an app-time wait. Measured in another project: integration lanes ran at 15-35% load-adjusted time against wall on a loaded machine.
 
-Not met: the endpoint's `wait_for` and frame waits are wall time.
 Source: `tools/rt-driver-mcp/src/launch.rs`, `src/pipe.rs`, `apps/native/src/driver/wait.rs`; another project's architecture doc and changelog; Windows docs for GetSystemTimes. Seen: 0 here (seeded from godot-mcp).
 
 ### Match every reply to its request, cancel what timed out, then say whether the app is busy or stuck
@@ -75,7 +74,7 @@ Source: `tools/rt-driver-mcp/src/pipe.rs`, `apps/native/src/driver/pipe.rs`; oth
 
 The endpoint clamps `wait_for`'s timeout to 100..=60000 ms and its interval to 20..=1000 ms, and the server waits for any reply for its reply guard, which is longer than the longest clamped wait (70 s against 60 s, and the backstops 350 s against 300 s, counted in load-adjusted time), so the transport never cuts a full-length wait short.
 
-A wait that times out is a result, not an error: `wait_for` always answers ok with `{met, waited_ms, last}`, `last` being the final value the predicate read, and a `batch` answers `{passed, steps, failedAt}` rather than an MCP error, so the agent reads `met` and `passed`. Where a timeout must be an error, it carries the last observation, so an agent can tell "never matched" from "matched the wrong value".
+A wait that times out is a result, not an error: `wait_for` always answers ok with `{met, waited_ms, load_adjusted_ms, last}` (`waited_ms` wall ms, `load_adjusted_ms` the load-adjusted ms spent, `last` the final value the predicate read, and `timed_out_by: "backstop"` when the wall-time backstop ended it), and a `batch` answers `{passed, steps, failedAt}` rather than an MCP error, so the agent reads `met` and `passed`. Where a timeout must be an error, it carries the last observation, so an agent can tell "never matched" from "matched the wrong value".
 Source: `apps/native/src/driver/wait.rs`, `tools/rt-driver-mcp/src/pipe.rs`, `src/tools.rs`; another project's wait and batch tools. Seen: 0 here (seeded from yaat).
 
 ### Own the processes you start by handle, and own the app's real process, not its launcher

@@ -3,13 +3,15 @@
 //! the discovery file that tells a driver client where the pipe is.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::StreamExt as _;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use gpui::{AnyWindowHandle, App, AppContext as _, AsyncApp, Entity, WeakEntity, Window};
+use load_clock::{Deadline, Expiry, LoadClock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -21,12 +23,40 @@ use crate::driver::pointer::window_address;
 use crate::driver::protocol::{ErrorCode, Outcome, Reply, Request};
 use crate::driver::wait::{Step, WaitLoop};
 
-/// How long a reply waits for the frame drawn after its request.
+/// How long a reply waits for the frame drawn after its request, in
+/// load-adjusted time.
 const FRAME_WAIT: Duration = Duration::from_secs(5);
 
 /// How long after start the discovery file waits for the window to be
-/// cloaked before it gives up.
+/// cloaked before it gives up, in load-adjusted time.
 const CLOAK_WAIT: Duration = Duration::from_secs(5);
+
+/// The longest a deadline wait sleeps before checking its deadline again.
+const SLICE: Duration = Duration::from_millis(250);
+
+/// The shortest a deadline wait sleeps: the load-adjusted time left is not
+/// wall time, so near the end a shorter slice would poll at the timer's tick
+/// rate. A wait may overshoot its ceiling by this much wall time.
+const MIN_SLICE: Duration = Duration::from_millis(20);
+
+/// The process's one load-adjusted clock, which every endpoint wait counts on.
+fn clock() -> Arc<LoadClock> {
+    static CLOCK: OnceLock<Arc<LoadClock>> = OnceLock::new();
+    Arc::clone(CLOCK.get_or_init(LoadClock::system))
+}
+
+/// Ends once `deadline` has expired, sleeping on background timers between
+/// checks; answers its expiry.
+async fn until_expired(deadline: &Deadline, cx: &AsyncApp) -> Expiry {
+    loop {
+        if let Some(expiry) = deadline.expired() {
+            return expiry;
+        }
+        cx.background_executor()
+            .timer(deadline.wait_slice(SLICE).max(MIN_SLICE))
+            .await;
+    }
+}
 
 /// The folder under the temp dir that holds one discovery file per driven
 /// client.
@@ -55,18 +85,19 @@ enum Handled {
     Shot(Result<usize, String>),
 }
 
-/// How long a `screenshot` waits for its capture thread.
+/// How long a `screenshot` waits for its capture thread, in load-adjusted
+/// time.
 const CAPTURE_WAIT: Duration = Duration::from_secs(10);
 
 /// What the capture thread answers: the PNG's path and its size.
 type Shot = Result<(PathBuf, u32, u32)>;
 
 /// How the wait for a drawn frame ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Frame {
     Drawn,
     Closed,
-    TimedOut,
+    TimedOut(Expiry),
 }
 
 /// Starts the endpoint on `window`, which `root` draws in: the pipe thread,
@@ -127,17 +158,18 @@ async fn answer(
         return refused(id, "the window is closed");
     };
     let frame = wait_for_frame(frame, cx).await;
-    match handled {
-        Handled::Reply(reply) => after_frame(reply, frame),
-        Handled::Shot(_) if frame == Frame::Closed => refused(id, "the window is closed"),
-        Handled::Shot(_) if frame == Frame::TimedOut => {
-            refused(id, "no frame was drawn within 5 s")
-        }
-        Handled::Shot(Err(reason)) => refused(id, &reason),
-        Handled::Shot(Ok(address)) => {
+    let shot = match handled {
+        Handled::Reply(reply) => return after_frame(reply, frame),
+        Handled::Shot(shot) => shot,
+    };
+    match (frame, shot) {
+        (Frame::Closed, _) => refused(id, "the window is closed"),
+        (Frame::TimedOut(expiry), _) => refused(id, &format!("no frame was drawn: {expiry}")),
+        (Frame::Drawn, Err(reason)) => refused(id, &reason),
+        (Frame::Drawn, Ok(address)) => {
             *shots += 1;
-            let timeout = cx.background_executor().timer(CAPTURE_WAIT);
-            screenshot(id, address, *shots, timeout).await
+            let deadline = Deadline::start(clock(), CAPTURE_WAIT);
+            screenshot(id, address, *shots, until_expired(&deadline, cx)).await
         }
     }
 }
@@ -155,7 +187,8 @@ async fn wait_for(
         Ok(parsed) => parsed,
         Err(reply) => return reply,
     };
-    let wait = WaitLoop::new(&params, Instant::now());
+    let wait = WaitLoop::new(&params);
+    let deadline = Deadline::start(clock(), wait.timeout());
     loop {
         let read = cx.update_window(handle, |_, window, cx| {
             let root = root.upgrade()?;
@@ -164,7 +197,7 @@ async fn wait_for(
         let Ok(Some((met, last))) = read else {
             return refused(request.id, "the window is closed");
         };
-        match wait.step(met, last, Instant::now()) {
+        match wait.step(met, last, deadline.figures()) {
             Step::Done(result) => return Reply::ok(request.id, result),
             Step::Again(sleep) => cx.background_executor().timer(sleep).await,
         }
@@ -177,7 +210,7 @@ async fn wait_for(
 /// when no frame was drawn after it.
 fn after_frame(reply: Reply, frame: Frame) -> Reply {
     match (frame, reply.outcome) {
-        (Frame::TimedOut | Frame::Closed, Outcome::Result(Value::Object(mut result))) => {
+        (Frame::TimedOut(_) | Frame::Closed, Outcome::Result(Value::Object(mut result))) => {
             result.insert("drawn".to_owned(), Value::Bool(false));
             Reply::ok(reply.id, Value::Object(result))
         }
@@ -204,20 +237,25 @@ fn request_frame(window: &mut Window, drawn: oneshot::Sender<()>) {
     });
 }
 
-/// Waits for `frame`, at most [`FRAME_WAIT`].
+/// Waits for `frame`, at most [`FRAME_WAIT`] of load-adjusted time.
 async fn wait_for_frame(frame: oneshot::Receiver<()>, cx: &AsyncApp) -> Frame {
-    let timer = cx.background_executor().timer(FRAME_WAIT);
-    match select(frame, timer).await {
+    let deadline = Deadline::start(clock(), FRAME_WAIT);
+    match select(frame, std::pin::pin!(until_expired(&deadline, cx))).await {
         Either::Left((Ok(()), _)) => Frame::Drawn,
         Either::Left((Err(_), _)) => Frame::Closed,
-        Either::Right(((), _)) => Frame::TimedOut,
+        Either::Right((expiry, _)) => Frame::TimedOut(expiry),
     }
 }
 
 /// Captures the window at `address` to
 /// `<config dir>/driver-shots/<pid>-<n>.png` on a worker thread, awaited
 /// without blocking the UI thread until `timeout` ends.
-async fn screenshot(id: u64, address: usize, n: u32, timeout: impl Future<Output = ()>) -> Reply {
+async fn screenshot(
+    id: u64,
+    address: usize,
+    n: u32,
+    timeout: impl Future<Output = Expiry>,
+) -> Reply {
     let (tx, rx) = oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("driver-capture".to_owned())
@@ -241,7 +279,7 @@ async fn screenshot(id: u64, address: usize, n: u32, timeout: impl Future<Output
 async fn capture_reply(
     id: u64,
     answer: oneshot::Receiver<Shot>,
-    timeout: impl Future<Output = ()>,
+    timeout: impl Future<Output = Expiry>,
 ) -> Reply {
     match select(answer, std::pin::pin!(timeout)).await {
         Either::Left((Ok(Ok((path, width, height))), _)) => Reply::ok(
@@ -250,7 +288,7 @@ async fn capture_reply(
         ),
         Either::Left((Ok(Err(err)), _)) => refused(id, &format!("{err:#}")),
         Either::Left((Err(_), _)) => refused(id, "the capture thread ended without an answer"),
-        Either::Right(((), _)) => refused(id, "the capture did not finish within 10 s"),
+        Either::Right((expiry, _)) => refused(id, &format!("the capture did not finish: {expiry}")),
     }
 }
 
@@ -268,7 +306,7 @@ fn shot_path(n: u32) -> Result<PathBuf> {
 /// [`CLOAK_WAIT`] passes: another thread cloaks and shows the window after
 /// it opens.
 async fn publish_when_cloaked(handle: AnyWindowHandle, cx: &mut AsyncApp) {
-    let started = Instant::now();
+    let deadline = Deadline::start(clock(), CLOAK_WAIT);
     loop {
         let (drawn, frame) = oneshot::channel();
         if cx
@@ -280,7 +318,7 @@ async fn publish_when_cloaked(handle: AnyWindowHandle, cx: &mut AsyncApp) {
         match wait_for_frame(frame, cx).await {
             Frame::Drawn => {}
             Frame::Closed => return,
-            Frame::TimedOut => {
+            Frame::TimedOut(_) => {
                 tracing::error!("driver: no frame was drawn; no discovery file is written");
                 return;
             }
@@ -296,13 +334,14 @@ async fn publish_when_cloaked(handle: AnyWindowHandle, cx: &mut AsyncApp) {
         match published {
             // The window closed, or the file is written.
             Err(_) | Ok(Ok(true)) => return,
-            Ok(Ok(false)) if started.elapsed() < CLOAK_WAIT => {}
             Ok(Ok(false)) => {
-                tracing::error!(
-                    "driver: the window was not shown and cloaked within 5 s; no discovery file \
-                     is written"
-                );
-                return;
+                if let Some(expiry) = deadline.expired() {
+                    tracing::error!(
+                        "driver: the window was not shown and cloaked: {expiry}; no discovery \
+                         file is written"
+                    );
+                    return;
+                }
             }
             Ok(Err(err)) => {
                 tracing::error!("driver: writing the discovery file: {err:#}");
@@ -452,8 +491,10 @@ fn process_started_at(pid: u32) -> Result<Option<u64>> {
 mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
 
     use futures::channel::oneshot;
+    use load_clock::{Expiry, ExpiryKind, Figures};
     use serde_json::json;
 
     use super::{
@@ -466,23 +507,37 @@ mod tests {
     fn a_stuck_capture_is_answered_refused() {
         // The sender is held and never answers, as a stuck capture thread.
         let (_stuck, answer) = oneshot::channel::<Shot>();
-        let reply = futures::executor::block_on(capture_reply(4, answer, async {}));
+        let expiry = ceiling(Duration::from_secs(10));
+        let reply = futures::executor::block_on(capture_reply(4, answer, async move { expiry }));
         assert_eq!(
             reply,
             Reply::error(
                 4,
                 ErrorCode::Refused,
-                "the capture did not finish within 10 s".to_owned(),
+                format!("the capture did not finish: {expiry}"),
                 None,
             )
         );
+    }
+
+    /// A ceiling expiry of `budget`, spent on a free machine.
+    fn ceiling(budget: Duration) -> Expiry {
+        Expiry {
+            kind: ExpiryKind::Ceiling,
+            figures: Figures {
+                budget,
+                wall: budget,
+                adjusted: budget,
+            },
+        }
     }
 
     #[test]
     fn a_frame_timeout_keeps_the_handlers_result() {
         let pressed = Reply::ok(5, json!({"pressed": "ctrl-,"}));
         assert_eq!(after_frame(pressed.clone(), Frame::Drawn), pressed);
-        for frame in [Frame::TimedOut, Frame::Closed] {
+        let timed_out = Frame::TimedOut(ceiling(Duration::from_secs(5)));
+        for frame in [timed_out, Frame::Closed] {
             assert_eq!(
                 after_frame(pressed.clone(), frame),
                 Reply::ok(5, json!({"pressed": "ctrl-,", "drawn": false})),
