@@ -12,7 +12,9 @@ use gpui::{
 
 use super::composer::Dock;
 use super::home::{self, Tone};
-use super::home_view::{SIDE_PADDING, STATUS_TEXT_SIZE, TOUCH_TARGET, tone_color};
+use super::home_view::{
+    SIDE_PADDING, STATUS_TEXT_SIZE, TITLE_CHIP_GAP, TOUCH_TARGET, title_chip, tone_color,
+};
 use super::hosts_view::phone_button;
 use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
@@ -30,8 +32,8 @@ use crate::dashboard_rows::ContextLabel;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
-use crate::linear_card::{OPEN_IN_LINEAR, TitleChip};
-use crate::linear_card_view::{card_sheet_body, issue_dot};
+use crate::linear_card::OPEN_IN_LINEAR;
+use crate::linear_card_view::card_sheet_body;
 use crate::target::HostKey;
 use crate::term_input;
 use crate::text_input::SystemPaste;
@@ -40,17 +42,6 @@ use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
-
-/// The title chip's height, radius, text size and horizontal padding, as
-/// the desktop's session header chips draw them.
-const CHIP_HEIGHT: f32 = 20.0;
-const CHIP_RADIUS: f32 = 5.0;
-const CHIP_TEXT_SIZE: f32 = 11.0;
-const CHIP_PAD: f32 = 7.0;
-/// The gap between the chip's dot and its identifier.
-const ISSUE_DOT_GAP: f32 = 5.0;
-/// The gap between the title's chip and the rest of the title.
-const TITLE_CHIP_GAP: f32 = 6.0;
 
 /// The composer's Send button's label.
 const SEND_LABEL: &str = "Send";
@@ -552,7 +543,7 @@ impl PhoneRoot {
                 .relative()
                 .child(body)
                 .children(show_prompt)
-                .children(self.card_sheet_layer(cx)),
+                .children(self.card_sheet_layer(px(0.0), cx)),
         )
     }
 
@@ -562,11 +553,30 @@ impl PhoneRoot {
         cx.notify();
     }
 
+    /// A back gesture on the card sheet: the card goes down; with a session
+    /// page under it, the page's own back step runs first.
+    fn card_back_gesture(
+        &mut self,
+        event: &BackGestureEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !session::back_on(event.phase) {
+            return;
+        }
+        if self.shown.is_some() {
+            self.session_back(cx);
+        } else {
+            self.dismiss_card(cx);
+        }
+    }
+
     /// While the phone's Linear card is up ([`RootView::phone_linear_card`]):
-    /// a scrim over the session page, whose tap takes the card down, and
-    /// the card as a bottom sheet over it: a grab handle, the card's
-    /// content and Open in Linear. A drag down on it takes it down.
-    fn card_sheet_layer(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// a scrim over the page, whose tap takes the card down, and the card as
+    /// a bottom sheet over it, its panel kept `bottom` clear of the window's
+    /// edge: a grab handle, the card's content and Open in Linear. A drag
+    /// down on it takes it down.
+    pub(super) fn card_sheet_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
         let card = self.root.read(cx).phone_linear_card()?;
         let t = theme(cx);
         let scrim = div()
@@ -581,7 +591,7 @@ impl PhoneRoot {
             // The scrim hides the page's root from the gesture, so it takes
             // the back gesture itself, and carries on a drag the sheet
             // began once the finger runs past the sheet's top.
-            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .on_back_gesture(cx.listener(Self::card_back_gesture))
             .on_scroll(cx.listener(Self::card_scrim_scrolled))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_card(cx)));
         Some(
@@ -594,14 +604,16 @@ impl PhoneRoot {
                 .flex_col()
                 .justify_end()
                 .child(scrim)
-                .child(self.card_sheet_panel(&card, &t, cx)),
+                .child(self.card_sheet_panel(&card, bottom, &t, cx)),
         )
     }
 
-    /// The card sheet itself, drawn its drag's travel below its place.
+    /// The card sheet itself, drawn its drag's travel below its place, with
+    /// `bottom` kept under its content.
     fn card_sheet_panel(
         &self,
         card: &crate::linear_card::Card,
+        bottom: Pixels,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -644,12 +656,12 @@ impl PhoneRoot {
             .flex_col()
             .gap(px(8.0))
             .pt(px(4.0))
-            .pb(px(16.0))
+            .pb(bottom + px(16.0))
             .rounded_t(px(14.0))
             .border_t_1()
             .border_color(gpui::rgb(t.line))
             .bg(gpui::rgb(t.raised))
-            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .on_back_gesture(cx.listener(Self::card_back_gesture))
             .on_scroll(cx.listener(Self::card_sheet_scrolled))
             .child(measure)
             .child(handle)
@@ -1470,10 +1482,9 @@ impl PhoneRoot {
                             .gap(px(TITLE_CHIP_GAP))
                             .min_w_0()
                             .children(
-                                header
-                                    .issue
-                                    .as_ref()
-                                    .map(|chip| Self::title_chip(chip, t, cx)),
+                                header.issue.as_ref().map(|chip| {
+                                    title_chip("phone-session-title-chip", chip, t, cx)
+                                }),
                             )
                             .child(
                                 div()
@@ -1504,40 +1515,6 @@ impl PhoneRoot {
                     ),
             )
             .children(toggle)
-    }
-
-    /// The header's title chip: the identifier behind a 6 px dot in its
-    /// state's colour, leading the title in the desktop chip's look. A tap
-    /// raises the issue's card as the phone's sheet, or opens the link on a
-    /// host that cannot answer ([`RootView::phone_raise_card`]).
-    fn title_chip(chip: &TitleChip, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
-        let (host, identifier, url) = (
-            chip.host.clone(),
-            chip.identifier.clone(),
-            chip.open_url().to_owned(),
-        );
-        div()
-            .id("phone-session-title-chip")
-            .driver_id(|| "phone-session-title-chip".to_owned())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(ISSUE_DOT_GAP))
-            .h(ui_px(cx, CHIP_HEIGHT))
-            .px(px(CHIP_PAD))
-            .rounded(px(CHIP_RADIUS))
-            .bg(gpui::rgb(t.chip))
-            .text_size(ui_px(cx, CHIP_TEXT_SIZE))
-            .text_color(gpui::rgb(t.text_2))
-            .whitespace_nowrap()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.root.update(cx, |root, cx| {
-                    root.phone_raise_card(&host, &identifier, &url, window, cx);
-                });
-            }))
-            .child(issue_dot(chip.dot, t))
-            .child(chip.identifier.clone())
     }
 }
 

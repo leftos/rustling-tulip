@@ -69,6 +69,9 @@
 //! `phone-home-hosts` shows the same Home with a second saved host, "lab",
 //! listing one repo of fourteen sessions under it, scrolled to its end:
 //! "lab"'s header pinned over the list's top, and each row's host chip.
+//! `phone-home-linear` shows the same Home with its working session titled
+//! [`PHONE_TITLE_LINE`]: the row's title leading with the `RT-12` chip
+//! behind a dot, the rest of the title after it, and no card raised.
 //! `phone-sheet` shows the same Home with the working session's long-press
 //! sheet open over a scrim: its label, Stop and Cancel.
 //! `phone-session` shows the same Home's working session opened: its
@@ -436,6 +439,7 @@ enum View {
     PhoneHome,
     PhoneHomeSorted,
     PhoneHomeHosts,
+    PhoneHomeLinear,
     PhoneSheet,
     PhoneSession,
     PhoneSessionSheet,
@@ -460,7 +464,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 77] = [
+    const ALL: [Self; 78] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -517,6 +521,7 @@ impl View {
         Self::PhoneHome,
         Self::PhoneHomeSorted,
         Self::PhoneHomeHosts,
+        Self::PhoneHomeLinear,
         Self::PhoneSheet,
         Self::PhoneSession,
         Self::PhoneSessionSheet,
@@ -547,6 +552,7 @@ impl View {
             Self::PhoneHome
                 | Self::PhoneHomeSorted
                 | Self::PhoneHomeHosts
+                | Self::PhoneHomeLinear
                 | Self::PhoneSheet
                 | Self::PhoneSession
                 | Self::PhoneSessionSheet
@@ -683,6 +689,7 @@ impl View {
             Self::PhoneHome => "phone-home",
             Self::PhoneHomeSorted => "phone-home-sorted",
             Self::PhoneHomeHosts => "phone-home-hosts",
+            Self::PhoneHomeLinear => "phone-home-linear",
             Self::PhoneSheet => "phone-sheet",
             Self::PhoneSession => "phone-session",
             Self::PhoneSessionSheet => "phone-session-sheet",
@@ -757,6 +764,7 @@ impl View {
             Self::PhoneHome
             | Self::PhoneHomeSorted
             | Self::PhoneHomeHosts
+            | Self::PhoneHomeLinear
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -819,6 +827,7 @@ impl View {
             | Self::PhoneHome
             | Self::PhoneHomeSorted
             | Self::PhoneHomeHosts
+            | Self::PhoneHomeLinear
             | Self::PhoneSheet
             | Self::PhoneSession
             | Self::PhoneSessionSheet
@@ -1128,6 +1137,7 @@ impl Shot {
             | View::PhoneHome
             | View::PhoneHomeSorted
             | View::PhoneHomeHosts
+            | View::PhoneHomeLinear
             | View::PhoneSheet
             | View::PhoneSession
             | View::PhoneSessionSheet
@@ -1995,6 +2005,7 @@ async fn capture_phone_home(
     check_phone_session_sheet(shot.view, handle, cx)?;
     check_phone_linear(shot.view, handle, cx)?;
     check_phone_title_chip(shot.view, handle, cx)?;
+    check_phone_home_chip(shot.view, handle, cx)?;
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -2268,6 +2279,25 @@ fn check_phone_title_chip(
     let shown = handle.update(cx, |phone, _, cx| phone.session_issue_identifier(cx))?;
     if shown.as_deref() != Some("RT-12") {
         bail!("the phone-linear-title view's header draws {shown:?}, not RT-12's chip");
+    }
+    Ok(())
+}
+
+/// Checks the `phone-home-linear` view's Home row draws its title's `RT-12`
+/// chip.
+fn check_phone_home_chip(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if view != View::PhoneHomeLinear {
+        return Ok(());
+    }
+    let shown = handle.update(cx, |phone, _, cx| {
+        phone.home_row_issue(PHONE_SHEET_SESSION, cx)
+    })?;
+    if shown.as_deref() != Some(PHONE_LINEAR_ISSUE) {
+        bail!("the phone-home-linear view's row draws {shown:?}, not RT-12's chip");
     }
     Ok(())
 }
@@ -2865,6 +2895,7 @@ fn drive(
         | View::PhoneHome
         | View::PhoneHomeSorted
         | View::PhoneHomeHosts
+        | View::PhoneHomeLinear
         | View::PhoneSheet
         | View::PhoneSession
         | View::PhoneSessionSheet
@@ -3950,9 +3981,10 @@ impl RemoteFixture {
     }
 
     /// The label the `phone-home` fixture's working session carries: the
-    /// `phone-linear-title` shot titles it after an issue its host knows.
+    /// `phone-linear-title` and `phone-home-linear` shots title it after an
+    /// issue its host knows.
     fn phone_working_label(view: View) -> &'static str {
-        if view == View::PhoneLinearTitle {
+        if matches!(view, View::PhoneLinearTitle | View::PhoneHomeLinear) {
             PHONE_TITLE_LINE
         } else {
             "Service worker cache"
@@ -4580,7 +4612,7 @@ impl FakeDaemon {
             View::HostRebind | View::PhoneHomeSorted => {
                 vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()]
             }
-            View::PhoneLinear | View::PhoneLinearTitle => {
+            View::PhoneLinear | View::PhoneLinearTitle | View::PhoneHomeLinear => {
                 vec![protocol::FEATURE_LINEAR_LINKS.to_owned()]
             }
             View::PhoneBrowser => vec![
@@ -4613,7 +4645,10 @@ impl FakeDaemon {
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
         })?;
-        if matches!(self.view, View::PhoneLinear | View::PhoneLinearTitle) {
+        if matches!(
+            self.view,
+            View::PhoneLinear | View::PhoneLinearTitle | View::PhoneHomeLinear
+        ) {
             self.send(phone_linear_context())?;
         }
         Ok(())

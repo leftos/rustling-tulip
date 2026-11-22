@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    BackGesturePhase, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
-    TestAppContext, TouchPhase, point, px,
+    BackGesturePhase, Edges, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
+    TestAppContext, TouchPhase, WindowInsets, point, px,
 };
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
@@ -977,6 +977,224 @@ fn a_header_chip_tap_on_a_host_without_linear_links_opens_the_link(cx: &mut Test
         "a host that cannot answer opens the link"
     );
     assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
+/// The selector of the saved host's Home row chip for session `id`.
+fn row_chip(id: &str) -> String {
+    format!("phone-home-row-chip-{id}")
+}
+
+/// The phone on Home, the saved [`REMOTE`] listing one shell session `n`
+/// titled `label`, the host listing `features` and [`linear`];
+/// everything sent so far is drained.
+fn titled_home<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    features: &[&str],
+    label: &str,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(features);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let shell = session("n")
+        .label(label)
+        .in_repo("r1")
+        .status("working")
+        .no_agent()
+        .build();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![shell],
+    });
+    host.send(linear());
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The id of the session the phone shows in place of Home.
+fn shown(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).shown_session().map(|(_, id)| id.to_owned()))
+    })
+}
+
+/// The id of the session whose row sheet is open.
+fn sheet_session(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.update(|window, cx| {
+        window
+            .root::<PhoneRoot>()
+            .flatten()
+            .and_then(|phone| phone.read(cx).sheet_session().map(str::to_owned))
+    })
+}
+
+/// A committed back gesture from Home's leading edge.
+fn back_over_home(h: &mut Harness<'_>) {
+    let page = h.bounds("phone-home");
+    let at = point(page.origin.x + px(4.0), page.origin.y + px(200.0));
+    h.back_gesture(BackGesturePhase::Started, at);
+    h.back_gesture(BackGesturePhase::Committed, at);
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_home_row_draws_the_titles_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+
+    assert!(drawn(&mut h, &row_chip("n")), "the row draws the chip");
+    let (chip, line) = (h.bounds(&row_chip("n")), h.bounds(&row("n")));
+    assert!(line.contains(&chip.center()), "the chip sits on the row");
+    assert!(
+        chip.left() < line.center().x,
+        "the chip leads the title: {chip:?} in {line:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_row_chip_raises_the_sheet_and_does_not_open_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+
+    h.tap_on(&row_chip("n"));
+
+    assert_eq!(shown(&mut h), None, "a tap on the chip opens no session");
+    assert_eq!(asked(&mut h), [vec!["RT-12".to_owned()]], "one ask");
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+    assert!(in_sheet(&mut h, "linear-card-id-phone=RT-12"));
+    assert_eq!(h.opened(), [], "a tap on a chip opens nothing");
+}
+
+#[gpui::test]
+fn a_tap_beside_the_chip_still_opens_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+    let line = h.bounds(&row("n"));
+    let at = point(line.left() + line.size.width * 0.75, line.center().y);
+
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        shown(&mut h).as_deref(),
+        Some("n"),
+        "a tap beside the chip opens the session"
+    );
+    assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
+#[gpui::test]
+fn a_long_press_on_the_row_chip_still_opens_the_row_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+
+    h.long_press_on(&row_chip("n"));
+
+    assert_eq!(
+        sheet_session(&mut h).as_deref(),
+        Some("n"),
+        "the hold opens the row sheet"
+    );
+    assert_eq!(shown(&mut h), None, "and opens no session");
+    assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
+#[gpui::test]
+fn back_takes_the_home_card_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+    h.tap_on(&row_chip("n"));
+    assert!(drawn(&mut h, SHEET), "the chip raises the card");
+
+    back_over_home(&mut h);
+
+    assert!(!drawn(&mut h, SHEET), "the card is down");
+    assert!(drawn(&mut h, "phone-home"), "Home is unchanged");
+    assert_eq!(shown(&mut h), None, "and no session opened");
+}
+
+#[gpui::test]
+fn the_home_card_sheet_clears_the_bottom_safe_area(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+    // The harness's window reports no insets: draw a phone's 62 pt top one
+    // and the home indicator's 34 pt band at the bottom.
+    let (top, indicator, pad) = (62.0, 34.0, 16.0);
+    let insets = WindowInsets {
+        safe_area: Edges {
+            top: px(top),
+            bottom: px(indicator),
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    };
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, cx| phone.set_insets_override(Some(insets), cx));
+    });
+    h.cx.run_until_parked();
+
+    h.tap_on(&row_chip("n"));
+    assert!(drawn(&mut h, SHEET), "the chip raises the card");
+
+    let open = h.bounds("phone-linear-open");
+    let window_bottom = px(h.window_height());
+    assert!(
+        open.bottom() + px(indicator + pad) <= window_bottom + px(1.0),
+        "Open in Linear clears the home indicator's band: {open:?} in a window {window_bottom:?} tall"
+    );
+}
+
+#[gpui::test]
+fn a_title_without_a_team_identifier_has_no_row_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_home(cx, &dir, &[protocol::FEATURE_LINEAR_LINKS], "November");
+
+    assert!(!drawn(&mut h, &row_chip("n")), "no identifier, no chip");
+    assert!(drawn(&mut h, &row("n")), "the row alone");
 }
 
 #[gpui::test]

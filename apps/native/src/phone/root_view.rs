@@ -1813,6 +1813,8 @@ enum SheetLayer {
     BrowserSheet,
     /// The prompt sheet.
     PromptSheet,
+    /// The Linear card sheet, over Home while no session page draws.
+    CardSheet,
     /// The device pairing layer, over the whole window.
     Pairing,
 }
@@ -1822,7 +1824,7 @@ impl SheetLayer {
     /// the whole window.
     const fn pane(self) -> Option<Pane> {
         match self {
-            Self::HomeSheet | Self::SortSheet => Some(Pane::List),
+            Self::HomeSheet | Self::SortSheet | Self::CardSheet => Some(Pane::List),
             Self::BrowserSheet | Self::PromptSheet => Some(Pane::Session),
             Self::Pairing => None,
         }
@@ -2004,9 +2006,9 @@ impl PhoneRoot {
     }
 
     /// The sheets over the page, in order: Home's long-press sheet, the
-    /// browser's folder sheet, then the prompt sheet; in two panes each
-    /// covers its own pane only. With them, whether any covers the session
-    /// pane ([`layer_covers_session`]).
+    /// browser's folder sheet, the prompt sheet, then the Linear card sheet
+    /// Home raised; in two panes each covers its own pane only. With them,
+    /// whether any covers the session pane ([`layer_covers_session`]).
     fn sheet_layers(
         &mut self,
         host_open: bool,
@@ -2033,11 +2035,16 @@ impl PhoneRoot {
             .prompt_sheet_shown(cx)
             .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
             .flatten();
+        let card_sheet = self
+            .home_card_over(host_open, cx)
+            .then(|| self.card_sheet_layer(padding.bottom, cx))
+            .flatten();
         let drawn = [
             (SheetLayer::HomeSheet, sheet),
             (SheetLayer::SortSheet, sort_sheet),
             (SheetLayer::BrowserSheet, browser_sheet),
             (SheetLayer::PromptSheet, prompt_sheet),
+            (SheetLayer::CardSheet, card_sheet),
         ];
         let covers_session = drawn
             .iter()
@@ -2065,6 +2072,15 @@ impl PhoneRoot {
             || self.shown.is_some()
             || self.settings.is_some();
         host_open && !page_over_home
+    }
+
+    /// Whether the Linear card sheet draws over Home: a card is up, Home is
+    /// the page on screen, and no session page draws beside it to carry the
+    /// card itself.
+    fn home_card_over(&self, host_open: bool, cx: &App) -> bool {
+        self.shown.is_none()
+            && self.home_sheet_over(host_open, cx)
+            && self.root.read(cx).phone_linear_card().is_some()
     }
 
     /// Whether the browser's folder sheet may draw: the browser is the page
@@ -2215,11 +2231,13 @@ mod tests {
             (true, SheetLayer::SortSheet, false),
             (true, SheetLayer::BrowserSheet, true),
             (true, SheetLayer::PromptSheet, true),
+            (true, SheetLayer::CardSheet, false),
             (true, SheetLayer::Pairing, true),
             (false, SheetLayer::HomeSheet, true),
             (false, SheetLayer::SortSheet, true),
             (false, SheetLayer::BrowserSheet, true),
             (false, SheetLayer::PromptSheet, true),
+            (false, SheetLayer::CardSheet, true),
             (false, SheetLayer::Pairing, true),
         ];
         for (split, layer, covers) in rows {

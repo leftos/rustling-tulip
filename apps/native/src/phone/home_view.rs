@@ -27,6 +27,8 @@ use crate::connection::Connection;
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::{ui_px, ui_text_size, ui_weight_shift};
+use crate::linear_card::TitleChip;
+use crate::linear_card_view::issue_dot;
 use crate::needs_you;
 use crate::sidebar::{DETACHED_BANNER, PhoneOrder};
 use crate::sidebar_view::{HostHeaderState, leaf_key};
@@ -45,6 +47,16 @@ pub(super) const SIDE_PADDING: f32 = 16.0;
 const PAIR_LABEL: &str = "Pair";
 /// The widest a host chip draws before its name is cut.
 const HOST_CHIP_MAX_WIDTH: f32 = 120.0;
+/// A title chip's height, radius, text size and horizontal padding, as the
+/// desktop's session header chips draw them.
+const CHIP_HEIGHT: f32 = 20.0;
+const CHIP_RADIUS: f32 = 5.0;
+const CHIP_TEXT_SIZE: f32 = 11.0;
+const CHIP_PAD: f32 = 7.0;
+/// The gap between a title chip's dot and its identifier.
+const ISSUE_DOT_GAP: f32 = 5.0;
+/// The gap between a title's chip and the rest of the title.
+pub(super) const TITLE_CHIP_GAP: f32 = 6.0;
 
 /// The width, in points, of the accent edge on the selected row.
 const SELECTED_EDGE_WIDTH: f32 = 3.0;
@@ -104,6 +116,48 @@ fn host_chip(id: String, label: &str, t: &UiTheme, cx: &App) -> Div {
         .text_color(gpui::rgb(t.muted))
         .truncate()
         .child(label.to_owned())
+}
+
+/// A title chip tagged `id`: the title's identifier behind a 6 px dot in its
+/// state's colour, in the desktop chip's look. A tap raises the issue's card
+/// as the phone's sheet, and goes no further, so the row or header under it
+/// neither opens nor selects anything; on a host that cannot answer it opens
+/// the link instead ([`RootView::phone_raise_card`]).
+pub(super) fn title_chip(
+    id: &str,
+    chip: &TitleChip,
+    t: &UiTheme,
+    cx: &mut Context<PhoneRoot>,
+) -> Stateful<Div> {
+    let (tag, host, identifier, url) = (
+        id.to_owned(),
+        chip.host.clone(),
+        chip.identifier.clone(),
+        chip.open_url().to_owned(),
+    );
+    div()
+        .id(SharedString::from(tag.clone()))
+        .driver_id(|| tag)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(ISSUE_DOT_GAP))
+        .h(ui_px(cx, CHIP_HEIGHT))
+        .px(px(CHIP_PAD))
+        .rounded(px(CHIP_RADIUS))
+        .bg(gpui::rgb(t.chip))
+        .text_size(ui_px(cx, CHIP_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text_2))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            this.root.update(cx, |root, cx| {
+                root.phone_raise_card(&host, &identifier, &url, window, cx);
+            });
+        }))
+        .child(issue_dot(chip.dot, t))
+        .child(chip.identifier.clone())
 }
 
 /// The card's text: the session and, while more than one host is listed,
@@ -432,11 +486,13 @@ fn refreshing_line(host: &HostKey, t: &UiTheme, cx: &Context<PhoneRoot>) -> Div 
 
 /// How a host's rows draw: its chip while more than one host is listed, and
 /// whether the rows are the ones it listed before the phone came to the
-/// foreground.
-#[derive(Clone, Copy)]
+/// foreground; with them, the Linear chip the row's title draws, while it
+/// names one of its host's teams' identifiers.
+#[derive(Clone)]
 struct RowLook<'a> {
     chip: Option<&'a str>,
     refreshing: bool,
+    issue: Option<TitleChip>,
 }
 
 /// The line between two rows of a group, inset by the side padding.
@@ -497,10 +553,11 @@ impl PhoneRoot {
             let look = RowLook {
                 chip: home.host_chip(&host.host),
                 refreshing,
+                issue: None,
             };
             for group in &host.groups {
                 let selected = self.selected_in(group);
-                children.push(Self::home_group(group, selected.as_deref(), look, &t, cx));
+                children.push(self.home_group(group, selected.as_deref(), &look, &t, cx));
             }
         }
         if home.rows().next().is_none() {
@@ -896,6 +953,22 @@ impl PhoneRoot {
             )
     }
 
+    /// The identifier the Home row of `session_id` draws as its title's
+    /// chip, while its title names one of its host's teams' identifiers.
+    #[must_use]
+    pub fn home_row_issue(&self, session_id: &str, cx: &App) -> Option<String> {
+        let home = self.home(cx);
+        let row = home.rows().find(|row| row.session_id == session_id)?;
+        let look = RowLook {
+            chip: None,
+            refreshing: false,
+            issue: None,
+        };
+        self.row_look(row, &look, cx)
+            .issue
+            .map(|chip| chip.identifier)
+    }
+
     /// The id of the session in `group` selected beside the list, in two
     /// panes.
     fn selected_in(&self, group: &HomeGroup) -> Option<String> {
@@ -910,9 +983,10 @@ impl PhoneRoot {
     /// hairline between each two, the one whose session is `selected`
     /// marked.
     fn home_group(
+        &self,
         group: &HomeGroup,
         selected: Option<&str>,
-        look: RowLook<'_>,
+        look: &RowLook<'_>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -927,9 +1001,21 @@ impl PhoneRoot {
                 body = body.child(hairline(t));
             }
             let chosen = selected == Some(row.session_id.as_str());
-            body = body.child(Self::session_row(row, chosen, look, t, cx));
+            let row_look = self.row_look(row, look, cx);
+            body = body.child(Self::session_row(row, chosen, &row_look, t, cx));
         }
         body
+    }
+
+    /// `look`, with `row`'s title's Linear chip, while it names one of its
+    /// host's teams' identifiers.
+    fn row_look<'a>(&self, row: &HomeRow, look: &RowLook<'a>, cx: &App) -> RowLook<'a> {
+        let issue = self.root.read(cx).title_chips().chip(&row.host, &row.label);
+        RowLook {
+            chip: look.chip,
+            refreshing: look.refreshing,
+            issue,
+        }
     }
 
     /// Home's header button that opens the sort sheet.
@@ -1096,7 +1182,7 @@ impl PhoneRoot {
     fn session_row(
         row: &HomeRow,
         selected: bool,
-        look: RowLook<'_>,
+        look: &RowLook<'_>,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1156,9 +1242,29 @@ impl PhoneRoot {
                     .flex_col()
                     .child(
                         div()
-                            .truncate()
-                            .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
-                            .child(row.label.clone()),
+                            .flex()
+                            .items_center()
+                            .gap(px(TITLE_CHIP_GAP))
+                            .min_w_0()
+                            .children(look.issue.as_ref().map(|chip| {
+                                title_chip(
+                                    &format!("phone-home-row-chip-{}", row.session_id),
+                                    chip,
+                                    t,
+                                    cx,
+                                )
+                            }))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_size(ui_px(cx, crate::UI_TEXT_SIZE))
+                                    .child(look.issue.as_ref().map_or_else(
+                                        || row.label.clone(),
+                                        |chip| chip.rest.clone(),
+                                    )),
+                            ),
                     )
                     .child(status_line(row, &leaf, look.chip, t, cx)),
             )
