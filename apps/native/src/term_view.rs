@@ -2064,6 +2064,7 @@ impl TerminalPane {
         // The gutter is the dots' own: a press there starts no selection
         // and reaches no program.
         if self.in_gutter(event.position) {
+            self.gutter_press(event, window);
             cx.stop_propagation();
             return;
         }
@@ -2073,23 +2074,17 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        // On the phone a tap toggles the soft keyboard: while it is up, the
-        // tap puts it away and goes no further, so nothing reaches the
-        // program and no selection starts; while it is down, the tap raises
-        // it as a text field does, unless the program reports the mouse, when
-        // the tap is the program's click and the key bar raises the keyboard.
-        // A first-mouse press only brings the window forward, and a session
-        // that takes no input has nothing to type into.
-        if event.button == MouseButton::Left && !event.first_mouse && self.phone_keyboard_up {
-            crate::keyboard::lower(window);
-            return;
-        }
+        // On the phone a tap toggles the soft keyboard. A first-mouse press
+        // only brings the window forward, and a session that takes no input
+        // has nothing to type into.
         if event.button == MouseButton::Left
             && !event.first_mouse
-            && self.accepts_input()
-            && !mouse::reports(self.term.mode(), event.modifiers.shift)
+            && self.tap_toggles_keyboard(
+                window,
+                mouse::reports(self.term.mode(), event.modifiers.shift),
+            )
         {
-            crate::keyboard::raise(window);
+            return;
         }
         // Ctrl+click on a URL or a path opens it, and Ctrl+Shift+click on a path
         // opens the link menu, ahead of a selection or a mouse
@@ -2189,6 +2184,32 @@ impl TerminalPane {
             None => return,
         }
         cx.notify();
+    }
+
+    /// A press in the gutter, which the dots own: it starts no selection
+    /// and reaches no program. A press beside a dot is still a tap on the
+    /// terminal, so on the phone it toggles the keyboard as one.
+    fn gutter_press(&self, event: &MouseDownEvent, window: &mut Window) {
+        if event.button == MouseButton::Left && !event.first_mouse {
+            self.tap_toggles_keyboard(window, false);
+        }
+    }
+
+    /// On the phone, a tap toggles the soft keyboard: while it is up, the
+    /// tap puts it away and goes no further, so nothing reaches the program
+    /// and no selection starts; while it is down, the tap raises it as a
+    /// text field does, unless `program_takes_the_tap`, when the tap is the
+    /// program's own click, or the session takes no input. Returns whether
+    /// it lowered the keyboard.
+    fn tap_toggles_keyboard(&self, window: &mut Window, program_takes_the_tap: bool) -> bool {
+        if self.phone_keyboard_up {
+            crate::keyboard::lower(window);
+            return true;
+        }
+        if self.accepts_input() && !program_takes_the_tap {
+            crate::keyboard::raise(window);
+        }
+        false
     }
 
     /// A move over the pane with no button down: a hover report when the

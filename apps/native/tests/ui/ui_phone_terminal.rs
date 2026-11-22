@@ -1578,6 +1578,118 @@ fn a_tap_on_the_terminal_with_the_keyboard_down_raises_it(cx: &mut TestAppContex
     );
 }
 
+/// A phone showing plain-shell session `s` on its Terminal page, its
+/// scrollback answered and everything sent so far drained.
+fn on_shell_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = open_phone(cx, dir);
+    let mut sessions = listed();
+    sessions.push(
+        session("s")
+            .shell("C:/r1")
+            .no_agent()
+            .label("Sierra")
+            .build(),
+    );
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+    h.click_on(&row("s"));
+    h.host(&saved_remote()).pty("s", b"");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The point a tap in the empty gutter of the phone's terminal for `id`
+/// lands on: midway across the 14 px gutter left of the grid, at the
+/// middle of what the screen shows.
+fn gutter_point(h: &mut Harness<'_>, id: &str) -> Point<Pixels> {
+    let slot = slot_id(id);
+    let first = h
+        .root(|root, cx| root.pane_cell_center(&slot, 0, 0, cx))
+        .expect("the terminal has been laid out");
+    let next = h
+        .root(|root, cx| root.pane_cell_center(&slot, 1, 0, cx))
+        .expect("the terminal has been laid out");
+    let cell = next.x - first.x;
+    point(
+        first.x - cell / 2.0 - px(7.0),
+        h.bounds("phone-session-terminal").center().y,
+    )
+}
+
+/// A whole finished command in the shell's integration markers: its
+/// prompt, the line typed, the output and the end with `exit`, then the
+/// next prompt.
+fn finished_command(line: &str, exit: &str) -> String {
+    format!("\x1b]133;A\x07$ {line}\r\n\x1b]133;C\x07out\r\n\x1b]133;D{exit}\x07\x1b]133;A\x07$ ")
+}
+
+#[gpui::test]
+fn a_tap_on_the_gutter_with_the_keyboard_down_raises_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_shell_terminal(cx, &dir);
+    draw_keyboard(&mut h, false);
+    clear_keyboard_calls();
+
+    let at = gutter_point(&mut h, "s");
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Raise),
+        "the tap brings the keyboard up"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_gutter_with_the_keyboard_up_lowers_it_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_shell_terminal(cx, &dir);
+    draw_keyboard(&mut h, true);
+    h.host(&saved_remote()).sent();
+    clear_keyboard_calls();
+
+    let at = gutter_point(&mut h, "s");
+    h.touch(TouchPhase::Started, at);
+    h.touch(TouchPhase::Ended, at);
+
+    assert_eq!(
+        last_keyboard_call(),
+        Some(KeyboardCall::Lower),
+        "the tap puts the keyboard away"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SendInput { .. })),
+        "the tap reaches no program: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_a_gutter_dot_leaves_the_keyboard_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_shell_terminal(cx, &dir);
+    h.host(&saved_remote())
+        .pty("s", finished_command("make", ";0").as_bytes());
+    h.cx.run_until_parked();
+    draw_keyboard(&mut h, false);
+    clear_keyboard_calls();
+
+    // The phone draws no dot menu: the dot's own press still stops ahead of
+    // the pane's, which keeps the keyboard as it is.
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+
+    assert_eq!(
+        keyboard_calls(),
+        [],
+        "a dot's tap leaves the keyboard alone"
+    );
+}
+
 /// The program in session `n` turns on mouse reports in SGR encoding, as a
 /// TUI with clickable parts does.
 fn program_reports_the_mouse(h: &mut Harness<'_>) {
