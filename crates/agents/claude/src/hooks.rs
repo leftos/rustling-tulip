@@ -191,36 +191,127 @@ fn same_path(a: &str, b: &str) -> bool {
     }
 }
 
-/// How far one event's groups hold an entry of ours.
+/// How one event's groups hold an entry of ours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Hold {
-    /// A current entry.
+enum Fit {
+    /// Exactly one current entry, in a group with the table's matcher.
     Current,
-    /// Only stale entries.
-    Stale,
+    /// Exactly one stale entry, in a group with the table's matcher.
+    Repoint,
+    /// Any other shape holding an entry of ours: a duplicate, a wrong
+    /// matcher, or a stale entry beside a current one.
+    Rebuild,
     /// No entry of ours.
     None,
 }
 
-/// The handlers of every group in `groups`, skipping a group that holds no
-/// `hooks` array.
-fn handlers(groups: &[Value]) -> impl Iterator<Item = &Value> {
-    groups
-        .iter()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
+/// Whether `group` carries the matcher the table names for its event: an
+/// absent matcher fits the table's `None`, and one that is not a string fits
+/// nothing.
+fn matcher_fits(group: &Value, matcher: Option<&str>) -> bool {
+    match group.get("matcher") {
+        None => matcher.is_none(),
+        Some(value) => value.as_str().is_some_and(|found| Some(found) == matcher),
+    }
 }
 
-/// How far `groups` hold an entry of ours.
-fn hold(groups: &[Value], shim: &str) -> Hold {
-    let marks: Vec<Mark> = handlers(groups).map(|h| mark(h, shim)).collect();
-    if marks.contains(&Mark::Ours) {
-        Hold::Current
-    } else if marks.contains(&Mark::Stale) {
-        Hold::Stale
-    } else {
-        Hold::None
+/// How `groups`, one event's groups, hold an entry of ours, whose group needs
+/// the table's `matcher` to count.
+fn fit(groups: &[Value], shim: &str, matcher: Option<&str>) -> Fit {
+    let mut held = None;
+    let mut found = 0_usize;
+    for group in groups {
+        let fits = matcher_fits(group, matcher);
+        let hooks = group.get("hooks").and_then(Value::as_array);
+        for handler in hooks.into_iter().flatten() {
+            let marked = mark(handler, shim);
+            if marked != Mark::Other {
+                found += 1;
+                held = Some((marked, fits));
+            }
+        }
     }
+    match held {
+        Some((Mark::Ours, true)) if found == 1 => Fit::Current,
+        Some((Mark::Stale, true)) if found == 1 => Fit::Repoint,
+        Some(_) => Fit::Rebuild,
+        None => Fit::None,
+    }
+}
+
+/// Whether any group in `groups` holds a handler of ours, current or stale.
+fn holds_ours(groups: &[Value], shim: &str) -> bool {
+    groups.iter().any(|group| {
+        group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|hooks| {
+                hooks
+                    .iter()
+                    .any(|handler| mark(handler, shim) != Mark::Other)
+            })
+    })
+}
+
+/// What taking every handler of ours out of one event's groups left.
+struct Pruned {
+    /// A handler of ours was taken out.
+    changed: bool,
+    /// A group went, leaving the event's array empty.
+    emptied: bool,
+}
+
+/// Take every handler of ours out of `groups`, current or stale, dropping a
+/// group the removal emptied; the user's handlers stay.
+fn prune_ours(groups: &mut Vec<Value>, shim: &str) -> Pruned {
+    let mut changed = false;
+    let mut emptied_groups = Vec::with_capacity(groups.len());
+    for group in groups.iter_mut() {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            emptied_groups.push(false);
+            continue;
+        };
+        let before = hooks.len();
+        hooks.retain(|handler| mark(handler, shim) == Mark::Other);
+        let removed = hooks.len() != before;
+        changed |= removed;
+        emptied_groups.push(removed && hooks.is_empty());
+    }
+    let mut emptied = emptied_groups.into_iter();
+    let before = groups.len();
+    groups.retain(|_| !emptied.next().unwrap_or(false));
+    Pruned {
+        changed,
+        emptied: groups.len() != before && groups.is_empty(),
+    }
+}
+
+/// Set every stale handler in `groups` to run `shim` where it stands.
+fn repoint(groups: &mut [Value], shim: &str) {
+    for group in groups.iter_mut() {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for handler in hooks {
+            if mark(handler, shim) == Mark::Stale
+                && let Value::Object(handler) = handler
+            {
+                handler.insert("command".to_owned(), Value::from(shim));
+            }
+        }
+    }
+}
+
+/// Take every handler of ours out of `groups` and append one fresh group
+/// carrying `matcher` and our entry for `shim`.
+fn rebuild(groups: &mut Vec<Value>, matcher: Option<&str>, shim: &str) {
+    prune_ours(groups, shim);
+    let mut group = Map::new();
+    if let Some(matcher) = matcher {
+        group.insert("matcher".to_owned(), Value::from(matcher));
+    }
+    group.insert("hooks".to_owned(), Value::Array(vec![user_entry(shim)]));
+    groups.push(Value::Object(group));
 }
 
 /// The entry the user settings carry for `shim` in every event.
@@ -239,25 +330,30 @@ struct Layout {
     indent: String,
     /// Lines end in CRLF.
     crlf: bool,
+    /// The text starts with a UTF-8 byte order mark, written back on render.
+    bom: bool,
     /// The text ends with a line ending.
     trailing_newline: bool,
 }
 
 impl Layout {
-    /// A new file's layout: two spaces, LF, a trailing newline.
+    /// A new file's layout: two spaces, LF, no byte order mark, a trailing
+    /// newline.
     fn new_file() -> Self {
         Self {
             indent: "  ".to_owned(),
             crlf: false,
+            bom: false,
             trailing_newline: true,
         }
     }
 
     /// `text`'s layout: the indent of its first indented line (two spaces
-    /// when none is), CRLF when it holds one, and whether it ends with a
-    /// newline.
+    /// when none is), CRLF when it holds one, whether it starts with a byte
+    /// order mark, and whether it ends with a newline.
     fn of(text: &str) -> Self {
-        let indent = text
+        let body = strip_bom(text);
+        let indent = body
             .lines()
             .find_map(|line| {
                 let rest = line.trim_start_matches([' ', '\t']);
@@ -267,8 +363,9 @@ impl Layout {
             .unwrap_or_else(|| "  ".to_owned());
         Self {
             indent,
-            crlf: text.contains("\r\n"),
-            trailing_newline: text.ends_with('\n'),
+            crlf: body.contains("\r\n"),
+            bom: text.starts_with(BOM),
+            trailing_newline: body.ends_with('\n'),
         }
     }
 
@@ -287,6 +384,9 @@ impl Layout {
                 "Claude Code's settings could not be written: {err}"
             ))
         })?;
+        if self.bom {
+            text.insert(0, BOM);
+        }
         if self.crlf {
             text = text.replace('\n', "\r\n");
         }
@@ -297,11 +397,20 @@ impl Layout {
     }
 }
 
+/// The UTF-8 byte order mark some editors write at the start of a settings
+/// file, which JSON does not carry.
+const BOM: char = '\u{feff}';
+
+/// `text` without a leading byte order mark.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix(BOM).unwrap_or(text)
+}
+
 /// The settings text's top-level object, refused when the text is not JSON,
 /// does not hold an object, or holds a `hooks` section that is not an object
-/// of arrays.
+/// of arrays. A leading byte order mark is read past.
 fn parse_settings(text: &str) -> Result<Map<String, Value>, AgentError> {
-    let value: Value = serde_json::from_str(text).map_err(|err| {
+    let value: Value = serde_json::from_str(strip_bom(text)).map_err(|err| {
         AgentError::new(format!(
             "Claude Code's settings file is not valid JSON: {err}"
         ))
@@ -320,13 +429,59 @@ fn parse_settings(text: &str) -> Result<Map<String, Value>, AgentError> {
     }
 }
 
-/// `existing`'s settings text with an entry running `shim` in every event of
-/// [`HOOK_EVENTS`]; `existing` is `None` when there is no file.
+/// Bring every event of [`HOOK_EVENTS`] in `events` to the table, and take
+/// ours out of every event the table no longer names; whether anything moved.
+fn fit_table(events: &mut Map<String, Value>, shim: &str) -> bool {
+    let mut changed = false;
+    for &(event, matcher) in HOOK_EVENTS {
+        let target = events
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Value::Array(groups) = target else {
+            continue;
+        };
+        match fit(groups, shim, matcher) {
+            Fit::Current => {}
+            Fit::Repoint => {
+                repoint(groups, shim);
+                changed = true;
+            }
+            Fit::None | Fit::Rebuild => {
+                rebuild(groups, matcher, shim);
+                changed = true;
+            }
+        }
+    }
+    let mut emptied_events = Vec::new();
+    for (event, groups) in events.iter_mut() {
+        if HOOK_EVENTS.iter().any(|&(name, _)| name == event) {
+            continue;
+        }
+        let Value::Array(groups) = groups else {
+            continue;
+        };
+        let pruned = prune_ours(groups, shim);
+        changed |= pruned.changed;
+        if pruned.emptied {
+            emptied_events.push(event.clone());
+        }
+    }
+    events.retain(|event, _| !emptied_events.contains(event));
+    changed
+}
+
+/// `existing`'s settings text holding one entry running `shim` in every event
+/// of [`HOOK_EVENTS`], each in a group carrying the table's matcher;
+/// `existing` is `None` when there is no file.
 ///
-/// An event that holds a current entry is left alone; one that holds only
-/// stale entries has each one's `command` set to `shim`; any other gets a new
-/// group at the end of its array. Nothing else moves. Text that needs no
-/// change comes back byte for byte.
+/// An event that holds exactly one handler of ours in a group with the
+/// table's matcher is left alone, a stale one having its `command` set to
+/// `shim` where it stands. Every other shape — a duplicate, a wrong matcher,
+/// none of ours — has every handler of ours taken out of it, dropping a group
+/// that removal emptied, and one fresh group with the table's matcher
+/// appended. Handlers of ours in an event the table no longer names are
+/// pruned the same way. Nothing else moves, and text that needs no change
+/// comes back byte for byte.
 pub(crate) fn install_user_hooks(
     existing: Option<&str>,
     shim: &Path,
@@ -341,41 +496,7 @@ pub(crate) fn install_user_hooks(
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
     if let Value::Object(events) = hooks {
-        for &(event, matcher) in HOOK_EVENTS {
-            let groups = events
-                .entry(event)
-                .or_insert_with(|| Value::Array(Vec::new()));
-            let Value::Array(groups) = groups else {
-                continue;
-            };
-            match hold(groups, &shim) {
-                Hold::Current => {}
-                Hold::Stale => {
-                    for group in groups.iter_mut() {
-                        let Some(Value::Array(group_hooks)) = group.get_mut("hooks") else {
-                            continue;
-                        };
-                        for handler in group_hooks {
-                            if mark(handler, &shim) == Mark::Stale
-                                && let Value::Object(handler) = handler
-                            {
-                                handler.insert("command".to_owned(), Value::from(&*shim));
-                            }
-                        }
-                    }
-                    changed = true;
-                }
-                Hold::None => {
-                    let mut group = Map::new();
-                    if let Some(matcher) = matcher {
-                        group.insert("matcher".to_owned(), Value::from(matcher));
-                    }
-                    group.insert("hooks".to_owned(), Value::Array(vec![user_entry(&shim)]));
-                    groups.push(Value::Object(group));
-                    changed = true;
-                }
-            }
-        }
+        changed |= fit_table(events, &shim);
     }
     match existing {
         Some(text) if !changed => Ok(text.to_owned()),
@@ -397,22 +518,9 @@ pub(crate) fn remove_user_hooks(existing: &str, shim: &Path) -> Result<String, A
             let Value::Array(groups) = groups else {
                 continue;
             };
-            let mut emptied_groups = Vec::new();
-            for group in groups.iter_mut() {
-                let Some(Value::Array(group_hooks)) = group.get_mut("hooks") else {
-                    emptied_groups.push(false);
-                    continue;
-                };
-                let before = group_hooks.len();
-                group_hooks.retain(|handler| mark(handler, &shim) == Mark::Other);
-                let removed = group_hooks.len() != before;
-                changed |= removed;
-                emptied_groups.push(removed && group_hooks.is_empty());
-            }
-            let mut emptied = emptied_groups.into_iter();
-            let before = groups.len();
-            groups.retain(|_| !emptied.next().unwrap_or(false));
-            if groups.len() != before && groups.is_empty() {
+            let pruned = prune_ours(groups, &shim);
+            changed |= pruned.changed;
+            if pruned.emptied {
                 emptied_events.push(event.clone());
             }
         }
@@ -429,8 +537,42 @@ pub(crate) fn remove_user_hooks(existing: &str, shim: &Path) -> Result<String, A
     Layout::of(existing).render(&Value::Object(root))
 }
 
+/// The state `fits`, one read per table event, and an install outside the
+/// table describe.
+fn state_of(fits: &[Fit], outside: bool) -> UserHooksState {
+    if outside {
+        UserHooksState::Stale
+    } else if fits.iter().all(|fit| *fit == Fit::None) {
+        UserHooksState::Off
+    } else if fits.iter().all(|fit| *fit == Fit::Current) {
+        UserHooksState::On
+    } else if fits.iter().all(|fit| *fit != Fit::None) {
+        UserHooksState::Stale
+    } else {
+        UserHooksState::Partial
+    }
+}
+
+/// Whether `events` holds a handler of ours in an event the table no longer
+/// names.
+fn outside_table(events: &Map<String, Value>, shim: &str) -> bool {
+    events.iter().any(|(event, groups)| {
+        !HOOK_EVENTS.iter().any(|&(name, _)| name == event)
+            && groups
+                .as_array()
+                .is_some_and(|groups| holds_ours(groups, shim))
+    })
+}
+
 /// How far `existing`'s settings text holds our entries running `shim`;
 /// `existing` is `None` when there is no file.
+///
+/// An event reads current only when it holds exactly one current handler of
+/// ours in a group with the table's matcher; a stale handler, a duplicate or
+/// a wrong matcher reads stale. `On` needs every event of the table current,
+/// `Stale` needs every event holding ours, and a handler of ours in an event
+/// outside the table makes the whole state `Stale`; `Off` is none of ours
+/// anywhere, and `Partial` anything else.
 pub(crate) fn user_hooks_state(
     existing: Option<&str>,
     shim: &Path,
@@ -441,24 +583,17 @@ pub(crate) fn user_hooks_state(
     let root = parse_settings(text)?;
     let shim = shim.to_string_lossy();
     let events = root.get("hooks").and_then(Value::as_object);
-    let holds: Vec<Hold> = HOOK_EVENTS
+    let fits: Vec<Fit> = HOOK_EVENTS
         .iter()
-        .map(|&(event, _)| {
+        .map(|&(event, matcher)| {
             events
                 .and_then(|events| events.get(event))
                 .and_then(Value::as_array)
-                .map_or(Hold::None, |groups| hold(groups, &shim))
+                .map_or(Fit::None, |groups| fit(groups, &shim, matcher))
         })
         .collect();
-    Ok(if holds.iter().all(|h| *h == Hold::None) {
-        UserHooksState::Off
-    } else if holds.iter().all(|h| *h == Hold::Current) {
-        UserHooksState::On
-    } else if holds.iter().all(|h| *h != Hold::None) {
-        UserHooksState::Stale
-    } else {
-        UserHooksState::Partial
-    })
+    let outside = events.is_some_and(|events| outside_table(events, &shim));
+    Ok(state_of(&fits, outside))
 }
 
 #[cfg(test)]
@@ -1345,5 +1480,147 @@ mod tests {
             "type": "command",
             "args": ["hook", "--from-env"],
         }));
+    }
+
+    /// The matcher the table names for `event`.
+    fn matcher_of(event: &str) -> &'static str {
+        HOOK_EVENTS
+            .iter()
+            .find(|&&(name, _)| name == event)
+            .and_then(|&(_, matcher)| matcher)
+            .expect("the table names the event with a matcher")
+    }
+
+    #[test]
+    fn install_widens_an_old_matcher_to_the_table() {
+        let matcher = matcher_of("Notification");
+        let user_group = json!({ "matcher": "custom", "hooks": [
+            { "type": "command", "command": "notify.sh" } ] });
+        let file = pretty(&json!({ "hooks": { "Notification": [
+            { "matcher": "permission_prompt", "hooks": [user_entry(SHIM)] },
+            user_group,
+        ] } }));
+        let installed = install(Some(&file), SHIM);
+        let document = parse(&installed);
+        let notification = groups(&document, "Notification");
+        assert_eq!(notification.len(), 2, "{notification:?}");
+        assert_eq!(notification[0], user_group, "the user's group stays");
+        assert_eq!(
+            notification[1],
+            json!({ "matcher": matcher, "hooks": [user_entry(SHIM)] }),
+            "one group of ours, with the table's matcher"
+        );
+        assert_eq!(state(Some(&installed), SHIM), UserHooksState::On);
+    }
+
+    #[test]
+    fn state_reads_stale_for_an_old_matcher() {
+        let mut document = parse(&install(None, SHIM));
+        document["hooks"]["Notification"][0]["matcher"] = json!("permission_prompt");
+        assert_eq!(
+            state(Some(&pretty(&document)), SHIM),
+            UserHooksState::Stale,
+            "an old matcher is not current"
+        );
+    }
+
+    #[test]
+    fn install_drops_a_stale_copy_beside_a_current_one() {
+        let matcher = matcher_of("Notification");
+        let file = pretty(&json!({ "hooks": { "Notification": [
+            { "matcher": matcher, "hooks": [user_entry(SHIM)] },
+            { "matcher": matcher, "hooks": [user_entry(OLD_SHIM)] },
+        ] } }));
+        let installed = install(Some(&file), SHIM);
+        let document = parse(&installed);
+        assert_eq!(
+            groups(&document, "Notification"),
+            &vec![json!({ "matcher": matcher, "hooks": [user_entry(SHIM)] })],
+            "one group of ours stays"
+        );
+        assert_eq!(state(Some(&installed), SHIM), UserHooksState::On);
+    }
+
+    #[test]
+    fn state_reads_stale_for_a_duplicate() {
+        let mut document = parse(&install(None, SHIM));
+        let copy = document["hooks"]["Notification"][0].clone();
+        document["hooks"]["Notification"]
+            .as_array_mut()
+            .expect("groups")
+            .push(copy);
+        assert_eq!(
+            state(Some(&pretty(&document)), SHIM),
+            UserHooksState::Stale,
+            "two copies of ours is not current"
+        );
+    }
+
+    #[test]
+    fn install_prunes_ours_from_an_event_the_table_dropped() {
+        let user_handler = json!({ "type": "command", "command": "keep.sh" });
+        let file = pretty(&json!({ "hooks": {
+            "OldEvent": [
+                { "hooks": [user_entry(OLD_SHIM), user_handler] },
+                { "hooks": [user_entry(SHIM)] },
+            ],
+            "GoneEvent": [{ "hooks": [user_entry(SHIM)] }],
+            "Stop": [{ "hooks": [user_handler] }],
+        } }));
+        let document = parse(&install(Some(&file), SHIM));
+        assert_eq!(
+            document["hooks"]["OldEvent"],
+            json!([{ "hooks": [user_handler] }]),
+            "ours goes with the group it emptied, the user's handler stays"
+        );
+        assert!(
+            document["hooks"].get("GoneEvent").is_none(),
+            "an event holding only ours goes: {document}"
+        );
+        assert_eq!(
+            document["hooks"]["Stop"],
+            json!([{ "hooks": [user_handler] }, { "hooks": [user_entry(SHIM)] }]),
+            "the table's own events are still installed"
+        );
+    }
+
+    #[test]
+    fn state_reads_stale_with_ours_outside_the_table() {
+        let mut document = parse(&install(None, SHIM));
+        document["hooks"]["OldEvent"] = json!([{ "hooks": [user_entry(SHIM)] }]);
+        assert_eq!(
+            state(Some(&pretty(&document)), SHIM),
+            UserHooksState::Stale,
+            "an entry of ours in an event the table dropped is stale"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_with_a_bom_installs_and_keeps_its_bom() {
+        let original = format!("\u{feff}{USER_FILE}");
+        let installed = install(Some(&original), SHIM);
+        let body = installed
+            .strip_prefix('\u{feff}')
+            .expect("the byte order mark stays");
+        assert_eq!(body, install(Some(USER_FILE), SHIM));
+        assert_eq!(
+            install(Some(&installed), SHIM),
+            installed,
+            "a second install changes nothing"
+        );
+    }
+
+    #[test]
+    fn state_reads_a_settings_file_with_a_bom() {
+        let installed = install(None, SHIM);
+        let with_bom = format!("\u{feff}{installed}");
+        assert_eq!(state(Some(&with_bom), SHIM), UserHooksState::On);
+    }
+
+    #[test]
+    fn remove_keeps_a_bom() {
+        let original = format!("\u{feff}{USER_FILE}");
+        let installed = install(Some(&original), SHIM);
+        assert_eq!(remove(&installed, SHIM), original);
     }
 }
