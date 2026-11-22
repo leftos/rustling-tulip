@@ -139,7 +139,9 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
         .or_else(|| parse_plan(rows, start))
         .or_else(|| parse_trust(rows, start))
         .or_else(|| parse_mcp_server(rows, start))
+        .or_else(|| parse_mcp_servers(rows, start))
         .or_else(|| parse_switch_model(rows, start))
+        .or_else(|| parse_auto_mode(rows, start))
         .or_else(|| parse_question(rows));
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
@@ -565,6 +567,188 @@ fn parse_mcp_server(rows: &[String], start: usize) -> Option<Parsed> {
         ChatPromptKind::McpServer,
         name,
         text_block(&notice, indent_of(&rows[anchor])),
+        options,
+    )))
+}
+
+/// What follows the count on the row that opens the dialog for several new
+/// MCP servers: `3 new MCP servers found in this project`.
+const MCP_SERVERS_TITLE_TAIL: &str = " new MCP servers found in this project";
+
+/// The footer of the dialog for several new MCP servers.
+const MCP_SERVERS_FOOTER: &str = "Space to select · Esc to reject all";
+
+/// The submit row under the servers of the dialog for several new MCP
+/// servers.
+const ENABLE_SELECTED: &str = "Enable selected";
+
+/// Whether `row` opens the dialog for several new MCP servers: a count, then
+/// [`MCP_SERVERS_TITLE_TAIL`]. The single server's dialog opens with
+/// [`MCP_SERVER_ANCHOR`] instead.
+fn is_mcp_servers_title(row: &str) -> bool {
+    mcp_servers_count(row).is_some()
+}
+
+/// The count of servers the title row `row` names, when it is the title of
+/// the dialog for several new MCP servers.
+fn mcp_servers_count(row: &str) -> Option<usize> {
+    let text = row.trim();
+    let tail = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !tail.starts_with(MCP_SERVERS_TITLE_TAIL) {
+        return None;
+    }
+    text[..text.len() - tail.len()].parse().ok()
+}
+
+/// The marks the server list draws in the cursor's column on its first and
+/// last shown rows once it holds more servers than it shows.
+const SCROLL_MARKS_UP_DOWN: [char; 2] = ['↑', '↓'];
+
+/// One row of the list in the dialog for several new MCP servers.
+enum ServerRow<'a> {
+    /// A server's checkbox row: its name, whether it is ticked, and whether
+    /// the cursor is on it.
+    Server {
+        name: &'a str,
+        ticked: bool,
+        cursor: bool,
+    },
+    /// The `Enable selected` row, and whether the cursor is on it.
+    Enable { cursor: bool },
+}
+
+/// `row` read as a row of the server list: `❯` on the cursor's row (`↑` or
+/// `↓` there on a scrolled list's end rows, which are not the cursor's), then
+/// `[✔]` or `[ ]` and the server's name, or `Enable selected`.
+fn server_row(row: &str) -> Option<ServerRow<'_>> {
+    let text = row.trim();
+    let (cursor, rest) = match text.strip_prefix(CURSOR) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (
+            false,
+            text.strip_prefix(SCROLL_MARKS_UP_DOWN)
+                .map_or(text, str::trim_start),
+        ),
+    };
+    if rest == ENABLE_SELECTED {
+        return Some(ServerRow::Enable { cursor });
+    }
+    let (ticked, name) = match rest.strip_prefix(BOX_ON) {
+        Some(name) => (true, name),
+        None => (false, rest.strip_prefix(BOX_OFF)?),
+    };
+    Some(ServerRow::Server {
+        name: name.trim(),
+        ticked,
+        cursor,
+    })
+}
+
+/// The servers of a server list, numbered from 1 in order, each selected
+/// when ticked, and the row the cursor is on: a server's number, or the
+/// number after the last server's for `Enable selected`; `None` when the
+/// list has no `Enable selected` row or no cursor yet.
+fn server_list(rows: &[String]) -> Option<(Vec<ChatOption>, u32)> {
+    let mut options = Vec::new();
+    let mut cursor = None;
+    let mut enable = false;
+    let mut next: u32 = 1;
+    for row in rows {
+        match server_row(row) {
+            Some(ServerRow::Server {
+                name,
+                ticked,
+                cursor: on,
+            }) => {
+                cursor = cursor.or(on.then_some(next));
+                options.push(ChatOption {
+                    number: next,
+                    label: name.to_owned(),
+                    description: None,
+                    selected: ticked,
+                });
+                next += 1;
+            }
+            Some(ServerRow::Enable { cursor: on }) => {
+                enable = true;
+                cursor = cursor.or(on.then_some(next));
+            }
+            None => {}
+        }
+    }
+    if !enable || options.is_empty() {
+        return None;
+    }
+    Some((options, cursor?))
+}
+
+/// The dialog Claude Code shows at start for several new MCP servers a
+/// project names: `<n> new MCP servers found in this project`, the notice,
+/// one checkbox row per server (all ticked at first), `Enable selected` and
+/// the `Space to select · Esc to reject all` footer. It reads as a
+/// multi-select [`ChatPromptKind::McpServer`]: the servers its options,
+/// ticked ones selected, the cursor on `Enable selected` being the number
+/// after the last server's.
+///
+/// A list holding more servers than the title's count shows is windowed:
+/// its rows cannot be told apart by number as it scrolls, so the prompt
+/// offers no server and no cursor, and is answered in the terminal.
+fn parse_mcp_servers(rows: &[String], start: usize) -> Option<Parsed> {
+    let anchor = find(rows, start, is_mcp_servers_title)?;
+    let count = mcp_servers_count(&rows[anchor]).unwrap_or(0);
+    let Some(footer) = find(rows, anchor + 1, |row| row.trim() == MCP_SERVERS_FOOTER) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let first = find(rows, anchor + 1, |row| server_row(row).is_some()).filter(|&i| i < footer);
+    let Some((first, (mut options, cursor))) =
+        first.and_then(|first| Some((first, server_list(&rows[first..footer])?)))
+    else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let windowed = count > options.len();
+    if windowed {
+        options.clear();
+    }
+    let notice: Vec<&str> = rows[anchor + 1..first].iter().map(String::as_str).collect();
+    let mut prompt = prompt(
+        ChatPromptKind::McpServer,
+        rows[anchor].trim().to_owned(),
+        text_block(&notice, indent_of(&rows[anchor])),
+        options,
+    );
+    prompt.multi = true;
+    prompt.cursor = (!windowed).then_some(cursor);
+    Some(Parsed::Prompt(prompt))
+}
+
+/// The title row of the dialog that offers auto mode as the default
+/// permission mode, which is also its subject.
+const AUTO_MODE_TITLE: &str = "Make auto mode your default permission mode?";
+
+/// The dialog Claude Code shows at start offering auto mode as the default
+/// permission mode: the title, its explanation and two unnumbered options,
+/// `Yes, set auto mode as my default permission mode` and `No, keep <mode>`
+/// naming the mode in use, with no footer under them. It reads as a
+/// [`ChatPromptKind::Confirm`]; options with no cursor row yet are a frame
+/// still being drawn.
+fn parse_auto_mode(rows: &[String], start: usize) -> Option<Parsed> {
+    let anchor = find(rows, start, |row| row.trim() == AUTO_MODE_TITLE)?;
+    // The options are the block holding the cursor's row: typing while the
+    // dialog is up draws a hint block under them.
+    let Some(cursor) = find(rows, anchor + 1, |row| row.trim_start().starts_with(CURSOR)) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let end = find(rows, cursor, |row| row.trim().is_empty()).unwrap_or(rows.len());
+    let (block_start, block_end) = options_block(rows, anchor + 1, end);
+    let options = trust_options(&rows[block_start..block_end]);
+    let explanation: Vec<&str> = rows[anchor + 1..block_start]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Some(Parsed::Prompt(prompt(
+        ChatPromptKind::Confirm,
+        AUTO_MODE_TITLE.to_owned(),
+        text_block(&explanation, indent_of(&rows[anchor])),
         options,
     )))
 }
@@ -1790,6 +1974,7 @@ pub(crate) fn recipe(
         ChatPromptKind::Question => return question_recipe(prompt, answer),
         ChatPromptKind::Review => return review_recipe(prompt, answer),
         ChatPromptKind::ModelPicker => return picker_recipe(prompt, answer),
+        ChatPromptKind::McpServer if prompt.multi => return mcp_servers_recipe(prompt, answer),
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
         | ChatPromptKind::Trust
@@ -1978,6 +2163,70 @@ fn cursor_move(prompt: &ChatPrompt, number: u32) -> Result<Option<RecipeStep>, A
     let key = if target > cursor { Key::Down } else { Key::Up };
     Ok(Some(RecipeStep {
         keys: vec![key; target.abs_diff(cursor)],
+        expect: ScreenExpect::OptionSelected(number),
+    }))
+}
+
+/// The keys that give `answer` to the dialog for several new MCP servers,
+/// whose rows take no digit: a toggle moves the cursor to the server's row
+/// and presses Space; Submit moves it to `Enable selected` and presses
+/// Enter. Esc (reject all) is not offered, nor is any other answer.
+fn mcp_servers_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    let (target, last) = match answer {
+        ChatAnswerKind::Toggle { number } => {
+            let option = prompt
+                .options
+                .iter()
+                .find(|option| option.number == *number)
+                .ok_or(AnswerRefusal::UnknownOption(*number))?;
+            let space = RecipeStep {
+                keys: vec![Key::Text(" ".to_owned())],
+                expect: ScreenExpect::OptionTicked(*number, !option.selected),
+            };
+            (*number, space)
+        }
+        ChatAnswerKind::Submit => {
+            let enter = RecipeStep {
+                keys: vec![Key::Enter],
+                expect: ScreenExpect::DialogGone,
+            };
+            (enable_row(prompt), enter)
+        }
+        _ => return Err(AnswerRefusal::NotThisDialog),
+    };
+    let mut steps: Vec<RecipeStep> = server_row_move(prompt, target)?.into_iter().collect();
+    steps.push(last);
+    Ok(AnswerRecipe { steps })
+}
+
+/// The number a multi-server MCP reading gives `Enable selected`: the one
+/// after its last server's.
+fn enable_row(prompt: &ChatPrompt) -> u32 {
+    prompt.options.last().map_or(1, |option| option.number + 1)
+}
+
+/// The arrows that move a multi-server MCP dialog's cursor from the row the
+/// reading shows it on to row `number` (a server, or `Enable selected`), as
+/// one step waiting for the cursor there; `None` when it is already there.
+/// The rows are numbered in screen order from 1, so their distance is their
+/// numbers'. Up from the first server would wrap to the last, so no move
+/// goes past either end.
+fn server_row_move(prompt: &ChatPrompt, number: u32) -> Result<Option<RecipeStep>, AnswerRefusal> {
+    let cursor = prompt
+        .cursor
+        .filter(|cursor| (1..=enable_row(prompt)).contains(cursor))
+        .ok_or(AnswerRefusal::NotThisDialog)?;
+    if cursor == number {
+        return Ok(None);
+    }
+    let key = if number > cursor { Key::Down } else { Key::Up };
+    let count =
+        usize::try_from(number.abs_diff(cursor)).map_err(|_| AnswerRefusal::NotThisDialog)?;
+    Ok(Some(RecipeStep {
+        keys: vec![key; count],
         expect: ScreenExpect::OptionSelected(number),
     }))
 }
@@ -2452,7 +2701,7 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
 mod tests {
     use super::{
         clear_draft_recipe, is_path_token, next_view_key, read, read_draft, read_styled, read_view,
-        read_view_styled, recipe, review_body, spinner_above,
+        read_view_styled, recipe, review_body, server_row, spinner_above,
     };
     use agent_api::{
         AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal,
@@ -3234,6 +3483,229 @@ mod tests {
                 prompt: None,
             }
         );
+    }
+
+    /// Claude Code 2.1.330's auto-mode dialog, the cursor on Yes, on No, and
+    /// on No at 60 columns, from the daemon's screen fixtures.
+    const AUTO_MODE: &str = include_str!("../../../daemon/src/screen/fixtures/v330-auto-mode.txt");
+    const AUTO_MODE_DOWN: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-auto-mode-down.txt");
+    const AUTO_MODE_W60: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-auto-mode-w60.txt");
+
+    /// The auto-mode dialog's two options as the captures draw them.
+    fn auto_mode_options() -> Vec<(u32, String)> {
+        vec![
+            (
+                1,
+                "Yes, set auto mode as my default permission mode".to_owned(),
+            ),
+            (2, "No, keep manual mode".to_owned()),
+        ]
+    }
+
+    #[test]
+    fn an_auto_mode_dialog_reads_its_title_options_and_cursor() {
+        for (name, text, cursor) in [
+            ("first", AUTO_MODE, 1),
+            ("down", AUTO_MODE_DOWN, 2),
+            ("w60", AUTO_MODE_W60, 2),
+        ] {
+            let screen = read(&capture(text));
+            assert_eq!(screen.composer, ComposerState::Dialog, "{name}");
+            assert_eq!(labels(&screen), auto_mode_options(), "{name}");
+            let prompt = screen.prompt.expect("an auto-mode prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::Confirm, "{name}");
+            assert_eq!(
+                prompt.subject, "Make auto mode your default permission mode?",
+                "{name}"
+            );
+            assert_eq!(prompt.cursor, Some(cursor), "{name}");
+            assert!(!prompt.multi, "{name}");
+        }
+        let wide = prompt_in(AUTO_MODE);
+        assert_eq!(
+            wide.body,
+            "Auto mode lets Claude handle permission prompts automatically. Claude checks each tool \
+             call for risky actions and\nprompt injection before executing, runs the ones it assesses \
+             as lower-risk, and blocks the rest."
+        );
+        let narrow = prompt_in(AUTO_MODE_W60);
+        assert_eq!(
+            narrow.body,
+            "Auto mode lets Claude handle permission prompts\nautomatically. Claude checks each tool \
+             call for risky\nactions and prompt injection before executing, runs the\nones it \
+             assesses as lower-risk, and blocks the rest."
+        );
+    }
+
+    #[test]
+    fn an_auto_mode_dialog_without_its_options_is_half_drawn() {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            "  Make auto mode your default permission mode?",
+            "",
+            "  Auto mode lets Claude handle permission prompts automatically.",
+        ]));
+        assert_eq!(
+            read(&screen),
+            ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_auto_mode_title_quoted_in_the_transcript_is_no_dialog() {
+        let transcript = boxed(
+            &[
+                "● Claude asked:",
+                "  Make auto mode your default permission mode?",
+                "  ❯ Yes, set auto mode as my default permission mode",
+            ],
+            &["> "],
+        );
+        let screen = read(&transcript);
+        assert_eq!(screen.prompt, None, "a transcript row is no dialog");
+        assert_ne!(screen.composer, ComposerState::Dialog);
+    }
+
+    /// Claude Code 2.1.330's dialog for three new MCP servers: the cursor on
+    /// the first, on the second, the second unticked, the cursor on `Enable
+    /// selected`, and at 60 columns on the third, from the daemon's fixtures.
+    const MCP_SERVERS: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers.txt");
+    const MCP_SERVERS_DOWN: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers-down.txt");
+    const MCP_SERVERS_TOGGLED: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers-toggled.txt");
+    const MCP_SERVERS_ON_ENABLE: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers-on-enable.txt");
+    const MCP_SERVERS_W60: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers-w60.txt");
+
+    /// The ticked servers' numbers of a prompt.
+    fn ticked(prompt: &ChatPrompt) -> Vec<u32> {
+        prompt
+            .options
+            .iter()
+            .filter(|option| option.selected)
+            .map(|option| option.number)
+            .collect()
+    }
+
+    #[test]
+    fn an_mcp_servers_dialog_reads_its_servers_ticks_and_cursor() {
+        let servers = vec![
+            (1, "rt-driver".to_owned()),
+            (2, "alpha-notes".to_owned()),
+            (3, "beta-search".to_owned()),
+        ];
+        for (name, text, ticks, cursor) in [
+            ("first", MCP_SERVERS, vec![1, 2, 3], 1),
+            ("down", MCP_SERVERS_DOWN, vec![1, 2, 3], 2),
+            ("toggled", MCP_SERVERS_TOGGLED, vec![1, 3], 2),
+            ("on-enable", MCP_SERVERS_ON_ENABLE, vec![1, 3], 4),
+            ("w60", MCP_SERVERS_W60, vec![1, 3], 3),
+        ] {
+            let screen = read(&capture(text));
+            assert_eq!(screen.composer, ComposerState::Dialog, "{name}");
+            assert_eq!(labels(&screen), servers, "{name}");
+            let prompt = screen.prompt.expect("an MCP servers prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::McpServer, "{name}");
+            assert!(prompt.multi, "{name}");
+            assert_eq!(
+                prompt.subject, "3 new MCP servers found in this project",
+                "{name}"
+            );
+            assert_eq!(ticked(&prompt), ticks, "{name}");
+            assert_eq!(prompt.cursor, Some(cursor), "{name}: 4 is Enable selected");
+        }
+        assert_eq!(
+            prompt_in(MCP_SERVERS).body,
+            "Select any you wish to enable.\n\nMCP servers may execute code or access system \
+             resources. All tool calls require approval. Learn more in the MCP\ndocumentation."
+        );
+    }
+
+    #[test]
+    fn an_mcp_servers_dialog_without_its_footer_is_half_drawn() {
+        let mut screen = capture(MCP_SERVERS);
+        let footer = screen
+            .iter()
+            .position(|row| row.contains("Esc to reject all"))
+            .expect("the footer");
+        screen.truncate(footer);
+        assert_eq!(
+            read(&screen),
+            ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_mcp_servers_title_quoted_in_the_transcript_is_no_dialog() {
+        let transcript = boxed(
+            &[
+                "● Claude Code said:",
+                "  3 new MCP servers found in this project",
+                "    [✔] rt-driver",
+            ],
+            &["> "],
+        );
+        let screen = read(&transcript);
+        assert_eq!(screen.prompt, None, "a transcript row is no dialog");
+        assert_ne!(screen.composer, ComposerState::Dialog);
+    }
+
+    #[test]
+    fn a_scroll_arrow_in_the_cursor_column_is_a_plain_server_row() {
+        for row in ["  ↓ [✔] delta-files", "  ↑ [ ] alpha-notes"] {
+            assert!(
+                matches!(
+                    server_row(row),
+                    Some(super::ServerRow::Server { cursor: false, .. })
+                ),
+                "{row:?} is a server row without the cursor"
+            );
+        }
+    }
+
+    /// Six servers, five shown, the fifth drawn with the list's `↓`.
+    const MCP_SERVERS_6: &str =
+        include_str!("../../../daemon/src/screen/fixtures/v330-mcp-servers-6-synthesized.txt");
+
+    #[test]
+    fn a_windowed_mcp_servers_list_offers_nothing_to_answer() {
+        let screen = read(&capture(MCP_SERVERS_6));
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.expect("the dialog still shows a prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::McpServer);
+        assert!(
+            prompt.options.is_empty(),
+            "no server can be told by its number"
+        );
+        assert_eq!(prompt.cursor, None);
+        assert_eq!(
+            recipe(&prompt, &ChatAnswerKind::Submit),
+            Err(AnswerRefusal::NotThisDialog)
+        );
+        assert_eq!(
+            recipe(&prompt, &ChatAnswerKind::Toggle { number: 1 }),
+            Err(AnswerRefusal::UnknownOption(1))
+        );
+    }
+
+    #[test]
+    fn an_auto_mode_dialog_with_a_hint_under_it_keeps_its_options() {
+        let hint =
+            include_str!("../../../daemon/src/screen/fixtures/v330-auto-mode-hint-synthesized.txt");
+        let screen = read(&capture(hint));
+        assert_eq!(labels(&screen), auto_mode_options());
+        assert_eq!(screen.prompt.expect("a prompt").cursor, Some(1));
     }
 
     #[test]

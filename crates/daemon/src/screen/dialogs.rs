@@ -605,6 +605,34 @@ mod tests {
     const SWITCH_BODY: &str = "Your next response will be slower and use more tokens\n\n\
         This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.";
 
+    /// The title of Claude Code 2.1.330's auto-mode dialog.
+    const AUTO_MODE_TITLE: &str = "Make auto mode your default permission mode?";
+
+    /// The auto-mode dialog's options in the captures, taken in manual mode.
+    const AUTO_MODE_OPTIONS: [(u32, &str); 2] = [
+        (1, "Yes, set auto mode as my default permission mode"),
+        (2, "No, keep manual mode"),
+    ];
+
+    /// The three servers of the 2.1.330 multi-server MCP captures.
+    const MCP_SERVERS: [(u32, &str); 3] =
+        [(1, "rt-driver"), (2, "alpha-notes"), (3, "beta-search")];
+
+    /// The multi-server MCP dialog with `ticked` servers ticked and the
+    /// cursor on `cursor` (4 being `Enable selected`).
+    fn mcp_servers(ticked: &[u32], cursor: u32) -> Expected {
+        Expected {
+            multi: true,
+            ticked: ticked.to_vec(),
+            ..dialog(
+                ChatPromptKind::McpServer,
+                "3 new MCP servers found in this project",
+                &MCP_SERVERS,
+                Some(cursor),
+            )
+        }
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -783,6 +811,80 @@ mod tests {
                         Some(3),
                     )
                 },
+            ),
+            (
+                "v330-auto-mode",
+                include_str!("fixtures/v330-auto-mode.txt"),
+                Expected {
+                    body: Some(
+                        "Auto mode lets Claude handle permission prompts automatically. Claude \
+                         checks each tool call for risky actions and\nprompt injection before \
+                         executing, runs the ones it assesses as lower-risk, and blocks the rest.",
+                    ),
+                    ..dialog(Confirm, AUTO_MODE_TITLE, &AUTO_MODE_OPTIONS, Some(1))
+                },
+            ),
+            (
+                "v330-auto-mode-down",
+                include_str!("fixtures/v330-auto-mode-down.txt"),
+                dialog(Confirm, AUTO_MODE_TITLE, &AUTO_MODE_OPTIONS, Some(2)),
+            ),
+            (
+                "v330-auto-mode-w60",
+                include_str!("fixtures/v330-auto-mode-w60.txt"),
+                dialog(Confirm, AUTO_MODE_TITLE, &AUTO_MODE_OPTIONS, Some(2)),
+            ),
+            (
+                "v330-mcp-servers",
+                include_str!("fixtures/v330-mcp-servers.txt"),
+                Expected {
+                    body: Some(
+                        "Select any you wish to enable.\n\nMCP servers may execute code or access \
+                         system resources. All tool calls require approval. Learn more in the \
+                         MCP\ndocumentation.",
+                    ),
+                    ..mcp_servers(&[1, 2, 3], 1)
+                },
+            ),
+            (
+                "v330-mcp-servers-down",
+                include_str!("fixtures/v330-mcp-servers-down.txt"),
+                mcp_servers(&[1, 2, 3], 2),
+            ),
+            (
+                "v330-mcp-servers-toggled",
+                include_str!("fixtures/v330-mcp-servers-toggled.txt"),
+                mcp_servers(&[1, 3], 2),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                include_str!("fixtures/v330-mcp-servers-on-enable.txt"),
+                // The cursor on `Enable selected`, the row after the last server.
+                mcp_servers(&[1, 3], 4),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                include_str!("fixtures/v330-mcp-servers-w60.txt"),
+                mcp_servers(&[1, 3], 3),
+            ),
+            (
+                "v330-mcp-servers-6-synthesized",
+                include_str!("fixtures/v330-mcp-servers-6-synthesized.txt"),
+                // A windowed list: no server is offered, so nothing is answered.
+                Expected {
+                    multi: true,
+                    ..dialog(
+                        McpServer,
+                        "6 new MCP servers found in this project",
+                        &[],
+                        None,
+                    )
+                },
+            ),
+            (
+                "v330-auto-mode-hint-synthesized",
+                include_str!("fixtures/v330-auto-mode-hint-synthesized.txt"),
+                dialog(Confirm, AUTO_MODE_TITLE, &AUTO_MODE_OPTIONS, Some(1)),
             ),
             (
                 "v152-learn-more",
@@ -1624,6 +1726,70 @@ mod tests {
                 },
             ),
             (
+                "v330-auto-mode",
+                include_str!("fixtures/v330-auto-mode.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-auto-mode-down",
+                include_str!("fixtures/v330-auto-mode-down.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-auto-mode-w60",
+                include_str!("fixtures/v330-auto-mode-w60.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-mcp-servers",
+                include_str!("fixtures/v330-mcp-servers.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-mcp-servers-down",
+                include_str!("fixtures/v330-mcp-servers-down.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-mcp-servers-toggled",
+                include_str!("fixtures/v330-mcp-servers-toggled.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                include_str!("fixtures/v330-mcp-servers-on-enable.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v330-mcp-servers-w60",
+                include_str!("fixtures/v330-mcp-servers-w60.txt"),
+                ViewReading {
+                    dialog: true,
+                    ..main_view(&[])
+                },
+            ),
+            (
                 "v71",
                 include_str!("fixtures/v71-agents-running.txt"),
                 main_view(&P71),
@@ -2063,6 +2229,16 @@ mod tests {
         let v01 = include_str!("fixtures/v01-start.txt");
         let collie_trust = include_str!("fixtures/claude--trust-prompt.txt");
         let mcp_server = include_str!("fixtures/claude--mcp-server-prompt.txt");
+        let auto_mode = include_str!("fixtures/v330-auto-mode.txt");
+        let auto_mode_down = include_str!("fixtures/v330-auto-mode-down.txt");
+        let servers = include_str!("fixtures/v330-mcp-servers.txt");
+        let servers_down = include_str!("fixtures/v330-mcp-servers-down.txt");
+        let servers_w60 = include_str!("fixtures/v330-mcp-servers-w60.txt");
+        let servers_on_enable = include_str!("fixtures/v330-mcp-servers-on-enable.txt");
+        // A server toggled: the arrows to its row, when it is not the cursor's, then Space.
+        let space =
+            |number: u32, ticked: bool| (vec![Key::Text(text(" "))], OptionTicked(number, ticked));
+        let enter_gone = || (vec![Key::Enter], DialogGone);
         let v152 = include_str!("fixtures/v152-learn-more.txt");
         let v23 = include_str!("fixtures/v23-amend-open.txt");
         let v52 = include_str!("fixtures/v52-plan-feedback-open.txt");
@@ -2167,6 +2343,130 @@ mod tests {
                 mcp_server,
                 option(3),
                 Ok(vec![(vec![Key::Enter], DialogGone)]),
+            ),
+            (
+                "v330-auto-mode",
+                auto_mode,
+                option(1),
+                Ok(vec![enter_gone()]),
+            ),
+            (
+                "v330-auto-mode",
+                auto_mode,
+                option(2),
+                Ok(vec![(vec![Key::Down], OptionSelected(2)), enter_gone()]),
+            ),
+            (
+                "v330-auto-mode-down",
+                auto_mode_down,
+                option(1),
+                Ok(vec![(vec![Key::Up], OptionSelected(1)), enter_gone()]),
+            ),
+            (
+                "v330-auto-mode-down",
+                auto_mode_down,
+                option(2),
+                Ok(vec![enter_gone()]),
+            ),
+            (
+                "v330-mcp-servers",
+                servers,
+                toggle(1),
+                Ok(vec![space(1, false)]),
+            ),
+            (
+                "v330-mcp-servers",
+                servers,
+                toggle(2),
+                Ok(vec![(vec![Key::Down], OptionSelected(2)), space(2, false)]),
+            ),
+            (
+                "v330-mcp-servers",
+                servers,
+                toggle(3),
+                Ok(vec![
+                    (vec![Key::Down; 2], OptionSelected(3)),
+                    space(3, false),
+                ]),
+            ),
+            (
+                "v330-mcp-servers-down",
+                servers_down,
+                toggle(1),
+                Ok(vec![(vec![Key::Up], OptionSelected(1)), space(1, false)]),
+            ),
+            (
+                "v330-mcp-servers-down",
+                servers_down,
+                toggle(2),
+                Ok(vec![space(2, false)]),
+            ),
+            (
+                "v330-mcp-servers-down",
+                servers_down,
+                toggle(3),
+                Ok(vec![(vec![Key::Down], OptionSelected(3)), space(3, false)]),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                servers_w60,
+                toggle(1),
+                Ok(vec![(vec![Key::Up; 2], OptionSelected(1)), space(1, false)]),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                servers_w60,
+                toggle(2),
+                Ok(vec![(vec![Key::Up], OptionSelected(2)), space(2, true)]),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                servers_w60,
+                toggle(3),
+                Ok(vec![space(3, false)]),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                servers_on_enable,
+                toggle(1),
+                Ok(vec![(vec![Key::Up; 3], OptionSelected(1)), space(1, false)]),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                servers_on_enable,
+                toggle(2),
+                Ok(vec![(vec![Key::Up; 2], OptionSelected(2)), space(2, true)]),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                servers_on_enable,
+                toggle(3),
+                Ok(vec![(vec![Key::Up], OptionSelected(3)), space(3, false)]),
+            ),
+            (
+                "v330-mcp-servers",
+                servers,
+                ChatAnswerKind::Submit,
+                Ok(vec![(vec![Key::Down; 3], OptionSelected(4)), enter_gone()]),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                servers_w60,
+                ChatAnswerKind::Submit,
+                Ok(vec![(vec![Key::Down], OptionSelected(4)), enter_gone()]),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                servers_on_enable,
+                ChatAnswerKind::Submit,
+                Ok(vec![enter_gone()]),
+            ),
+            ("v330-mcp-servers", servers, option(1), refused.clone()),
+            (
+                "v330-mcp-servers",
+                servers,
+                toggle(4),
+                Err(AnswerRefusal::UnknownOption(4)),
             ),
             (
                 "v152-learn-more",

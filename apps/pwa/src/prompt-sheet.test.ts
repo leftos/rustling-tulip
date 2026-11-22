@@ -283,6 +283,50 @@ test("sheet_mcp_server_offers_the_screens_options", () => {
   ]);
 });
 
+test("sheet_confirm_offers_the_screens_options", () => {
+  const p = prompt("confirm", [
+    option(1, "Yes, set auto mode as my default permission mode", true),
+    option(2, "No, keep manual mode"),
+  ]);
+  const sheet = sheetFor(screen(p), null);
+
+  expect(buttons(sheet).map((button) => button.label)).toEqual([
+    "Yes, set auto mode as my default permission mode",
+    "No, keep manual mode",
+  ]);
+  expect(answers(sheet)).toEqual([
+    { kind: "option", number: 1 },
+    { kind: "option", number: 2 },
+  ]);
+});
+
+test("sheet_mcp_servers_toggle_each_server_and_enable_the_selected", () => {
+  const p = prompt(
+    "mcp_server",
+    [option(1, "rt-driver", true), option(2, "alpha-notes"), option(3, "beta-search", true)],
+    { multi: true, cursor: 2 },
+  );
+  const sheet = sheetFor(screen(p), null);
+
+  expect(buttons(sheet).map((button) => [button.number, button.label, button.selected])).toEqual([
+    [1, "rt-driver", true],
+    [2, "alpha-notes", false],
+    [3, "beta-search", true],
+    [null, "Enable selected", false],
+  ]);
+  expect(answers(sheet)).toEqual([
+    { kind: "toggle", number: 1 },
+    { kind: "toggle", number: 2 },
+    { kind: "toggle", number: 3 },
+    { kind: "submit" },
+  ]);
+});
+
+test("sheet_windowed_mcp_servers_offer_nothing_to_answer", () => {
+  const p = prompt("mcp_server", [], { multi: true });
+  expect(buttons(sheetFor(screen(p), null))).toEqual([]);
+});
+
 test("sheet_heads_up_offers_nothing_to_answer", () => {
   expect(buttons(sheetFor(screen(prompt("heads_up")), null))).toEqual([]);
 });

@@ -1,0 +1,32 @@
+
+X:\dev\rustling-tulip.wt\rt-1450-capture\.tmp\cap\proj>cd /d "X:\dev\rustling-tulip.wt\rt-1450-capture\.tmp\cap\proj" &&
+ C:\Users\lefto\.local\bin\claude.exe --settings X:\dev\rustling-tulip.wt\rt-1450-capture\.tmp\cap\d\config\sessions\4ac
+821ea-9441-443b-8b7b-b15da5ec65b9\hook-settings.json --session-id 737c63b3-2709-4a03-9e13-799438954563
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  3 new MCP servers found in this project
+  Select any you wish to enable.
+
+  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP
+  documentation.
+
+    [✔] rt-driver
+  ❯ [ ] alpha-notes
+    [✔] beta-search
+       Enable selected
+ Space to select · Esc to reject all
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

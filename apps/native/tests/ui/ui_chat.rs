@@ -1785,6 +1785,52 @@ fn a_switch_model_card_sends_no_go_back(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_auto_mode_card_offers_its_two_options_and_sends_the_pick(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let options = [
+        (1, "Yes, set auto mode as my default permission mode"),
+        (2, "No, keep manual mode"),
+    ];
+    for (id, button) in [("a1", "chat-card-1"), ("a2", "chat-card-2")] {
+        show(&mut h, prompt(id, ChatPromptKind::Confirm, &options));
+        h.click_on(button);
+    }
+    assert_eq!(answer_kinds(&mut h), [opt(1), opt(2)]);
+}
+
+#[gpui::test]
+fn an_mcp_servers_card_toggles_each_server_and_enables_the_selected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut servers = prompt(
+        "s1",
+        ChatPromptKind::McpServer,
+        &[(1, "rt-driver"), (2, "alpha-notes"), (3, "beta-search")],
+    );
+    servers.multi = true;
+    for (id, button) in [
+        ("s1", "chat-card-1"),
+        ("s2", "chat-card-2"),
+        ("s3", "chat-card-3"),
+        ("s4", "chat-card-submit"),
+    ] {
+        servers.id = id.to_owned();
+        show(&mut h, servers.clone());
+        h.click_on(button);
+    }
+    assert_eq!(
+        answer_kinds(&mut h),
+        [
+            ChatAnswerKind::Toggle { number: 1 },
+            ChatAnswerKind::Toggle { number: 2 },
+            ChatAnswerKind::Toggle { number: 3 },
+            ChatAnswerKind::Submit,
+        ]
+    );
+}
+
+#[gpui::test]
 fn question_review_plan_trust_and_heads_up_cards_send_their_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

@@ -1236,7 +1236,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 82] = [
+        let cases: [(&str, &str, Verdict); 92] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1466,6 +1466,56 @@ mod tests {
             (
                 "claude--mcp-server-prompt",
                 include_str!("fixtures/claude--mcp-server-prompt.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-auto-mode",
+                include_str!("fixtures/v330-auto-mode.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-auto-mode-down",
+                include_str!("fixtures/v330-auto-mode-down.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-auto-mode-w60",
+                include_str!("fixtures/v330-auto-mode-w60.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers",
+                include_str!("fixtures/v330-mcp-servers.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers-down",
+                include_str!("fixtures/v330-mcp-servers-down.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers-toggled",
+                include_str!("fixtures/v330-mcp-servers-toggled.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers-on-enable",
+                include_str!("fixtures/v330-mcp-servers-on-enable.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers-w60",
+                include_str!("fixtures/v330-mcp-servers-w60.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-mcp-servers-6-synthesized",
+                include_str!("fixtures/v330-mcp-servers-6-synthesized.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "v330-auto-mode-hint-synthesized",
+                include_str!("fixtures/v330-auto-mode-hint-synthesized.txt"),
                 State(AwaitingInput),
             ),
             ("v95-rewind", include_str!("fixtures/v95-rewind.txt"), Keep),

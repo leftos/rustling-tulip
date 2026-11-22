@@ -351,6 +351,7 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
             Some(2),
         ),
         ChatPromptKind::Trust => positional(prompt, &["Trust this folder", "Exit"], None),
+        ChatPromptKind::McpServer if prompt.multi => server_buttons(prompt),
         ChatPromptKind::McpServer | ChatPromptKind::HeadsUp | ChatPromptKind::Confirm => {
             positional(prompt, &[], None)
         }
@@ -462,6 +463,35 @@ fn positional(prompt: &ChatPrompt, labels: &[&str], typed: Option<usize>) -> Vec
             CardButton::numbered(choice.number, label, answer)
         })
         .collect()
+}
+
+/// The servers of a multi-select new-MCP-servers prompt, each toggled, then
+/// Enable selected, which submits the ticked ones; reject all gets no
+/// button.
+fn server_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
+    let mut buttons: Vec<CardButton> = prompt
+        .options
+        .iter()
+        .map(|choice| {
+            CardButton::numbered(
+                choice.number,
+                &choice.label,
+                ButtonAnswer::Fixed(ChatAnswerKind::Toggle {
+                    number: choice.number,
+                }),
+            )
+        })
+        .collect();
+    // A windowed list offers no server, and so no submit: it is answered
+    // in the terminal.
+    if !buttons.is_empty() {
+        buttons.push(CardButton::named(
+            "submit",
+            "Enable selected",
+            ChatAnswerKind::Submit,
+        ));
+    }
+    buttons
 }
 
 /// A question's options (picked, or toggled on a multi-select), its own

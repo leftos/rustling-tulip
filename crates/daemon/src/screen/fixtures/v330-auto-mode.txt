@@ -1,0 +1,32 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   X:\dev\rustling-tulip.wt\rt-1450-capture\.tmp\cap\proj3
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Make auto mode your default permission mode?
+
+  Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and
+  prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+
+  ❯ Yes, set auto mode as my default permission mode
+    No, keep manual mode
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

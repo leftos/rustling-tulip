@@ -260,16 +260,40 @@ function buttonsFor(prompt: ChatPrompt): SheetButton[] {
       return questionButtons(prompt);
     case "plan":
       return planButtons(prompt);
+    case "mcp_server":
+      return prompt.multi === true ? serverButtons(prompt) : pickButtons(prompt);
     case "review":
     case "trust":
-    case "mcp_server":
+    case "confirm":
     case "heads_up":
-      return (prompt.options ?? []).map((choice) =>
-        optionButton(choice, optionAction(choice.number)),
-      );
+      return pickButtons(prompt);
     default:
       return [];
   }
+}
+
+/** One button per option, the screen's own label for each, picking it. */
+function pickButtons(prompt: ChatPrompt): SheetButton[] {
+  return (prompt.options ?? []).map((choice) => optionButton(choice, optionAction(choice.number)));
+}
+
+/**
+ * The servers of a multi-select new-MCP-servers prompt, each toggled and
+ * ticked as the screen has it, then Enable selected, which submits them;
+ * reject all gets no button.
+ */
+function serverButtons(prompt: ChatPrompt): SheetButton[] {
+  const buttons = (prompt.options ?? []).map((choice) =>
+    optionButton(choice, {
+      kind: "answer",
+      answer: { kind: "toggle", number: choice.number },
+    }),
+  );
+  // A windowed list offers no server, and so no submit: it is answered in the terminal.
+  if (buttons.length > 0) {
+    buttons.push(namedButton("Enable selected", { kind: "submit" }));
+  }
+  return buttons;
 }
 
 /** Allow once, Always allow (when offered) and Deny, then the answers that carry words. */

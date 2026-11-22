@@ -39,6 +39,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - When turning Claude's hooks on or off in Settings fails, the switch shows the error and its last state instead of vanishing or waiting forever.
 - Status hooks you start Claude with by hand keep running the current hook program, even when its copy was left read-only.
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
+- Claude's "Make auto mode your default permission mode?" question and its "new MCP servers found" checklist now mark the session as needing you, with a card you can answer from Chat or the phone.
 - On the phone, an offline host's card on Settings › Hosts no longer jumps on each redial, and the Appearance page's theme rows and text size label line up.
 - On the phone's Terminal page, copying text now reaches the clipboard and shows the copied notice.
 - With the phone on its side, the Needs you card takes at most half the height, so Home's rows show under it.

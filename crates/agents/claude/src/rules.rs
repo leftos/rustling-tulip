@@ -184,6 +184,27 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             verdict: ScreenVerdict::AwaitingInput,
         },
         ScreenRule {
+            name: "dialog_auto_mode".to_string(),
+            priority: 980,
+            // No footer: the title is the anchor, above the cursor's row, so
+            // the region is the rows under the last rule. Under the idle box's
+            // bottom rule a title quoted in the transcript is cut off.
+            region: ScreenRegion::AfterLastRule,
+            matcher: LineMatcher::Regex(
+                r"^\s*Make auto mode your default permission mode\?\s*$".to_string(),
+            ),
+            not: Vec::new(),
+            verdict: ScreenVerdict::AwaitingInput,
+        },
+        ScreenRule {
+            name: "dialog_mcp_servers".to_string(),
+            priority: 980,
+            region: DIALOG_REGION,
+            matcher: LineMatcher::Regex(r"^\s*Space to select · Esc to reject all\s*$".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::AwaitingInput,
+        },
+        ScreenRule {
             name: "turn_hooks_running".to_string(),
             priority: 975,
             region: ScreenRegion::AbovePromptBox { rows: 24 },
@@ -335,6 +356,8 @@ mod tests {
                 ("dialog_question_review", 980),
                 ("dialog_plan", 980),
                 ("dialog_trust", 980),
+                ("dialog_auto_mode", 980),
+                ("dialog_mcp_servers", 980),
                 ("turn_hooks_running", 975),
                 ("turn_spinner", 970),
                 ("overlay_heads_up", 960),
@@ -348,7 +371,7 @@ mod tests {
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 20);
+        assert_eq!(screen_rules().rules.len(), 22);
     }
 
     #[test]

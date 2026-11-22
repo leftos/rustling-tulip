@@ -3603,6 +3603,42 @@ mod hysteresis_tests {
         );
     }
 
+    /// Whether a queued first prompt stays held while the session shows
+    /// `capture`, a startup dialog, and the agent reads as in a dialog.
+    async fn startup_hold_keeps_the_first_prompt_behind(tag: &str, capture: &str) {
+        let registry = SessionRegistry::new(scratch_dirs(tag));
+        let mut record = test_record(SESSION);
+        record.screen = Some(Arc::new(Mutex::new(screen_from(capture))));
+        registry.insert(record);
+        assert_eq!(
+            agent_reading(&registry, SESSION),
+            AgentReading::Dialog,
+            "{tag}: the dialog holds the keys"
+        );
+        let (pty, _input, _exit) = crate::history::test_support::recording_pty();
+        hold_first_prompt(&registry, &pty);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(pty.first_prompt_held(), "{tag}: held behind the dialog");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_hold_keeps_the_first_prompt_behind_the_auto_mode_dialog() {
+        startup_hold_keeps_the_first_prompt_behind(
+            "hold-auto-mode",
+            include_str!("screen/fixtures/v330-auto-mode.txt"),
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_hold_keeps_the_first_prompt_behind_the_mcp_servers_dialog() {
+        startup_hold_keeps_the_first_prompt_behind(
+            "hold-mcp-servers",
+            include_str!("screen/fixtures/v330-mcp-servers.txt"),
+        )
+        .await;
+    }
+
     /// A plain shell never waits for input, and its idle timer only fires from
     /// `Working`: seeded `AwaitingInput` it would never leave it.
     #[test]
