@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - In the phone's web app, the terminal's private cursor-position answer no longer counts as your typing or marks the session offline.
 - On the iPhone, tapping a web link in a session's terminal opens it in Safari, or in the app that claims it.
 - Answering one question of a multi-question card from the phone or the chat keeps the session waiting on you until the card is submitted.
+- Status hooks you start Claude with by hand keep running the current hook program, even when its copy was left read-only.
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
 - Installed status hooks in Claude's user settings update to the current events and matchers at the next start, and a settings file saved with a byte order mark no longer refuses them.
 - A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.

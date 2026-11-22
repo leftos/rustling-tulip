@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 /// First N hex chars of the SHA-256 retained in the cached filename. 16 chars
@@ -124,6 +125,11 @@ pub(crate) fn hook_shim_path(data_dir: &Path) -> PathBuf {
         .join(format!("{HOOK_SHIM_STEM}{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The counter that gives each [`ensure_hook_shim`] call its own temp file:
+/// two concurrent calls in one daemon (a settings Set and the startup
+/// refresh) must never write, or rename, each other's half-written copy.
+static HOOK_SHIM_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Ensure the fixed copy of the tracer that a hook entry in an agent's user
 /// settings runs exists at `<data_dir>/hook-shim/rt-hook` (with the
 /// platform's executable suffix) and holds `tracer_exe`'s bytes, and return
@@ -131,11 +137,17 @@ pub(crate) fn hook_shim_path(data_dir: &Path) -> PathBuf {
 ///
 /// Unlike [`ensure_cached`]'s copies, the path never changes, so a user
 /// settings entry naming it stays valid across tracer updates. A missing copy
-/// or one whose bytes differ is replaced through a temp file in the same
-/// folder renamed over it; an equal copy is not rewritten. When the rename
-/// fails (on Windows, a running hook holds the file), the old copy is kept,
-/// a `warn!` is logged, and its path is still returned: a stale shim speaks
-/// the same additive `hook` argv.
+/// or one whose bytes differ is replaced through a temp file this call alone
+/// writes, `rt-hook{suffix}.{pid}.{n}.tmp`, renamed over it, so two
+/// concurrent calls never rename each other's half-written file; an equal
+/// copy is not rewritten. Temps another pid left in the folder (a crashed
+/// run's) are swept before the write. On Windows the shim never carries the
+/// read-only attribute: the temp's flag is cleared after the tracer's mode is
+/// copied, and a read-only old copy has its flag cleared before the rename is
+/// tried a second time, since a read-only file cannot be replaced there. When
+/// the rename still fails (a running hook holds the file), the old copy is
+/// kept, a `warn!` is logged, and its path is still returned: a stale shim
+/// speaks the same additive `hook` argv.
 pub fn ensure_hook_shim(tracer_exe: &Path, data_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = data_dir.join(HOOK_SHIM_DIR);
     let target = hook_shim_path(data_dir);
@@ -147,19 +159,15 @@ pub fn ensure_hook_shim(tracer_exe: &Path, data_dir: &Path) -> anyhow::Result<Pa
     }
     fs::create_dir_all(&dir)
         .with_context(|| format!("creating the hook shim dir {}", dir.display()))?;
-    let tmp = dir.join(format!(
-        "{HOOK_SHIM_STEM}{}.{}.tmp",
-        std::env::consts::EXE_SUFFIX,
-        std::process::id()
-    ));
-    let written = fs::write(&tmp, &bytes)
-        .with_context(|| format!("writing {}", tmp.display()))
-        .and_then(|()| copy_mode(tracer_exe, &tmp));
-    if let Err(err) = written {
+    let pid = std::process::id();
+    sweep_stale_hook_shim_temps(&dir, pid);
+    let seq = HOOK_SHIM_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(hook_shim_temp_name(pid, seq));
+    if let Err(err) = write_hook_shim_temp(&tmp, &bytes, tracer_exe) {
         let _ = fs::remove_file(&tmp);
         return Err(err);
     }
-    if let Err(err) = fs::rename(&tmp, &target) {
+    if let Err(err) = rename_hook_shim_temp(&tmp, &target) {
         let _ = fs::remove_file(&tmp);
         if !target.exists() {
             // No old copy to keep: nothing would run at the path.
@@ -179,6 +187,133 @@ pub fn ensure_hook_shim(tracer_exe: &Path, data_dir: &Path) -> anyhow::Result<Pa
         "binary_cache: hook shim refreshed"
     );
     Ok(target)
+}
+
+/// The name of the temp file one [`ensure_hook_shim`] call writes:
+/// `rt-hook{suffix}.{pid}.{n}.tmp`, `n` distinct per call in this process.
+fn hook_shim_temp_name(pid: u32, n: u64) -> String {
+    format!(
+        "{HOOK_SHIM_STEM}{}.{pid}.{n}.tmp",
+        std::env::consts::EXE_SUFFIX
+    )
+}
+
+/// Whether the file named `name` in the hook shim folder is a temp another
+/// process left behind, so a crashed run's: true for
+/// `rt-hook{suffix}.{other pid}.tmp` (the older naming) and
+/// `rt-hook{suffix}.{other pid}.{n}.tmp`, false for this pid's temps, for the
+/// shim itself and for any other file.
+fn stale_hook_shim_temp(name: &str, pid: u32) -> bool {
+    let Some(rest) = name
+        .strip_prefix(HOOK_SHIM_STEM)
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .and_then(|rest| rest.strip_prefix(std::env::consts::EXE_SUFFIX))
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let (temp_pid, seq) = match rest.split_once('.') {
+        Some((temp_pid, seq)) => (temp_pid, Some(seq)),
+        None => (rest, None),
+    };
+    let Ok(temp_pid) = temp_pid.parse::<u32>() else {
+        return false;
+    };
+    let seq_is_a_count = seq.is_none_or(|seq| seq.parse::<u64>().is_ok());
+    seq_is_a_count && temp_pid != pid
+}
+
+/// Remove the temps a crashed earlier run left in the hook shim folder `dir`:
+/// every file [`stale_hook_shim_temp`] names for `pid`. One data folder has
+/// one daemon, so another pid's temp is a crashed run's and no live call of
+/// this process is writing it. A removal that fails is logged and ignored: a
+/// stale temp must not stop the refresh.
+fn sweep_stale_hook_shim_temps(dir: &Path, pid: u32) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(
+                ?err,
+                dir = %dir.display(),
+                "binary_cache: could not list the hook shim dir to sweep stale temps"
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warn!(?err, "binary_cache: skipping an unreadable hook shim entry");
+                continue;
+            }
+        };
+        if !stale_hook_shim_temp(&entry.file_name().to_string_lossy(), pid) {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(err) = fs::remove_file(&path) {
+            warn!(
+                ?err,
+                path = %path.display(),
+                "binary_cache: could not remove a stale hook shim temp"
+            );
+        }
+    }
+}
+
+/// Write `bytes` to `tmp` and give it `tracer_exe`'s mode. On Windows the
+/// read-only flag that copy can carry is cleared: a read-only file cannot be
+/// replaced by a rename, and the shim is never read-only. Unix modes are
+/// copied as they are.
+fn write_hook_shim_temp(tmp: &Path, bytes: &[u8], tracer_exe: &Path) -> anyhow::Result<()> {
+    fs::write(tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    copy_mode(tracer_exe, tmp)?;
+    #[cfg(windows)]
+    clear_read_only(tmp)
+        .with_context(|| format!("clearing the read-only flag on {}", tmp.display()))?;
+    Ok(())
+}
+
+/// Rename `tmp` over `target`, clearing a read-only flag on the old copy and
+/// trying once more on Windows, where a read-only file cannot be replaced.
+#[cfg(windows)]
+fn rename_hook_shim_temp(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    match fs::rename(tmp, target) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if let Err(err) = clear_read_only(target) {
+                debug!(
+                    ?err,
+                    shim = %target.display(),
+                    "binary_cache: could not clear the read-only flag on the old hook shim"
+                );
+                return Err(first);
+            }
+            fs::rename(tmp, target)
+        }
+    }
+}
+
+/// Rename `tmp` over `target`; a Unix mode that refuses the rename is
+/// reported as it is.
+#[cfg(not(windows))]
+fn rename_hook_shim_temp(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, target)
+}
+
+/// Clear `path`'s read-only flag. Windows only: Unix has no such flag to
+/// clear, and clearing the write bit there would make the file
+/// world-writable.
+#[cfg(windows)]
+#[expect(
+    clippy::permissions_set_readonly_false,
+    reason = "Windows only: no Unix mode is involved, and a read-only file cannot be replaced by a rename"
+)]
+fn clear_read_only(path: &Path) -> std::io::Result<()> {
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(path, perms)
 }
 
 /// Delete every cached binary that is not present in `in_use`. Paths match
@@ -251,7 +386,7 @@ pub struct GcReport {
 /// Copy `src`'s permission bits onto `dst`. On Unix this carries the
 /// executable bit — without it the `fs::write`-created cache entry is a
 /// non-executable `0644` file and `spawn` fails with `EACCES`. On Windows the
-/// only bit is read-only, which is harmless for a freshly written file.
+/// only bit is read-only, which [`ensure_hook_shim`]'s temp clears.
 fn copy_mode(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let perms = fs::metadata(src)
         .with_context(|| format!("reading template metadata {}", src.display()))?
@@ -397,6 +532,14 @@ mod tests {
         })
     }
 
+    /// Set or clear `path`'s read-only flag.
+    #[cfg(windows)]
+    fn set_read_only(path: &Path, read_only: bool) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(read_only);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
     #[test]
     fn hook_shim_copies_the_tracer_to_its_fixed_path() {
         let dirs = crate::history::test_support::scratch_dirs("hook-shim-copy");
@@ -454,6 +597,108 @@ mod tests {
         );
         assert_eq!(fs::read(&shim).unwrap(), b"tracer v1");
         assert!(!holds_a_temp_file(&data.join("hook-shim")));
+    }
+
+    #[test]
+    fn hook_shim_temp_names_are_unique_per_call() {
+        let first = hook_shim_temp_name(4242, 7);
+        let second = hook_shim_temp_name(4242, 8);
+
+        assert_ne!(first, second, "each call gets its own temp file");
+        for name in [&first, &second] {
+            assert!(name.contains("4242"), "the temp carries the pid: {name}");
+            assert!(
+                Path::new(name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp")),
+                "the temp ends in .tmp: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_hook_shim_temp_names_another_pid() {
+        let pid = 4242;
+        let suffix = std::env::consts::EXE_SUFFIX;
+
+        assert!(stale_hook_shim_temp(&format!("rt-hook{suffix}.7.tmp"), pid));
+        assert!(stale_hook_shim_temp(
+            &format!("rt-hook{suffix}.7.3.tmp"),
+            pid
+        ));
+        assert!(!stale_hook_shim_temp(
+            &format!("rt-hook{suffix}.{pid}.tmp"),
+            pid
+        ));
+        assert!(!stale_hook_shim_temp(
+            &format!("rt-hook{suffix}.{pid}.3.tmp"),
+            pid
+        ));
+        assert!(!stale_hook_shim_temp("rt-hook.exe", pid));
+        assert!(!stale_hook_shim_temp("rt-hook", pid));
+        assert!(!stale_hook_shim_temp("notes.txt", pid));
+    }
+
+    #[test]
+    fn hook_shim_sweeps_a_crashed_runs_temp() {
+        let scratch = Scratch::new("hook-shim-sweep");
+        let tracer = write_template(scratch.path(), "rt-tracer.exe", b"tracer v1");
+        let data = scratch.path().join("data");
+        let shim = ensure_hook_shim(&tracer, &data).expect("first copy");
+        let crashed = data.join("hook-shim").join(format!(
+            "rt-hook{}.4294967295.tmp",
+            std::env::consts::EXE_SUFFIX
+        ));
+        fs::write(&crashed, b"half written").unwrap();
+
+        fs::write(&tracer, b"tracer v2").unwrap();
+        ensure_hook_shim(&tracer, &data).expect("refresh");
+
+        assert_eq!(fs::read(&shim).unwrap(), b"tracer v2");
+        assert!(!crashed.exists(), "a crashed run's temp is swept");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_tracer_makes_a_writable_shim() {
+        let scratch = Scratch::new("hook-shim-read-only-tracer");
+        let tracer = write_template(scratch.path(), "rt-tracer.exe", b"tracer v1");
+        set_read_only(&tracer, true);
+        let data = scratch.path().join("data");
+
+        let shim = ensure_hook_shim(&tracer, &data).expect("copy a read-only tracer");
+        assert!(
+            !fs::metadata(&shim).unwrap().permissions().readonly(),
+            "the shim never carries the read-only flag"
+        );
+
+        set_read_only(&tracer, false);
+        fs::write(&tracer, b"tracer v2, longer").unwrap();
+        set_read_only(&tracer, true);
+
+        let again =
+            ensure_hook_shim(&tracer, &data).expect("refresh from a read-only tracer again");
+        assert_eq!(fs::read(&again).unwrap(), b"tracer v2, longer");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_old_shim_is_replaced() {
+        let scratch = Scratch::new("hook-shim-read-only-old");
+        let tracer = write_template(scratch.path(), "rt-tracer.exe", b"tracer v1");
+        let data = scratch.path().join("data");
+        let shim = ensure_hook_shim(&tracer, &data).expect("first copy");
+        set_read_only(&shim, true);
+
+        fs::write(&tracer, b"tracer v2, longer").unwrap();
+        let again = ensure_hook_shim(&tracer, &data).expect("replace a read-only shim");
+
+        assert_eq!(again, shim);
+        assert_eq!(fs::read(&shim).unwrap(), b"tracer v2, longer");
+        assert!(
+            !fs::metadata(&shim).unwrap().permissions().readonly(),
+            "the replaced shim is not read-only"
+        );
     }
 
     #[test]

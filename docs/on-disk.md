@@ -268,7 +268,7 @@ The phone app's folder, `pwa/` in the install folder (`Contents/Resources/pwa` i
 
 Beside the binaries cache (under the binaries dir's parent) sits `hook-shim/rt-hook` (`rt-hook.exe` on Windows): a byte copy of the cached tracer, refreshed only when its bytes differ, written through a temp file `rt-hook[.exe].<pid>.tmp`.
 
-It exists for the tracer's `hook --from-env` mode run from a user's settings hooks; turning an agent's user hooks on refreshes it first, and so does the daemon's start for each agent whose entries are installed (`crates/daemon/src/binary_cache.rs`, `ensure_hook_shim`, `hook_shim_path`). Turning the hooks off leaves it.
+It exists for the tracer's `hook --from-env` mode run from a user's settings hooks; turning an agent's user hooks on refreshes it first, and so does the daemon's start for each agent whose entries are installed (`crates/daemon/src/binary_cache.rs`, `ensure_hook_shim`, `hook_shim_path`). Turning the hooks off leaves it. Each refresh writes a temp of its own beside it, `rt-hook{suffix}.{pid}.{n}.tmp`, renamed over the shim, and first removes the temps another pid left (a crashed run's); on Windows the shim never keeps a read-only flag, so a later refresh can replace it.
 
 ### User hooks
 
