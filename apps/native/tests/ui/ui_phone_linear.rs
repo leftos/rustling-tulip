@@ -873,6 +873,112 @@ fn back_takes_a_chat_card_down_first(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-session-chat"), "the page is unchanged");
 }
 
+/// The selector of the session header's title chip.
+const TITLE_CHIP: &str = "phone-session-title-chip";
+
+/// The phone on the saved [`REMOTE`]'s shell session `n`, titled `label`,
+/// on its Terminal page, the host listing `features` and [`linear`];
+/// everything sent so far is drained.
+fn titled_shell<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    features: &[&str],
+    label: &str,
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(features);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let shell = session("n")
+        .label(label)
+        .in_repo("r1")
+        .status("working")
+        .no_agent()
+        .build();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![shell],
+    });
+    host.send(linear());
+    h.click_on(&row("n"));
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+#[gpui::test]
+fn the_session_header_draws_the_titles_identifier_as_a_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_shell(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+
+    assert!(drawn(&mut h, TITLE_CHIP), "the header draws the chip");
+    assert!(drawn(&mut h, "phone-session-label"), "and the title");
+    let (chip, label) = (h.bounds(TITLE_CHIP), h.bounds("phone-session-label"));
+    assert!(
+        chip.right() <= label.left() + px(1.0),
+        "the chip leads the title: {chip:?} before {label:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tap_on_the_header_chip_raises_the_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_shell(
+        cx,
+        &dir,
+        &[protocol::FEATURE_LINEAR_LINKS],
+        "RT-12 Fix the login loop",
+    );
+
+    h.click_on(TITLE_CHIP);
+
+    assert_eq!(asked(&mut h), [vec!["RT-12".to_owned()]], "one ask");
+    assert!(drawn(&mut h, SHEET), "the tap raises the sheet");
+    assert!(in_sheet(&mut h, "linear-card-id-phone=RT-12"));
+    assert_eq!(h.opened(), [], "a tap on a chip opens nothing");
+}
+
+#[gpui::test]
+fn a_title_without_a_team_identifier_has_no_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_shell(cx, &dir, &[protocol::FEATURE_LINEAR_LINKS], "November");
+
+    assert!(!drawn(&mut h, TITLE_CHIP), "no identifier, no chip");
+    assert!(drawn(&mut h, "phone-session-label"), "the title alone");
+}
+
+#[gpui::test]
+fn a_header_chip_tap_on_a_host_without_linear_links_opens_the_link(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_shell(cx, &dir, &[], "RT-12 Fix the login loop");
+
+    assert!(
+        drawn(&mut h, TITLE_CHIP),
+        "the context alone draws the chip"
+    );
+
+    h.click_on(TITLE_CHIP);
+
+    assert_eq!(asked(&mut h), Vec::<Vec<String>>::new(), "no linear_links");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url(ISSUE_WEB.to_owned())],
+        "a host that cannot answer opens the link"
+    );
+    assert!(!drawn(&mut h, SHEET), "and raises no card");
+}
+
 #[gpui::test]
 fn a_chat_identifier_links_once_the_linear_context_arrives(cx: &mut TestAppContext) {
     let dir = TestDir::new();

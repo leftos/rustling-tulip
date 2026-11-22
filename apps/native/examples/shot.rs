@@ -92,6 +92,10 @@
 //! Linear card raised as a bottom sheet over a scrim, filled with its
 //! state, priority, title, project, release, assignee and updated time,
 //! over Open in Linear.
+//! `phone-linear-title` shows the `phone-session` page with its working
+//! session titled [`PHONE_TITLE_LINE`]: the header's title leading with
+//! the `RT-12` chip behind a dot, the rest of the title after it,
+//! and no card raised.
 //! `phone-settings` shows the same Home's Settings button tapped: Settings'
 //! header with Back and its title over the category list.
 //! `phone-settings-appearance` shows Settings' Appearance page: its header
@@ -438,6 +442,7 @@ enum View {
     PhoneComposerEdit,
     PhoneTerminal,
     PhoneLinear,
+    PhoneLinearTitle,
     PhoneSettings,
     PhoneSettingsAppearance,
     PhoneSettingsKeys,
@@ -455,7 +460,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 76] = [
+    const ALL: [Self; 77] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -518,6 +523,7 @@ impl View {
         Self::PhoneComposerEdit,
         Self::PhoneTerminal,
         Self::PhoneLinear,
+        Self::PhoneLinearTitle,
         Self::PhoneSettings,
         Self::PhoneSettingsAppearance,
         Self::PhoneSettingsKeys,
@@ -547,6 +553,7 @@ impl View {
                 | Self::PhoneComposerEdit
                 | Self::PhoneTerminal
                 | Self::PhoneLinear
+                | Self::PhoneLinearTitle
                 | Self::PhoneSettings
                 | Self::PhoneSettingsAppearance
                 | Self::PhoneSettingsKeys
@@ -580,6 +587,7 @@ impl View {
             Self::PhoneSession
                 | Self::PhoneSessionSheet
                 | Self::PhoneComposerEdit
+                | Self::PhoneLinearTitle
                 | Self::PhoneLandscapeTerminal
         ) || self.is_two_pane()
     }
@@ -681,6 +689,7 @@ impl View {
             Self::PhoneComposerEdit => "phone-composer-edit",
             Self::PhoneTerminal => "phone-terminal",
             Self::PhoneLinear => "phone-linear",
+            Self::PhoneLinearTitle => "phone-linear-title",
             Self::PhoneSettings => "phone-settings",
             Self::PhoneSettingsAppearance => "phone-settings-appearance",
             Self::PhoneSettingsKeys => "phone-settings-keys",
@@ -754,6 +763,7 @@ impl View {
             | Self::PhoneComposerEdit
             | Self::PhoneTerminal
             | Self::PhoneLinear
+            | Self::PhoneLinearTitle
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
             | Self::PhoneSettingsKeys
@@ -815,6 +825,7 @@ impl View {
             | Self::PhoneComposerEdit
             | Self::PhoneTerminal
             | Self::PhoneLinear
+            | Self::PhoneLinearTitle
             | Self::PhoneSettings
             | Self::PhoneSettingsAppearance
             | Self::PhoneSettingsKeys
@@ -1123,6 +1134,7 @@ impl Shot {
             | View::PhoneComposerEdit
             | View::PhoneTerminal
             | View::PhoneLinear
+            | View::PhoneLinearTitle
             | View::PhoneSettings
             | View::PhoneSettingsAppearance
             | View::PhoneSettingsKeys
@@ -1982,6 +1994,7 @@ async fn capture_phone_home(
     open_phone_file_page(shot, handle, cx).await?;
     check_phone_session_sheet(shot.view, handle, cx)?;
     check_phone_linear(shot.view, handle, cx)?;
+    check_phone_title_chip(shot.view, handle, cx)?;
     check_daemon(failure)?;
     capture(shot.out.clone(), address, failure).await
 }
@@ -2149,6 +2162,9 @@ async fn open_phone_file_page(
 const PHONE_LINEAR_LINE: &str = "see RT-12 for the fix";
 /// The issue the `phone-linear` shot's card shows.
 const PHONE_LINEAR_ISSUE: &str = "RT-12";
+/// The title the `phone-linear-title` shot gives its session, whose host
+/// knows the team RT.
+const PHONE_TITLE_LINE: &str = "RT-12 Fix the login loop";
 /// The title of [`PHONE_LINEAR_ISSUE`]'s copy.
 const PHONE_LINEAR_TITLE: &str = "Phone card as a bottom sheet";
 
@@ -2236,6 +2252,23 @@ async fn raise_phone_linear_card(handle: WindowHandle<PhoneRoot>, cx: &mut Async
         window.dispatch_event(gpui::PlatformInput::MouseUp(up), cx);
     })?;
     cx.background_executor().timer(LOAD_WAIT).await;
+    Ok(())
+}
+
+/// Checks the `phone-linear-title` view's header leads with its title's
+/// `RT-12` chip.
+fn check_phone_title_chip(
+    view: View,
+    handle: WindowHandle<PhoneRoot>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if view != View::PhoneLinearTitle {
+        return Ok(());
+    }
+    let shown = handle.update(cx, |phone, _, cx| phone.session_issue_identifier(cx))?;
+    if shown.as_deref() != Some("RT-12") {
+        bail!("the phone-linear-title view's header draws {shown:?}, not RT-12's chip");
+    }
     Ok(())
 }
 
@@ -2838,6 +2871,7 @@ fn drive(
         | View::PhoneComposerEdit
         | View::PhoneTerminal
         | View::PhoneLinear
+        | View::PhoneLinearTitle
         | View::PhoneSettings
         | View::PhoneSettingsAppearance
         | View::PhoneSettingsKeys
@@ -3915,6 +3949,16 @@ impl RemoteFixture {
         Ok(Self { repos, sessions })
     }
 
+    /// The label the `phone-home` fixture's working session carries: the
+    /// `phone-linear-title` shot titles it after an issue its host knows.
+    fn phone_working_label(view: View) -> &'static str {
+        if view == View::PhoneLinearTitle {
+            PHONE_TITLE_LINE
+        } else {
+            "Service worker cache"
+        }
+    }
+
     /// What the `phone-home` shot's "box" lists: two repos, the first with
     /// two sessions waiting, the longest waiting on a question whose three
     /// answers each carry a description and the other on a two-question
@@ -3984,7 +4028,7 @@ impl RemoteFixture {
             ),
             (
                 "b-pwa",
-                "Service worker cache",
+                Self::phone_working_label(view),
                 "working",
                 in_repo(PHONE_REPO, PHONE_REPO_PATH),
                 4,
@@ -4536,7 +4580,9 @@ impl FakeDaemon {
             View::HostRebind | View::PhoneHomeSorted => {
                 vec![protocol::FEATURE_HOST_LAYOUTS.to_owned()]
             }
-            View::PhoneLinear => vec![protocol::FEATURE_LINEAR_LINKS.to_owned()],
+            View::PhoneLinear | View::PhoneLinearTitle => {
+                vec![protocol::FEATURE_LINEAR_LINKS.to_owned()]
+            }
             View::PhoneBrowser => vec![
                 protocol::FEATURE_HOST_PATHS.to_owned(),
                 protocol::FEATURE_HOST_BROWSE.to_owned(),
@@ -4567,7 +4613,7 @@ impl FakeDaemon {
         self.send(DaemonMessage::Sessions {
             sessions: fixture.sessions.clone(),
         })?;
-        if self.view == View::PhoneLinear {
+        if matches!(self.view, View::PhoneLinear | View::PhoneLinearTitle) {
             self.send(phone_linear_context())?;
         }
         Ok(())

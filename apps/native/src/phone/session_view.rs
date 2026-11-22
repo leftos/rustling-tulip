@@ -30,8 +30,8 @@ use crate::dashboard_rows::ContextLabel;
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use crate::keyboard;
-use crate::linear_card::OPEN_IN_LINEAR;
-use crate::linear_card_view::card_sheet_body;
+use crate::linear_card::{OPEN_IN_LINEAR, TitleChip};
+use crate::linear_card_view::{card_sheet_body, issue_dot};
 use crate::target::HostKey;
 use crate::term_input;
 use crate::text_input::SystemPaste;
@@ -40,6 +40,17 @@ use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
+
+/// The title chip's height, radius, text size and horizontal padding, as
+/// the desktop's session header chips draw them.
+const CHIP_HEIGHT: f32 = 20.0;
+const CHIP_RADIUS: f32 = 5.0;
+const CHIP_TEXT_SIZE: f32 = 11.0;
+const CHIP_PAD: f32 = 7.0;
+/// The gap between the chip's dot and its identifier.
+const ISSUE_DOT_GAP: f32 = 5.0;
+/// The gap between the title's chip and the rest of the title.
+const TITLE_CHIP_GAP: f32 = 6.0;
 
 /// The composer's Send button's label.
 const SEND_LABEL: &str = "Send";
@@ -223,10 +234,19 @@ impl PhoneRoot {
         let context = root.context_label_of(session_id);
         let mirrored = self.chat_mirrored(host, session_id, cx);
         let home = self.home(cx);
-        Some(
-            Header::new(session_id, home.row_of(host, session_id), ended, mirrored)
-                .with_context(context),
-        )
+        let header = Header::new(session_id, home.row_of(host, session_id), ended, mirrored)
+            .with_context(context);
+        let issue = root.title_chips().chip(host, &header.label);
+        Some(header.with_issue(issue))
+    }
+
+    /// The identifier of the shown session's title chip, while its header
+    /// draws one.
+    #[must_use]
+    pub fn session_issue_identifier(&self, cx: &App) -> Option<String> {
+        self.session_header(cx)
+            .and_then(|header| header.issue)
+            .map(|chip| chip.identifier)
     }
 
     /// The page the shown session draws while its chat is mirrored or not
@@ -1445,10 +1465,25 @@ impl PhoneRoot {
                     .flex_col()
                     .child(
                         div()
-                            .driver_id(|| "phone-session-label".to_owned())
-                            .truncate()
-                            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                            .child(header.label.clone()),
+                            .flex()
+                            .items_center()
+                            .gap(px(TITLE_CHIP_GAP))
+                            .min_w_0()
+                            .children(
+                                header
+                                    .issue
+                                    .as_ref()
+                                    .map(|chip| Self::title_chip(chip, t, cx)),
+                            )
+                            .child(
+                                div()
+                                    .driver_id(|| "phone-session-label".to_owned())
+                                    .truncate()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                                    .child(header.title_text()),
+                            ),
                     )
                     .child(
                         div()
@@ -1469,6 +1504,40 @@ impl PhoneRoot {
                     ),
             )
             .children(toggle)
+    }
+
+    /// The header's title chip: the identifier behind a 6 px dot in its
+    /// state's colour, leading the title in the desktop chip's look. A tap
+    /// raises the issue's card as the phone's sheet, or opens the link on a
+    /// host that cannot answer ([`RootView::phone_raise_card`]).
+    fn title_chip(chip: &TitleChip, t: &UiTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let (host, identifier, url) = (
+            chip.host.clone(),
+            chip.identifier.clone(),
+            chip.open_url().to_owned(),
+        );
+        div()
+            .id("phone-session-title-chip")
+            .driver_id(|| "phone-session-title-chip".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(ISSUE_DOT_GAP))
+            .h(ui_px(cx, CHIP_HEIGHT))
+            .px(px(CHIP_PAD))
+            .rounded(px(CHIP_RADIUS))
+            .bg(gpui::rgb(t.chip))
+            .text_size(ui_px(cx, CHIP_TEXT_SIZE))
+            .text_color(gpui::rgb(t.text_2))
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.root.update(cx, |root, cx| {
+                    root.phone_raise_card(&host, &identifier, &url, window, cx);
+                });
+            }))
+            .child(issue_dot(chip.dot, t))
+            .child(chip.identifier.clone())
     }
 }
 

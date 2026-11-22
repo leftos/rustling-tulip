@@ -6,6 +6,7 @@ use gpui::BackGesturePhase;
 
 use super::home::{HomeRow, Tone};
 use crate::dashboard_rows::ContextLabel;
+use crate::linear_card::TitleChip;
 
 /// The toggle's label on the Chat page.
 pub(crate) const TERMINAL_LABEL: &str = "Terminal";
@@ -25,6 +26,9 @@ pub(crate) struct Header {
     pub(crate) chat_mirrored: bool,
     /// The session's context label, while its host's facts give a figure.
     pub(crate) context: Option<ContextLabel>,
+    /// The chip its title's Linear identifier draws, while the title names
+    /// one of the host's teams.
+    pub(crate) issue: Option<TitleChip>,
 }
 
 impl Header {
@@ -42,12 +46,26 @@ impl Header {
             toggle: toggle_shown(ended, chat_mirrored),
             chat_mirrored,
             context: None,
+            issue: None,
         }
     }
 
     /// The header showing `context` as its context label.
     pub(crate) fn with_context(self, context: Option<ContextLabel>) -> Self {
         Self { context, ..self }
+    }
+
+    /// The header drawing `issue` as its title's chip.
+    pub(crate) fn with_issue(self, issue: Option<TitleChip>) -> Self {
+        Self { issue, ..self }
+    }
+
+    /// The title text the header draws after its chip: the label, or, with
+    /// a chip, the label with its identifier cut out.
+    pub(crate) fn title_text(&self) -> String {
+        self.issue
+            .as_ref()
+            .map_or_else(|| self.label.clone(), |chip| chip.rest.clone())
     }
 }
 
@@ -205,7 +223,11 @@ pub(crate) fn back_on(phase: BackGesturePhase) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::linear_card::{LinearCache, TitleChips};
+    use crate::links::IssueContext;
     use crate::target::HostKey;
 
     #[test]
@@ -239,8 +261,61 @@ mod tests {
                 toggle: true,
                 chat_mirrored: true,
                 context: None,
+                issue: None,
             }
         );
+    }
+
+    /// `host`'s Linear context in workspace `acme` with the team RT and a
+    /// key, Linear on or off, as `TitleChips` reads it.
+    fn rt_contexts(host: &HostKey, enabled: bool) -> HashMap<HostKey, IssueContext> {
+        let context =
+            IssueContext::new(&["RT".to_owned()], Some("acme"), true).with_enabled(enabled);
+        HashMap::from([(host.clone(), context)])
+    }
+
+    #[test]
+    fn a_header_carries_its_titles_chip() {
+        let host = HostKey::Local;
+        let row = |label: &str| HomeRow {
+            host: host.clone(),
+            session_id: "s".to_owned(),
+            label: label.to_owned(),
+            status: "Working",
+            tone: Tone::Working,
+        };
+        let issues = LinearCache::default();
+        let contexts = rt_contexts(&host, true);
+        let chips = TitleChips {
+            contexts: &contexts,
+            issues: &issues,
+            now: chrono::Utc::now(),
+        };
+        let titled = Header::new("s", Some(&row("RT-12 Fix the login loop")), false, true);
+        let chip = chips.chip(&host, &titled.label);
+        assert_eq!(
+            chip.as_ref()
+                .map(|chip| (chip.identifier.as_str(), chip.rest.as_str())),
+            Some(("RT-12", "Fix the login loop")),
+            "the title's identifier, cut out of the rest"
+        );
+        assert_eq!(
+            titled.with_issue(chip).issue.map(|chip| chip.identifier),
+            Some("RT-12".to_owned()),
+            "the header carries its title's chip"
+        );
+        let plain = Header::new("s", Some(&row("November")), false, true)
+            .with_issue(chips.chip(&host, "November"));
+        assert_eq!(plain.issue, None, "a title naming no identifier takes none");
+        let off = rt_contexts(&host, false);
+        let chips = TitleChips {
+            contexts: &off,
+            issues: &issues,
+            now: chrono::Utc::now(),
+        };
+        let off = Header::new("s", Some(&row("RT-12 Fix the login loop")), false, true)
+            .with_issue(chips.chip(&host, "RT-12 Fix the login loop"));
+        assert_eq!(off.issue, None, "with Linear off the title takes none");
     }
 
     #[test]

@@ -6,7 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
-- On the phone, tapping a Linear issue in a session's terminal or in a chat answer shows its card in a sheet, with Open in Linear.
+- On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header shows its card in a sheet, with Open in Linear.
 
 ### Fixed
 
