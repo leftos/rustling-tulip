@@ -1,6 +1,8 @@
 //! Agent-exit specs: a session whose agent ends keeps its pane as a shell
 //! with no toast, and the leaf says which program the pane runs.
 
+use std::time::Duration;
+
 use crate::support;
 
 use gpui::TestAppContext;
@@ -159,6 +161,53 @@ fn a_turn_ending_after_the_agent_exited_is_not_waiting(cx: &mut TestAppContext) 
         leaf_unseen(&mut h, "s1"),
         Some(false),
         "nothing waits on the user: the pane is back to its shell"
+    );
+}
+
+#[gpui::test]
+fn an_agent_killed_mid_turn_raises_no_finished_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").status("working").build(),
+        request_id: None,
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").program_name("nu").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_secs(5));
+
+    assert!(
+        h.notified().is_empty(),
+        "the turn did not finish: its agent was killed"
+    );
+    assert!(toasts(&mut h).is_empty(), "and no toast says it did");
+}
+
+#[gpui::test]
+fn a_held_finished_releases_when_the_agent_exits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    for snapshot in [
+        session("s1").status("working").build(),
+        session("s1").background().build(),
+        session("s1").program_name("nu").build(),
+    ] {
+        h.send(DaemonMessage::SessionUpdated {
+            session: snapshot,
+            request_id: None,
+        });
+    }
+    h.advance(Duration::from_secs(5));
+
+    let titles: Vec<String> = h.notified().into_iter().map(|(title, _)| title).collect();
+    assert_eq!(
+        titles,
+        ["Finished"],
+        "the turn finished; the hand-back released its held notification"
     );
 }
 

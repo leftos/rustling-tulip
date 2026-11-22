@@ -44,11 +44,13 @@ use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
 use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
+use crate::sidebar::{
+    agent_is_up, can_attach, chip_tip, display_label, label_tooltip, runtime_label,
+};
 use crate::source_control::followed_repo;
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
-use crate::status_glyph::{GlyphSize, glyph, glyph_view};
+use crate::status_glyph::{GlyphSize, glyph, glyph_view, marker_mode};
 use crate::tabs::{self, PaneBinding, SessionRef, TabsModel};
 use crate::target::{HostKey, Target};
 use crate::term::prompt_nav::Dir;
@@ -3713,7 +3715,7 @@ fn header_parts(
     }
     PaneHeaderParts {
         status: session.status,
-        mode: session.mode,
+        mode: marker_mode(session.mode, agent_is_up(session, label_agents)),
         unseen,
         background: session.background,
         status_tip: format!(
@@ -5330,6 +5332,23 @@ mod tests {
             [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")
                 .with_icon(Some(RuntimeIcon::Pwsh))],
             "a plain shell says no provider and wears its shell's icon"
+        );
+    }
+
+    #[test]
+    fn an_exited_agents_pane_header_wears_the_plain_shell_marker() {
+        let mut session = session_with("claude", &json!([]));
+        let agents = [claude_descriptor()];
+        assert_eq!(
+            header_parts(&session, false, &agents, &[], None).mode,
+            SessionMode::Interactive,
+            "precondition: the agent is up"
+        );
+        session.program_name = Some("nu".to_owned());
+        assert_eq!(
+            header_parts(&session, false, &agents, &[], None).mode,
+            SessionMode::PlainShell,
+            "the agent left its shell in the pane"
         );
     }
 

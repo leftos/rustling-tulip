@@ -6789,7 +6789,13 @@ impl RootView {
             }
             DaemonMessage::SessionUpdated { session, .. } => {
                 let discard = self.exit_discard(host, session);
-                let finished = crate::notify::finished(self.sidebar.session(&session.id), session);
+                // The sidebar folds this update after, so its agent-up set
+                // still holds the old snapshot's answer. A session naming no
+                // agent has none to end, so its turn still finishes.
+                let up = session.agent.is_none()
+                    || crate::sidebar::agent_is_up(session, self.sidebar.label_agents(host));
+                let finished =
+                    crate::notify::finished(self.sidebar.session(&session.id), session, up);
                 self.seen_by(host).insert(session.id.clone());
                 return (
                     Some(self.appearance_moved(host, session)),
@@ -7705,11 +7711,9 @@ impl RootView {
                 this.open_connection_picker(window, cx);
             }));
         let text = footer.pill();
-        let counts = status_counts(
-            self.sidebar.all_sessions(),
-            |id| self.sidebar.is_unseen(id),
-            |s| self.sidebar.session_agent_up(s),
-        );
+        let counts = status_counts(self.sidebar.sessions_with_agent_up(), |id| {
+            self.sidebar.is_unseen(id)
+        });
         let pill = div()
             .id("daemon-pill")
             .driver_id(|| "daemon-pill".to_owned())

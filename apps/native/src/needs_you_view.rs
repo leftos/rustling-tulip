@@ -20,7 +20,7 @@ use crate::fonts::{ui_px, ui_px_at};
 use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
 use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
-use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view};
+use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view, marker_mode};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
@@ -152,7 +152,7 @@ impl RootView {
                         glyph(
                             s.status,
                             s.background,
-                            s.mode,
+                            marker_mode(s.mode, self.sidebar.session_agent_up(s)),
                             self.sidebar.is_unseen(&s.id),
                             &theme(cx),
                         )

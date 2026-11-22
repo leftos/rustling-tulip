@@ -1623,6 +1623,10 @@ struct HostSlice {
     /// Agent sessions whose turn ended while this client showed another
     /// session focused, until the user looks at them.
     unseen: HashSet<String>,
+    /// The listed sessions whose agent is the program up in their pane, by
+    /// [`agent_is_up`] against [`Self::label_agents`]: refreshed as a
+    /// session arrives, changes or leaves and as that list changes.
+    agent_up: HashSet<String>,
     /// The dispatch runs the daemon lists, in the order it sent them.
     pub dispatch_runs: Vec<DispatchRunSnapshot>,
     /// The daemon has sent a whole session list.
@@ -1692,6 +1696,8 @@ impl HostSlice {
                 }
                 self.unseen
                     .retain(|id| sessions.iter().any(|s| &s.id == id));
+                self.agent_up
+                    .retain(|id| sessions.iter().any(|s| &s.id == id));
                 sessions.clone_into(&mut self.sessions);
                 self.sessions_loaded = true;
             }
@@ -1700,6 +1706,7 @@ impl HostSlice {
                 self.sessions.retain(|s| &s.id != session_id);
                 self.attention.remove(session_id);
                 self.unseen.remove(session_id);
+                self.agent_up.remove(session_id);
             }
             DaemonMessage::Attention { session_id, .. } => {
                 self.attention.insert(session_id.clone());
@@ -1740,7 +1747,7 @@ impl HostSlice {
     /// left, from working or from idle with background work. Any status but
     /// idle leaves the set, so it holds only idle sessions, and so does an
     /// update that shows the session's agent gone: only an agent still up in
-    /// its pane waits on the user.
+    /// its pane waits on the user. The agent-up set records whether it is.
     fn note_turn(
         &mut self,
         before: Option<(SessionStatus, bool)>,
@@ -1752,6 +1759,11 @@ impl HostSlice {
             Some((SessionStatus::Working, _) | (SessionStatus::Idle, true))
         );
         let up = agent_is_up(session, self.label_agents());
+        if up {
+            self.agent_up.insert(session.id.clone());
+        } else {
+            self.agent_up.remove(&session.id);
+        }
         match session.status {
             SessionStatus::Idle if !up => {
                 self.unseen.remove(&session.id);
@@ -1776,6 +1788,19 @@ impl HostSlice {
         } else {
             &self.agents
         }
+    }
+
+    /// Recomputes the agent-up set for every listed session, as a change of
+    /// [`Self::label_agents`] must.
+    fn refresh_agent_up(&mut self) {
+        let agents = self.label_agents();
+        let up = self
+            .sessions
+            .iter()
+            .filter(|s| agent_is_up(s, agents))
+            .map(|s| s.id.clone())
+            .collect();
+        self.agent_up = up;
     }
 
     /// The container tree's inputs from this slice, folded by `collapsed`,
@@ -2051,13 +2076,20 @@ impl SidebarModel {
 
     /// Keeps `host`'s agents, in its daemon's order, as its connection
     /// sends them; a list a disconnect leaves empty keeps the last one for
-    /// labels.
+    /// labels. A change of the list labels read refreshes whether each of
+    /// the host's sessions has its agent up.
     pub fn set_agents(&mut self, host: &HostKey, agents: Vec<AgentDescriptor>) {
         let slice = self.slice_mut(host);
+        // An empty list leaves `known_agents`, the list labels then read,
+        // which the last non-empty one already set.
+        let changed = !agents.is_empty() && slice.label_agents() != agents.as_slice();
         if !agents.is_empty() {
             slice.known_agents.clone_from(&agents);
         }
         slice.agents = agents;
+        if changed {
+            slice.refresh_agent_up();
+        }
     }
 
     /// `host`'s agents, in its daemon's order, as its connection last sent
@@ -2092,10 +2124,23 @@ impl SidebarModel {
     }
 
     /// Whether session `s`'s agent is the program up in its pane, by
-    /// [`agent_is_up`] and the label agent list of the host that lists it.
+    /// [`agent_is_up`] and the label agent list of the host that lists it,
+    /// as that host's slice last worked it out; false for a session no host
+    /// lists.
     #[must_use]
     pub fn session_agent_up(&self, s: &SessionSnapshot) -> bool {
-        agent_is_up(s, self.session_label_agents(&s.id))
+        self.slice_of_session(&s.id).agent_up.contains(&s.id)
+    }
+
+    /// Every host's sessions, This PC's first, each with whether its agent
+    /// is up in its pane, as [`Self::session_agent_up`] reads it.
+    pub fn sessions_with_agent_up(&self) -> impl Iterator<Item = (&SessionSnapshot, bool)> {
+        self.slices().flat_map(|(_, slice)| {
+            slice
+                .sessions
+                .iter()
+                .map(|s| (s, slice.agent_up.contains(&s.id)))
+        })
     }
 
     /// Fold a message from `host`'s daemon into that host's slice; a whole
@@ -3983,7 +4028,7 @@ fn leaf(
     label_agents: &[AgentDescriptor],
 ) -> Leaf {
     let runtime = runtime_label(s, label_agents);
-    let up = agent_up(s, runtime.as_deref(), label_agents).is_some();
+    let up = agent_up_given(s, runtime.as_deref(), label_agents);
     Leaf {
         id: s.id.clone(),
         kind: LeafKind::Session,
@@ -4930,14 +4975,28 @@ fn agent_exited(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
     s.mode == SessionMode::Interactive
         && s.agent.is_some()
         && non_empty(s.program_name.as_deref()).is_some()
-        && agent_up(s, runtime_label(s, agents).as_deref(), agents).is_none()
+        && !agent_is_up(s, agents)
 }
 
-/// Whether `s`'s agent is the program up in its pane: [`agent_up`] against
-/// the descriptor list `agents`.
+/// Whether `s`'s agent is the program up in its pane: the session names an
+/// agent and, when the descriptor list `agents` holds it, the runtime tag
+/// showing is the agent's own ([`agent_up`]). Ending needs evidence: an
+/// agent the list does not hold, or an empty list, counts as up unless the
+/// session is a plain shell. A session naming no agent is never up.
 #[must_use]
 pub fn agent_is_up(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
-    agent_up(s, runtime_label(s, agents).as_deref(), agents).is_some()
+    agent_up_given(s, runtime_label(s, agents).as_deref(), agents)
+}
+
+/// [`agent_is_up`] with the runtime tag (`runtime`) already worked out.
+fn agent_up_given(s: &SessionSnapshot, runtime: Option<&str>, agents: &[AgentDescriptor]) -> bool {
+    let Some(agent) = s.agent.as_ref() else {
+        return false;
+    };
+    match descriptor_for(agents, agent) {
+        Some(_) => agent_up(s, runtime, agents).is_some(),
+        None => s.mode != SessionMode::PlainShell,
+    }
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -6652,6 +6711,113 @@ pub(crate) mod tests {
         exited.program_name = Some("nu".to_owned());
         set_status(&mut model, &exited, SessionStatus::Idle);
         assert!(!unseen_of(&model, "a"), "the agent is gone, nothing waits");
+    }
+
+    /// Session `id` of the Claude agent with `program` as the daemon's
+    /// program name.
+    fn running(id: &str, program: Option<&str>) -> SessionSnapshot {
+        let mut s = session(id);
+        s.program_name = program.map(str::to_owned);
+        s
+    }
+
+    #[test]
+    fn an_agent_running_its_tag_is_up_and_not_exited() {
+        let agents = [claude_descriptor()];
+        let s = running("a", Some(agents[0].tag.as_str()));
+        assert!(agent_is_up(&s, &agents));
+        assert!(!agent_exited(&s, &agents));
+    }
+
+    #[test]
+    fn an_agent_whose_shell_runs_again_is_not_up_and_exited() {
+        let agents = [claude_descriptor()];
+        let s = running("a", Some("nu"));
+        assert!(!agent_is_up(&s, &agents));
+        assert!(agent_exited(&s, &agents));
+    }
+
+    #[test]
+    fn an_agent_missing_from_the_list_is_up_and_not_exited() {
+        let agents = [test_descriptor()];
+        let s = running("a", Some("nu"));
+        assert!(agent_is_up(&s, &agents), "nothing says the agent ended");
+        assert!(!agent_exited(&s, &agents));
+    }
+
+    #[test]
+    fn an_agent_with_an_empty_list_is_up_and_not_exited() {
+        let s = running("a", Some("nu"));
+        assert!(agent_is_up(&s, &[]), "nothing says the agent ended");
+        assert!(!agent_exited(&s, &[]));
+    }
+
+    #[test]
+    fn an_interactive_session_with_no_agent_reads_as_a_shell() {
+        let mut s = running("a", Some("nu"));
+        s.agent = None;
+        for agents in [vec![], vec![claude_descriptor()]] {
+            assert!(!agent_is_up(&s, &agents), "no agent to be up");
+            assert!(!agent_exited(&s, &agents), "no agent to exit");
+        }
+    }
+
+    #[test]
+    fn the_agent_up_cache_follows_agents_arriving_after_sessions() {
+        let host = crate::target::HostKey::Local;
+        let shell = running("a", Some("nu"));
+        let live = running("b", None);
+        let mut model = SidebarModel::new(UiState::default());
+        model.apply(
+            &host,
+            &DaemonMessage::Sessions {
+                sessions: vec![shell.clone(), live.clone()],
+            },
+        );
+        for s in [&shell, &live] {
+            assert_eq!(
+                model.session_agent_up(s),
+                agent_is_up(s, &[]),
+                "{}: no list yet",
+                s.id
+            );
+        }
+        model.set_agents(&host, vec![claude_descriptor()]);
+        let agents = [claude_descriptor()];
+        for s in [&shell, &live] {
+            assert_eq!(
+                model.session_agent_up(s),
+                agent_is_up(s, &agents),
+                "{}: the list arrived",
+                s.id
+            );
+        }
+        assert!(!model.session_agent_up(&shell), "the shell runs again");
+        assert!(model.session_agent_up(&live), "the agent runs");
+    }
+
+    #[test]
+    fn a_session_update_refreshes_the_agent_up_cache() {
+        let a = running("a", None);
+        let mut model = model_with(vec![a.clone()]);
+        assert!(model.session_agent_up(&a), "precondition: the agent runs");
+        let exited = running("a", Some("nu"));
+        set_status(&mut model, &exited, SessionStatus::Idle);
+        assert!(!model.session_agent_up(&exited), "the agent ended");
+    }
+
+    #[test]
+    fn a_removed_session_leaves_the_agent_up_cache() {
+        let a = running("a", None);
+        let mut model = model_with(vec![a.clone()]);
+        assert!(model.local.agent_up.contains("a"), "precondition: cached");
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionRemoved {
+                session_id: "a".to_owned(),
+            },
+        );
+        assert!(!model.local.agent_up.contains("a"), "it left the cache");
     }
 
     #[test]

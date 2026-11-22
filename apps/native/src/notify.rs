@@ -858,10 +858,17 @@ fn needs_you_body(session: Option<&SessionSnapshot>, agents: &[AgentDescriptor])
 
 /// Whether `after` ends a turn the session was running: it is idle with no
 /// background work left, an agent rather than a plain shell, and the copy the
-/// client still held was working, or idle waiting on background work the
-/// agent left running. A session seen for the first time raises nothing.
+/// client still held was working with its agent still up in the pane after
+/// (`after_agent_up`, so an agent killed mid-turn raises nothing), or idle
+/// waiting on background work the agent left running, whose turn had already
+/// finished, so it releases even when the agent ends. A session seen for the
+/// first time raises nothing.
 #[must_use]
-pub(crate) fn finished(before: Option<&SessionSnapshot>, after: &SessionSnapshot) -> bool {
+pub(crate) fn finished(
+    before: Option<&SessionSnapshot>,
+    after: &SessionSnapshot,
+    after_agent_up: bool,
+) -> bool {
     if after.status != SessionStatus::Idle
         || after.background
         || after.mode == SessionMode::PlainShell
@@ -869,7 +876,7 @@ pub(crate) fn finished(before: Option<&SessionSnapshot>, after: &SessionSnapshot
         return false;
     }
     before.is_some_and(|before| {
-        before.status == SessionStatus::Working
+        (before.status == SessionStatus::Working && after_agent_up)
             || (before.status == SessionStatus::Idle && before.background)
     })
 }
@@ -2177,34 +2184,57 @@ mod tests {
     fn finished_fires_when_working_goes_idle() {
         let working = snapshot(&serde_json::json!({ "status": "working" }));
         let idle = snapshot(&serde_json::json!({ "status": "idle" }));
-        assert!(finished(Some(&working), &idle));
+        assert!(finished(Some(&working), &idle, true));
+    }
+
+    #[test]
+    fn finished_ignores_an_agent_that_ended_mid_turn() {
+        let working = snapshot(&serde_json::json!({ "status": "working" }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(
+            !finished(Some(&working), &idle, false),
+            "the agent was killed, its turn did not finish"
+        );
+    }
+
+    #[test]
+    fn finished_releases_a_held_background_turn_when_the_agent_ends() {
+        let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(
+            finished(Some(&holding), &idle, false),
+            "the turn had finished; the hand-back only released it"
+        );
     }
 
     #[test]
     fn finished_waits_while_background_work_runs() {
         let working = snapshot(&serde_json::json!({ "status": "working" }));
         let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
-        assert!(!finished(Some(&working), &holding));
+        assert!(!finished(Some(&working), &holding, true));
     }
 
     #[test]
     fn finished_fires_when_background_work_ends() {
         let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
         let idle = snapshot(&serde_json::json!({ "status": "idle" }));
-        assert!(finished(Some(&holding), &idle));
+        assert!(finished(Some(&holding), &idle, true));
     }
 
     #[test]
     fn finished_ignores_a_plain_shell() {
         let working = snapshot(&serde_json::json!({ "status": "working", "mode": "plain_shell" }));
         let idle = snapshot(&serde_json::json!({ "status": "idle", "mode": "plain_shell" }));
-        assert!(!finished(Some(&working), &idle), "a shell has no turn");
+        assert!(
+            !finished(Some(&working), &idle, true),
+            "a shell has no turn"
+        );
     }
 
     #[test]
     fn finished_ignores_a_first_sighting() {
         let idle = snapshot(&serde_json::json!({ "status": "idle" }));
-        assert!(!finished(None, &idle), "nothing says a turn ended");
+        assert!(!finished(None, &idle, true), "nothing says a turn ended");
     }
 
     #[test]
@@ -2212,7 +2242,7 @@ mod tests {
         let asking = snapshot(&serde_json::json!({ "status": "awaiting_input" }));
         let idle = snapshot(&serde_json::json!({ "status": "idle" }));
         assert!(
-            !finished(Some(&asking), &idle),
+            !finished(Some(&asking), &idle, true),
             "an answer is no turn's end"
         );
     }

@@ -88,22 +88,21 @@ impl StatusCounts {
     }
 }
 
-/// Counts `sessions` by the glyph each shows, `is_unseen` telling whether a
-/// session's finished turn is in the client's unseen set and `is_agent_up`
-/// whether its agent is the program up in its pane. A session whose agent is
-/// not up shows the idle dot whatever the set says, so it is never waiting,
-/// as a plain shell is not. A session marked "Don't count as busy" is never
-/// working or background, but still needs you when it asks.
+/// Counts `sessions` by the glyph each shows, each paired with whether its
+/// agent is the program up in its pane, `is_unseen` telling whether a
+/// session's finished turn is in the client's unseen set. A session whose
+/// agent is not up shows the idle dot whatever the set says, so it is never
+/// waiting, as a plain shell is not. A session marked "Don't count as busy"
+/// is never working or background, but still needs you when it asks.
 #[must_use]
 pub fn status_counts<'a>(
-    sessions: impl IntoIterator<Item = &'a SessionSnapshot>,
+    sessions: impl IntoIterator<Item = (&'a SessionSnapshot, bool)>,
     is_unseen: impl Fn(&str) -> bool,
-    is_agent_up: impl Fn(&SessionSnapshot) -> bool,
 ) -> StatusCounts {
     let mut counts = StatusCounts::default();
-    for session in sessions {
+    for (session, agent_up) in sessions {
         let unseen = is_unseen(&session.id);
-        let mode = marker_mode(session.mode, is_agent_up(session));
+        let mode = marker_mode(session.mode, agent_up);
         match glyph(
             session.status,
             session.background,
@@ -283,7 +282,9 @@ mod tests {
 
     fn counts(sessions: &[SessionSnapshot], unseen: &[&str]) -> StatusCounts {
         let unseen: HashSet<&str> = unseen.iter().copied().collect();
-        status_counts(sessions, |id| unseen.contains(id), up)
+        status_counts(sessions.iter().map(|s| (s, up(s))), |id| {
+            unseen.contains(id)
+        })
     }
 
     fn span(kind: CountKind, text: &str) -> CountSpan {
