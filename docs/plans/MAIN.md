@@ -23,12 +23,7 @@
 - [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open · release vNext
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
 - [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading · release vNext
-- [ ] RT-1311 Keep a stale interrupt row from ending a new turn under a working title · release vNext
-- [ ] RT-1312 Let a dropped turn-end hold land Idle when a working title stays up · release vNext
 - [ ] RT-1313 End a hung CLI's turn when its screen freezes on a readable spinner · release vNext
-- [ ] RT-1314 Stop the shell-hosted watcher spinning on an open window under an overlay · release vNext
-- [ ] RT-1450 Show Claude's "Make auto mode your default permission mode?" dialog as a Chat card and as needing you · release vNext
-- [ ] RT-1459 Read Claude's multi-server MCP dialog as needing you, with a card · release vNext
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule · release vNext
 - [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
@@ -171,6 +166,7 @@
 - [ ] RT-2043 Fix the Settings shot drives that Shift+Tab from the tab list into the search box
 - [ ] RT-2044 Give the nine unmapped native files rows in the test map
 - [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
+- [ ] RT-2154 Stop the dispatch-runs daemon tests leaking a child process
 
 ## Elevated daemon and security
 
@@ -221,7 +217,6 @@
 - [ ] RT-1817 Share one bottom-slack constant between Chat, Tail boxes and the phone's edge scroll
 - [ ] RT-1952 Tell apart phone composer file chips that share a file name
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
-- [ ] RT-2143 Show messages from other agents in Chat as agent messages, not as the user's · release vNext
 
 ## Settings and themes
 
@@ -501,32 +496,29 @@
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
   - [ ] RT-1739 Animate the phone's content down as the keyboard hides
 - [ ] RT-1766 Draw an answerable tray card's question in full, as the read-only card does
-- [ ] RT-1773 Show on the phone's Home that a host's notifications need attention · release vNext
 - [ ] RT-1774 Tidy the phone Settings › Notifications page: hint wording, offline hosts and specs
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
-- [ ] RT-1785 Even out the phone Appearance page: theme row spacing and the text size label · release vNext
-- [ ] RT-1793 Keep an offline host's card on Settings › Hosts from jumping on each redial · release vNext
 - [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone · release vNext
-- [ ] RT-1879 Copy a phone Terminal selection to the clipboard · release vNext
 - [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
 - [ ] RT-1910 Send photos and files from the phone into a session · release vNext
-- [ ] RT-1913 Keep the phone's Quick dock and Show prompt from re-sizing the session's PTY · release vNext
-- [ ] RT-1914 Keep the phone terminal's keyboard-down height when the fixed rows outgrow the keyboard-up page · release vNext
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
 - [ ] RT-1931 Pinch to zoom an image in the phone viewer · release vNext
-- [ ] RT-1959 Fit two-digit line numbers in the phone viewer's gutter · release vNext
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-1977 Build the iPad app icons and check the notification extension for an iPad upload · release vNext
-- [ ] RT-1978 Fit the Needs you tray card's options in the phone's two-pane list · release vNext
-- [ ] RT-2013 Keep the phone terminal's output visible above the prompt while the keyboard is up · release vNext
 - [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain · release vNext
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
-- [ ] RT-2098 Keep the phone edit bar off the keyboard when both placements reach under it · release vNext
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
 - [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
 - [ ] RT-2136 Let a tap through right after a fast swipe on the phone's Needs you tray
 - [ ] RT-2141 Show a shell command dot's menu when tapped on the phone's Terminal page
+- [ ] RT-2144 Keep the edit bar inside the window when its selection is scrolled above it
+- [ ] RT-2148 Seed the phone terminal's rest height without the overflow when its clip box is squeezed to zero
+- [ ] RT-2149 Draw no blank band at the top of the phone terminal for a frame after the keyboard falls
+- [ ] RT-2150 Re-measure the phone terminal's rest height on an iPad with a hardware keyboard
+- [ ] RT-2151 Keep an errored host's card on Settings › Hosts from jumping on each redial
+- [ ] RT-2152 Size the phone's landscape Needs you card from the list pane with the keyboard up
+- [ ] RT-2153 Keep the copied chip off the terminal's top rows in the phone's landscape full-screen terminal
 
 ## Dashboard, Gates and Linear
 
@@ -692,6 +684,9 @@
 - [ ] RT-1767 Define the phone's key bar, composer, Quick dock and Keys tray in the glossary, and index the phone screens
 - [ ] RT-1839 Make the TailFile docs say a link to a network or device path is followed, not refused
 - [ ] RT-2101 Re-point issue descriptions that cite deleted docs/plans files
+- [ ] RT-2145 Name every phone Settings category in docs/README.md
+- [ ] RT-2146 Check CLAUDE.md's native-shot view list against shot.rs
+- [ ] RT-2147 Name the size ruling docs/plans/mobile-app.md's Size step points at
 
 ## Backlog
 
@@ -801,6 +796,8 @@
 - [ ] RT-2135 Say on the phone when a tapped path's file fetch fails or is refused
 - [ ] RT-2138 Read a tray card's facts, labels and held prompt by host and session
 - [ ] RT-2140 Show a tool output Claude Code saved outside the transcript in Chat
+- [ ] RT-2155 Read a wrapped option label in Claude's trust-style dialogs as one option
+- [ ] RT-2156 Read a dialog drawn above a labelled session-name rule in the daemon's rule regions
 
 ## Design files
 
@@ -818,7 +815,7 @@
 - [gate-log-tail.md](gate-log-tail.md) — RT-1119, RT-1120, RT-1121, RT-1122, RT-1123
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277
-- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-363, RT-369, RT-881, RT-1735, RT-1913, Phone app
+- [mobile-app.md](mobile-app.md) — RT-83, RT-109, RT-112, RT-363, RT-369, RT-881, RT-1735, RT-2147, Phone app
 - [needs-you.md](needs-you.md) — RT-277, RT-423
 - [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-100, RT-102, RT-113, RT-114, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-1111
 - [open-unbound.md](open-unbound.md) — RT-1357, RT-1358, RT-1359, RT-1639
