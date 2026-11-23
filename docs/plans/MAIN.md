@@ -13,19 +13,15 @@
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
 - [ ] RT-548 Read running-subagent rows past an hour in the background rule · release vNext
 - [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay · release vNext
-- [ ] RT-557 Read the "Background this session?" dialog as a dialog · release vNext
 - [ ] RT-755 Log every status writer and every toast decision
 - [ ] RT-767 Work through the held turn end's leftover cases
 - [ ] RT-777 Stop the daemon's screen losing output when its watcher lags · release vNext
-- [ ] RT-850 Read background counts on a default-mode Claude footer · release vNext
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
-- [ ] RT-1265 Read a prompt with Claude Code's right-hand file panel open · release vNext
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
 - [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading · release vNext
 - [ ] RT-1313 End a hung CLI's turn when its screen freezes on a readable spinner · release vNext
 - [ ] RT-1485 Close RT-1446's review follow-ups: a spared Stop's background flag, a broad kept raise, the half-drawn dialog rule · release vNext
-- [ ] RT-2099 Read a question review above a truncated task panel as awaiting input · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 - [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
@@ -187,6 +183,11 @@
 
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
+  - [ ] RT-2162 Read a transcript, Rewind or /btw overlay as a chat prompt with a Close button · release vNext
+  - [ ] RT-2163 Show a /btw answer in its chat card · release vNext
+  - [ ] RT-2164 Answer Rewind from the chat: pick a point, then restore or summarize · release vNext
+  - [ ] RT-2165 Answer an AskUserQuestion with previews from the chat · release vNext
+  - [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
 - [ ] RT-556 Fix one-shot wakeup times across daylight-saving changes
@@ -505,8 +506,6 @@
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
 - [ ] RT-1931 Pinch to zoom an image in the phone viewer · release vNext
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
-- [ ] RT-1977 Build the iPad app icons and check the notification extension for an iPad upload · release vNext
-- [ ] RT-2018 Let the ad hoc signed simulator phone app read its own Keychain · release vNext
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
 - [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
@@ -798,6 +797,12 @@
 - [ ] RT-2140 Show a tool output Claude Code saved outside the transcript in Chat
 - [ ] RT-2155 Read a wrapped option label in Claude's trust-style dialogs as one option
 - [ ] RT-2156 Read a dialog drawn above a labelled session-name rule in the daemon's rule regions
+- [ ] RT-2158 Keep an isolated Claude spawn from loading the real home's plugin dirs
+- [ ] RT-2159 Clear a background flag left on an Idle session whose CLI hangs
+- [ ] RT-2160 Stop a backgrounded Claude session's host copy when the session is killed
+- [ ] RT-2167 Report Claude's 2.1.330 sessions list as an overlay in the chat reader
+- [ ] RT-2168 Read session status while Claude Code's file panel is open
+- [ ] RT-2169 Keep quoted heads-up text from reading as a heads-up overlay
 
 ## Design files
 
