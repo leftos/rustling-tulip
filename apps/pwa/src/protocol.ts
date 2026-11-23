@@ -3145,7 +3145,9 @@ export type ChatAnswerKind =
    * Move the prompt's adjustable row ([`ChatPrompt::adjust`]) one step
    * up (`raise`) or down, leaving the prompt up.
    */
-  | { kind: "adjust"; raise: boolean };
+  | { kind: "adjust"; raise: boolean }
+  /** Bring a notice's hidden choices on screen, leaving it up. */
+  | { kind: "reveal" };
 
 /**
  * Where the daemon sees a connection come from, as `Welcome.origin` reports

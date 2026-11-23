@@ -1342,6 +1342,12 @@ pub const fn skip_answer() -> ChatAnswerKind {
     ChatAnswerKind::Skip
 }
 
+/// The answer that brings a clipped Heads up's choices on screen.
+#[must_use]
+pub const fn reveal_answer() -> ChatAnswerKind {
+    ChatAnswerKind::Reveal
+}
+
 /// The answer carrying `text` as the user's own answer, when `text` is not
 /// blank; the text is passed on as typed.
 #[must_use]
@@ -2314,8 +2320,8 @@ mod tests {
     use super::{
         ChatLoads, ChatLog, DIGIT_GRACE, DISPLAY_CAP, LoadChanges, PaneView, PaneViews,
         PromptStack, ViewKey, allow_with_text, back_answer, deny_with_text, entry_id,
-        follows_bottom, option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
-        type_something_answer,
+        follows_bottom, option_answer, reveal_answer, skip_answer, submit_answer, toggle_answer,
+        tool_one_liner, type_something_answer,
     };
 
     /// A message row, the simplest entry with an id.
@@ -2926,6 +2932,7 @@ mod tests {
         assert_eq!(submit_answer(), ChatAnswerKind::Submit);
         assert_eq!(back_answer(), ChatAnswerKind::Back);
         assert_eq!(skip_answer(), ChatAnswerKind::Skip);
+        assert_eq!(reveal_answer(), ChatAnswerKind::Reveal);
         assert_eq!(
             type_something_answer("a hint"),
             Some(ChatAnswerKind::TypeSomething {

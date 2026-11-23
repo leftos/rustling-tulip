@@ -327,8 +327,20 @@ test("sheet_windowed_mcp_servers_offer_nothing_to_answer", () => {
   expect(buttons(sheetFor(screen(p), null))).toEqual([]);
 });
 
-test("sheet_heads_up_offers_nothing_to_answer", () => {
-  expect(buttons(sheetFor(screen(prompt("heads_up")), null))).toEqual([]);
+test("sheet_clipped_heads_up_offers_show_choices", () => {
+  const sheet = sheetFor(screen(prompt("heads_up")), null);
+  expect(buttons(sheet).map((button) => button.label)).toEqual(["Show choices"]);
+  expect(answers(sheet)).toEqual([{ kind: "reveal" }]);
+});
+
+test("sheet_heads_up_with_choices_picks_them", () => {
+  const p = prompt("heads_up", [option(1, "Learn more"), option(2, "Knew this already")]);
+  const sheet = sheetFor(screen(p), null);
+  expect(buttons(sheet).map((button) => button.label)).toEqual(["Learn more", "Knew this already"]);
+  expect(answers(sheet)).toEqual([
+    { kind: "option", number: 1 },
+    { kind: "option", number: 2 },
+  ]);
 });
 
 test("sheet_action_with_blank_text_sends_nothing", () => {

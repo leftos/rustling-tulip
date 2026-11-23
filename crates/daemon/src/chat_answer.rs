@@ -18,7 +18,7 @@ use agent_api::{AnswerRecipe, AnswerRefusal, RecipeStep, ScreenExpect};
 use chrono::{DateTime, Utc};
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
-    ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, PendingInput,
+    AgentId, ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, PendingInput,
 };
 use tokio::time::{Instant, timeout};
 use tracing::debug;
@@ -311,8 +311,7 @@ fn recipe_on(
 }
 
 /// The prompt main shows in `reading`, after the return, when it is still
-/// the prompt `shown` checked in the agent's view: of the same kind, with
-/// the same option labels in order, and giving `kind` the same `recipe`.
+/// the prompt `shown` checked in the agent's view ([`same_prompt`]).
 fn still_shown(
     target: &TypeTarget,
     shown: &ChatPrompt,
@@ -320,6 +319,27 @@ fn still_shown(
     kind: &ChatAnswerKind,
     recipe: &AnswerRecipe,
 ) -> Result<ChatPrompt, TypeRefusal> {
+    let same =
+        shown_prompt(reading).filter(|main| same_prompt(&target.agent, main, shown, kind, recipe));
+    let Some(main) = same else {
+        debug!(session_id = %target.session_id, "chat answer: main shows another prompt after the return");
+        return Err(TypeRefusal::refused(PROMPT_GONE));
+    };
+    Ok(main.clone())
+}
+
+/// Whether `main` is still the prompt `shown`: of the same kind, with
+/// subjects that match ([`subjects_match`]: a clipped notice shows only
+/// its leading title rows, or none), the same option labels in order when
+/// both have options (a clipped notice has none), and giving `kind` the
+/// same `recipe`.
+fn same_prompt(
+    agent: &AgentId,
+    main: &ChatPrompt,
+    shown: &ChatPrompt,
+    kind: &ChatAnswerKind,
+    recipe: &AnswerRecipe,
+) -> bool {
     let labels = |prompt: &ChatPrompt| {
         prompt
             .options
@@ -327,16 +347,19 @@ fn still_shown(
             .map(|option| option.label.clone())
             .collect::<Vec<_>>()
     };
-    let same = shown_prompt(reading).filter(|main| {
-        main.kind == shown.kind
-            && labels(main) == labels(shown)
-            && recipe_for(&target.agent, main, kind).as_ref() == Ok(recipe)
-    });
-    let Some(main) = same else {
-        debug!(session_id = %target.session_id, "chat answer: main shows another prompt after the return");
-        return Err(TypeRefusal::refused(PROMPT_GONE));
-    };
-    Ok(main.clone())
+    main.kind == shown.kind
+        && subjects_match(&main.subject, &shown.subject)
+        && (main.options.is_empty() || shown.options.is_empty() || labels(main) == labels(shown))
+        && recipe_for(agent, main, kind).as_ref() == Ok(recipe)
+}
+
+/// Whether two subjects may name one prompt: each with its runs of
+/// whitespace collapsed to one space and trimmed, either is empty or one
+/// starts with the other.
+fn subjects_match(a: &str, b: &str) -> bool {
+    let normal = |subject: &str| subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (a, b) = (normal(a), normal(b));
+    a.is_empty() || b.is_empty() || a.starts_with(&b) || b.starts_with(&a)
 }
 
 /// The `Error` that answers a plugin's refusal to build a recipe.
@@ -517,7 +540,9 @@ impl Answerer<'_> {
             let last = at + 1 == recipe.steps.len();
             let also = match (last, self.progress.deny, &step.expect) {
                 (true, true, _) => Also::BoxReady,
-                (true, false, ScreenExpect::Any) => Also::Moved(first.as_ref()),
+                (true, false, ScreenExpect::Any | ScreenExpect::NoticeAnswered) => {
+                    Also::Moved(first.as_ref())
+                }
                 _ => Also::Nothing,
             };
             if self.turn.owner_typed_since() {
@@ -619,7 +644,8 @@ impl Answerer<'_> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::restore_message;
+    use super::{restore_message, same_prompt};
+    use crate::screen::dialogs::recipe_for;
     use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind};
 
     /// The body of the 2.1.330 capture's choice screen for a message with
@@ -666,6 +692,56 @@ mod tests {
             adjust: None,
             preview: None,
         }
+    }
+
+    /// A Heads up prompt titled `subject` with `labels` as its options.
+    fn heads_up(subject: &str, labels: &[&str]) -> ChatPrompt {
+        ChatPrompt {
+            id: "p-heads-up".to_owned(),
+            kind: ChatPromptKind::HeadsUp,
+            subject: subject.to_owned(),
+            body: String::new(),
+            ..rewind_prompt("", labels)
+        }
+    }
+
+    /// Whether `main` is still `shown` for `kind`, with `shown`'s own
+    /// recipe.
+    fn still_same(main: &ChatPrompt, shown: &ChatPrompt, kind: &ChatAnswerKind) -> bool {
+        let agent = agent_registry::default_agent();
+        let recipe = recipe_for(&agent, shown, kind).expect("the shown prompt has a recipe");
+        same_prompt(&agent, main, shown, kind, &recipe)
+    }
+
+    const OFFER: [&str; 3] = ["Learn more", "Knew this already", "Dismiss"];
+
+    #[test]
+    fn a_clipped_notice_is_not_its_revealed_self() {
+        let clipped = heads_up("Heads up · The nightly sync job", &[]);
+        let revealed = heads_up("", &OFFER);
+        assert!(!still_same(&revealed, &clipped, &ChatAnswerKind::Reveal));
+    }
+
+    #[test]
+    fn a_clipped_notice_matches_a_longer_title_of_its_own() {
+        let shown = heads_up("Heads up · The nightly sync job you set up earlier", &[]);
+        let main = heads_up(
+            "Heads up ·  The nightly sync job you set up earlier\n copies every note in this folder,",
+            &[],
+        );
+        assert!(still_same(&main, &shown, &ChatAnswerKind::Reveal));
+        assert!(still_same(&shown, &main, &ChatAnswerKind::Reveal));
+    }
+
+    #[test]
+    fn notices_whose_choices_differ_are_not_one() {
+        let offer = heads_up("Heads up · The nightly sync job", &OFFER);
+        let explanation = heads_up(
+            "Heads up · The nightly sync job",
+            &["Got it", "Chat in main session", "Dismiss"],
+        );
+        assert!(!still_same(&explanation, &offer, &option(1)));
+        assert!(still_same(&offer, &offer, &option(1)));
     }
 
     fn option(number: u32) -> ChatAnswerKind {

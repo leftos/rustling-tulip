@@ -2897,6 +2897,9 @@ pub(crate) fn recipe(
     if let ChatAnswerKind::Adjust { raise } = answer {
         return adjust_recipe(prompt, *raise);
     }
+    if *answer == ChatAnswerKind::Reveal {
+        return reveal_recipe(prompt);
+    }
     match prompt.kind {
         ChatPromptKind::Question => return question_recipe(prompt, answer),
         ChatPromptKind::Review => return review_recipe(prompt, answer),
@@ -2979,6 +2982,20 @@ fn check_field_text(text: &str) -> Result<(), AnswerRefusal> {
     Ok(())
 }
 
+/// Bringing a clipped Heads up's choices on screen: ctrl+x and Tab in one
+/// write (a bare ctrl+x is a chord prefix that swallows the next key), which
+/// focuses the notice and scrolls it to its key row. Only a Heads up with no
+/// options, the clipped state, takes it.
+fn reveal_recipe(prompt: &ChatPrompt) -> Result<AnswerRecipe, AnswerRefusal> {
+    if prompt.kind != ChatPromptKind::HeadsUp || !prompt.options.is_empty() {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    Ok(one_step(
+        vec![Key::CtrlX, Key::Tab],
+        ScreenExpect::OptionsShown,
+    ))
+}
+
 /// A recipe of one step.
 fn one_step(keys: Vec<Key>, expect: ScreenExpect) -> AnswerRecipe {
     AnswerRecipe {
@@ -3006,8 +3023,10 @@ fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answe
     if feedback_option(prompt) == Some(number) {
         return Err(AnswerRefusal::NotThisDialog);
     }
+    // A Heads up may stay up when a digit is taken, but the box must not be
+    // left holding the digit as text.
     let expect = if prompt.kind == ChatPromptKind::HeadsUp {
-        ScreenExpect::Any
+        ScreenExpect::NoticeAnswered
     } else {
         ScreenExpect::DialogGone
     };

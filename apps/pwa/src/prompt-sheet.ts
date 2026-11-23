@@ -262,14 +262,29 @@ function buttonsFor(prompt: ChatPrompt): SheetButton[] {
       return planButtons(prompt);
     case "mcp_server":
       return prompt.multi === true ? serverButtons(prompt) : pickButtons(prompt);
+    case "heads_up":
+      return headsUpButtons(prompt);
     case "review":
     case "trust":
     case "confirm":
-    case "heads_up":
       return pickButtons(prompt);
     default:
       return [];
   }
+}
+
+/** The label of the button that brings a clipped Heads up's choices on screen. */
+const SHOW_CHOICES = "Show choices";
+
+/**
+ * A Heads up's choices; one clipped by its scroll lists none, so its one
+ * button scrolls it to its key row.
+ */
+function headsUpButtons(prompt: ChatPrompt): SheetButton[] {
+  if ((prompt.options ?? []).length === 0) {
+    return [namedButton(SHOW_CHOICES, { kind: "reveal" })];
+  }
+  return pickButtons(prompt);
 }
 
 /** One button per option, the screen's own label for each, picking it. */

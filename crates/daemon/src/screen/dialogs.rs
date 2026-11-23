@@ -229,6 +229,18 @@ pub fn expect_holds(
                     .iter()
                     .any(|option| option.number == *number && option.selected == *ticked)
         }),
+        ScreenExpect::NoticeAnswered => {
+            let notice_holds_text = after.composer == ComposerState::Draft
+                && after
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.kind == ChatPromptKind::HeadsUp);
+            let held_text = before.is_some_and(|screen| screen.composer == ComposerState::Draft);
+            !notice_holds_text || held_text
+        }
+        ScreenExpect::OptionsShown => after.prompt.as_ref().is_some_and(|prompt| {
+            prompt.kind == ChatPromptKind::HeadsUp && !prompt.options.is_empty()
+        }),
         ScreenExpect::Any => true,
     }
 }
@@ -2876,7 +2888,9 @@ mod tests {
         reason = "one row per answer; the table is the test"
     )]
     fn recipes_per_answer() {
-        use ScreenExpect::{Any, DialogGone, OptionSelected, OptionTicked, SameDialog};
+        use ScreenExpect::{
+            Any, DialogGone, NoticeAnswered, OptionSelected, OptionTicked, OptionsShown, SameDialog,
+        };
         let v31 = include_str!("fixtures/v31-ask-q1.txt");
         let preview3 = include_str!("fixtures/claude--v2330-ask-preview3-first.txt");
         let preview_multi = include_str!("fixtures/claude--v2330-ask-preview-multi-q1.txt");
@@ -2908,6 +2922,10 @@ mod tests {
             |number: u32, ticked: bool| (vec![Key::Text(text(" "))], OptionTicked(number, ticked));
         let enter_gone = || (vec![Key::Enter], DialogGone);
         let v152 = include_str!("fixtures/v152-learn-more.txt");
+        let v152_collapsed = include_str!("fixtures/v152-heads-up-collapsed.txt");
+        let offer_clipped = include_str!("fixtures/claude--v2330-heads-up-offer-60x20-clipped.txt");
+        let offer_revealed =
+            include_str!("fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt");
         let v23 = include_str!("fixtures/v23-amend-open.txt");
         let v52 = include_str!("fixtures/v52-plan-feedback-open.txt");
         let v53 = include_str!("fixtures/v53-plan-feedback-typed.txt");
@@ -3144,22 +3162,52 @@ mod tests {
                 Err(AnswerRefusal::UnknownOption(4)),
             ),
             (
+                "claude--v2330-heads-up-offer-60x20-clipped",
+                offer_clipped,
+                ChatAnswerKind::Reveal,
+                Ok(vec![(vec![Key::CtrlX, Key::Tab], OptionsShown)]),
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-clipped",
+                offer_clipped,
+                option(1),
+                Err(AnswerRefusal::UnknownOption(1)),
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-after-ctrlx-tab",
+                offer_revealed,
+                ChatAnswerKind::Reveal,
+                refused.clone(),
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-after-ctrlx-tab",
+                offer_revealed,
+                option(1),
+                Ok(vec![(vec![Key::Digit(1)], NoticeAnswered)]),
+            ),
+            (
+                "v152-heads-up-collapsed",
+                v152_collapsed,
+                ChatAnswerKind::Reveal,
+                refused.clone(),
+            ),
+            (
                 "v152-learn-more",
                 v152,
                 option(1),
-                Ok(vec![(vec![Key::Digit(1)], Any)]),
+                Ok(vec![(vec![Key::Digit(1)], NoticeAnswered)]),
             ),
             (
                 "v152-learn-more",
                 v152,
                 option(2),
-                Ok(vec![(vec![Key::Digit(2)], Any)]),
+                Ok(vec![(vec![Key::Digit(2)], NoticeAnswered)]),
             ),
             (
                 "v152-learn-more",
                 v152,
                 option(0),
-                Ok(vec![(vec![Key::Digit(0)], Any)]),
+                Ok(vec![(vec![Key::Digit(0)], NoticeAnswered)]),
             ),
             (
                 "c23-perm-bash",
@@ -3482,6 +3530,91 @@ mod tests {
     /// been typed on `before`.
     fn holds(expect: &ScreenExpect, before: &ChatScreen, after: &ChatScreen) -> bool {
         expect_holds(expect, Some(before), Some(after))
+    }
+
+    #[test]
+    fn notice_answered_cases() {
+        let with_box = |mut screen: ChatScreen, composer: ComposerState| {
+            screen.composer = composer;
+            screen
+        };
+        let digit_in_box = read_capture(include_str!(
+            "fixtures/claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused.txt"
+        ));
+        let collapsed = read_capture(include_str!("fixtures/v152-heads-up-collapsed.txt"));
+        let filled = read_capture(include_str!(
+            "fixtures/v171-main-chat-in-main-draft-carried.txt"
+        ));
+        let revealed = read_capture(include_str!(
+            "fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt"
+        ));
+        let explained = read_capture(include_str!("fixtures/v2319-heads-up-explained.txt"));
+        let mut no_prompt = with_box(revealed.clone(), ComposerState::Ready);
+        no_prompt.prompt = None;
+        assert_eq!(
+            digit_in_box.composer,
+            ComposerState::Draft,
+            "F8's box holds the digit"
+        );
+        let cases = [
+            (
+                "the same notice, its empty box now holding the digit",
+                with_box(digit_in_box.clone(), ComposerState::Ready),
+                digit_in_box,
+                false,
+            ),
+            (
+                "Chat in main session filled the box",
+                collapsed.clone(),
+                filled,
+                true,
+            ),
+            ("the notice gone, the box ready", revealed, no_prompt, true),
+            (
+                "the explanation, the user's draft kept",
+                with_box(collapsed.clone(), ComposerState::Draft),
+                with_box(explained.clone(), ComposerState::Draft),
+                true,
+            ),
+            (
+                "the explanation, an empty box now holding text",
+                collapsed,
+                with_box(explained, ComposerState::Draft),
+                false,
+            ),
+        ];
+        for (case, before, now, answered) in cases {
+            assert_eq!(
+                holds(&ScreenExpect::NoticeAnswered, &before, &now),
+                answered,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn options_shown_holds_on_a_notice_with_choices() {
+        let clipped = read_capture(include_str!(
+            "fixtures/claude--v2330-heads-up-offer-60x20-clipped.txt"
+        ));
+        let revealed = read_capture(include_str!(
+            "fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt"
+        ));
+        let question = read_capture(include_str!("fixtures/v31-ask-q1.txt"));
+        let mut no_prompt = clipped.clone();
+        no_prompt.prompt = None;
+        let expect = ScreenExpect::OptionsShown;
+        assert!(holds(&expect, &clipped, &revealed), "the revealed offer");
+        assert!(!holds(&expect, &clipped, &clipped), "the clipped offer");
+        assert!(!holds(&expect, &clipped, &no_prompt), "no prompt");
+        assert!(
+            question
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| !prompt.options.is_empty()),
+            "the question has options"
+        );
+        assert!(!holds(&expect, &clipped, &question), "a question");
     }
 
     #[test]

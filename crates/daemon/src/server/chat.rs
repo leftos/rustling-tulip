@@ -4607,6 +4607,17 @@ mod tests {
             const V51: &str = include_str!("../screen/fixtures/v51-plan-dialog.txt");
             const V52: &str = include_str!("../screen/fixtures/v52-plan-feedback-open.txt");
             const V152: &str = include_str!("../screen/fixtures/v152-heads-up-collapsed.txt");
+            const OFFER_CLIPPED: &str =
+                include_str!("../screen/fixtures/claude--v2330-heads-up-offer-60x20-clipped.txt");
+            const OFFER_REVEALED: &str = include_str!(
+                "../screen/fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt"
+            );
+            const EXPLAINED: &str = include_str!("../screen/fixtures/v2319-heads-up-explained.txt");
+            const CHAT_IN_MAIN_FILLED: &str =
+                include_str!("../screen/fixtures/v171-main-chat-in-main-draft-carried.txt");
+            const OFFER_DIGIT_IN_BOX: &str = include_str!(
+                "../screen/fixtures/claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused.txt"
+            );
             const V192: &str =
                 include_str!("../screen/fixtures/v192-agent-view-ask-with-chat-about-this.txt");
 
@@ -4861,6 +4872,56 @@ mod tests {
                 a.waits("the digit");
                 a.term.show(C32).await;
                 a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_heads_up_chat_in_main_session_that_fills_the_box_is_taken() {
+                let mut a = answer_on("answer-heads-up-chat-in-main", EXPLAINED, option(2)).await;
+                a.typed(b"2", "the bare digit").await;
+                a.waits("the digit");
+                a.term.show(CHAT_IN_MAIN_FILLED).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_clipped_heads_up_reveals_its_choices() {
+                let mut a = answer_on(
+                    "answer-heads-up-reveal",
+                    OFFER_CLIPPED,
+                    ChatAnswerKind::Reveal,
+                )
+                .await;
+                a.typed(b"\x18", "ctrl+x").await;
+                a.typed(TAB, "then Tab, in the same step").await;
+                a.waits("the chord");
+                a.term.show(OFFER_REVEALED).await;
+                a.answered().await;
+                assert!(a.term.typed_now().is_empty(), "the keys are typed once");
+            }
+
+            #[tokio::test]
+            async fn a_reveal_that_shows_no_choices_was_not_taken() {
+                let mut a = answer_on(
+                    "answer-heads-up-unrevealed",
+                    OFFER_CLIPPED,
+                    ChatAnswerKind::Reveal,
+                )
+                .await;
+                a.typed(b"\x18", "ctrl+x").await;
+                a.typed(TAB, "then Tab").await;
+                a.term.show(OFFER_DIGIT_IN_BOX).await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+                assert!(a.term.typed_now().is_empty(), "the keys are typed once");
+            }
+
+            #[tokio::test]
+            async fn a_heads_up_digit_left_in_the_box_was_not_taken() {
+                let mut a =
+                    answer_on("answer-heads-up-digit-in-box", OFFER_REVEALED, option(1)).await;
+                a.typed(b"1", "the bare digit").await;
+                a.term.show(OFFER_DIGIT_IN_BOX).await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+                assert!(a.term.typed_now().is_empty(), "nothing more is typed");
             }
 
             #[tokio::test]

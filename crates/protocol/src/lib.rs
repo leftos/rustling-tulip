@@ -4027,6 +4027,8 @@ pub enum ChatAnswerKind {
     /// Move the prompt's adjustable row ([`ChatPrompt::adjust`]) one step
     /// up (`raise`) or down, leaving the prompt up.
     Adjust { raise: bool },
+    /// Bring a notice's hidden choices on screen, leaving it up.
+    Reveal,
     /// Forward-compat fallback: an answer kind the current build doesn't
     /// know. Daemon never constructs this directly.
     #[serde(other)]
@@ -19016,6 +19018,7 @@ mod tests {
             },
             ChatAnswerKind::Back,
             ChatAnswerKind::Skip,
+            ChatAnswerKind::Reveal,
         ] {
             let msg = ClientMessage::ChatAnswer {
                 session_id: "s1".to_string(),
@@ -20207,6 +20210,14 @@ mod tests {
         let known: ChatAnswerKind =
             serde_json::from_str(r#"{"kind":"option","number":3}"#).expect("decode");
         assert_eq!(known, ChatAnswerKind::Option { number: 3 });
+    }
+
+    #[test]
+    fn chat_answer_kind_reveal_round_trips() {
+        let json = serde_json::to_string(&ChatAnswerKind::Reveal).expect("encode");
+        assert_eq!(json, r#"{"kind":"reveal"}"#);
+        let back: ChatAnswerKind = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, ChatAnswerKind::Reveal);
     }
 
     #[test]

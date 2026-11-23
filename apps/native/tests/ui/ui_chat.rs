@@ -4459,6 +4459,15 @@ fn the_heads_up_notice_is_pinned_over_the_composer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_clipped_heads_up_card_sends_reveal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, prompt("h1", ChatPromptKind::HeadsUp, &[]));
+    h.click_on("chat-card-reveal");
+    assert_eq!(answer_kinds(&mut h), [ChatAnswerKind::Reveal]);
+}
+
+#[gpui::test]
 fn an_unreadable_dialog_says_to_open_the_terminal(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

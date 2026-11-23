@@ -36,6 +36,9 @@ pub enum Key {
     ClearLine,
     /// Esc, which closes an overlay.
     Esc,
+    /// ctrl+x: the chord prefix that, with Tab after it in the same write,
+    /// focuses a Heads up notice and scrolls it to its key row.
+    CtrlX,
 }
 
 impl Key {
@@ -61,6 +64,7 @@ impl Key {
             Self::Stash => vec![0x13],
             Self::ClearLine => vec![0x15],
             Self::Esc => vec![0x1b],
+            Self::CtrlX => vec![0x18],
         }
     }
 }
@@ -83,6 +87,12 @@ pub enum ScreenExpect {
     OptionSelected(u32),
     /// This option is ticked (`true`) or not.
     OptionTicked(u32, bool),
+    /// A Heads up notice now lists its choices.
+    OptionsShown,
+    /// A Heads up notice took its digit: the notice is gone or has moved on,
+    /// or a box that held no text before is not left holding text under a
+    /// notice.
+    NoticeAnswered,
     /// No check.
     Any,
 }
@@ -235,6 +245,11 @@ mod tests {
         for (key, bytes) in cases {
             assert_eq!(key.to_bytes(), bytes, "{key:?}");
         }
+    }
+
+    #[test]
+    fn ctrl_x_is_byte_0x18() {
+        assert_eq!(Key::CtrlX.to_bytes(), vec![0x18]);
     }
 
     #[test]

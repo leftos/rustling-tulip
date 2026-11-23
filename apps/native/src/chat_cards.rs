@@ -17,7 +17,9 @@ use crate::UI_TEXT_SIZE;
 use crate::buttons::{
     ButtonSize, Layer, field_frame, outlined_button, primary_button, read_only_outlined_button,
 };
-use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
+use crate::chat::{
+    PromptStack, allow_with_text, deny_with_text, reveal_answer, type_something_answer,
+};
 use crate::dashboard_rows::{AskOption, AskQuestion};
 use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
@@ -368,6 +370,10 @@ impl CardButton {
 /// The label of a question's own-text option.
 const TYPE_SOMETHING: &str = "Type something";
 
+/// The label of the button that brings a clipped Heads up's choices on
+/// screen.
+pub const SHOW_CHOICES: &str = "Show choices";
+
 /// The buttons `prompt`'s card offers, in order, naming the session's agent
 /// as people read it (`agent`); none for a kind the chat cannot answer.
 #[must_use]
@@ -387,6 +393,11 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
         ),
         ChatPromptKind::Trust => positional(prompt, &["Trust this folder", "Exit"], None),
         ChatPromptKind::McpServer if prompt.multi => server_buttons(prompt),
+        // A Heads up clipped by its scroll lists no choices: one button
+        // scrolls it to its key row.
+        ChatPromptKind::HeadsUp if prompt.options.is_empty() => {
+            vec![CardButton::named("reveal", SHOW_CHOICES, reveal_answer())]
+        }
         ChatPromptKind::McpServer | ChatPromptKind::HeadsUp | ChatPromptKind::Confirm => {
             positional(prompt, &[], None)
         }
@@ -1807,6 +1818,29 @@ mod tests {
         );
         let unknown = prompt_with(ChatPromptKind::Unknown, &[(1, "a")]);
         assert_eq!(card_buttons(&unknown, "Claude"), []);
+    }
+
+    #[test]
+    fn a_clipped_heads_up_card_offers_only_show_choices() {
+        let clipped = prompt_with(ChatPromptKind::HeadsUp, &[]);
+        assert_eq!(
+            fixed(&card_buttons(&clipped, "Claude")),
+            [row("reveal", "Show choices", Some(ChatAnswerKind::Reveal))]
+        );
+        let revealed = prompt_with(
+            ChatPromptKind::HeadsUp,
+            &[(1, "Learn more"), (2, "Knew this already"), (0, "Dismiss")],
+        );
+        let buttons = fixed(&card_buttons(&revealed, "Claude"));
+        assert_eq!(
+            buttons,
+            [
+                row("1", "Learn more", opt(1)),
+                row("2", "Knew this already", opt(2)),
+                row("0", "Dismiss", opt(0)),
+            ]
+        );
+        assert!(buttons.iter().all(|(_, label, _)| label != "Show choices"));
     }
 
     #[test]
