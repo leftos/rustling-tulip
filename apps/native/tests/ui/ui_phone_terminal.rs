@@ -1422,33 +1422,6 @@ fn opening_quick_on_the_terminal_keeps_the_size(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn putting_the_prompt_sheet_away_keeps_the_size(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = sheet_over_terminal(cx, &dir);
-    h.host(&saved_remote()).sent();
-
-    drag_sheet(&mut h, px(60.0), 5);
-
-    assert!(drawn(&mut h, "phone-prompt-show"), "Show prompt draws");
-    let sent = h.host(&saved_remote()).sent();
-    assert_eq!(
-        first_resize_claim(&sent, "a"),
-        None,
-        "putting the sheet away sends no resize: {sent:?}"
-    );
-
-    h.click_on("phone-prompt-show");
-
-    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet is back");
-    let sent = h.host(&saved_remote()).sent();
-    assert_eq!(
-        first_resize_claim(&sent, "a"),
-        None,
-        "bringing the sheet back sends no resize: {sent:?}"
-    );
-}
-
 /// The rows of every `Resize` for session `id` in `sent`.
 fn resize_rows(sent: &[ClientMessage], id: &str) -> Vec<u16> {
     sent.iter()
@@ -1467,7 +1440,7 @@ fn opening_the_terminal_with_the_prompt_put_away_sends_one_size(
     cx: &mut TestAppContext,
 ) {
     let plain_dir = TestDir::new();
-    let mut plain = sheet_over_terminal(plain, &plain_dir);
+    let mut plain = question_on_terminal(plain, &plain_dir);
     let plain_rows = first_resize_rows(&plain.host(&saved_remote()).sent(), "a");
     assert!(plain_rows.is_some(), "a plain open claims a size");
 
@@ -1505,8 +1478,8 @@ fn opening_the_terminal_with_the_prompt_put_away_sends_one_size(
 
     assert!(drawn(&mut h, "phone-session-terminal"), "the Terminal page");
     assert!(
-        drawn(&mut h, "phone-prompt-show"),
-        "Show prompt still draws"
+        !drawn(&mut h, "phone-prompt-show"),
+        "Show prompt stays off the Terminal page"
     );
     let laid_out = h.root(|root, cx| root.pane_cell_center(&slot_id("a"), 0, 0, cx));
     assert!(
@@ -1582,41 +1555,16 @@ fn question_prompt(id: &str) -> ChatPrompt {
 }
 
 #[gpui::test]
-fn the_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
+fn no_prompt_sheet_draws_over_the_terminal_page(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = sheet_over_terminal(cx, &dir);
+    let mut h = question_on_terminal(cx, &dir);
 
-    assert!(drawn(&mut h, "phone-prompt-sheet"));
-    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+    assert!(!drawn(&mut h, "phone-prompt-sheet"), "no sheet");
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the terminal alone"
+    );
     assert!(h.root(|root, _| root.phone_terminal_view()).is_some());
-}
-
-#[gpui::test]
-fn a_drag_on_the_prompt_sheet_puts_it_away_with_the_keyboard_up(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = sheet_over_terminal(cx, &dir);
-    draw_keyboard(&mut h, true);
-    h.host(&saved_remote()).sent();
-    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet is up");
-
-    drag_sheet(&mut h, px(60.0), 5);
-
-    assert!(
-        !drawn(&mut h, "phone-prompt-sheet"),
-        "the drag puts it away"
-    );
-    let sent = h.host(&saved_remote()).sent();
-    let claimed_or_typed = sent.iter().any(|msg| match msg {
-        ClientMessage::Resize {
-            session_id, claim, ..
-        } => session_id == "a" && *claim,
-        ClientMessage::SendInput { session_id, .. } => session_id == "a",
-        _ => false,
-    });
-    assert!(
-        !claimed_or_typed,
-        "the drag types and claims nothing: {sent:?}"
-    );
 }
 
 /// A downward pan over the prompt sheet's handle: `steps` movements of
@@ -1638,9 +1586,8 @@ fn drag_sheet(h: &mut Harness<'_>, dy: Pixels, steps: usize) {
     h.cx.run_until_parked();
 }
 
-/// Session `a` on its Terminal page with a pending question's prompt sheet
-/// drawn over it.
-fn sheet_over_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+/// Session `a` on its Terminal page with a pending question.
+fn question_on_terminal<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = open_phone(cx, dir);
     h.click_on(&row("a"));
     let sent = h.host(&saved_remote()).sent();

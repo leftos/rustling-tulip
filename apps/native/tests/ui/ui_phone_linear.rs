@@ -613,8 +613,15 @@ fn a_question_waits_under_the_card_until_it_goes(cx: &mut TestAppContext) {
 
     assert!(!drawn(&mut h, SHEET), "back takes the card down");
     assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "the question stays off the Terminal page"
+    );
+
+    h.click_on("phone-session-toggle");
+
+    assert!(
         drawn(&mut h, "phone-prompt-sheet"),
-        "and the question rises"
+        "and rises on the Chat page"
     );
 }
 

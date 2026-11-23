@@ -2032,10 +2032,15 @@ impl PhoneRoot {
     /// Whether the shown session's terminal fills the screen: the iPhone on
     /// its side, with the session on its Terminal page.
     pub(super) fn terminal_full(&self, cx: &App) -> bool {
-        self.layout == PhoneLayout::TerminalFull
-            && self
-                .session_header(cx)
-                .is_some_and(|header| self.shown_page(header.chat_mirrored) == Page::Terminal)
+        self.layout == PhoneLayout::TerminalFull && self.shown_on_terminal(cx)
+    }
+
+    /// Whether the shown session's page is its Terminal page, whatever the
+    /// layout: the toggle, the full-screen terminal or the iPad's session
+    /// pane.
+    pub(super) fn shown_on_terminal(&self, cx: &App) -> bool {
+        self.session_header(cx)
+            .is_some_and(|header| self.shown_page(header.chat_mirrored) == Page::Terminal)
     }
 
     /// Whether a page covers the shown session's: Settings, the viewer or
@@ -2291,12 +2296,15 @@ impl PhoneRoot {
             && self.prompt_sheet_shown(cx)
     }
 
-    /// Whether the prompt sheet may draw: a session's page is shown with no
-    /// viewer, browser or Settings over it, and no Linear card sheet up,
-    /// which the question waits under until it goes.
+    /// Whether the prompt sheet may draw: a session's Chat page is shown
+    /// with no viewer, browser or Settings over it, and no Linear card sheet
+    /// up, which the question waits under until it goes.
     fn prompt_sheet_shown(&self, cx: &App) -> bool {
         let page_over = self.viewer.is_some() || self.browser.is_some() || self.settings.is_some();
-        self.shown.is_some() && !page_over && self.root.read(cx).phone_linear_card().is_none()
+        self.shown.is_some()
+            && !page_over
+            && self.root.read(cx).phone_linear_card().is_none()
+            && !self.shown_on_terminal(cx)
     }
 
     /// `layer` over the whole window, or over `pane` alone while one is

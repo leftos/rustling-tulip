@@ -272,9 +272,11 @@ impl PhoneRoot {
         .size_full()
     }
 
-    /// Whether the prompt sheet is up over the shown session's page.
+    /// Whether the prompt sheet is up over the shown session's page: a
+    /// prompt waits and was not put away, on a page that is not the
+    /// session's Terminal page.
     pub(super) fn prompt_sheet_up(&self, cx: &App) -> bool {
-        self.prompt_sheet.shows(self.current_prompt(cx).as_deref())
+        self.prompt_sheet.shows(self.current_prompt(cx).as_deref()) && !self.shown_on_terminal(cx)
     }
 
     /// Puts the prompt sheet away, as a swipe does.
@@ -286,10 +288,11 @@ impl PhoneRoot {
     }
 
     /// Whether `Show prompt` draws at the page's bottom: the current prompt
-    /// was put away.
+    /// was put away, on a page that is not the session's Terminal page.
     pub(super) fn show_prompt_drawn(&self, cx: &App) -> bool {
         self.prompt_sheet
             .put_away(self.current_prompt(cx).as_deref())
+            && !self.shown_on_terminal(cx)
     }
 
     /// `Show prompt` at the page's bottom, while the current prompt was put

@@ -77,6 +77,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Closing a tab of only dispatch run or subagent views, or of empty panes, no longer asks for a second click.
 - The Settings window's Cancel button reads Close while you have changed nothing.
+- On the phone, a question's sheet no longer covers a session's Terminal page; it waits until you switch to Chat.
 
 ## v0.18.3-alpha
 

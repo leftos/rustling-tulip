@@ -12,7 +12,10 @@ use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{BackGesturePhase, Bounds, Edges, Pixels, TestAppContext, WindowInsets, point, px};
-use protocol::{DaemonMessage, SessionSnapshot};
+use protocol::{
+    ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
+    DaemonMessage, SessionSnapshot,
+};
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use rustling_tulip_native::phone::{PhoneLayout, PhoneRoot};
 use rustling_tulip_native::target::HostKey;
@@ -317,6 +320,94 @@ fn the_toggle_on_its_side_fills_the_screen_and_back_returns_to_the_panes(cx: &mu
 
     assert_eq!(shown(&mut h).as_deref(), Some("a"), "the selection stays");
     assert_panes_on_chat(&mut h);
+}
+
+/// A pending question, `q1`.
+fn question() -> ChatPrompt {
+    ChatPrompt {
+        id: "q1".to_owned(),
+        kind: ChatPromptKind::Question,
+        subject: "calc.py".to_owned(),
+        body: "Which one?".to_owned(),
+        options: [(1, "sub"), (2, "div")]
+            .iter()
+            .map(|(number, label)| ChatOption {
+                number: *number,
+                label: (*label).to_owned(),
+                description: None,
+                selected: false,
+            })
+            .collect(),
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+        adjust: None,
+        preview: None,
+    }
+}
+
+#[gpui::test]
+fn no_prompt_sheet_over_the_full_screen_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = upright(cx, &dir);
+    h.click_on(&row("a"));
+    let request = h
+        .host(&saved_remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == "a" => Some(request_id),
+            _ => None,
+        });
+    h.host(&saved_remote()).send(DaemonMessage::Chat {
+        session_id: "a".to_owned(),
+        entries: vec![ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "message u1".to_owned(),
+            pending: false,
+        }],
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: request.flatten(),
+    });
+    h.cx.run_until_parked();
+    h.click_on("phone-session-toggle");
+    assert!(drawn(&mut h, "phone-session-terminal"));
+
+    turn_on_side(&mut h);
+
+    assert_full(&mut h);
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen {
+                composer: ComposerState::Dialog,
+                prompt: Some(question()),
+            },
+        });
+    h.cx.run_until_parked();
+
+    assert!(
+        !drawn(&mut h, "phone-prompt-sheet"),
+        "no sheet over the full-screen terminal"
+    );
+
+    turn_upright(&mut h);
+    h.click_on("phone-session-toggle");
+
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "the Chat page's sheet waits"
+    );
 }
 
 #[gpui::test]

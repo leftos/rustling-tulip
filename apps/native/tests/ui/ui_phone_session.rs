@@ -1034,7 +1034,7 @@ fn back_with_the_sheet_up_dismisses_it_and_stays_on_the_page(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn the_sheet_shows_on_the_terminal_page_too(cx: &mut TestAppContext) {
+fn the_sheet_stays_off_the_terminal_page(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
     h.click_on("phone-session-toggle");
@@ -1042,9 +1042,71 @@ fn the_sheet_shows_on_the_terminal_page_too(cx: &mut TestAppContext) {
 
     screen_shows(&mut h, Some(question_prompt("q1")));
 
-    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(!drawn(&mut h, "phone-prompt-sheet"), "the sheet stays down");
+    assert!(
+        !drawn(&mut h, "phone-prompt-show"),
+        "and Show prompt stays off"
+    );
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "the terminal alone"
+    );
+
+    h.click_on("phone-session-toggle");
+
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "the Chat page's sheet waits"
+    );
     assert!(in_sheet(&mut h, "chat-card-1"));
-    assert!(drawn(&mut h, "phone-session-terminal"), "over the terminal");
+}
+
+#[gpui::test]
+fn a_back_on_the_terminal_page_ignores_a_pending_question(cx: &mut TestAppContext) {
+    let asking_dir = TestDir::new();
+    let mut asking = chat_loaded(cx, &asking_dir, vec![user("u1")]);
+    asking.click_on("phone-session-toggle");
+    assert!(drawn(&mut asking, "phone-session-terminal"));
+    screen_shows(&mut asking, Some(question_prompt("q1")));
+
+    back_gesture(&mut asking, BackGesturePhase::Committed);
+
+    let asking_landing = (
+        drawn(&mut asking, "phone-session-terminal"),
+        drawn(&mut asking, "phone-home"),
+        shown(&mut asking),
+    );
+    assert!(
+        drawn(&mut asking, "phone-session-chat"),
+        "back steps to the Chat page"
+    );
+    assert!(
+        !drawn(&mut asking, "phone-prompt-show"),
+        "the prompt was not put away"
+    );
+    assert!(
+        drawn(&mut asking, "phone-prompt-sheet"),
+        "its sheet waits on the Chat page"
+    );
+    drop(asking);
+
+    let plain_dir = TestDir::new();
+    let mut plain = chat_loaded(cx, &plain_dir, vec![user("u1")]);
+    plain.click_on("phone-session-toggle");
+    assert!(drawn(&mut plain, "phone-session-terminal"));
+
+    back_gesture(&mut plain, BackGesturePhase::Committed);
+
+    let plain_landing = (
+        drawn(&mut plain, "phone-session-terminal"),
+        drawn(&mut plain, "phone-home"),
+        shown(&mut plain),
+    );
+    assert!(drawn(&mut plain, "phone-session-chat"), "the Chat page");
+    assert_eq!(
+        asking_landing, plain_landing,
+        "the same landing whether a question waits or not"
+    );
 }
 
 #[gpui::test]
