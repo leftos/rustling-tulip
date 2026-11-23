@@ -3418,6 +3418,14 @@ impl RootView {
         cx.notify();
     }
 
+    /// Saves whether the phone in two panes hides Home's list beside a
+    /// shown session; the phone redraws.
+    pub fn set_phone_list_collapsed(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.sidebar.set_phone_list_collapsed(on);
+        self.save_ui();
+        cx.notify();
+    }
+
     /// While the phone's order is Desktop tabs, asks `host` for its layouts
     /// when its connection is open and lists `host_layouts`; the reply is
     /// matched to the request.

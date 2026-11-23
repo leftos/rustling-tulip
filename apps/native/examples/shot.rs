@@ -132,6 +132,9 @@
 //! `Working`, the Terminal toggle) over its loaded chat and composer.
 //! `phone-ipad-portrait` shows the same in an iPad's 820x1180 portrait
 //! window inside its 24 pt top and 20 pt bottom insets.
+//! `phone-ipad-collapsed` shows `phone-ipad` with Home's list collapsed:
+//! the session's page across the whole window, its header leading with
+//! `Show list`.
 //! `phone-landscape-home` shows the same in an iPhone's 874x402 window on
 //! its side, inside its 21 pt bottom inset and 62 pt side insets.
 //! `phone-landscape-terminal` shows that session's Terminal page there after
@@ -462,13 +465,14 @@ enum View {
     PhoneBrowser,
     PhoneIpad,
     PhoneIpadPortrait,
+    PhoneIpadCollapsed,
     PhoneLandscapeHome,
     PhoneLandscapeTerminal,
     PhonePairing,
 }
 
 impl View {
-    const ALL: [Self; 79] = [
+    const ALL: [Self; 80] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -545,6 +549,7 @@ impl View {
         Self::PhoneBrowser,
         Self::PhoneIpad,
         Self::PhoneIpadPortrait,
+        Self::PhoneIpadCollapsed,
         Self::PhoneLandscapeHome,
         Self::PhoneLandscapeTerminal,
         Self::PhonePairing,
@@ -576,6 +581,7 @@ impl View {
                 | Self::PhoneBrowser
                 | Self::PhoneIpad
                 | Self::PhoneIpadPortrait
+                | Self::PhoneIpadCollapsed
                 | Self::PhoneLandscapeHome
                 | Self::PhoneLandscapeTerminal
                 | Self::PhonePairing
@@ -587,7 +593,10 @@ impl View {
     fn is_two_pane(self) -> bool {
         matches!(
             self,
-            Self::PhoneIpad | Self::PhoneIpadPortrait | Self::PhoneLandscapeHome
+            Self::PhoneIpad
+                | Self::PhoneIpadPortrait
+                | Self::PhoneIpadCollapsed
+                | Self::PhoneLandscapeHome
         )
     }
 
@@ -615,7 +624,7 @@ impl View {
     /// The insets the phone's root draws inside, as the device reports them.
     fn phone_insets(self) -> WindowInsets {
         let (top, right, bottom, left) = match self {
-            Self::PhoneIpad => (0.0, 0.0, 0.0, 0.0),
+            Self::PhoneIpad | Self::PhoneIpadCollapsed => (0.0, 0.0, 0.0, 0.0),
             Self::PhoneIpadPortrait => (IPAD_INSET_TOP, 0.0, IPAD_INSET_BOTTOM, 0.0),
             Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal => (
                 0.0,
@@ -714,6 +723,7 @@ impl View {
             Self::PhoneBrowser => "phone-browser",
             Self::PhoneIpad => "phone-ipad",
             Self::PhoneIpadPortrait => "phone-ipad-portrait",
+            Self::PhoneIpadCollapsed => "phone-ipad-collapsed",
             Self::PhoneLandscapeHome => "phone-landscape-home",
             Self::PhoneLandscapeTerminal => "phone-landscape-terminal",
             Self::PhonePairing => "phone-pairing",
@@ -790,7 +800,7 @@ impl View {
             | Self::PhoneViewerMd
             | Self::PhoneBrowser
             | Self::PhonePairing => PHONE_WINDOW_SIZE,
-            Self::PhoneIpad => IPAD_WINDOW_SIZE,
+            Self::PhoneIpad | Self::PhoneIpadCollapsed => IPAD_WINDOW_SIZE,
             Self::PhoneIpadPortrait => IPAD_PORTRAIT_WINDOW_SIZE,
             Self::PhoneLandscapeHome | Self::PhoneLandscapeTerminal => PHONE_LANDSCAPE_WINDOW_SIZE,
             _ => WINDOW_SIZE,
@@ -854,6 +864,7 @@ impl View {
             | Self::PhoneBrowser
             | Self::PhoneIpad
             | Self::PhoneIpadPortrait
+            | Self::PhoneIpadCollapsed
             | Self::PhoneLandscapeHome
             | Self::PhoneLandscapeTerminal
             | Self::PhonePairing => true,
@@ -1172,6 +1183,7 @@ impl Shot {
             | View::PhoneBrowser
             | View::PhoneIpad
             | View::PhoneIpadPortrait
+            | View::PhoneIpadCollapsed
             | View::PhoneLandscapeHome
             | View::PhoneLandscapeTerminal
             | View::PhonePairing
@@ -1221,6 +1233,7 @@ impl Shot {
             View::Perf => perf_ui_state(),
             View::PhoneHomeSorted => phone_home_sorted_ui_state(),
             View::PhoneHomeHosts => phone_home_hosts_ui_state(),
+            View::PhoneIpadCollapsed => phone_ipad_collapsed_ui_state(),
             view if view.is_phone() => phone_home_ui_state(),
             _ => return Ok(()),
         };
@@ -1347,6 +1360,14 @@ fn phone_home_ui_state() -> Value {
 fn phone_home_sorted_ui_state() -> Value {
     let mut state = phone_home_ui_state();
     state["phone_order"] = json!("desktop_tabs");
+    state
+}
+
+/// The layout the `phone-ipad-collapsed` shot starts from: the
+/// `phone-home` fixture's, its list collapsed.
+fn phone_ipad_collapsed_ui_state() -> Value {
+    let mut state = phone_home_ui_state();
+    state["phone_list_collapsed"] = json!(true);
     state
 }
 
@@ -2097,6 +2118,11 @@ async fn check_phone_home_view(
     }
     if view.opens_session() {
         open_phone_session(view, handle, cx).await?;
+    }
+    if view == View::PhoneIpadCollapsed
+        && !handle.update(cx, |phone, _, cx| phone.list_collapsed(cx))?
+    {
+        bail!("the phone-ipad-collapsed view's list is not collapsed");
     }
     Ok(())
 }
@@ -2930,6 +2956,7 @@ fn drive(
         | View::PhoneBrowser
         | View::PhoneIpad
         | View::PhoneIpadPortrait
+        | View::PhoneIpadCollapsed
         | View::PhoneLandscapeHome
         | View::PhoneLandscapeTerminal
         | View::PhonePairing => Ok(()),

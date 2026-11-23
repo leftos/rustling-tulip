@@ -23,7 +23,7 @@ use rustling_tulip_native::phone::{PhoneLayout, PhoneRoot};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use serde_json::json;
-use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+use support::{Harness, REMOTE, TestDir, repo, saved_remote, saved_ui, seed_ui, session};
 
 /// The list pane's width, in points.
 const LIST_WIDTH: f32 = 320.0;
@@ -130,10 +130,19 @@ fn open_phone_with<'a>(
     platform: Arc<FakePushPlatform>,
     features: &[&str],
 ) -> Harness<'a> {
-    seed_ui(
-        dir,
-        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
-    );
+    let ui = json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] });
+    open_phone_from(cx, dir, &ui, platform, features)
+}
+
+/// [`open_phone_with`] over the saved UI file `ui`.
+fn open_phone_from<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &serde_json::Value,
+    platform: Arc<FakePushPlatform>,
+    features: &[&str],
+) -> Harness<'a> {
+    seed_ui(dir, ui);
     let mut h = Harness::phone_with(cx, dir, platform);
     h.tokens().set(REMOTE, "t1").expect("seed a token");
     let mut host = h.host(&saved_remote());
@@ -436,6 +445,12 @@ fn question() -> ChatPrompt {
 fn prompted<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = ipad(cx, dir);
     h.click_on(&row("a"));
+    pose_question(&mut h);
+    h
+}
+
+/// Loads selected session `a`'s chat and leaves [`question`] pending.
+fn pose_question(h: &mut Harness<'_>) {
     let request = h
         .host(&saved_remote())
         .sent()
@@ -471,7 +486,6 @@ fn prompted<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
         },
     });
     h.cx.run_until_parked();
-    h
 }
 
 /// The id of the first message among what the phone sent the saved host
@@ -808,4 +822,142 @@ fn the_tray_card_keeps_its_height_on_the_ipad(cx: &mut TestAppContext) {
         px(356.0),
         "the iPad's list pane keeps the card's full height"
     );
+}
+
+/// The window's width, in points.
+fn window_width(h: &mut Harness<'_>) -> Pixels {
+    h.cx.update(|window, _| window.viewport_size().width)
+}
+
+/// The list toggle's label, while it shows.
+fn list_toggle(h: &mut Harness<'_>) -> Option<&'static str> {
+    phone(h, PhoneRoot::list_toggle)
+}
+
+/// Session `a` selected on the iPad, then its list collapsed.
+fn collapsed<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = ipad(cx, dir);
+    h.click_on(&row("a"));
+    h.click_on("phone-list-toggle");
+    h
+}
+
+#[gpui::test]
+fn hide_list_gives_the_session_the_full_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = ipad(cx, &dir);
+    h.click_on(&row("a"));
+    assert_eq!(list_toggle(&mut h), Some("Hide list"));
+    assert!(
+        h.bounds("phone-list-toggle").size.height >= px(44.0),
+        "a touch target"
+    );
+
+    h.click_on("phone-list-toggle");
+
+    assert!(!drawn(&mut h, "phone-list-pane"), "the list hides");
+    let session = h.bounds("phone-session");
+    let width = window_width(&mut h);
+    assert_eq!(session.origin.x, px(0.0), "from the left edge: {session:?}");
+    assert_eq!(session.size.width, width, "to the right edge: {session:?}");
+    assert_eq!(list_toggle(&mut h), Some("Show list"));
+    assert_eq!(saved_ui(&dir)["phone_list_collapsed"], true);
+
+    h.click_on("phone-list-toggle");
+
+    assert_eq!(
+        list_pane(&mut h).size.width,
+        px(LIST_WIDTH),
+        "the list shows"
+    );
+    assert_eq!(list_toggle(&mut h), Some("Hide list"));
+    assert_eq!(saved_ui(&dir)["phone_list_collapsed"], false);
+}
+
+#[gpui::test]
+fn a_collapsed_list_spans_the_prompt_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = collapsed(cx, &dir);
+
+    pose_question(&mut h);
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet rises");
+    let width = window_width(&mut h);
+    for layer in ["phone-prompt-sheet", "phone-prompt-scrim"] {
+        let bounds = h.bounds(layer);
+        assert_eq!(bounds.origin.x, px(0.0), "{layer} {bounds:?}");
+        assert_eq!(bounds.size.width, width, "{layer} {bounds:?}");
+    }
+}
+
+#[gpui::test]
+fn a_collapsed_list_draws_again_with_no_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = collapsed(cx, &dir);
+    assert!(!drawn(&mut h, "phone-list-pane"));
+
+    back_gesture(&mut h);
+
+    assert_eq!(shown(&mut h), None);
+    assert!(
+        drawn(&mut h, "phone-list-pane"),
+        "no pane is left without the list"
+    );
+    assert_eq!(
+        saved_ui(&dir)["phone_list_collapsed"],
+        true,
+        "the choice is kept"
+    );
+}
+
+#[gpui::test]
+fn the_list_stays_collapsed_after_a_restart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "saved_hosts": [{ "name": REMOTE, "port": 8787 }],
+        "phone_list_collapsed": true,
+    });
+    let mut h = open_phone_from(cx, &dir, &ui, Arc::new(FakePushPlatform::default()), &[]);
+    resize(&mut h, 1180.0, 820.0);
+    assert!(drawn(&mut h, "phone-list-pane"), "nothing shown yet");
+
+    h.click_on(&row("a"));
+
+    assert!(!drawn(&mut h, "phone-list-pane"), "the saved choice holds");
+    assert_eq!(list_toggle(&mut h), Some("Show list"));
+}
+
+#[gpui::test]
+fn hiding_the_list_reclaims_the_terminal_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = ipad(cx, &dir);
+    h.click_on(&row("a"));
+    h.click_on("phone-session-toggle");
+    h.host(&saved_remote()).pty("a", b"");
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("phone-list-toggle");
+
+    let sent = h.host(&saved_remote()).sent();
+    let claim = sent.iter().find_map(|msg| match msg {
+        ClientMessage::Resize {
+            session_id, claim, ..
+        } if session_id == "a" => Some(*claim),
+        _ => None,
+    });
+    assert_eq!(claim, Some(true), "the wider pane claims the PTY: {sent:?}");
+}
+
+#[gpui::test]
+fn the_header_offers_no_list_toggle_in_one_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone_with(cx, &dir, Arc::new(FakePushPlatform::default()), &[]);
+    resize(&mut h, 402.0, 874.0);
+
+    h.click_on(&row("a"));
+
+    assert!(drawn(&mut h, "phone-session-back"));
+    assert!(!drawn(&mut h, "phone-list-toggle"), "no list to hide");
+    assert_eq!(list_toggle(&mut h), None);
 }

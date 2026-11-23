@@ -377,19 +377,25 @@ impl PhoneRoot {
         self.terminal_need = self.cursor_need(cx);
     }
 
-    /// A rotation or a pane change resized the window's viewport under the
-    /// open terminal: its rest height is measured again and the pane is
-    /// marked resized, so the size it measures next claims the PTY, as its
-    /// open did. A keyboard leaves the viewport as it is, so it never
-    /// claims.
+    /// A rotation resized the window's viewport under the open terminal:
+    /// [`Self::reclaim_terminal_size`], as its open did. A keyboard leaves
+    /// the viewport as it is, so it never claims; the list pane's toggle
+    /// reclaims on its own.
     fn claim_on_resize(&mut self, window: &Window, cx: &mut Context<Self>) {
         let viewport = window.viewport_size();
         let previous = self.terminal_viewport.replace(viewport);
         if previous.is_some_and(|previous| previous != viewport) {
-            self.terminal_heights.clear();
-            if let Some(pane) = self.terminal_pane(cx) {
-                pane.update(cx, |pane, _| pane.mark_resized());
-            }
+            self.reclaim_terminal_size(cx);
+        }
+    }
+
+    /// The open terminal's rest height is measured again and its pane is
+    /// marked resized, so the size it measures next claims the PTY: after a
+    /// viewport change, or a list pane hidden or shown beside it.
+    pub(super) fn reclaim_terminal_size(&mut self, cx: &mut Context<Self>) {
+        self.terminal_heights.clear();
+        if let Some(pane) = self.terminal_pane(cx) {
+            pane.update(cx, |pane, _| pane.mark_resized());
         }
     }
 

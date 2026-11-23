@@ -44,6 +44,24 @@ use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 /// The session page's Back button.
 const BACK_LABEL: &str = "Back";
 
+/// The session header's leading button in two panes while Home's list shows.
+const HIDE_LIST_LABEL: &str = "Hide list";
+
+/// The session header's leading button in two panes while Home's list is
+/// collapsed.
+const SHOW_LIST_LABEL: &str = "Show list";
+
+/// What the session header draws in its leading slot.
+#[derive(Clone, Copy)]
+enum HeaderLead {
+    /// Back, one pane at a time.
+    Back,
+    /// The list toggle labelled so, in two panes.
+    ListToggle(&'static str),
+    /// Nothing.
+    None,
+}
+
 /// The composer's Send button's label.
 const SEND_LABEL: &str = "Send";
 /// The composer's Paste button's label.
@@ -291,6 +309,21 @@ impl PhoneRoot {
             .then(|| self.shown_page(header.chat_mirrored).toggle_label())
     }
 
+    /// The session header's list toggle's label, while it shows: in two
+    /// panes with a session shown and its header drawn, "Hide list" while
+    /// Home's list shows and "Show list" while it is collapsed.
+    #[must_use]
+    pub fn list_toggle(&self, cx: &App) -> Option<&'static str> {
+        let shows = self.layout.two_pane() && self.shown.is_some() && !self.terminal_full(cx);
+        shows.then(|| {
+            if self.list_collapsed(cx) {
+                SHOW_LIST_LABEL
+            } else {
+                HIDE_LIST_LABEL
+            }
+        })
+    }
+
     /// A tap on the Terminal toggle: the shown session's other page; on an
     /// iPhone on its side the Terminal page fills the screen.
     pub fn tap_session_toggle(&mut self, cx: &mut Context<Self>) {
@@ -530,8 +563,13 @@ impl PhoneRoot {
             }
         };
         let full = self.layout == PhoneLayout::TerminalFull && page == Page::Terminal;
-        let header_row = (!full)
-            .then(|| Self::session_header_row(&header, page, !self.layout.two_pane(), &t, cx));
+        let lead = if self.layout.two_pane() {
+            self.list_toggle(cx)
+                .map_or(HeaderLead::None, HeaderLead::ListToggle)
+        } else {
+            HeaderLead::Back
+        };
+        let header_row = (!full).then(|| Self::session_header_row(&header, page, lead, &t, cx));
         Some(
             div()
                 .driver_id(|| "phone-session".to_owned())
@@ -1514,23 +1552,39 @@ impl PhoneRoot {
             })
     }
 
-    /// The header: Back while `back` (one pane at a time; Home's list stays
-    /// beside the page in two panes), the label over the status word, and
-    /// the toggle while it shows.
+    /// The header's leading button: Back one pane at a time, the list
+    /// toggle in two panes.
+    fn header_lead(lead: HeaderLead, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let button = |selector: &str, label: &'static str, cx: &mut Context<Self>| {
+            phone_button(selector, ButtonKind::Outlined, cx)
+                .min_h(px(TOUCH_TARGET))
+                .flex_none()
+                .child(label)
+        };
+        match lead {
+            HeaderLead::Back => Some(
+                button("phone-session-back", BACK_LABEL, cx)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx))),
+            ),
+            HeaderLead::ListToggle(label) => Some(
+                button("phone-list-toggle", label, cx)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_list(cx))),
+            ),
+            HeaderLead::None => None,
+        }
+    }
+
+    /// The header: its leading button (`lead`: Back one pane at a time, the
+    /// list toggle in two panes), the label over the status word, and the
+    /// toggle while it shows.
     fn session_header_row(
         header: &Header,
         page: Page,
-        back: bool,
+        lead: HeaderLead,
         t: &UiTheme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let back = back.then(|| {
-            phone_button("phone-session-back", ButtonKind::Outlined, cx)
-                .min_h(px(TOUCH_TARGET))
-                .flex_none()
-                .child(BACK_LABEL)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.session_back(cx)))
-        });
+        let back = Self::header_lead(lead, cx);
         let toggle = header.toggle.then(|| {
             phone_button("phone-session-toggle", ButtonKind::Outlined, cx)
                 .min_h(px(TOUCH_TARGET))

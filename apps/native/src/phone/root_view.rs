@@ -2055,6 +2055,36 @@ impl PhoneRoot {
         !self.layout.two_pane() || self.terminal_full(cx)
     }
 
+    /// Whether Home's list is hidden so the session pane takes the whole
+    /// window: the owner collapsed it, the window draws two panes with no
+    /// full-screen terminal, and a session, the viewer or the browser shows
+    /// in the session pane. With nothing shown the list draws as ever.
+    #[must_use]
+    pub fn list_collapsed(&self, cx: &App) -> bool {
+        self.root.read(cx).sidebar.ui_state().phone_list_collapsed
+            && self.layout.two_pane()
+            && !self.terminal_full(cx)
+            && (self.shown.is_some() || self.viewer.is_some() || self.browser.is_some())
+    }
+
+    /// A tap on the session header's list toggle: Home's list hides beside
+    /// the shown session, or shows again, and the choice is saved. Hiding it
+    /// closes Home's open sheet and sort menu. The open terminal claims its
+    /// PTY size again, since its pane's width changed under a viewport that
+    /// did not.
+    pub fn toggle_list(&mut self, cx: &mut Context<Self>) {
+        let collapse = !self.list_collapsed(cx);
+        tracing::debug!(collapse, "phone: toggling the list pane");
+        if collapse {
+            self.sheet = None;
+            self.sort_menu = false;
+        }
+        self.root
+            .update(cx, |root, cx| root.set_phone_list_collapsed(collapse, cx));
+        self.reclaim_terminal_size(cx);
+        cx.notify();
+    }
+
     /// The window turned from layout `previous` to the one this frame
     /// picked: on its side, [`Self::turn_on_side`]; upright again,
     /// [`Self::turn_upright`].
@@ -2147,8 +2177,17 @@ impl PhoneRoot {
         }
     }
 
-    /// Home's list in its pane, a line, then the session pane.
+    /// Home's list in its pane, a line, then the session pane; the session
+    /// pane alone while [`Self::list_collapsed`].
     fn two_pane_body(&mut self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
+        if self.list_collapsed(cx) {
+            let pane = self.session_pane(keyboard_up, cx);
+            return div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .child(div().flex_1().min_w_0().h_full().child(pane));
+        }
         let t = theme(cx);
         let list = div()
             .driver_id(|| "phone-list-pane".to_owned())
@@ -2196,8 +2235,8 @@ impl PhoneRoot {
     /// The sheets over the page, in order: Home's long-press sheet, the
     /// browser's folder sheet, the prompt sheet, the composer's Attach sheet,
     /// then the Linear card sheet Home raised; in two panes each covers its
-    /// own pane only. With them, whether any covers the session pane
-    /// ([`layer_covers_session`]).
+    /// own pane only, and spans the window while the list is collapsed. With
+    /// them, whether any covers the session pane ([`layer_covers_session`]).
     fn sheet_layers(
         &mut self,
         host_open: bool,
@@ -2205,7 +2244,8 @@ impl PhoneRoot {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> (Vec<Div>, bool) {
-        let split = self.split(host_open, cx);
+        // A collapsed list leaves the session pane the whole window.
+        let split = self.split(host_open, cx) && !self.list_collapsed(cx);
         let sheet = self
             .home_sheet_over(host_open, cx)
             .then(|| self.sheet_layer(padding.bottom, cx))
@@ -2254,12 +2294,12 @@ impl PhoneRoot {
     }
 
     /// Whether Home's long-press sheet may draw: in two panes over the
-    /// list while it shows; on one pane only over Home itself, with no
+    /// list while it shows and is not collapsed; on one pane only over Home itself, with no
     /// viewer, browser, session page, Settings or hosts screen under it. A
     /// terminal filling the screen counts as one pane.
     fn home_sheet_over(&self, host_open: bool, cx: &App) -> bool {
         if !self.one_pane(cx) {
-            return self.split(host_open, cx);
+            return self.split(host_open, cx) && !self.list_collapsed(cx);
         }
         let page_over_home = self.viewer.is_some()
             || self.browser.is_some()

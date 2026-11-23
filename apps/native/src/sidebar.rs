@@ -632,6 +632,11 @@ pub struct UiState {
     /// Manual with this off.
     #[serde(default)]
     pub phone_needs_you_first: bool,
+    /// Whether the phone in two panes hides Home's list while a session,
+    /// the viewer or the browser shows, so the session pane takes the whole
+    /// width; off unless saved on.
+    #[serde(default)]
+    pub phone_list_collapsed: bool,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -1575,6 +1580,7 @@ impl Default for UiState {
             phone_keys: None,
             phone_order: PhoneOrder::Manual,
             phone_needs_you_first: false,
+            phone_list_collapsed: false,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -2938,6 +2944,12 @@ impl SidebarModel {
     /// owner at each host's top.
     pub fn set_phone_needs_you_first(&mut self, on: bool) {
         self.ui.phone_needs_you_first = on;
+    }
+
+    /// Saves whether the phone in two panes hides Home's list beside a
+    /// shown session.
+    pub fn set_phone_list_collapsed(&mut self, on: bool) {
+        self.ui.phone_list_collapsed = on;
     }
 
     /// The look the interface draws in now: the six appearance fields.
@@ -7614,6 +7626,7 @@ pub(crate) mod tests {
             phone_keys: None,
             phone_order: PhoneOrder::Manual,
             phone_needs_you_first: false,
+            phone_list_collapsed: false,
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),
@@ -9406,6 +9419,39 @@ pub(crate) mod tests {
             "no order is named that: {text}"
         );
         assert!(load_ui_state(&dir.0).phone_needs_you_first, "and loads on");
+    }
+
+    #[test]
+    fn an_older_file_loads_the_list_shown() {
+        let dir = TestDir::new("list-collapsed-old");
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "phone_needs_you_first": true }"#).expect("write");
+
+        let loaded = load_ui_state(&dir.0);
+
+        assert!(
+            !loaded.phone_list_collapsed,
+            "a file without it shows the list"
+        );
+    }
+
+    #[test]
+    fn the_list_collapsed_switch_round_trips() {
+        let dir = TestDir::new("list-collapsed-round-trip");
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(
+            !model.ui_state().phone_list_collapsed,
+            "off unless saved on"
+        );
+
+        model.set_phone_list_collapsed(true);
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        assert!(
+            text.contains(r#""phone_list_collapsed": true"#),
+            "saved on: {text}"
+        );
+        assert!(load_ui_state(&dir.0).phone_list_collapsed, "and loads on");
     }
 
     #[test]

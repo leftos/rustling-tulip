@@ -108,6 +108,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   It holds how the phone's Home orders its sessions (`phone_order`): `"manual"`, `"alphabetical"` or `"desktop_tabs"`; absent, or a value that names none of them, loads as `"manual"`. Beside it, `phone_needs_you_first` (a boolean, absent means off) is the Sort sheet's "Needs you first" switch, which gathers each host's waiting sessions into a group at its top after the order runs. A v0.18.0-alpha file wrote `"phone_order": "needs_you_first"` as an order: it loads as Manual with the switch on and is saved that way, unless the file holds `phone_needs_you_first`, which wins.
 
+  It holds whether the phone in two panes hides Home's list beside a shown session (`phone_list_collapsed`, a boolean, the session header's `Hide list` / `Show list` button); absent means off, so an older file loads with the list shown.
+
   It holds the phone's key grid (`phone_keys`), in grid order: a list of `{"id", "label", "action"}` keys.
 
   An action is `{"kind": "send", "steps": [...]}`, each step `{"ctrl", "alt", "shift", "key"}` with a key of `{"kind": "char", "value": "b"}` or `{"kind": "named", "name": "page_up"}` — the named keys' own names, as in `esc`, `page_up`, `page_down` and `f1`.
