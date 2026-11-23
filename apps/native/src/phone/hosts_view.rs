@@ -425,7 +425,13 @@ fn host_row(root: &RootView, host: &SavedHost, not_paired: &HashSet<String>) -> 
     })
 }
 
-/// A button on the phone's ground, tagged `selector`.
+/// A phone button's padding left and right of its label, in px: narrower
+/// than [`ButtonSize::Large`]'s, so a label fits a phone's width whole.
+pub(crate) const PHONE_BUTTON_PAD_X: f32 = 10.0;
+
+/// A button on the phone's ground, tagged `selector`, with
+/// [`PHONE_BUTTON_PAD_X`] beside its label and at least a touch target
+/// wide; a row of equal shares overrides that with `min_w_0`.
 pub(super) fn phone_button(
     selector: &str,
     kind: ButtonKind,
@@ -443,6 +449,8 @@ pub(super) fn phone_button(
             &theme(cx),
         ),
     )
+    .px(px(PHONE_BUTTON_PAD_X))
+    .min_w(px(TOUCH_TARGET))
 }
 
 /// A field in its outlined box, tagged `selector`; a press anywhere on the

@@ -15,7 +15,7 @@ use super::home::{self, Tone};
 use super::home_view::{
     SIDE_PADDING, STATUS_TEXT_SIZE, TITLE_CHIP_GAP, TOUCH_TARGET, title_chip, tone_color,
 };
-use super::hosts_view::phone_button;
+use super::hosts_view::{PHONE_BUTTON_PAD_X, phone_button};
 use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::pasteboard::{self, PasteSpot};
@@ -24,7 +24,6 @@ use super::prompt_sheet;
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
 use super::{PhoneLayout, PhoneRoot};
-use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
 use crate::chat_view::{HandleAreas, HandleEnd, chat_available, composer_line_disables};
@@ -38,6 +37,7 @@ use crate::target::HostKey;
 use crate::term_input;
 use crate::text_input::SystemPaste;
 use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, UI_TEXT_SIZE};
 use protocol::{FEATURE_UPLOAD_FILE, ShiftEnter};
 
 /// The session page's Back button.
@@ -131,6 +131,10 @@ const KEYS_LABEL: &str = "Keys";
 const HIDE_LABEL: &str = "Hide";
 /// The room between the composer's rows, and between its buttons.
 const COMPOSER_GAP: f32 = 8.0;
+/// The padding left and right of each label in the composer's button row,
+/// in px: tighter than [`PHONE_BUTTON_PAD_X`], so five labels fit whole on
+/// a 402 pt phone.
+const COMPOSER_ROW_PAD_X: f32 = 6.0;
 /// What the composer's note row asks once the draft's Clear is tapped.
 const DRAFT_CLEAR_ASK: &str = "Clear the terminal's draft?";
 
@@ -752,6 +756,7 @@ impl PhoneRoot {
             .flex_1()
             .min_w(px(0.0))
             .py(px(6.0))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .child(input);
         let send = button(
             "phone-composer-send",
@@ -765,6 +770,8 @@ impl PhoneRoot {
                 &t,
             ),
         )
+        .px(px(PHONE_BUTTON_PAD_X))
+        .min_w(px(TOUCH_TARGET))
         .min_h(px(TOUCH_TARGET))
         .flex_none()
         .child(SEND_LABEL)
@@ -993,7 +1000,7 @@ impl PhoneRoot {
     }
 
     /// An outlined composer action tagged `selector` reading `label`, a
-    /// touch target tall, drawn dimmed unless `enabled`.
+    /// touch target tall and wide, drawn dimmed unless `enabled`.
     fn composer_action(
         selector: &str,
         label: &'static str,
@@ -1012,6 +1019,8 @@ impl PhoneRoot {
                 &theme(cx),
             ),
         )
+        .px(px(PHONE_BUTTON_PAD_X))
+        .min_w(px(TOUCH_TARGET))
         .min_h(px(TOUCH_TARGET))
         .flex_none()
         .child(label)
@@ -1043,10 +1052,16 @@ impl PhoneRoot {
             .gap(px(COMPOSER_GAP));
         for button in buttons_shown(keyboard_up, photos) {
             let drawn = phone_button(button.id(), ButtonKind::Outlined, cx)
+                .px(px(COMPOSER_ROW_PAD_X))
                 .min_h(px(TOUCH_TARGET))
                 .flex_1()
                 .min_w_0()
-                .child(div().truncate().child(button.label()));
+                .child(
+                    div()
+                        .driver_id(move || format!("{}-label", button.id()))
+                        .truncate()
+                        .child(button.label()),
+                );
             let drawn = match button {
                 ComposerButton::Paste => record_paste_bounds(
                     drawn.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1462,7 +1477,7 @@ impl PhoneRoot {
         div()
             .flex()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(8.0))
             .min_h(px(TOUCH_TARGET))
             .px(px(SIDE_PADDING))
             .py(px(6.0))

@@ -22,6 +22,7 @@ use protocol::{
     SessionSnapshot, ToolKind, ToolOutcome, WorkShell,
 };
 use rustling_tulip_native::chat::{self, RowShape};
+use rustling_tulip_native::fonts;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::pasteboard::FakePasteboard;
@@ -1869,6 +1870,23 @@ fn the_keys_dock_lists_the_grid_in_order(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_keys_docks_keys_are_44_px_wide(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+    h.click_on("phone-composer-keys");
+    assert!(drawn(&mut h, "phone-dock-keys"), "the dock opens");
+
+    for index in 0..=20 {
+        let key = format!("phone-key-{index}");
+        let bounds = h.bounds(&key);
+        assert!(
+            bounds.size.width >= touch_target(),
+            "{key} is a touch target wide: {bounds:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn the_keys_dock_opens_with_ctrl_unarmed(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
@@ -3068,6 +3086,90 @@ fn the_composer_row_keeps_hide_inside_it_with_the_keyboard_up(cx: &mut TestAppCo
     assert!(
         hide.right() <= row.right() + px(1.0),
         "Hide stays inside its row: {hide:?} in {row:?}"
+    );
+}
+
+/// The width of `label` shaped as a phone button draws it: the UI family,
+/// regular weight, at the button's 13 pt plus the UI text offset.
+fn button_label_width(h: &mut Harness<'_>, label: &str) -> Pixels {
+    h.cx.update(|window, cx| {
+        let run = gpui::TextRun {
+            len: label.len(),
+            font: gpui::Font {
+                weight: fonts::ui_weight(cx, gpui::FontWeight::NORMAL),
+                ..gpui::font(fonts::ui_family(cx))
+            },
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(
+                label.to_owned().into(),
+                fonts::ui_px(cx, 13.0),
+                &[run],
+                None,
+            )
+            .width
+    })
+}
+
+#[gpui::test]
+fn the_composer_row_fits_its_labels_at_402(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    // The iPhone 17's width, with its keyboard up: five buttons in the row.
+    h.cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
+    draw_insets(&mut h, Some(keyboard_insets(px(445.0))));
+
+    for (id, label) in [
+        ("paste", "Paste"),
+        ("photos", "Photos"),
+        ("quick", "Quick"),
+        ("keys", "Keys"),
+        ("hide", "Hide"),
+    ] {
+        let selector = format!("phone-composer-{id}");
+        let button = h.bounds(&selector);
+        let drawn_label = h.bounds(&format!("{selector}-label"));
+        let measured = button_label_width(&mut h, label);
+        // The row's buttons leave 6 px of padding and a 1 px border a side.
+        let room = button.size.width - px(2.0 * (6.0 + 1.0));
+        assert!(
+            measured <= room,
+            "{label} ({measured}) fits the {room} inside {button:?}"
+        );
+        assert!(
+            drawn_label.size.width + px(0.5) >= measured,
+            "{label} draws whole: {drawn_label:?} for its {measured}"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_composer_field_draws_at_the_chat_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![user("u1")]);
+
+    // One row at the chat's 12 pt (UI text offset 0), in the window's style.
+    let line = h.cx.update(|window, cx| {
+        let style = gpui::TextStyle {
+            font_size: fonts::ui_px(cx, 12.0).into(),
+            ..window.text_style()
+        };
+        style.line_height_in_pixels(window.rem_size())
+    });
+    // The field's 6 px above and below its row and its 1 px border; the
+    // frame is never less than 34 tall.
+    let framed = line + px(2.0 * (6.0 + 1.0));
+    let least = px(34.0);
+    let most = if framed > least { framed } else { least };
+    let field = h.bounds("phone-composer-field");
+    assert!(
+        field.size.height <= most + px(0.5),
+        "a one-row field at 12 pt is at most {most} tall: {field:?}"
     );
 }
 
