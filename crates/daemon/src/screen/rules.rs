@@ -23,6 +23,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use agent_api::{LineMatcher, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
 use protocol::AgentId;
 use regex::Regex;
+use unicode_width::UnicodeWidthChar;
 
 use super::Screen;
 
@@ -529,7 +530,7 @@ fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
     match region {
         ScreenRegion::BottomNonEmpty { rows } => screen.bottom_non_empty_lines(rows),
         ScreenRegion::BottomNonEmptyAboveTasks { rows } => {
-            last_non_empty_above_tasks(&screen.rows(), rows)
+            last_non_empty_above_tasks(&left_of_side_panel(screen.rows()), rows)
         }
         ScreenRegion::PromptBoxBody => screen.prompt_box_body(),
         ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
@@ -539,9 +540,79 @@ fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
             marker,
             or_marker,
             rows,
-        } => from_last_marked_row(&screen.rows(), marker, or_marker, rows),
+        } => from_last_marked_row(&left_of_side_panel(screen.rows()), marker, or_marker, rows),
         ScreenRegion::Unknown => Vec::new(),
     }
+}
+
+/// The character the right-hand file panel's left edge is drawn with.
+const PANEL_EDGE: char = '│';
+
+/// `rows` with a right-hand side panel cut off: when every non-empty row
+/// draws [`PANEL_EDGE`] in one cell column past the first, each row's text
+/// left of it, trailing spaces trimmed (a row holding only the edge becomes
+/// empty); otherwise `rows` as they are.
+fn left_of_side_panel(rows: Vec<String>) -> Vec<String> {
+    let Some(column) = side_panel_column(&rows) else {
+        return rows;
+    };
+    rows.into_iter()
+        .map(|row| {
+            let end = char_at_cell(&row, column).map_or(usize::MAX, |(index, _)| index);
+            let left: String = row.chars().take(end).collect();
+            left.trim_end().to_owned()
+        })
+        .collect()
+}
+
+/// The display cells `c` takes: two for a wide character, none for a
+/// combining mark.
+fn cells(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// The character `row` draws at cell column `column`, with its index among
+/// the row's characters; `None` when a wide character covers that cell or the
+/// row ends before it.
+fn char_at_cell(row: &str, column: usize) -> Option<(usize, char)> {
+    let mut cell = 0;
+    for (index, c) in row.chars().enumerate() {
+        let width = cells(c);
+        if width == 0 {
+            continue;
+        }
+        if cell == column {
+            return Some((index, c));
+        }
+        if cell > column {
+            return None;
+        }
+        cell += width;
+    }
+    None
+}
+
+/// The cell column of a side panel's edge: the first column past the first
+/// in which every non-empty row of `rows`, at least two of them, draws
+/// [`PANEL_EDGE`].
+fn side_panel_column(rows: &[String]) -> Option<usize> {
+    let mut drawn = rows.iter().filter(|row| !row.is_empty());
+    let first = drawn.next()?;
+    drawn.next()?;
+    first
+        .chars()
+        .scan(0, |cell, c| {
+            let at = *cell;
+            *cell += cells(c);
+            Some((at, c))
+        })
+        .filter(|&(at, c)| at > 0 && c == PANEL_EDGE)
+        .map(|(at, _)| at)
+        .find(|&column| {
+            rows.iter()
+                .filter(|row| !row.is_empty())
+                .all(|row| char_at_cell(row, column).is_some_and(|(_, c)| c == PANEL_EDGE))
+        })
 }
 
 /// The marks a task panel draws before one of its rows.
@@ -588,8 +659,20 @@ fn is_word_end(after: &str) -> bool {
         .is_none_or(|c| !c.is_alphanumeric() && c != '_')
 }
 
+/// Whether `row` is a task panel's one summary row of the tasks it leaves
+/// out: `… +2 tasks (open)`, `… +2 completed`.
+fn is_task_summary_row(row: &str) -> bool {
+    row.trim()
+        .strip_prefix("… +")
+        .and_then(|rest| rest.split_once(' '))
+        .is_some_and(|(count, words)| {
+            is_count(count) && words.chars().next().is_some_and(char::is_alphabetic)
+        })
+}
+
 /// The last `n` non-empty rows of `rows`, a trailing task panel left out:
-/// blank rows, then a run of task rows and the `N/M tasks done` header
+/// blank rows, then a run of task rows (with at most one summary row of the
+/// tasks it leaves out directly under them) and the `N/M tasks done` header
 /// directly above them. Without both a task row and its header there is no
 /// panel, and the rows read exactly as [`Screen::bottom_non_empty_lines`]
 /// gives them.
@@ -598,11 +681,15 @@ fn last_non_empty_above_tasks(rows: &[String], n: usize) -> Vec<String> {
     while end > 0 && rows[end - 1].is_empty() {
         end -= 1;
     }
-    let mut top = end;
+    let mut tasks_end = end;
+    if tasks_end > 0 && is_task_summary_row(&rows[tasks_end - 1]) {
+        tasks_end -= 1;
+    }
+    let mut top = tasks_end;
     while top > 0 && is_task_row(&rows[top - 1]) {
         top -= 1;
     }
-    if top < end && top > 0 && is_task_panel_header(&rows[top - 1]) {
+    if top < tasks_end && top > 0 && is_task_panel_header(&rows[top - 1]) {
         end = top - 1;
     }
     let mut lines: Vec<String> = rows[..end]
@@ -750,6 +837,121 @@ mod tests {
         );
         let done = rows_of(&["1. Submit answers", "1/1 task done", "  ✔ Fix it"]);
         assert_eq!(last_non_empty_above_tasks(&done, 2), ["1. Submit answers"]);
+        for summary in ["      … +2 tasks (open)", "      … +2 completed"] {
+            let rows = rows_of(&["1. Submit answers", "0/7 tasks done", "  ◻ a", summary]);
+            assert_eq!(last_non_empty_above_tasks(&rows, 2), ["1. Submit answers"]);
+        }
+    }
+
+    /// `text`, which takes `cells` cells, then a side panel's edge at cell 30.
+    fn beside_panel(text: &str, cells: usize) -> String {
+        format!("{text}{}│ notes2.md", " ".repeat(30 - cells))
+    }
+
+    #[test]
+    fn a_wide_character_left_of_the_panel_still_finds_it() {
+        let rows = vec![
+            beside_panel("● ✅ Done", 9),
+            beside_panel("● cafe\u{301} open", 11),
+            beside_panel("", 0),
+            beside_panel("❯ 1. Yes", 8),
+        ];
+        assert_eq!(
+            left_of_side_panel(rows),
+            ["● ✅ Done", "● cafe\u{301} open", "", "❯ 1. Yes"]
+        );
+    }
+
+    /// `lines` as a capture's text, one row each.
+    fn capture(lines: &[&str]) -> String {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    /// A reply row quoting the agents view's heading.
+    const QUOTED_AGENTS_VIEW: &str = "● The view said: Your session moved to the background · enter opens it · esc returns to it";
+
+    #[test]
+    fn a_quoted_agents_view_heading_does_not_pin_the_status() {
+        let rule = "─".repeat(60);
+        let idle = capture(&[
+            QUOTED_AGENTS_VIEW,
+            "",
+            &rule,
+            "❯ ",
+            &rule,
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+        assert_eq!(
+            read_claude(&screen_from(&idle)).verdict,
+            Verdict::State(ScreenState::Idle)
+        );
+        let question = capture(&[
+            QUOTED_AGENTS_VIEW,
+            "",
+            &rule,
+            " ☐ Keep",
+            "",
+            "Keep the file?",
+            "",
+            "❯ 1. Yes",
+            "  2. No",
+            "  3. Type something.",
+            &rule,
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]);
+        assert_eq!(
+            read_claude(&screen_from(&question)).verdict,
+            Verdict::State(ScreenState::AwaitingInput)
+        );
+    }
+
+    #[test]
+    fn rewind_with_code_changes_reads_as_its_overlay() {
+        let rewind = capture(&[
+            "  Rewind",
+            "",
+            "  Restore to the point before you sent this message:",
+            "",
+            "  │ fix the build",
+            "",
+            "  The conversation goes back to before this message.",
+            "",
+            "❯ 1. Restore code and conversation",
+            "  2. Restore conversation",
+            "  3. Restore code",
+            "  4. Summarize from here",
+            "  5. Summarize up to here",
+            "  6. Never mind",
+        ]);
+        let reading = read_claude(&screen_from(&rewind));
+        assert_eq!(reading.verdict, Verdict::Keep);
+        assert_eq!(reading.rule.as_deref(), Some("overlay_rewind_restore"));
+    }
+
+    #[test]
+    fn above_tasks_skips_only_one_summary_row_under_task_rows() {
+        let no_tasks = rows_of(&["1. Submit answers", "0/7 tasks done", "  … +2 tasks (open)"]);
+        assert_eq!(
+            last_non_empty_above_tasks(&no_tasks, 2),
+            ["0/7 tasks done", "  … +2 tasks (open)"]
+        );
+        let two = rows_of(&[
+            "1. Submit",
+            "0/7 tasks done",
+            "  ◻ a",
+            "  … +2 completed",
+            "  … +2 tasks (open)",
+        ]);
+        assert_eq!(
+            last_non_empty_above_tasks(&two, 2),
+            ["  … +2 completed", "  … +2 tasks (open)"]
+        );
+        let other = rows_of(&["1. Submit", "0/7 tasks done", "  ◻ a", "  … more"]);
+        assert_eq!(last_non_empty_above_tasks(&other, 2), ["  ◻ a", "  … more"]);
     }
 
     #[test]
@@ -811,6 +1013,21 @@ mod tests {
                 "v2318-subagent-running-w40",
                 include_str!("fixtures/v2318-subagent-running-w40.txt"),
                 "background_subagents",
+            ),
+            (
+                "claude--v2330-manual-mode-bg-shell",
+                include_str!("fixtures/claude--v2330-manual-mode-bg-shell.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2330-default-mode-setting-bg-shell",
+                include_str!("fixtures/claude--v2330-default-mode-setting-bg-shell.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2330-manual-mode-bg-shell-and-agent",
+                include_str!("fixtures/claude--v2330-manual-mode-bg-shell-and-agent.txt"),
+                "background_shell",
             ),
         ];
         for (name, text, rule) in shown {
@@ -1240,7 +1457,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 92] = [
+        let cases: [(&str, &str, Verdict); 112] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1683,6 +1900,106 @@ mod tests {
             (
                 "v2322-ask-vim-cancelled-idle-w120",
                 include_str!("fixtures/v2322-ask-vim-cancelled-idle-w120.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2330-file-panel-ask-w147x82",
+                include_str!("fixtures/claude--v2330-file-panel-ask-w147x82.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-review-tasks",
+                include_str!("fixtures/claude--v2330-ask-review-tasks.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-review-tasks-file-panel",
+                include_str!("fixtures/claude--v2330-ask-review-tasks-file-panel.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-multi-q1-tasks",
+                include_str!("fixtures/claude--v2330-ask-multi-q1-tasks.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-ask-multi-q1-tasks-file-panel",
+                include_str!("fixtures/claude--v2330-ask-multi-q1-tasks-file-panel.txt"),
+                State(AwaitingInput),
+            ),
+            (
+                "claude--v2330-background-after-second-left",
+                include_str!("fixtures/claude--v2330-background-after-second-left.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-background-left-while-working",
+                include_str!("fixtures/claude--v2330-background-left-while-working.txt"),
+                Keep,
+            ),
+            (
+                "v168-agent-view-left-background",
+                include_str!("fixtures/v168-agent-view-left-background.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-rewind-confirm",
+                include_str!("fixtures/claude--v2330-rewind-confirm.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-transcript-overlay-shortcuts",
+                include_str!("fixtures/claude--v2330-transcript-overlay-shortcuts.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-transcript-overlay-search",
+                include_str!("fixtures/claude--v2330-transcript-overlay-search.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-btw-pending",
+                include_str!("fixtures/claude--v2330-btw-pending.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-rewind-picker",
+                include_str!("fixtures/claude--v2330-rewind-picker.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-transcript-overlay",
+                include_str!("fixtures/claude--v2330-transcript-overlay.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-transcript-overlay-search-match",
+                include_str!("fixtures/claude--v2330-transcript-overlay-search-match.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-model-picker",
+                include_str!("fixtures/claude--v2330-model-picker.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-btw-answer",
+                include_str!("fixtures/claude--v2330-btw-answer.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-manual-mode-bg-shell",
+                include_str!("fixtures/claude--v2330-manual-mode-bg-shell.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2330-default-mode-setting-bg-shell",
+                include_str!("fixtures/claude--v2330-default-mode-setting-bg-shell.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2330-manual-mode-bg-shell-and-agent",
+                include_str!("fixtures/claude--v2330-manual-mode-bg-shell-and-agent.txt"),
                 State(Idle),
             ),
         ];

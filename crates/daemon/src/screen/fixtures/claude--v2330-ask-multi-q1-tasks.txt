@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude API
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt525\repo
+
+⚠ Code Mode (experimental) is off for this session, as you chose. To stop being asked, remove
+  CLAUDE_CODE_EXPERIMENTAL_CODE_MODE from your shell or settings.json.
+
+  Fable 5.2 is here for your longest and toughest coding tasks. It draws down usage faster than Opus 5.5. Switch with
+  /model.
+
+❯ Use your task list tool to create seven tasks named Task 1 through Task 7, all pending. Then call AskUserQuestion
+  once with two questions: "Color?" (header Color, options Red, Blue) and "Size?" (header Size, options Small, Large).
+  Nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Color  ☐ Size  ✔ Submit  →
+
+Color?
+
+❯ 1. Red
+     Choose red
+  2. Blue
+     Choose blue
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+  0/7 tasks done
+  ◻ Task 1
+  ◻ Task 2
+  ◻ Task 3
+  ◻ Task 4
+  ◻ Task 5
+  … +2 tasks (open)

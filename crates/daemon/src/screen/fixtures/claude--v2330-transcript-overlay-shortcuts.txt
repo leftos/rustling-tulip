@@ -1,0 +1,40 @@
+⚠ Code Mode (experimental) is off for this session, as you chose. To stop being asked, remove
+  CLAUDE_CODE_EXPERIMENTAL_CODE_MODE from your shell or settings.json.
+
+▎ Auto mode is now Claude Code's default permission mode.
+▎ Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and
+▎ prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+
+  Fable 5.2 is here for your longest and toughest coding tasks. It draws down usage faster than Opus 5.5. Switch with
+  /model.
+
+❯ /model
+  ⎿  Kept model as Haiku 5.5
+
+❯ /btw
+  ⎿  Usage: /btw <your question>
+
+❯ Call the AskUserQuestion tool once: one question "Which layout?", header "Layout", two options "Grid" and "List", and
+  give each option a preview field holding a 3-line ASCII sketch. Do nothing else.
+
+● Answered Claude's questions:
+  ⎿  · Which layout? → Grid
+  ⎿  1 PostToolUse hook ran
+
+                                                                                              03:16 PM claude-haiku-5-5
+● You picked Grid for the layout.
+
+✻ Baked for 2s · done 3:16 PM
+
+❯ Reply with the single word: ok
+
+                                                                                              03:16 PM claude-haiku-5-5
+● ok
+
+✻ Cooked for 0s · done 3:16 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  q/ctrl+o to exit     ctrl+u/d to move half a page    {/} to jump between prompts    [ to print to scrollback
+  ? to close           space/b to move a page          / to search                    v to open in notepad
+  ↑/↓/j/k to scroll    g/G to go to top/bottom         n/N to cycle matches

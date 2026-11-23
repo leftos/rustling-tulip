@@ -128,6 +128,64 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             verdict: ScreenVerdict::Keep,
         },
         ScreenRule {
+            name: "overlay_rewind_restore".to_string(),
+            priority: 990,
+            // Rewind's choice screen draws no footer; its options end the screen.
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            // Its option count depends on whether the code changed since the
+            // message, and a highlighted option may carry a hint after it.
+            matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?\d+\. Summarize up to here\b".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_transcript_shortcuts".to_string(),
+            priority: 990,
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            matcher: LineMatcher::Contains("q/ctrl+o to exit".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_transcript_search".to_string(),
+            priority: 990,
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            matcher: LineMatcher::Contains("⌕ Search transcript".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_btw_pending".to_string(),
+            priority: 990,
+            // A side question still being answered: its footer is the bare key.
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            matcher: LineMatcher::Regex(r"^\s*Esc to close\s*$".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_background_dialog".to_string(),
+            priority: 990,
+            // The "Background this session?" dialog older versions draw on Left Left.
+            region: ScreenRegion::BottomNonEmpty { rows: 4 },
+            matcher: LineMatcher::Regex(r"^\s*(?:❯\s*)?1\. Background anyway\b".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_agents_view".to_string(),
+            priority: 990,
+            // Claude's agents view, which Left Left moves the session to: its
+            // box is the view's own, not the session's. Its mode line under
+            // the box is the anchor, which no reply's text can reach.
+            region: ScreenRegion::AfterLastRule,
+            matcher: LineMatcher::Regex(
+                r"^\s*(?:(?:⏵⏵|⏸) )?.*· enter to return · space to reply\b".to_string(),
+            ),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
             name: "dialog_permission".to_string(),
             priority: 980,
             region: DIALOG_REGION,
@@ -351,6 +409,12 @@ mod tests {
                 ("overlay_model_picker", 990),
                 ("overlay_btw", 990),
                 ("overlay_rewind", 990),
+                ("overlay_rewind_restore", 990),
+                ("overlay_transcript_shortcuts", 990),
+                ("overlay_transcript_search", 990),
+                ("overlay_btw_pending", 990),
+                ("overlay_background_dialog", 990),
+                ("overlay_agents_view", 990),
                 ("dialog_permission", 980),
                 ("dialog_question", 980),
                 ("dialog_question_review", 980),
@@ -371,7 +435,7 @@ mod tests {
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 22);
+        assert_eq!(screen_rules().rules.len(), 28);
     }
 
     #[test]

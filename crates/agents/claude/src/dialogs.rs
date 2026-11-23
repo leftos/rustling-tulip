@@ -20,6 +20,8 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use unicode_width::UnicodeWidthChar;
+
 use agent_api::{
     AnswerRecipe, AnswerRefusal, DraftReading, Key, KeyHolder, RecipeStep, ScreenExpect,
     ScreenWork, ViewGoal, ViewReading, ViewRefusal, ViewStep,
@@ -53,12 +55,17 @@ const OVERLAY_ROWS: usize = 4;
 /// The key line each overlay shows, and the name the chat gives it. An
 /// `AskUserQuestion` step whose options carry previews is one: the chat
 /// recognises it but does not answer it.
-const OVERLAYS: [(&str, &str); 4] = [
+const OVERLAYS: [(&str, &str); 5] = [
     ("Showing detailed transcript", "transcript"),
     ("f to fork · Esc to close", "btw"),
     ("Enter to continue · Esc to cancel", "rewind"),
     ("· n to add notes ·", "question_preview"),
+    // The "Background this session?" dialog older versions draw on Left Left.
+    ("1. Background anyway", "background"),
 ];
+
+/// The character the right-hand file panel's left edge is drawn with.
+const PANEL_EDGE: char = '│';
 
 /// The mark of a question tab not yet answered.
 const TAB_OPEN: char = '☐';
@@ -118,8 +125,11 @@ enum Parsed {
     HalfDrawn,
 }
 
-/// What the screen whose visible rows are `rows` shows the chat.
+/// What the screen whose visible rows are `rows` shows the chat; a
+/// right-hand file panel is left out, so a dialog drawn beside it reads.
 pub(crate) fn read(rows: &[String]) -> ChatScreen {
+    let left = left_of_side_panel(rows);
+    let rows = left.as_deref().unwrap_or(rows);
     if let Some(prompt) = parse_model_picker(rows) {
         return ChatScreen {
             composer: ComposerState::Dialog,
@@ -159,11 +169,105 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     }
 }
 
+/// The display cells `c` takes: two for a wide character, none for a
+/// combining mark.
+fn cells(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// The character `row` draws at cell column `column`, with its index among
+/// the row's characters; `None` when a wide character covers that cell or the
+/// row ends before it.
+fn char_at_cell(row: &str, column: usize) -> Option<(usize, char)> {
+    let mut cell = 0;
+    for (index, c) in row.chars().enumerate() {
+        let width = cells(c);
+        if width == 0 {
+            continue;
+        }
+        if cell == column {
+            return Some((index, c));
+        }
+        if cell > column {
+            return None;
+        }
+        cell += width;
+    }
+    None
+}
+
+/// Each row's length in characters left of a right-hand side panel's edge,
+/// when one is drawn: every non-empty row, at least two of them, draws
+/// [`PANEL_EDGE`] in one cell column past the first. `None` when no panel is
+/// drawn.
+fn side_panel_ends(rows: &[String]) -> Option<Vec<usize>> {
+    let mut drawn = rows.iter().filter(|row| !row.trim().is_empty());
+    let first = drawn.next()?;
+    drawn.next()?;
+    let column = first
+        .chars()
+        .scan(0, |cell, c| {
+            let at = *cell;
+            *cell += cells(c);
+            Some((at, c))
+        })
+        .filter(|&(at, c)| at > 0 && c == PANEL_EDGE)
+        .map(|(at, _)| at)
+        .find(|&column| {
+            rows.iter()
+                .filter(|row| !row.trim().is_empty())
+                .all(|row| char_at_cell(row, column).is_some_and(|(_, c)| c == PANEL_EDGE))
+        })?;
+    Some(
+        rows.iter()
+            .map(|row| char_at_cell(row, column).map_or(usize::MAX, |(index, _)| index))
+            .collect(),
+    )
+}
+
+/// `rows`, each cut to the length `ends` gives it (a row past `ends` whole),
+/// trailing spaces trimmed.
+fn cut_rows(rows: &[String], ends: &[usize]) -> Vec<String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let end = ends.get(index).copied().unwrap_or(usize::MAX);
+            let left: String = row.chars().take(end).collect();
+            left.trim_end().to_owned()
+        })
+        .collect()
+}
+
+/// `rows` with a right-hand side panel cut off, when one is drawn; `None`
+/// when none is.
+fn left_of_side_panel(rows: &[String]) -> Option<Vec<String>> {
+    side_panel_ends(rows).map(|ends| cut_rows(rows, &ends))
+}
+
+/// `rows` and `dim` with a right-hand side panel cut off both, at the
+/// column `rows` draws its edge in (`dim` lines up with `rows` character for
+/// character); `None` when no panel is drawn.
+fn without_side_panel(rows: &[String], dim: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    let ends = side_panel_ends(rows)?;
+    Some((cut_rows(rows, &ends), cut_rows(dim, &ends)))
+}
+
+/// `rows` and `dim`, or the copies `cut` holds with a side panel cut off.
+fn panel_cut<'a>(
+    rows: &'a [String],
+    dim: &'a [String],
+    cut: Option<&'a (Vec<String>, Vec<String>)>,
+) -> (&'a [String], &'a [String]) {
+    cut.map_or((rows, dim), |(rows, dim)| (rows.as_slice(), dim.as_slice()))
+}
+
 /// [`read`] of `rows`, `dim` being `rows` with every character not drawn dim
 /// replaced by a space: a box holding only the agent's suggested next
 /// prompt, drawn dim, is a suggestion rather than a draft, or working while
-/// a spinner shows above it.
+/// a spinner shows above it. A right-hand side panel is cut off both.
 pub(crate) fn read_styled(rows: &[String], dim: &[String]) -> ChatScreen {
+    let cut = without_side_panel(rows, dim);
+    let (rows, dim) = panel_cut(rows, dim, cut.as_ref());
     let mut screen = read(rows);
     if screen.composer == ComposerState::Draft
         && let Some((top, text)) = suggestion(rows, dim)
@@ -178,8 +282,11 @@ pub(crate) fn read_styled(rows: &[String], dim: &[String]) -> ChatScreen {
 }
 
 /// [`read_view`] of `rows`, `dim` as in [`read_styled`]: a box holding only
-/// the agent's dim suggestion shows no first line.
+/// the agent's dim suggestion shows no first line. A right-hand side panel
+/// is cut off both.
 pub(crate) fn read_view_styled(rows: &[String], dim: &[String]) -> ViewReading {
+    let cut = without_side_panel(rows, dim);
+    let (rows, dim) = panel_cut(rows, dim, cut.as_ref());
     let mut view = read_view(rows);
     if suggestion(rows, dim).is_some() {
         view.box_first_line = None;
@@ -208,8 +315,11 @@ fn box_rules(rows: &[String]) -> Option<(usize, usize)> {
 /// of them. A row takes the next one with it when the box wrapped it at its
 /// inner width (Ink wraps at a word boundary, and a row's wrap flag does not
 /// tell that from a newline the user typed); otherwise the two are separate
-/// lines, and a blank row is a new empty one.
+/// lines, and a blank row is a new empty one. A right-hand side panel is cut
+/// off `rows` and `dim` first.
 pub(crate) fn read_draft(rows: &[String], dim: &[String]) -> Option<DraftReading> {
+    let cut = without_side_panel(rows, dim);
+    let (rows, dim) = panel_cut(rows, dim, cut.as_ref());
     let (top, bottom) = box_rules(rows)?;
     if suggestion(rows, dim).is_some() {
         return None;
@@ -3960,6 +4070,51 @@ mod tests {
             }
         );
         assert_eq!(read_view_styled(&screen, &dim).box_first_line, None);
+    }
+
+    /// `text`, which takes `cells` cells, then a side panel's edge at cell 70.
+    fn beside_panel(text: &str, cells: usize) -> String {
+        format!("{text}{}│ notes2.md", " ".repeat(70 - cells))
+    }
+
+    /// `screen`, whose rows take one cell per character, with a side panel
+    /// drawn right of it.
+    fn with_panel(screen: &[String]) -> Vec<String> {
+        screen
+            .iter()
+            .map(|row| beside_panel(row, row.chars().count()))
+            .collect()
+    }
+
+    #[test]
+    fn a_wide_character_left_of_the_panel_still_finds_it() {
+        let mut screen = with_panel(&boxed(&["✻ Cogitated for 1s · done 10:53 PM"], &["❯ "]));
+        screen.insert(0, beside_panel("● ✅ Done", 9));
+        screen.insert(1, beside_panel("● cafe\u{301} open", 11));
+        assert_eq!(read(&screen).composer, ComposerState::Ready);
+    }
+
+    #[test]
+    fn a_dim_suggestion_beside_the_panel_reads_as_a_suggestion() {
+        let (screen, dim) = styled_box(SUGGESTION, true);
+        let screen = with_panel(&screen);
+        assert_eq!(
+            read_styled(&screen, &dim).composer,
+            ComposerState::Suggestion {
+                text: SUGGESTION.to_owned()
+            }
+        );
+        assert_eq!(read_view_styled(&screen, &dim).box_first_line, None);
+    }
+
+    #[test]
+    fn a_draft_beside_the_panel_reads_back() {
+        let (screen, _) = styled_box("fix the build", false);
+        let screen = with_panel(&screen);
+        assert_eq!(
+            draft_of(&screen).map(|draft| draft.text),
+            Some("fix the build".to_owned())
+        );
     }
 
     /// `dim` with the character at `column` of its one dim row blanked: a

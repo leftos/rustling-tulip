@@ -85,6 +85,8 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"
+# The cells a row's characters take, to find the file panel's edge column.
+unicode-width = { workspace = true }
 sha2 = "0.10"
 # Web Push (`push/`): the RFC 8292 VAPID JWT (ES256) and the receiver keys the
 # push tests build. Pure Rust, so no `aws-lc-sys`.

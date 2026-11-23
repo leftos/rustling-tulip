@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  New sessions: Haiku 5.5 · medium effort · X:\dev\rustling-tulip\.tmp\rt525\repo
+ ▝▝   ▝▝   1 awaiting input
+
+  Your session moved to the background · enter opens it · esc returns to it · ctrl+c twice exits and it keeps running
+
+  Needs input
+  Sessions that have a question or need your decision land here
+❯ ✻ AskUserQuestion layout preview  ok                                                                                0s
+
+  Working
+  Sessions at work, even after you exit. New ones default to a git worktree
+
+  Completed
+  Finished sessions wait here for you to review
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  A different way to work with Claude: hand off a bigger task than you would chat through, and Claude organizes it in
+  the sections above so you know when it needs you.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode · enter to return · space to reply · ctrl+x to remove · ? for shortcuts

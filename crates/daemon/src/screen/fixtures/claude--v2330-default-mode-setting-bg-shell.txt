@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude API
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt525\repo
+
+⚠ Code Mode (experimental) is off for this session, as you chose. To stop being asked, remove
+  CLAUDE_CODE_EXPERIMENTAL_CODE_MODE from your shell or settings.json.
+
+  Fable 5.2 is here for your longest and toughest coding tasks. It draws down usage faster than Opus 5.5. Switch with
+  /model.
+
+❯ Run the Bash command sleep 300 with run_in_background true, then end your turn with one word.
+
+  Ran 1 shell command
+
+● Background sleep 300 is running.
+
+✻ Brewed for 2s · done 3:25 PM · 1 shell still running
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · 1 shell · ↓ to manage

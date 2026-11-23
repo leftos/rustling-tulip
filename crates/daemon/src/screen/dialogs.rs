@@ -1425,6 +1425,22 @@ mod tests {
                 ),
             ),
             (
+                "claude--v2330-file-panel-ask-w147x82",
+                include_str!("fixtures/claude--v2330-file-panel-ask-w147x82.txt"),
+                question(
+                    "Keep the file?",
+                    &[(1, "Yes"), (2, "No"), (3, "Type something")],
+                    Some(1),
+                    None,
+                    &[("Keep", false, true)],
+                ),
+            ),
+            (
+                "v168-agent-view-left-background",
+                include_str!("fixtures/v168-agent-view-left-background.txt"),
+                overlay("background"),
+            ),
+            (
                 "v43-ask-submitted",
                 include_str!("fixtures/v43-ask-submitted.txt"),
                 no_prompt(Ready),
@@ -1861,6 +1877,7 @@ mod tests {
                 "v168",
                 include_str!("fixtures/v168-agent-view-left-background.txt"),
                 ViewReading {
+                    dialog: true,
                     panel_in_view: None,
                     ..main_view(&[])
                 },

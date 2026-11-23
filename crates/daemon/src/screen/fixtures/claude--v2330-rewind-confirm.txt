@@ -1,0 +1,40 @@
+▎ prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+  1 more notice hidden (ctrl+o to expand)
+
+❯ /model
+  ⎿  Kept model as Haiku 5.5
+
+❯ /btw
+  ⎿  Usage: /btw <your question>
+
+❯ Call the AskUserQuestion tool once: one question "Which layout?", header "Layout", two options "Grid" and "List", and
+  give each option a preview field holding a 3-line ASCII sketch. Do nothing else.
+
+● Answered Claude's questions:
+  ⎿  · Which layout? → Grid
+
+● You picked Grid for the layout.
+
+✻ Baked for 2s · done 3:16 PM
+
+❯ Reply with the single word: ok
+
+● ok
+
+✻ Cooked for 0s · done 3:16 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Rewind
+
+  Restore to the point before you sent this message:
+
+  │ Reply with the single word: ok
+  │ (17s ago)
+
+  The conversation goes back to before this message.
+  The code will be unchanged.
+
+  ❯ 1. Restore conversation
+    2. Summarize from here
+    3. Summarize up to here
+    4. Never mind

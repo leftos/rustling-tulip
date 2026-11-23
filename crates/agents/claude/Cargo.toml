@@ -47,6 +47,8 @@ tracing = { workspace = true }
 # The NFC form of the config dir that Claude Code hashes for its Keychain
 # service name.
 unicode-normalization = "0.1.26"
+# The cells a row's characters take, to find the file panel's edge column.
+unicode-width = { workspace = true }
 uuid = { workspace = true }
 # Zeroes the transports' response buffers, which may hold tokens.
 zeroize = "1.9.0"

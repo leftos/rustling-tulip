@@ -115,6 +115,12 @@ More a real-Claude rig needs:
 - Real hook payloads can be captured with a hook in the isolated Claude home's own `settings.json`.
 - Submit text with `send --keys` and then a separate `<Enter>`: `send --raw` arrives as a paste and does not submit.
 - A daemon CLI verb started through `cmd /c` mangles `<Enter>`.
+- In a PowerShell capture script `$d` and `$D` are the same variable, since PowerShell names are case-insensitive.
+- The `<Backspace>` key name does nothing in Claude's input box; the byte `\x7f` erases.
+- Esc in the ctrl+o transcript overlay closes it entirely, not one sub-screen at a time.
+- A bare `/btw` prints only its usage line, so give it a question.
+- Claude Code 2.1.330 no longer shows the "Background this session?" dialog: Left Left opens Claude's own sessions list. Backgrounding hands the session to Claude's own background host (`claude daemon run`), which keeps running after `rustling-tulipd kill`.
+- 2.1.330 draws the default permission mode as `⏸ manual mode on`; the `claude--v2330-*.txt` fixtures in `crates/daemon/src/screen/fixtures/` are captures of it.
 
 Sending `/compact` to a session from Git Bash needs `MSYS_NO_PATHCONV=1`, or the shell rewrites the leading `/` into a Windows path.
 
