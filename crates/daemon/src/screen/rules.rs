@@ -1457,7 +1457,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 113] = [
+        let cases: [(&str, &str, Verdict); 117] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1751,6 +1751,26 @@ mod tests {
                 "v152-learn-more",
                 include_str!("fixtures/v152-learn-more.txt"),
                 Keep,
+            ),
+            (
+                "v2319-heads-up-one-moment",
+                include_str!("fixtures/v2319-heads-up-one-moment.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-explained",
+                include_str!("fixtures/v2319-heads-up-explained.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-dismissed",
+                include_str!("fixtures/v2319-heads-up-dismissed.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-quoted-synthesized",
+                include_str!("fixtures/v2319-heads-up-quoted-synthesized.txt"),
+                State(Idle),
             ),
             (
                 "claude--menu-model-picker",

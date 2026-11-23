@@ -282,7 +282,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "overlay_heads_up".to_string(),
             priority: 960,
             region: ScreenRegion::AbovePromptBox { rows: 24 },
-            matcher: LineMatcher::Contains("✦ Heads up ·".to_string()),
+            matcher: LineMatcher::Regex(r"^✦ Heads up ·".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::Keep,
         },
@@ -290,7 +290,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "overlay_you_should_know".to_string(),
             priority: 960,
             region: ScreenRegion::AbovePromptBox { rows: 24 },
-            matcher: LineMatcher::Contains("✦ You should know ·".to_string()),
+            matcher: LineMatcher::Regex(r"^✦ You should know ·".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::Keep,
         },
@@ -298,7 +298,15 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             name: "overlay_heads_up_dismissed".to_string(),
             priority: 960,
             region: ScreenRegion::AbovePromptBox { rows: 24 },
-            matcher: LineMatcher::Contains("✦ Dismissed.   ".to_string()),
+            matcher: LineMatcher::Regex(r"^✦ Dismissed\.   ".to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
+            name: "overlay_heads_up_one_moment".to_string(),
+            priority: 960,
+            region: ScreenRegion::AbovePromptBox { rows: 24 },
+            matcher: LineMatcher::Regex(r"^✦ One moment…\s*$".to_string()),
             not: Vec::new(),
             verdict: ScreenVerdict::Keep,
         },
@@ -427,6 +435,7 @@ mod tests {
                 ("overlay_heads_up", 960),
                 ("overlay_you_should_know", 960),
                 ("overlay_heads_up_dismissed", 960),
+                ("overlay_heads_up_one_moment", 960),
                 ("idle_interrupted", 950),
                 ("idle_prompt_box", 940),
                 ("background_shell", 930),
@@ -435,7 +444,7 @@ mod tests {
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 28);
+        assert_eq!(screen_rules().rules.len(), 29);
     }
 
     #[test]

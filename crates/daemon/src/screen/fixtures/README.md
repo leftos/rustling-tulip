@@ -26,6 +26,8 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v152-heads-up-collapsed.txt` is the one capture made by hand: `v152-learn-more.txt` with the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`, since no capture of the collapsed notice exists.
 
+`v2319-heads-up-quoted-synthesized.txt` is `v2319-heads-up-explained.txt` with the rows above its prompt box replaced by a reply quoting the notice's titles, its key row and `✦ One moment…`, each indented under the reply row: a quoted title is transcript, not the notice, so the idle box reads.
+
 `v03-ready-quoting-question-footer--synthesized.txt` is `v03-ready.txt` with a user prompt and a reply quoting a question's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`) written into the blank rows above the idle box: a quoted footer is transcript, not a dialog.
 
 `v03-ready-quoting-review--synthesized.txt` is the same screen with the reply quoting the review step instead (`Ready to submit your answers?` and its `❯ 1. Submit answers` / `2. Cancel` options), and `v03-ready-draft-under-review-quote--synthesized.txt` is that screen with a draft `1. fix the test` in the box: a quoted review is transcript, not a dialog, and so is a draft under one. `v03-ready-draft-submit-under-review-quote--synthesized.txt` is that screen with a draft whose box row is `❯ 1. Submit answers`, which matches the review's option row: the input box's border under it vetoes the review rule, so it reads as a draft, not a review.

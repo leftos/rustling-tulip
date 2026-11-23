@@ -1,0 +1,11 @@
+⏺ The notice said:
+  ✦ Heads up · Note number 6 says a nightly job posts your files to a shared drive.
+  1: Understood   2: Chat in main session   0: Dismiss
+  ✦ You should know · something
+  ✦ Dismissed.   1: That was helpful
+  ✦ One moment…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

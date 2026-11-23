@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Session status stays right on Claude Code 2.1.330 with its file panel open, a long task list, or Rewind, transcript, /btw and sessions screens up.
+- A Heads up notice quoted in Claude's reply no longer keeps a session's status from updating, and a notice's "One moment…" no longer reads as idle.
 - When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - On the phone, tapping a path that cannot be fetched, or whose fetch fails, now says why on the session page instead of showing nothing.
 - On the phone, the hosts screen a first run adds its first host on now scrolls, so Add stays reachable above the keyboard.
