@@ -2416,6 +2416,7 @@ mod tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }
     }
 
@@ -3853,7 +3854,7 @@ mod strip_tests {
             "our own send in flight reads as sending"
         );
         let overlay = ComposerState::Overlay {
-            name: "question_preview".to_owned(),
+            name: "background".to_owned(),
         };
         assert_eq!(
             composer_note(true, Some(&overlay), false, false, None).map(|note| note.text()),
@@ -3908,6 +3909,7 @@ mod strip_tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }
     }
 

@@ -3925,6 +3925,11 @@ pub struct ChatPrompt {
     /// It is not part of the prompt's identity: moving it keeps the card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjust: Option<String>,
+    /// The focused option's preview, as plain rows joined by newlines, when
+    /// the dialog draws one beside its options; empty when the dialog offers
+    /// previews but the focused option has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// What kind of prompt a [`ChatPrompt`] is, which picks its card layout.
@@ -18129,6 +18134,7 @@ mod tests {
                 multi: true,
                 cursor: Some(2),
                 adjust: None,
+                preview: None,
             }),
         }
     }
@@ -20229,6 +20235,7 @@ mod tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         };
         let bare = serde_json::to_string(&prompt).expect("encode");
         assert!(!bare.contains("adjust"), "{bare}");
@@ -20237,6 +20244,38 @@ mod tests {
         prompt.adjust = Some("High effort".to_owned());
         let json = serde_json::to_string(&prompt).expect("encode");
         assert!(json.contains(r#""adjust":"High effort""#), "{json}");
+        let back: ChatPrompt = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, prompt);
+    }
+
+    #[test]
+    fn chat_prompt_preview_round_trips_and_defaults_to_none() {
+        let mut prompt = ChatPrompt {
+            id: "p1".to_owned(),
+            kind: ChatPromptKind::Question,
+            subject: "Which layout?".to_owned(),
+            body: String::new(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: Some(1),
+            adjust: None,
+            preview: None,
+        };
+        let bare = serde_json::to_string(&prompt).expect("encode");
+        assert!(!bare.contains("preview"), "{bare}");
+        let back: ChatPrompt = serde_json::from_str(&bare).expect("decode");
+        assert_eq!(back.preview, None);
+        prompt.preview = Some("+--+\n| A |\n+--+".to_owned());
+        let json = serde_json::to_string(&prompt).expect("encode");
+        assert!(json.contains(r#""preview":"+--+\n| A |\n+--+""#), "{json}");
+        let back: ChatPrompt = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, prompt);
+        prompt.preview = Some(String::new());
+        let json = serde_json::to_string(&prompt).expect("encode");
+        assert!(json.contains(r#""preview":"""#), "{json}");
         let back: ChatPrompt = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, prompt);
     }

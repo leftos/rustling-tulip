@@ -1530,6 +1530,7 @@ fn prompt(id: &str, kind: ChatPromptKind, list: &[(u32, &str)]) -> ChatPrompt {
         multi: false,
         cursor: None,
         adjust: None,
+        preview: None,
     }
 }
 

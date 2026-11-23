@@ -721,6 +721,7 @@ fn sheet_prompt(id: &str, kind: ChatPromptKind, list: &[(u32, &str)]) -> ChatPro
         multi: false,
         cursor: None,
         adjust: None,
+        preview: None,
     }
 }
 

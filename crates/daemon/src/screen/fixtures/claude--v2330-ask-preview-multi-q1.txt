@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   X:\dev\.tmp\rt-525-cap\repo
+
+
+❯ PREVIEW1 ask me the layout question
+
+● Answered Claude's questions:
+  ⎿  · Which layout? → List
+
+● Mock: got the tool result.
+
+✻ Churned for 0s · done 9:46 PM
+
+❯ PREVIEW2 ask me two questions
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Layout  ☐ Theme  ✔ Submit  →
+
+Which layout?
+
+❯ 1. Grid                         ┌──────────────────────────────────────────┐
+  2. List                         │ +--------+                               │
+                                  │ | A  B   |                               │
+                                  │ | C  D   |                               │
+                                  │ | E  F   |                               │
+                                  │ +--------+                               │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel
+
+
+
+

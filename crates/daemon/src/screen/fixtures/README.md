@@ -69,6 +69,16 @@ What the captures measured about the box, which the draft reader and the clear r
 
 `claude--v2.1.330-subagent-running-past-1m.txt` and `claude--v2.1.330-subagent-running-past-2m.txt` are Claude Code 2.1.330 screens (120 columns) taken for RT-548 63.6 s and 126.4 s after a prompt started a subagent held open for 150 s: the agents panel's running row `◯ general-purpose  Long wait 1m 3s · ↑ 50 tokens`, and the same row at `2m 5s · ↑ 50 tokens`, under the footer `⏸ manual mode on · ? for shortcuts · ↓ to manage`.
 
+`claude--v2330-ask-preview3-first.txt` is a Claude Code 2.1.330 screen (120 columns) taken for RT-525: a one-question `AskUserQuestion` whose three options carry previews, the cursor on the first, its preview box drawn right of the options and `Notes: press n to add notes` under it. The preview question reads as a Question prompt whose `preview` is the box's text.
+
+`claude--v2330-ask-preview3-digit-2.txt` is the same dialog after the digit 2: on a previews step a digit only moves the cursor, so the second option and its preview show and the dialog stays up.
+
+`claude--v2330-ask-preview-multi-q1.txt` and `claude--v2330-ask-preview-multi-q2.txt` are the two questions of a two-question `AskUserQuestion` whose options carry previews, as Claude Code 2.1.330 draws them with a tab bar and `Tab to switch questions` in the footer; the second is drawn after the first is answered.
+
+`claude--v2330-ask-preview-multi-review.txt` is that dialog's review step, which draws no preview and reads as the usual Review prompt.
+
+`claude--v2330-ask-preview-first.txt` and `claude--v2330-ask-preview-down.txt` are a one-question previews dialog as Claude Code 2.1.330 draws it, before and after one Down: a six-row preview on the first option, a five-row one on the second.
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.

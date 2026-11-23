@@ -130,11 +130,10 @@ struct OverlayRow {
 }
 
 /// The overlays, the first whose key line is among the bottom rows winning.
-/// An `AskUserQuestion` step whose options carry previews is one: the chat
-/// recognises it but does not answer it. The transcript search's Esc goes
+/// The transcript search's Esc goes
 /// back to the transcript, whose own prompt then offers its Close; what Esc
 /// leads to on Rewind's choice screen is not known.
-static OVERLAYS: [OverlayRow; 9] = [
+static OVERLAYS: [OverlayRow; 8] = [
     OverlayRow {
         matched: OverlayMatch::Contains("Showing detailed transcript"),
         name: "transcript",
@@ -206,11 +205,6 @@ static OVERLAYS: [OverlayRow; 9] = [
             expect: ScreenExpect::Any,
         }),
     },
-    OverlayRow {
-        matched: OverlayMatch::Contains("· n to add notes ·"),
-        name: "question_preview",
-        close: None,
-    },
     // The "Background this session?" dialog older versions draw on Left Left.
     OverlayRow {
         matched: OverlayMatch::Contains("1. Background anyway"),
@@ -251,6 +245,20 @@ const NEXT_ROW: &str = "Next";
 /// The start of a question step's footer.
 const QUESTION_FOOTER: &str = "Enter to select";
 
+/// The hint a question step's footer carries when its options have previews.
+const NOTES_HINT: &str = "n to add notes";
+
+/// The hint a previews step's footer adds while a note is being typed.
+const NOTES_EDITOR: &str = "ctrl+g to edit";
+
+/// The start of the row under a previews step's box that holds its note.
+const NOTES_ROW: &str = "Notes:";
+
+/// The corners a question step draws its focused option's preview box with.
+const PREVIEW_TOP_LEFT: char = '┌';
+const PREVIEW_TOP_RIGHT: char = '┐';
+const PREVIEW_BOTTOM_LEFT: char = '└';
+
 /// The vim editor mode's marker heading a question's footer in insert mode.
 const VIM_INSERT_HEAD: &str = "-- INSERT -- · ";
 
@@ -277,10 +285,17 @@ const PLAN_FEEDBACK_LABEL: &str = "Tell Claude what to change";
 
 /// What a dialog parser found.
 enum Parsed {
-    /// The whole dialog.
-    Prompt(ChatPrompt),
+    /// The whole dialog, boxed so a half-drawn frame stays small.
+    Prompt(Box<ChatPrompt>),
     /// The dialog's header without its footer: a frame still being drawn.
     HalfDrawn,
+}
+
+impl Parsed {
+    /// The whole dialog `prompt`.
+    fn prompt(prompt: ChatPrompt) -> Self {
+        Self::Prompt(Box::new(prompt))
+    }
 }
 
 /// What the screen whose visible rows are `rows` shows the chat; a
@@ -317,7 +332,7 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
             composer: ComposerState::Dialog,
-            prompt: Some(prompt),
+            prompt: Some(*prompt),
         },
         Some(Parsed::HalfDrawn) => ChatScreen {
             composer: ComposerState::Dialog,
@@ -698,6 +713,7 @@ fn close_prompt(close: &OverlayClose, rows: &[String]) -> ChatPrompt {
         multi: false,
         cursor: None,
         adjust: None,
+        preview: None,
     }
 }
 
@@ -816,7 +832,7 @@ fn parse_permission(rows: &[String], start: usize) -> Option<Parsed> {
             .find_map(|prefix| option.label.strip_prefix(prefix))
             .map(str::to_owned)
     });
-    Some(Parsed::Prompt(ChatPrompt {
+    Some(Parsed::prompt(ChatPrompt {
         can_amend: rows[footer].contains("Tab to amend"),
         always_allow_tip,
         ..prompt(
@@ -873,7 +889,7 @@ fn parse_plan(rows: &[String], start: usize) -> Option<Parsed> {
         .find(|text| !text.is_empty())
         .unwrap_or_default()
         .to_owned();
-    Some(Parsed::Prompt(prompt(
+    Some(Parsed::prompt(prompt(
         ChatPromptKind::Plan,
         subject,
         text_block(&plan, indent),
@@ -921,7 +937,7 @@ fn parse_trust(rows: &[String], start: usize) -> Option<Parsed> {
         return Some(Parsed::HalfDrawn);
     }
     let (subject, body) = trust_text(rows, anchor, block_start);
-    Some(Parsed::Prompt(prompt(
+    Some(Parsed::prompt(prompt(
         ChatPromptKind::Trust,
         subject,
         body,
@@ -959,7 +975,7 @@ fn parse_mcp_server(rows: &[String], start: usize) -> Option<Parsed> {
         .iter()
         .map(String::as_str)
         .collect();
-    Some(Parsed::Prompt(prompt(
+    Some(Parsed::prompt(prompt(
         ChatPromptKind::McpServer,
         name,
         text_block(&notice, indent_of(&rows[anchor])),
@@ -1114,7 +1130,7 @@ fn parse_mcp_servers(rows: &[String], start: usize) -> Option<Parsed> {
     );
     prompt.multi = true;
     prompt.cursor = (!windowed).then_some(cursor);
-    Some(Parsed::Prompt(prompt))
+    Some(Parsed::prompt(prompt))
 }
 
 /// The title row of the dialog that offers auto mode as the default
@@ -1141,7 +1157,7 @@ fn parse_auto_mode(rows: &[String], start: usize) -> Option<Parsed> {
         .iter()
         .map(String::as_str)
         .collect();
-    Some(Parsed::Prompt(prompt(
+    Some(Parsed::prompt(prompt(
         ChatPromptKind::Confirm,
         AUTO_MODE_TITLE.to_owned(),
         text_block(&explanation, indent_of(&rows[anchor])),
@@ -1210,6 +1226,7 @@ fn parse_model_picker(rows: &[String]) -> Option<ChatPrompt> {
     }
     Some(ChatPrompt {
         adjust: effort_label(&rows[first + listed..]),
+        preview: None,
         ..prompt(
             ChatPromptKind::ModelPicker,
             PICKER_TITLE.to_owned(),
@@ -1346,7 +1363,7 @@ fn parse_switch_model(rows: &[String], start: usize) -> Option<Parsed> {
         .iter()
         .map(String::as_str)
         .collect();
-    Some(Parsed::Prompt(prompt(
+    Some(Parsed::prompt(prompt(
         ChatPromptKind::Confirm,
         SWITCH_MODEL_TITLE.to_owned(),
         text_block(&explanation, indent_of(&rows[anchor])),
@@ -1556,17 +1573,22 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
         .find(|&index| numbered(&rows[index]).is_some())
         .unwrap_or(end);
     let width = dialog_width(rows, bar, footer);
-    let found = question_options(&rows[first_option..end], width);
+    let footer = footer_text(rows, footer);
+    let Some((found, preview)) = options_and_preview(&rows[first_option..end], &footer, width)
+    else {
+        return Some(Parsed::HalfDrawn);
+    };
     if found.options.is_empty() {
         return Some(Parsed::HalfDrawn);
     }
     if let Some(tab) = tabs.iter_mut().find(|tab| !tab.answered) {
         tab.current = true;
     }
-    Some(Parsed::Prompt(ChatPrompt {
+    Some(Parsed::prompt(ChatPrompt {
         questions: tabs,
         multi: found.multi,
         cursor: found.cursor,
+        preview,
         ..prompt(
             ChatPromptKind::Question,
             question_text(&rows[title..first_option], width),
@@ -1598,14 +1620,19 @@ fn question_without_bar(rows: &[String]) -> Option<Parsed> {
     }
     let start = question_start(rows, first_option);
     let width = dialog_width(rows, start, footer);
-    let found = question_options(&rows[first_option..end], width);
+    let footer = footer_text(rows, footer);
+    let Some((found, preview)) = options_and_preview(&rows[first_option..end], &footer, width)
+    else {
+        return Some(Parsed::HalfDrawn);
+    };
     if found.options.is_empty() {
         return Some(Parsed::HalfDrawn);
     }
-    Some(Parsed::Prompt(ChatPrompt {
+    Some(Parsed::prompt(ChatPrompt {
         questions: Vec::new(),
         multi: found.multi,
         cursor: found.cursor,
+        preview,
         ..prompt(
             ChatPromptKind::Question,
             question_text(&rows[start..first_option], width),
@@ -1960,6 +1987,118 @@ fn question_options(rows: &[String], width: usize) -> QuestionOptions {
     found
 }
 
+/// A question step's options among `rows` (its first option down to its
+/// inner rule) and the focused option's preview; `None` while a note is
+/// being typed (the footer, `footer`, offers `ctrl+g to edit`), when keys
+/// go to the note. A step whose footer offers notes draws its preview column
+/// right of the options: each row is cut at that column (the box's left
+/// edge, else the `Notes:` row's) before the options are read, and the
+/// preview is the box's text, empty when the focused option draws no box.
+/// A step whose footer offers no notes has no preview.
+fn options_and_preview(
+    rows: &[String],
+    footer: &str,
+    width: usize,
+) -> Option<(QuestionOptions, Option<String>)> {
+    if !footer.contains(NOTES_HINT) {
+        return Some((question_options(rows, width), None));
+    }
+    if footer.contains(NOTES_EDITOR) {
+        return None;
+    }
+    let found = preview_box(rows);
+    let column = found
+        .as_ref()
+        .map(|found| found.left)
+        .or_else(|| notes_column(rows));
+    let options = match column {
+        Some(column) => question_options(&cut_at_cell(rows, column), width),
+        None => question_options(rows, width),
+    };
+    let preview = found
+        .map(|found| preview_text(rows, &found))
+        .unwrap_or_default();
+    Some((options, Some(preview)))
+}
+
+/// Where a previews step draws its focused option's box: the rows of its
+/// top and bottom edges and the cell columns of its left and right edges.
+struct PreviewBox {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+}
+
+/// The preview box among `rows`: the first row holding `┌` and `┐`, and
+/// the first row under it drawing `└` in the `┌` cell column.
+fn preview_box(rows: &[String]) -> Option<PreviewBox> {
+    let top = rows.iter().position(|row| row.contains(PREVIEW_TOP_LEFT))?;
+    let left = cell_of(&rows[top], PREVIEW_TOP_LEFT)?;
+    let right = cell_of(&rows[top], PREVIEW_TOP_RIGHT)?;
+    let bottom = (top + 1..rows.len()).find(|&index| {
+        char_at_cell(&rows[index], left).is_some_and(|(_, c)| c == PREVIEW_BOTTOM_LEFT)
+    })?;
+    Some(PreviewBox {
+        top,
+        bottom,
+        left,
+        right,
+    })
+}
+
+/// The cell column `row` first draws `target` in.
+fn cell_of(row: &str, target: char) -> Option<usize> {
+    let mut cell = 0;
+    for c in row.chars() {
+        if c == target {
+            return Some(cell);
+        }
+        cell += cells(c);
+    }
+    None
+}
+
+/// The cell column of a previews step's `Notes:` row, which lines up with
+/// the preview column when the focused option draws no box.
+fn notes_column(rows: &[String]) -> Option<usize> {
+    rows.iter()
+        .find(|row| row.trim_start().starts_with(NOTES_ROW))
+        .map(|row| indent_of(row))
+}
+
+/// `rows`, each cut left of cell column `column` (a row ending before it
+/// whole), trailing spaces trimmed.
+fn cut_at_cell(rows: &[String], column: usize) -> Vec<String> {
+    let ends: Vec<usize> = rows
+        .iter()
+        .map(|row| char_at_cell(row, column).map_or(usize::MAX, |(index, _)| index))
+        .collect();
+    cut_rows(rows, &ends)
+}
+
+/// The text inside `found`: each row between its top and bottom edges, cut
+/// between its left and right edges, one leading space taken off and
+/// trailing spaces trimmed, joined with newlines.
+fn preview_text(rows: &[String], found: &PreviewBox) -> String {
+    let lines: Vec<String> = rows[found.top + 1..found.bottom]
+        .iter()
+        .map(|row| {
+            let Some((start, _)) = char_at_cell(row, found.left) else {
+                return String::new();
+            };
+            let end = char_at_cell(row, found.right).map_or(usize::MAX, |(index, _)| index);
+            let inner: String = row.chars().take(end).skip(start + 1).collect();
+            inner
+                .strip_prefix(' ')
+                .unwrap_or(&inner)
+                .trim_end()
+                .to_owned()
+        })
+        .collect();
+    cap_body(lines.join("\n"))
+}
+
 /// `label` without a multi-select box, and whether the box is ticked;
 /// `None` for a label with no box.
 fn checkbox(label: &str) -> (Option<bool>, &str) {
@@ -2084,7 +2223,7 @@ fn review(
     let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
     let options = collect_options(&rows[first..end], |_| false);
     let width = dialog_width(rows, body.start, end);
-    Parsed::Prompt(ChatPrompt {
+    Parsed::prompt(ChatPrompt {
         questions: tabs,
         ..prompt(
             ChatPromptKind::Review,
@@ -2259,6 +2398,7 @@ fn prompt(
         multi: false,
         cursor,
         adjust: None,
+        preview: None,
     }
 }
 
@@ -2636,11 +2776,15 @@ fn server_row_move(prompt: &ChatPrompt, number: u32) -> Result<Option<RecipeStep
 /// a single-choice option (and moves on) or ticks a multi-select one; the
 /// arrows move between questions. While the cursor is on the `Type
 /// something` option every printable key goes into its field, so only
-/// `Submit` and `TypeSomething` are built then.
+/// `Submit` and `TypeSomething` are built then. A step whose options carry
+/// previews is answered by [`preview_recipe`].
 fn question_recipe(
     prompt: &ChatPrompt,
     answer: &ChatAnswerKind,
 ) -> Result<AnswerRecipe, AnswerRefusal> {
+    if prompt.preview.is_some() {
+        return preview_recipe(prompt, answer);
+    }
     let field_focused = prompt.cursor.is_some() && prompt.cursor == type_something_option(prompt);
     let keeps_field = matches!(
         answer,
@@ -2666,6 +2810,29 @@ fn question_recipe(
         ChatAnswerKind::Skip => Ok(one_step(vec![Key::Right], ScreenExpect::Any)),
         _ => Err(AnswerRefusal::NotThisDialog),
     }
+}
+
+/// The keys that pick option `number` of a question step whose options carry
+/// previews, where a digit only moves the cursor and no option is a `Type
+/// something` field: the arrows to the option, waiting for the cursor there,
+/// then Enter, waiting for the step to close. Nothing else is answered on
+/// such a step.
+fn preview_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    let ChatAnswerKind::Option { number } = answer else {
+        return Err(AnswerRefusal::NotThisDialog);
+    };
+    if prompt.multi {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    let mut steps: Vec<RecipeStep> = cursor_move(prompt, *number)?.into_iter().collect();
+    steps.push(RecipeStep {
+        keys: vec![Key::Enter],
+        expect: ScreenExpect::DialogGone,
+    });
+    Ok(AnswerRecipe { steps })
 }
 
 /// The number of a question's `Type something` option: always its last
@@ -3322,18 +3489,143 @@ mod tests {
         assert_eq!(screen.prompt.expect("the Close prompt").body, "");
     }
 
+    /// What a preview question's capture reads as: subject, option labels,
+    /// cursor and the focused option's preview.
+    type PreviewReading = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        u32,
+        &'static str,
+    );
+
+    const GRID_PREVIEW: &str = "+--------+\n| A  B   |\n| C  D   |\n| E  F   |\n+--------+";
+
+    /// The preview captures and what each reads as.
+    fn preview_readings() -> [PreviewReading; 9] {
+        let layout: &[&str] = &["Grid", "List"];
+        let style: &[&str] = &["Type hints", "Plain"];
+        let shape: &[&str] = &["An option label of some"; 3];
+        [
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview3-first.txt"
+                ),
+                "Which layout?",
+                &["Grid", "List", "Stack"],
+                1,
+                GRID_PREVIEW,
+            ),
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview3-digit-2.txt"
+                ),
+                "Which layout?",
+                &["Grid", "List", "Stack"],
+                2,
+                "+--------+\n| A      |\n| B      |\n| C      |\n+--------+",
+            ),
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview-multi-q1.txt"
+                ),
+                "Which layout?",
+                layout,
+                1,
+                GRID_PREVIEW,
+            ),
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview-multi-q2.txt"
+                ),
+                "Which theme?",
+                &["Light", "Dark"],
+                1,
+                "+--------+\n| light  |\n| #fff   |\n| bg     |\n+--------+",
+            ),
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview-first.txt"
+                ),
+                "Which layout?",
+                layout,
+                1,
+                "+-----+ +-----+ +-----+\n| [] | | [] | | [] |\n+-----+ +-----+ +-----+\n\
+                 +-----+ +-----+ +-----+\n| [] | | [] | | [] |\n+-----+ +-----+ +-----+",
+            ),
+            (
+                include_str!(
+                    "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview-down.txt"
+                ),
+                "Which layout?",
+                layout,
+                2,
+                "+------------------------+\n| [] Item one            |\n| [] Item two            |\n\
+                 | [] Item three          |\n+------------------------+",
+            ),
+            (
+                include_str!("../../../daemon/src/screen/fixtures/v39-ask-q3.txt"),
+                "Which code style should the functions use?",
+                style,
+                1,
+                "def add(a: float, b: float) -> float:\n    return a + b",
+            ),
+            (
+                include_str!("../../../daemon/src/screen/fixtures/v40-ask-q3-down.txt"),
+                "Which code style should the functions use?",
+                style,
+                2,
+                "def add(a, b):\n    return a + b",
+            ),
+            (
+                include_str!("../../../daemon/src/screen/fixtures/v2319-ask-preview-w120.txt"),
+                PREVIEW_W120_QUESTION,
+                shape,
+                1,
+                "fn shape() {\n    let a = 1;\n    let b = 2;\n    a + b\n}",
+            ),
+        ]
+    }
+
+    /// The question of `v2319-ask-preview-w120.txt`, read without its gutter.
+    const PREVIEW_W120_QUESTION: &str = "bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo ch?";
+
     #[test]
-    fn a_preview_question_overlay_has_no_close_prompt() {
-        let screen = read(&capture(include_str!(
-            "../../../daemon/src/screen/fixtures/v39-ask-q3.txt"
+    fn a_preview_question_reads_as_a_question_with_its_preview() {
+        for (text, subject, labels, cursor, preview) in preview_readings() {
+            let screen = read(&capture(text));
+            assert_eq!(screen.composer, ComposerState::Dialog, "{subject}");
+            let prompt = screen.prompt.expect("the preview question's prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::Question, "{subject}");
+            assert_eq!(prompt.subject, subject);
+            let read_labels: Vec<&str> = prompt
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect();
+            assert_eq!(read_labels, labels, "{subject}");
+            assert_eq!(prompt.cursor, Some(cursor), "{subject}");
+            assert_eq!(prompt.preview.as_deref(), Some(preview), "{subject}");
+        }
+        let notes = read(&capture(include_str!(
+            "../../../daemon/src/screen/fixtures/v41-ask-notes.txt"
         )));
-        assert_eq!(
-            screen.composer,
-            ComposerState::Overlay {
-                name: "question_preview".to_owned()
-            }
-        );
-        assert_eq!(screen.prompt, None);
+        assert_eq!(notes.composer, ComposerState::Dialog);
+        assert_eq!(notes.prompt, None, "a note being typed is no prompt");
+        let review = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-ask-preview-multi-review.txt"
+        ));
+        assert_eq!(review.kind, ChatPromptKind::Review);
+        assert_eq!(review.preview, None);
+        let plain = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/v31-ask-q1.txt"
+        ));
+        assert_eq!(plain.kind, ChatPromptKind::Question);
+        assert_eq!(plain.preview, None);
     }
 
     /// An idle 2.1.330 screen, whose prompt box is empty.
@@ -3476,6 +3768,7 @@ mod tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }
     }
 

@@ -5792,6 +5792,7 @@ fn permission_screen() -> ChatScreen {
             multi: false,
             cursor: Some(1),
             adjust: None,
+            preview: None,
         }),
     }
 }
@@ -5846,6 +5847,7 @@ fn question_screen() -> ChatScreen {
             multi: false,
             cursor: Some(1),
             adjust: None,
+            preview: None,
         }),
     }
 }
@@ -5875,6 +5877,7 @@ fn btw_screen() -> ChatScreen {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }),
     }
 }
@@ -5924,6 +5927,7 @@ fn model_picker_screen() -> ChatScreen {
             multi: false,
             cursor: Some(5),
             adjust: Some("Medium effort (default)".to_owned()),
+            preview: None,
         }),
     }
 }

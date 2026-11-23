@@ -1972,7 +1972,7 @@ mod tests {
             w.refused(
                 CHAT_REFUSED,
                 PROMPT_UNREADABLE,
-                "a preview question, whose dialog reads as an overlay",
+                "a preview question, whose wrapped option labels read shorter than the hook's",
             )
             .await;
         }

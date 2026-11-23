@@ -1949,9 +1949,10 @@ pub(crate) fn without_whitespace(text: &str) -> String {
 fn same_but_cursor(a: &ChatScreen, b: &ChatScreen) -> bool {
     // Outside a multi-select question an option is selected where the
     // cursor is, so its mark moves with the cursor. A model picker keeps
-    // both: its card fills the highlighted row.
+    // both: its card fills the highlighted row. So does a question whose
+    // options carry previews: its card shows the cursor's option's preview.
     let without_cursor = |prompt: &ChatPrompt| {
-        if prompt.kind == ChatPromptKind::ModelPicker {
+        if prompt.kind == ChatPromptKind::ModelPicker || prompt.preview.is_some() {
             return prompt.clone();
         }
         let mut prompt = prompt.clone();
@@ -2714,6 +2715,7 @@ mod tests {
                 multi: false,
                 cursor: Some(1),
                 adjust: None,
+                preview: None,
             }),
         }
     }
@@ -2734,6 +2736,7 @@ mod tests {
                 multi: false,
                 cursor: None,
                 adjust: None,
+                preview: None,
             }),
         }
     }
@@ -2871,6 +2874,7 @@ mod tests {
                 multi: false,
                 cursor: Some(cursor),
                 adjust: Some(adjust.to_owned()),
+                preview: None,
             }),
         };
         let picker = |cursor: u32, adjust: &str| {
@@ -2889,6 +2893,39 @@ mod tests {
         assert!(
             !same_but_cursor(&picker(1, "High effort"), &picker(1, "xHigh effort")),
             "a moved effort redraws the card"
+        );
+    }
+
+    #[test]
+    fn a_moved_cursor_on_a_preview_question_reads_as_a_changed_prompt() {
+        let screen = |cursor: u32, preview: Option<&str>| ChatScreen {
+            composer: protocol::ComposerState::Dialog,
+            prompt: Some(ChatPrompt {
+                id: "p1".to_owned(),
+                kind: protocol::ChatPromptKind::Question,
+                subject: "Which layout?".to_owned(),
+                body: String::new(),
+                options: Vec::new(),
+                questions: Vec::new(),
+                can_amend: false,
+                always_allow_tip: None,
+                multi: false,
+                cursor: Some(cursor),
+                adjust: None,
+                preview: preview.map(str::to_owned),
+            }),
+        };
+        assert!(
+            same_but_cursor(&screen(1, None), &screen(2, None)),
+            "a moved cursor alone is no change on a question without previews"
+        );
+        assert!(
+            !same_but_cursor(&screen(1, Some("+--+")), &screen(2, Some("+--+"))),
+            "a moved cursor on a preview question shows the new option's preview"
+        );
+        assert!(
+            !same_but_cursor(&screen(1, Some("")), &screen(2, Some(""))),
+            "a moved cursor on a preview question is a change even with no box drawn"
         );
     }
 
@@ -2915,6 +2952,7 @@ mod tests {
                 multi: false,
                 cursor: None,
                 adjust: None,
+                preview: None,
             }),
         };
         let mut state = ScreenState::default();

@@ -3057,6 +3057,12 @@ export interface ChatPrompt {
    * It is not part of the prompt's identity: moving it keeps the card.
    */
   adjust?: string | null;
+  /**
+   * The focused option's preview, as plain rows joined by newlines, when
+   * the dialog draws one beside its options; empty when the dialog offers
+   * previews but the focused option has none.
+   */
+  preview?: string | null;
 }
 
 /** What kind of prompt a [`ChatPrompt`] is, which picks its card layout. */

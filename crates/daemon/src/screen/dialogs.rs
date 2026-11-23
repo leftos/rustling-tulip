@@ -308,6 +308,8 @@ mod tests {
         body: Option<&'static str>,
         /// The label of the prompt's adjustable row.
         adjust: Option<&'static str>,
+        /// The focused option's preview of a previews step.
+        preview: Option<&'static str>,
     }
 
     /// A screen with no prompt and the input box in `composer`.
@@ -325,6 +327,7 @@ mod tests {
             tabs: Vec::new(),
             body: None,
             adjust: None,
+            preview: None,
         }
     }
 
@@ -379,6 +382,40 @@ mod tests {
         }
     }
 
+    /// A previews step under `tabs` whose focused option, `cursor`, shows
+    /// `preview`.
+    fn previewed(
+        subject: &'static str,
+        options: &[(u32, &'static str)],
+        cursor: u32,
+        tabs: &[(&'static str, bool, bool)],
+        preview: &'static str,
+    ) -> Expected {
+        Expected {
+            preview: Some(preview),
+            ..question(subject, options, Some(cursor), None, tabs)
+        }
+    }
+
+    /// The previews of the layout question's options in the 2.1.330 captures.
+    const GRID_PREVIEW: &str = "+--------+\n| A  B   |\n| C  D   |\n| E  F   |\n+--------+";
+    const LIST_PREVIEW: &str = "+--------+\n| A      |\n| B      |\n| C      |\n+--------+";
+    const LAYOUT_OPTIONS: [(u32, &str); 2] = [(1, "Grid"), (2, "List")];
+    const LAYOUT3_OPTIONS: [(u32, &str); 3] = [(1, "Grid"), (2, "List"), (3, "Stack")];
+    const STYLE_OPTIONS: [(u32, &str); 2] = [(1, "Type hints"), (2, "Plain")];
+    const STYLE_TABS: [(&str, bool, bool); 3] = [
+        ("Next fn", true, false),
+        ("Tests", true, false),
+        ("Style", false, true),
+    ];
+
+    /// The question of `v2319-ask-preview-w120.txt`, read without its gutter.
+    const PREVIEW_W120_QUESTION: &str = "bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike \
+        november oscar papa alpha bravo ch?";
+
     /// A permission dialog with the `Tab to amend` footer.
     fn permission(
         subject: &'static str,
@@ -416,6 +453,7 @@ mod tests {
             && ticked(prompt) == expected.ticked
             && tabs(prompt) == expected.tabs
             && prompt.and_then(|prompt| prompt.adjust.as_deref()) == expected.adjust
+            && prompt.and_then(|prompt| prompt.preview.as_deref()) == expected.preview
             && expected
                 .body
                 .is_none_or(|body| prompt.is_some_and(|prompt| prompt.body == body));
@@ -1409,17 +1447,125 @@ mod tests {
             (
                 "v39-ask-q3",
                 include_str!("fixtures/v39-ask-q3.txt"),
-                overlay("question_preview"),
+                previewed(
+                    "Which code style should the functions use?",
+                    &STYLE_OPTIONS,
+                    1,
+                    &STYLE_TABS,
+                    "def add(a: float, b: float) -> float:\n    return a + b",
+                ),
             ),
             (
                 "v40-ask-q3-down",
                 include_str!("fixtures/v40-ask-q3-down.txt"),
-                overlay("question_preview"),
+                previewed(
+                    "Which code style should the functions use?",
+                    &STYLE_OPTIONS,
+                    2,
+                    &STYLE_TABS,
+                    "def add(a, b):\n    return a + b",
+                ),
             ),
             (
                 "v41-ask-notes",
                 include_str!("fixtures/v41-ask-notes.txt"),
-                overlay("question_preview"),
+                no_prompt(ComposerState::Dialog),
+            ),
+            (
+                "v2319-ask-preview-w120",
+                include_str!("fixtures/v2319-ask-preview-w120.txt"),
+                previewed(
+                    PREVIEW_W120_QUESTION,
+                    &[
+                        (1, "An option label of some"),
+                        (2, "An option label of some"),
+                        (3, "An option label of some"),
+                    ],
+                    1,
+                    &[("Shape", false, true)],
+                    "fn shape() {\n    let a = 1;\n    let b = 2;\n    a + b\n}",
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                include_str!("fixtures/claude--v2330-ask-preview3-first.txt"),
+                previewed(
+                    "Which layout?",
+                    &LAYOUT3_OPTIONS,
+                    1,
+                    &[("Layout", false, true)],
+                    GRID_PREVIEW,
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview3-digit-2",
+                include_str!("fixtures/claude--v2330-ask-preview3-digit-2.txt"),
+                previewed(
+                    "Which layout?",
+                    &LAYOUT3_OPTIONS,
+                    2,
+                    &[("Layout", false, true)],
+                    LIST_PREVIEW,
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview-multi-q1",
+                include_str!("fixtures/claude--v2330-ask-preview-multi-q1.txt"),
+                previewed(
+                    "Which layout?",
+                    &LAYOUT_OPTIONS,
+                    1,
+                    &[("Layout", false, true), ("Theme", false, false)],
+                    GRID_PREVIEW,
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview-multi-q2",
+                include_str!("fixtures/claude--v2330-ask-preview-multi-q2.txt"),
+                previewed(
+                    "Which theme?",
+                    &[(1, "Light"), (2, "Dark")],
+                    1,
+                    &[("Layout", true, false), ("Theme", false, true)],
+                    "+--------+\n| light  |\n| #fff   |\n| bg     |\n+--------+",
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview-multi-review",
+                include_str!("fixtures/claude--v2330-ask-preview-multi-review.txt"),
+                Expected {
+                    tabs: vec![("Layout", true, false), ("Theme", true, false)],
+                    ..dialog(
+                        Review,
+                        "Review your answers",
+                        &[(1, "Submit answers"), (2, "Cancel")],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-ask-preview-first",
+                include_str!("fixtures/claude--v2330-ask-preview-first.txt"),
+                previewed(
+                    "Which layout?",
+                    &LAYOUT_OPTIONS,
+                    1,
+                    &[("Layout", false, true)],
+                    "+-----+ +-----+ +-----+\n| [] | | [] | | [] |\n+-----+ +-----+ +-----+\n\
+                     +-----+ +-----+ +-----+\n| [] | | [] | | [] |\n+-----+ +-----+ +-----+",
+                ),
+            ),
+            (
+                "claude--v2330-ask-preview-down",
+                include_str!("fixtures/claude--v2330-ask-preview-down.txt"),
+                previewed(
+                    "Which layout?",
+                    &LAYOUT_OPTIONS,
+                    2,
+                    &[("Layout", false, true)],
+                    "+------------------------+\n| [] Item one            |\n| [] Item two            |\n\
+                     | [] Item three          |\n+------------------------+",
+                ),
             ),
             (
                 "v42-ask-review",
@@ -2358,6 +2504,8 @@ mod tests {
     fn recipes_per_answer() {
         use ScreenExpect::{Any, DialogGone, OptionSelected, OptionTicked, SameDialog};
         let v31 = include_str!("fixtures/v31-ask-q1.txt");
+        let preview3 = include_str!("fixtures/claude--v2330-ask-preview3-first.txt");
+        let preview_multi = include_str!("fixtures/claude--v2330-ask-preview-multi-q1.txt");
         let v32 = include_str!("fixtures/v32-ask-q2.txt");
         let v33 = include_str!("fixtures/v33-ask-q2-toggled.txt");
         let v36 = include_str!("fixtures/v36-ask-other-cursor.txt");
@@ -2727,6 +2875,62 @@ mod tests {
             ("v31-ask-q1", v31, option(4), refused.clone()),
             ("v31-ask-q1", v31, toggle(1), refused.clone()),
             ("v31-ask-q1", v31, ChatAnswerKind::Submit, refused.clone()),
+            // A previews step: a digit only moves the cursor, so the arrows
+            // move it to the option and Enter picks it, closing the step.
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                option(1),
+                Ok(vec![(vec![Key::Enter], DialogGone)]),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                option(3),
+                Ok(vec![
+                    (vec![Key::Down; 2], OptionSelected(3)),
+                    (vec![Key::Enter], DialogGone),
+                ]),
+            ),
+            (
+                "claude--v2330-ask-preview-multi-q1",
+                preview_multi,
+                option(2),
+                Ok(vec![
+                    (vec![Key::Down], OptionSelected(2)),
+                    (vec![Key::Enter], DialogGone),
+                ]),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                toggle(1),
+                refused.clone(),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                ChatAnswerKind::Submit,
+                refused.clone(),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                type_x(),
+                refused.clone(),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                ChatAnswerKind::Back,
+                refused.clone(),
+            ),
+            (
+                "claude--v2330-ask-preview3-first",
+                preview3,
+                ChatAnswerKind::Skip,
+                refused.clone(),
+            ),
             (
                 "v32-ask-q2",
                 v32,

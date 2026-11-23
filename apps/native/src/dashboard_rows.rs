@@ -1430,6 +1430,7 @@ mod tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }
     }
 

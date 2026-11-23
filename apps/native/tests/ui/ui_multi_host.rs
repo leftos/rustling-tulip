@@ -4139,6 +4139,7 @@ fn permission_prompt(id: &str) -> ChatPrompt {
         multi: false,
         cursor: None,
         adjust: None,
+        preview: None,
     }
 }
 

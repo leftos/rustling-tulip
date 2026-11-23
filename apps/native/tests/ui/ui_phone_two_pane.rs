@@ -427,6 +427,7 @@ fn question() -> ChatPrompt {
         multi: false,
         cursor: None,
         adjust: None,
+        preview: None,
     }
 }
 

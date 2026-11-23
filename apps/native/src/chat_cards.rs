@@ -496,7 +496,8 @@ fn server_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
 }
 
 /// A question's options (picked, or toggled on a multi-select), its own
-/// text option, and with several questions Back and Skip; a multi-select
+/// text option, and with several questions Back and Skip (not on a step
+/// whose options carry previews, which answers neither); a multi-select
 /// ends with Next, or Submit on its last question.
 fn question_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
     let mut buttons: Vec<CardButton> = prompt
@@ -515,7 +516,7 @@ fn question_buttons(prompt: &ChatPrompt) -> Vec<CardButton> {
             CardButton::numbered(choice.number, &choice.label, answer)
         })
         .collect();
-    if prompt.questions.len() > 1 {
+    if prompt.questions.len() > 1 && prompt.preview.is_none() {
         buttons.push(CardButton::named("back", "Back", ChatAnswerKind::Back));
         buttons.push(CardButton::named("skip", "Skip", ChatAnswerKind::Skip));
     }
@@ -1291,6 +1292,7 @@ mod tests {
             multi: false,
             cursor: None,
             adjust: None,
+            preview: None,
         }
     }
 
@@ -1846,6 +1848,28 @@ mod tests {
                 .map(|button| button.label.clone()),
             Some("Submit".to_owned()),
             "the last question submits"
+        );
+    }
+
+    #[test]
+    fn a_preview_question_card_offers_no_back_or_skip() {
+        let mut plain = prompt_with(ChatPromptKind::Question, &[(1, "Grid"), (2, "List")]);
+        plain.questions = vec![tab("Layout", true), tab("Theme", false)];
+        let mut previewed = plain.clone();
+        previewed.preview = Some("+--+".to_owned());
+        assert_eq!(
+            fixed(&card_buttons(&previewed, "Claude")),
+            [row("1", "Grid", opt(1)), row("2", "List", opt(2))],
+            "a preview step answers neither Back nor Skip"
+        );
+        assert_eq!(
+            fixed(&card_buttons(&plain, "Claude")),
+            [
+                row("1", "Grid", opt(1)),
+                row("2", "List", opt(2)),
+                row("back", "Back", Some(ChatAnswerKind::Back)),
+                row("skip", "Skip", Some(ChatAnswerKind::Skip)),
+            ]
         );
     }
 
