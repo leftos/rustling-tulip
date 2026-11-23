@@ -19,6 +19,9 @@ mod hosts_view;
 #[cfg(target_os = "ios")]
 mod idiom_ios;
 mod image_zoom;
+pub mod inbox;
+#[cfg(target_os = "ios")]
+mod inbox_ios;
 mod key_bar;
 pub mod key_grid;
 #[cfg(target_os = "ios")]
@@ -214,6 +217,21 @@ fn phone_pasteboard() -> Arc<dyn PhonePasteboard> {
 #[cfg(not(target_os = "ios"))]
 fn phone_pasteboard() -> Arc<dyn PhonePasteboard> {
     Arc::new(pasteboard::LoggingPasteboard)
+}
+
+/// The share inbox in the App Group container on iOS; `None` until the app
+/// is signed into the group.
+#[cfg(target_os = "ios")]
+#[must_use]
+pub fn group_container() -> Option<std::path::PathBuf> {
+    inbox_ios::group_container()
+}
+
+/// No App Group off iOS: the inbox is the env override or the UI folder's.
+#[cfg(not(target_os = "ios"))]
+#[must_use]
+pub fn group_container() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// The phone's photo picker on iOS: `PHPickerViewController`.

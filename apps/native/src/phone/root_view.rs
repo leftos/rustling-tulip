@@ -21,6 +21,7 @@ use super::files_picker::{FILES_LABEL, FilePicker, LoggingFiles};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
+use super::inbox::{LAST_USED_FILE, LastUsed};
 use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
 use super::pasteboard::{LoggingPasteboard, PhonePasteboard};
@@ -1056,6 +1057,18 @@ impl PhoneRoot {
             self.chat_mirrored(&host, session_id, cx),
         ));
         self.composer_dock = super::composer::Dock::None;
+        if let Some(dir) = self
+            .fetched_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+        {
+            let key = LastUsed::key(host.wire(), session_id);
+            if let Err(err) =
+                LastUsed::stamp_saved(&dir.join(LAST_USED_FILE), &key, SystemTime::now())
+            {
+                tracing::warn!(error = %err, "phone: saving the last-used record");
+            }
+        }
         let shown = (host, session_id.to_owned());
         self.shown = Some(shown.clone());
         self.prompt_sheet = SheetState::default();
