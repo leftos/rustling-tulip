@@ -19,8 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 - On the phone, Settings › Notifications sets how long a Finished alert waits after a session goes idle, as the desktop's setting does.
 - On the phone, an image in the viewer zooms with a pinch, pans with one finger while zoomed, and a double tap switches between fit and twice the size.
-
-- On the phone, the Chat box's Attach button offers Photos and Files, and a picked file goes up into the message like a pasted image.
+- On the phone, Chat's Attach button takes a photo with the camera, or sends several photos or a file into the message.
 
 ### Fixed
 

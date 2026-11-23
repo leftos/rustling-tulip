@@ -170,7 +170,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # (src/phone/paste_control_ios.rs): `UIPasteControl`, its configuration and
 # colours, and the target it pastes into. The composer's Files
 # (src/phone/files_ios.rs): `UIDocumentPickerViewController` and its
-# delegate, opening any file as a copy.
+# delegate, opening any file as a copy. The Attach sheet's Camera
+# (src/phone/camera_ios.rs): `UIImagePickerController` (a
+# `UINavigationController`) and its delegate protocols.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -186,9 +188,11 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIGraphicsImageRenderer",
     "UIGraphicsRenderer",
     "UIImage",
+    "UIImagePickerController",
     "UIPasteConfiguration",
     "UIPasteConfigurationSupporting",
     "UIPasteControl",
+    "UINavigationController",
     "UIPasteboard",
     "UIPopoverPresentationController",
     "UIPresentationController",

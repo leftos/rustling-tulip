@@ -253,6 +253,20 @@ impl RootView {
         self.upload_bytes(host, UploadTarget::Composer, session_id, payload, cx);
     }
 
+    /// The phone's Files picked `name`, a file over the upload cap that was
+    /// never read: the toast a file sent into a chat over the cap shows says
+    /// so, and nothing goes up.
+    pub(crate) fn on_chat_file_too_large(&mut self, name: &str, cx: &mut Context<Self>) {
+        tracing::info!(%name, "paste upload: the picked file is over the cap");
+        self.push_too_large_toast(UploadKind::File, name, cx);
+    }
+
+    /// Shows the toast an upload of `kind` named `name` over the cap shows.
+    fn push_too_large_toast(&mut self, kind: UploadKind, name: &str, cx: &mut Context<Self>) {
+        let (title, detail) = kind.too_large_toast(name);
+        self.push_toast(ToastKind::Warning, title, Some(detail), cx);
+    }
+
     /// Uploads the `bytes` named `name` of `kind`, for `session_id` on
     /// `host`, its path going to `target`; a host that cannot take it, or an
     /// upload over the cap, shows a toast instead.
@@ -279,8 +293,7 @@ impl RootView {
                 "paste upload: the {} is over the cap",
                 kind.noun()
             );
-            let (title, detail) = kind.too_large_toast(name);
-            self.push_toast(ToastKind::Warning, title, Some(detail), cx);
+            self.push_too_large_toast(kind, name, cx);
             return;
         }
         let request_id = crate::new_request_id();

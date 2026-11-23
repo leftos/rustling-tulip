@@ -1,13 +1,15 @@
-//! The phone's Photos on iOS: `PHPickerViewController` for one image,
+//! The phone's Photos on iOS: `PHPickerViewController` for up to
+//! [`PHOTOS_LIMIT`] images,
 //! presented from the topmost view controller of the app's key window on the
 //! main thread, as the share sheet is (`share_ios.rs`). The picker runs out
 //! of process, so it needs no photo library permission.
 //!
-//! The picked item is loaded as JPEG: taken as it is when its provider offers
+//! Each picked item is loaded as JPEG: taken as it is when its provider offers
 //! `public.jpeg`, else loaded as `public.image` and re-encoded through
 //! `UIImage`. An image over the upload cap is scaled down ([`fitted`]). The
-//! answer goes back through a oneshot channel, since the item provider's
-//! completion runs on a queue of the system's choosing.
+//! images go back together, in the picker's order, through a oneshot
+//! channel once every item has loaded, since the item provider's completion
+//! runs on a queue of the system's choosing.
 //!
 //! `objc2-photos-ui` declares `PHPickerViewController` for macOS alone, so
 //! the iOS class (a `UIViewController`) is declared here; the configuration,
@@ -16,6 +18,8 @@
 
 use std::cell::OnceCell;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -31,8 +35,8 @@ use objc2::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSData, NSError, NSObject, NSString};
 use objc2_photos_ui::{
-    PHPickerConfiguration, PHPickerConfigurationAssetRepresentationMode, PHPickerFilter,
-    PHPickerResult, PHPickerViewControllerDelegate,
+    PHPickerConfiguration, PHPickerConfigurationAssetRepresentationMode,
+    PHPickerConfigurationSelection, PHPickerFilter, PHPickerResult, PHPickerViewControllerDelegate,
 };
 use objc2_ui_kit::{
     UIApplication, UIGraphicsImageRenderer, UIGraphicsImageRendererContext,
@@ -40,7 +44,9 @@ use objc2_ui_kit::{
 };
 
 use super::pasteboard::PastedImage;
-use super::photos::{Fit, PhotoPicker, PickSlot, SCALED_QUALITY, fit, scaled_pixel_size};
+use super::photos::{
+    Fit, PHOTOS_LIMIT, PhotoPicker, PickAnswer, PickSlot, SCALED_QUALITY, fit, scaled_pixel_size,
+};
 
 /// The type a picked item is taken as it is under.
 const JPEG_TYPE: &str = "public.jpeg";
@@ -50,7 +56,7 @@ const IMAGE_TYPE: &str = "public.image";
 
 /// The open pick's answer, until the picker finishes and takes it out for
 /// its load; a newer pick replaces one still open, which answers it nothing.
-static WAITING: PickSlot<Option<PastedImage>> = PickSlot::new();
+static WAITING: PickSlot<Vec<PastedImage>> = PickSlot::new();
 
 extern_class!(
     /// `PhotosUI`'s picker on iOS, a `UIViewController`.
@@ -112,7 +118,7 @@ thread_local! {
 pub struct IosPhotoPicker;
 
 impl PhotoPicker for IosPhotoPicker {
-    fn pick(&self) -> BoxFuture<'static, Option<PastedImage>> {
+    fn pick(&self) -> BoxFuture<'static, Vec<PastedImage>> {
         let rx = WAITING.open();
         if let Some(mtm) = MainThreadMarker::new() {
             present_on_main(mtm);
@@ -124,11 +130,11 @@ impl PhotoPicker for IosPhotoPicker {
                     tracing::warn!(
                         "phone: the main queue ran off the main thread; no photo picker"
                     );
-                    WAITING.take().send(None);
+                    WAITING.take().send(Vec::new());
                 }
             });
         }
-        rx.map(|picked| picked.ok().flatten()).boxed()
+        rx.map(Result::unwrap_or_default).boxed()
     }
 }
 
@@ -145,20 +151,21 @@ fn delegate(mtm: MainThreadMarker) -> Retained<PickerDelegate> {
     })
 }
 
-/// Presents the picker, images only and one at most, from the topmost view
+/// Presents the picker, images only and [`PHOTOS_LIMIT`] at most, from the topmost view
 /// controller; logs `phone: photo picker presented` once `UIKit` has shown
 /// it.
 fn present_on_main(mtm: MainThreadMarker) {
     let Some(presenter) = top_view_controller(mtm) else {
         tracing::warn!("phone: no view controller to present the photo picker from");
-        WAITING.take().send(None);
+        WAITING.take().send(Vec::new());
         return;
     };
     // SAFETY: a fresh configuration is set up on the main thread before the
     // picker is made from it; the limit and filter are the documented ones.
     let picker = unsafe {
         let configuration = PHPickerConfiguration::new();
-        configuration.setSelectionLimit(1);
+        configuration.setSelectionLimit(isize::try_from(PHOTOS_LIMIT).unwrap_or(1));
+        configuration.setSelection(PHPickerConfigurationSelection::Ordered);
         configuration.setFilter(Some(&PHPickerFilter::imagesFilter()));
         configuration.setPreferredAssetRepresentationMode(
             PHPickerConfigurationAssetRepresentationMode::Compatible,
@@ -174,18 +181,68 @@ fn present_on_main(mtm: MainThreadMarker) {
 }
 
 /// The picker finished: it is dismissed, its pick's answer is taken out of
-/// [`WAITING`] here on the main thread, and its first result is loaded and
-/// answered through that answer alone, or nothing when the pick was
-/// cancelled. A pick opened while the load runs gets a fresh slot, which this
-/// load never answers.
+/// [`WAITING`] here on the main thread, and every result is loaded and the
+/// images answered together through that answer alone once all have
+/// loaded, in the picker's order; nothing when the pick was cancelled. A
+/// pick opened while the loads run gets a fresh slot, which they never
+/// answer.
 fn finished(picker: &UIViewController, results: &NSArray<PHPickerResult>) {
     picker.dismissViewControllerAnimated_completion(true, None);
     let answer = WAITING.take();
-    let Some(result) = results.firstObject() else {
+    let count = results.count();
+    if count == 0 {
         tracing::info!("phone: the photo pick was cancelled");
-        answer.send(None);
+        answer.send(Vec::new());
         return;
-    };
+    }
+    let gathering = Arc::new(Gathering::new(answer, count));
+    for (at, result) in results.iter().enumerate() {
+        load(&result, at, Arc::clone(&gathering));
+    }
+}
+
+/// One pick's loads: the answer, each result's loaded bytes by its place in
+/// the picker's order, and how many loads have not finished. The bytes are
+/// only stored as they arrive; the last load to finish converts them one at
+/// a time, so at most one image is decoded or scaled at once.
+struct Gathering {
+    answer: PickAnswer<Vec<PastedImage>>,
+    loaded: Mutex<Vec<Option<Vec<u8>>>>,
+    left: AtomicUsize,
+}
+
+impl Gathering {
+    /// The loads of `count` results, answering `answer`.
+    fn new(answer: PickAnswer<Vec<PastedImage>>, count: usize) -> Self {
+        Self {
+            answer,
+            loaded: Mutex::new(vec![None; count]),
+            left: AtomicUsize::new(count),
+        }
+    }
+
+    /// The load of the result at `at` finished with `bytes`, `None` when it
+    /// failed; the last load to finish converts every stored item to JPEG
+    /// within the cap ([`as_jpeg`]), one at a time in the picker's order, and
+    /// answers the images that converted.
+    fn finish(&self, at: usize, bytes: Option<Vec<u8>>) {
+        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = loaded.get_mut(at) {
+            *slot = bytes;
+        }
+        if self.left.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let stored: Vec<Vec<u8>> = loaded.drain(..).flatten().collect();
+        drop(loaded);
+        let images: Vec<PastedImage> = stored.into_iter().filter_map(as_jpeg).collect();
+        self.answer.send(images);
+    }
+}
+
+/// Loads `result`, the pick's result at `at`, and hands its bytes to
+/// `gathering`; one that fails to load is dropped with a warning.
+fn load(result: &PHPickerResult, at: usize, gathering: Arc<Gathering>) {
     // SAFETY: a result's item provider is read on the main thread the
     // delegate is called on.
     let provider = unsafe { result.itemProvider() };
@@ -196,14 +253,14 @@ fn finished(picker: &UIViewController, results: &NSArray<PHPickerResult>) {
         // null with a live error, for the call.
         let (data, error) = unsafe { (data.as_ref(), error.as_ref()) };
         if let Some(data) = data {
-            answer.send(as_jpeg(data.to_vec()));
+            gathering.finish(at, Some(data.to_vec()));
         } else {
             let why = error.map(|error| error.localizedDescription().to_string());
             tracing::warn!(error = ?why, "phone: the picked photo could not be loaded");
-            answer.send(None);
+            gathering.finish(at, None);
         }
     });
-    // SAFETY: the completion touches only the answer channel, `NSData` and
+    // SAFETY: the completion touches only the gathering, `NSData` and
     // `UIImage`, which are safe on the queue it runs on.
     let _progress = unsafe {
         provider.loadDataRepresentationForTypeIdentifier_completionHandler(&kind, &block)

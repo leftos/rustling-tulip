@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use super::composer::Dock;
+use super::files_picker::FilePick;
 use super::home::{self, Tone};
 use super::home_view::{
     SIDE_PADDING, STATUS_TEXT_SIZE, TITLE_CHIP_GAP, TOUCH_TARGET, title_chip, tone_color,
@@ -1181,23 +1182,28 @@ impl PhoneRoot {
         None
     }
 
-    /// Photos' tap in the Attach sheet: the platform's picker opens for one
-    /// image, which uploads to the shown session's host as a pasted image
-    /// does; a cancelled pick sends nothing.
+    /// Photos' tap in the Attach sheet: the platform's picker opens for up to
+    /// [`photos::PHOTOS_LIMIT`] images, each of which uploads in pick order to
+    /// the shown session's host as a pasted image does; a cancelled pick
+    /// sends nothing.
     pub(super) fn pick_photo(&mut self, cx: &mut Context<Self>) {
         let Some((_, session_id)) = self.shown.clone() else {
             return;
         };
         let picked = self.photos.pick();
         cx.spawn(async move |this, cx| {
-            let Some((bytes, format)) = picked.await else {
+            let picked = picked.await;
+            if picked.is_empty() {
                 tracing::info!(session = %session_id, "phone: no photo picked");
                 return;
-            };
-            let name = photos::picked_name(chrono::Local::now().naive_local(), format);
+            }
+            let now = chrono::Local::now().naive_local();
             let sent = this.update(cx, |this, cx| {
                 this.root.update(cx, |root, cx| {
-                    root.on_chat_paste_image(&session_id, &name, &bytes, cx);
+                    for (bytes, format) in &picked {
+                        let name = photos::picked_name(now, *format);
+                        root.on_chat_paste_image(&session_id, &name, bytes, cx);
+                    }
                 });
             });
             if sent.is_err() {
@@ -1207,9 +1213,36 @@ impl PhoneRoot {
         .detach();
     }
 
+    /// Camera's tap in the Attach sheet: the platform's camera opens for one
+    /// photo, which uploads to the shown session's host as a picked photo
+    /// does; a cancelled capture sends nothing.
+    pub(super) fn take_photo(&mut self, cx: &mut Context<Self>) {
+        let Some((_, session_id)) = self.shown.clone() else {
+            return;
+        };
+        let taken = self.camera.capture();
+        cx.spawn(async move |this, cx| {
+            let Some((bytes, format)) = taken.await else {
+                tracing::info!(session = %session_id, "phone: no photo taken");
+                return;
+            };
+            let name = photos::picked_name(chrono::Local::now().naive_local(), format);
+            let sent = this.update(cx, |this, cx| {
+                this.root.update(cx, |root, cx| {
+                    root.on_chat_paste_image(&session_id, &name, &bytes, cx);
+                });
+            });
+            if sent.is_err() {
+                tracing::debug!("phone: a photo was taken after the phone's root was gone");
+            }
+        })
+        .detach();
+    }
+
     /// Files' tap in the Attach sheet: the platform's picker opens for one
     /// file, which uploads under its own name to the shown session's host,
-    /// its host path landing in the composer as a pasted image's does; a
+    /// its host path landing in the composer as a pasted image's does; a file
+    /// over the upload cap shows the too-large toast instead, and a
     /// cancelled pick sends nothing.
     pub(super) fn pick_file(&mut self, cx: &mut Context<Self>) {
         let Some((_, session_id)) = self.shown.clone() else {
@@ -1217,13 +1250,16 @@ impl PhoneRoot {
         };
         let picked = self.files.pick();
         cx.spawn(async move |this, cx| {
-            let Some((name, bytes)) = picked.await else {
+            let Some(pick) = picked.await else {
                 tracing::info!(session = %session_id, "phone: no file picked");
                 return;
             };
             let sent = this.update(cx, |this, cx| {
-                this.root.update(cx, |root, cx| {
-                    root.on_chat_upload_file(&session_id, &name, &bytes, cx);
+                this.root.update(cx, |root, cx| match &pick {
+                    FilePick::File((name, bytes)) => {
+                        root.on_chat_upload_file(&session_id, name, bytes, cx);
+                    }
+                    FilePick::TooLarge(name) => root.on_chat_file_too_large(name, cx),
                 });
             });
             if sent.is_err() {

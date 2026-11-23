@@ -1,5 +1,6 @@
-//! The phone's Photos: picks one image from the photo library for the
-//! composer to upload, and the size and name rules a phone image goes up by.
+//! The phone's Photos: picks up to [`PHOTOS_LIMIT`] images from the photo
+//! library for the composer to upload, and the size and name rules a phone
+//! image goes up by.
 //!
 //! On iOS the picker is `PHPickerViewController` (`photos_ios.rs`); every
 //! other platform logs the request and picks nothing, and [`FakePhotoPicker`]
@@ -20,6 +21,9 @@ use crate::paste_upload::extension_of;
 /// The composer's Photos button's label.
 pub const PHOTOS_LABEL: &str = "Photos";
 
+/// The most images one pick takes.
+pub const PHOTOS_LIMIT: usize = 10;
+
 /// The longer side, in pixels, an image over the cap is scaled down to.
 pub const SCALED_LONG_SIDE: u32 = 2048;
 
@@ -28,9 +32,10 @@ pub const SCALED_QUALITY: f64 = 0.8;
 
 /// What the phone's platform offers for picking a photo.
 pub trait PhotoPicker: Send + Sync {
-    /// Shows the platform's photo picker for one image; answers the picked
-    /// image, or `None` when the pick was cancelled or failed.
-    fn pick(&self) -> BoxFuture<'static, Option<PastedImage>>;
+    /// Shows the platform's photo picker for up to [`PHOTOS_LIMIT`] images;
+    /// answers the picked images in the picker's order, none when the pick
+    /// was cancelled or nothing could be loaded.
+    fn pick(&self) -> BoxFuture<'static, Vec<PastedImage>>;
 }
 
 /// A platform with no photo picker: a request is logged and nothing is
@@ -38,23 +43,23 @@ pub trait PhotoPicker: Send + Sync {
 pub struct LoggingPhotos;
 
 impl PhotoPicker for LoggingPhotos {
-    fn pick(&self) -> BoxFuture<'static, Option<PastedImage>> {
+    fn pick(&self) -> BoxFuture<'static, Vec<PastedImage>> {
         tracing::info!("phone: no photo picker on this platform");
-        futures::future::ready(None).boxed()
+        futures::future::ready(Vec::new()).boxed()
     }
 }
 
 /// A photo picker for specs: every pick answers what it was made with, and
 /// the picks are counted.
 pub struct FakePhotoPicker {
-    answer: Option<PastedImage>,
+    answer: Vec<PastedImage>,
     picks: Mutex<usize>,
 }
 
 impl FakePhotoPicker {
     /// A picker whose every pick answers `answer`.
     #[must_use]
-    pub fn answering(answer: Option<PastedImage>) -> Self {
+    pub fn answering(answer: Vec<PastedImage>) -> Self {
         Self {
             answer,
             picks: Mutex::new(0),
@@ -69,7 +74,7 @@ impl FakePhotoPicker {
 }
 
 impl PhotoPicker for FakePhotoPicker {
-    fn pick(&self) -> BoxFuture<'static, Option<PastedImage>> {
+    fn pick(&self) -> BoxFuture<'static, Vec<PastedImage>> {
         *self.picks.lock().unwrap_or_else(PoisonError::into_inner) += 1;
         futures::future::ready(self.answer.clone()).boxed()
     }
@@ -77,7 +82,7 @@ impl PhotoPicker for FakePhotoPicker {
 
 /// The answer slot of the platform picker's open pick. [`PickSlot::open`]
 /// makes a pick's channel; when the user finishes picking, the picker takes
-/// the pick's answer out with [`PickSlot::take`] before it loads the image,
+/// the pick's answer out with [`PickSlot::take`] before it loads the images,
 /// so the load answers only its own pick, and a pick opened while that load
 /// runs gets a fresh slot the old load can never answer.
 #[cfg_attr(

@@ -5,6 +5,9 @@
 mod autoscroll;
 pub(crate) mod browser;
 mod browser_view;
+pub mod camera;
+#[cfg(target_os = "ios")]
+mod camera_ios;
 mod composer;
 mod fetched;
 #[cfg(target_os = "ios")]
@@ -69,6 +72,7 @@ use crate::{
     LiveSeams, NoTaskbarBadge, NoToastPlacer, RootDeps, RootShape, RootView, SilentNotifier,
     SilentSounder,
 };
+use camera::CameraPicker;
 use files_picker::FilePicker;
 pub use layout::PhoneLayout;
 use pasteboard::PhonePasteboard;
@@ -108,6 +112,7 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
                         .with_share(root_share)
                         .with_pasteboard(phone_pasteboard())
                         .with_photos(photo_picker())
+                        .with_camera(camera_picker())
                         .with_files(file_picker())
                 })
             });
@@ -221,6 +226,18 @@ fn photo_picker() -> Arc<dyn PhotoPicker> {
 #[cfg(not(target_os = "ios"))]
 fn photo_picker() -> Arc<dyn PhotoPicker> {
     Arc::new(photos::LoggingPhotos)
+}
+
+/// The phone's camera on iOS: `UIImagePickerController`.
+#[cfg(target_os = "ios")]
+fn camera_picker() -> Arc<dyn CameraPicker> {
+    Arc::new(camera_ios::IosCamera)
+}
+
+/// No camera off iOS: the Attach sheet offers no Camera.
+#[cfg(not(target_os = "ios"))]
+fn camera_picker() -> Arc<dyn CameraPicker> {
+    Arc::new(camera::LoggingCamera)
 }
 
 /// The phone's file picker on iOS: `UIDocumentPickerViewController`.

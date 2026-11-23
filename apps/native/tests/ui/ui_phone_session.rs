@@ -25,7 +25,8 @@ use rustling_tulip_native::chat::{self, RowShape};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
-use rustling_tulip_native::phone::files_picker::FakeFilePicker;
+use rustling_tulip_native::phone::camera::FakeCamera;
+use rustling_tulip_native::phone::files_picker::{FakeFilePicker, FilePick};
 use rustling_tulip_native::phone::pasteboard::FakePasteboard;
 use rustling_tulip_native::phone::photos::FakePhotoPicker;
 use rustling_tulip_native::phone::quick_replies::{ReplyGroup, ReplySet};
@@ -1356,10 +1357,7 @@ fn fake_pasteboard(
 
 /// Gives the phone a [`FakePhotoPicker`] whose every pick answers `answer`,
 /// and hands back the spec's handle on it.
-fn fake_photos(
-    h: &mut Harness<'_>,
-    answer: Option<(Vec<u8>, ImageFormat)>,
-) -> Arc<FakePhotoPicker> {
+fn fake_photos(h: &mut Harness<'_>, answer: Vec<(Vec<u8>, ImageFormat)>) -> Arc<FakePhotoPicker> {
     let picker = Arc::new(FakePhotoPicker::answering(answer));
     let given = picker.clone();
     h.cx.update(|window, cx| {
@@ -1374,7 +1372,7 @@ fn fake_photos(
 
 /// Gives the phone a [`FakeFilePicker`] whose every pick answers `answer`,
 /// and hands back the spec's handle on it.
-fn fake_files(h: &mut Harness<'_>, answer: Option<(String, Vec<u8>)>) -> Arc<FakeFilePicker> {
+fn fake_files(h: &mut Harness<'_>, answer: Option<FilePick>) -> Arc<FakeFilePicker> {
     let picker = Arc::new(FakeFilePicker::answering(answer));
     let given = picker.clone();
     h.cx.update(|window, cx| {
@@ -1385,6 +1383,35 @@ fn fake_files(h: &mut Harness<'_>, answer: Option<(String, Vec<u8>)>) -> Arc<Fak
         phone.update(cx, |phone, _| phone.set_files(given));
     });
     picker
+}
+
+/// Gives the phone a [`FakeCamera`] that is `available` or not and whose
+/// every capture answers `answer`, and hands back the spec's handle on it.
+fn fake_camera(
+    h: &mut Harness<'_>,
+    available: bool,
+    answer: Option<(Vec<u8>, ImageFormat)>,
+) -> Arc<FakeCamera> {
+    let camera = Arc::new(FakeCamera::new(available, answer));
+    let given = camera.clone();
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_camera(given));
+    });
+    camera
+}
+
+/// Every toast's title and detail, oldest first.
+fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| (toast.title.clone(), toast.detail.clone()))
+            .collect()
+    })
 }
 
 /// An `UploadFile` the phone sent: its request id, session, name and bytes.
@@ -1537,7 +1564,7 @@ fn attach_photos_runs_the_photo_flow(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     let jpeg = vec![0xFF, 0xD8, 0xFF, 4, 5, 6];
-    let picker = fake_photos(&mut h, Some((jpeg.clone(), ImageFormat::Jpeg)));
+    let picker = fake_photos(&mut h, vec![(jpeg.clone(), ImageFormat::Jpeg)]);
 
     h.click_on("phone-composer-photos");
     h.click_on("phone-attach-photos");
@@ -1570,7 +1597,7 @@ fn attach_photos_runs_the_photo_flow(cx: &mut TestAppContext) {
 fn a_cancelled_pick_sends_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
-    let picker = fake_photos(&mut h, None);
+    let picker = fake_photos(&mut h, vec![]);
 
     h.click_on("phone-composer-photos");
     h.click_on("phone-attach-photos");
@@ -1584,7 +1611,10 @@ fn a_cancelled_pick_sends_nothing(cx: &mut TestAppContext) {
 fn attach_files_uploads_the_picked_file(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
-    let picker = fake_files(&mut h, Some(("notes.pdf".to_owned(), b"%PDF".to_vec())));
+    let picker = fake_files(
+        &mut h,
+        Some(FilePick::File(("notes.pdf".to_owned(), b"%PDF".to_vec()))),
+    );
 
     h.click_on("phone-composer-photos");
     h.click_on("phone-attach-files");
@@ -4944,5 +4974,149 @@ fn copy_after_show_all_copies_the_whole_text(cx: &mut TestAppContext) {
         painted_selection(&mut h),
         vec![("t1".to_owned(), 2, 0..end)],
         "the whole text is drawn selected"
+    );
+}
+
+#[gpui::test]
+fn attach_sheet_offers_the_camera_when_the_phone_has_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    fake_camera(&mut h, true, None);
+
+    h.click_on("phone-composer-photos");
+
+    assert!(
+        drawn(&mut h, "phone-attach-camera"),
+        "the sheet offers Camera"
+    );
+    assert!(
+        drawn(&mut h, "phone-attach-photos"),
+        "the sheet offers Photos"
+    );
+    assert!(
+        drawn(&mut h, "phone-attach-files"),
+        "the sheet offers Files"
+    );
+}
+
+#[gpui::test]
+fn attach_sheet_hides_the_camera_without_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    fake_camera(&mut h, false, None);
+
+    h.click_on("phone-composer-photos");
+
+    assert!(
+        !drawn(&mut h, "phone-attach-camera"),
+        "a phone with no camera is offered none"
+    );
+    assert!(
+        drawn(&mut h, "phone-attach-photos"),
+        "the sheet offers Photos"
+    );
+    assert!(
+        drawn(&mut h, "phone-attach-files"),
+        "the sheet offers Files"
+    );
+}
+
+#[gpui::test]
+fn attach_camera_uploads_the_photo_taken(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 7, 8, 9];
+    let camera = fake_camera(&mut h, true, Some((jpeg.clone(), ImageFormat::Jpeg)));
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-camera");
+
+    assert_eq!(camera.captures(), 1, "the row opens the camera");
+    let [upload]: [Upload; 1] = uploads(&mut h).try_into().expect("exactly one upload");
+    assert_eq!(upload.session_id, "a");
+    assert!(
+        upload.name.starts_with("photo-")
+            && std::path::Path::new(&upload.name)
+                .extension()
+                .is_some_and(|ext| ext == "jpg"),
+        "a taken photo's name: {}",
+        upload.name
+    );
+    assert_eq!(upload.bytes, jpeg, "the taken bytes go up");
+    assert!(
+        !drawn(&mut h, "phone-attach-camera"),
+        "the sheet closes on its row's tap"
+    );
+}
+
+#[gpui::test]
+fn attach_camera_cancel_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let camera = fake_camera(&mut h, true, None);
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-camera");
+
+    assert_eq!(camera.captures(), 1, "the row opens the camera");
+    assert!(
+        uploads(&mut h).is_empty(),
+        "a cancelled capture sends nothing"
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+}
+
+#[gpui::test]
+fn attach_photos_uploads_each_picked_photo_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let first = vec![0xFF, 0xD8, 0xFF, 1];
+    let second = vec![0xFF, 0xD8, 0xFF, 2];
+    let picker = fake_photos(
+        &mut h,
+        vec![
+            (first.clone(), ImageFormat::Jpeg),
+            (second.clone(), ImageFormat::Jpeg),
+        ],
+    );
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-photos");
+
+    assert_eq!(picker.picks(), 1, "the tap opens the picker once");
+    let sent = uploads(&mut h);
+    let bytes: Vec<&[u8]> = sent.iter().map(|upload| upload.bytes.as_slice()).collect();
+    assert_eq!(
+        bytes,
+        vec![first.as_slice(), second.as_slice()],
+        "each picked photo goes up, in pick order"
+    );
+    assert!(
+        sent.iter().all(|upload| upload.session_id == "a"),
+        "every upload is for the shown session"
+    );
+}
+
+#[gpui::test]
+fn attach_files_over_the_cap_shows_the_too_large_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let picker = fake_files(&mut h, Some(FilePick::TooLarge("movie.mov".into())));
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-files");
+
+    assert_eq!(picker.picks(), 1, "the row opens the picker");
+    assert!(
+        uploads(&mut h).is_empty(),
+        "a file over the cap is not sent"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        vec![(
+            "Couldn't send the file".to_owned(),
+            Some("movie.mov is larger than 8 MiB.".to_owned())
+        )],
+        "the too-large toast names the file"
     );
 }

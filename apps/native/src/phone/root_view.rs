@@ -15,6 +15,7 @@ use gpui::{
 use protocol::{ClientMessage, PathKind};
 
 use super::browser::FolderEnd;
+use super::camera::{CAMERA_LABEL, CameraPicker, LoggingCamera};
 use super::fetched::{self, Entry, Freshness, HostStat, Index};
 use super::files_picker::{FILES_LABEL, FilePicker, LoggingFiles};
 use super::home::Offer;
@@ -211,6 +212,9 @@ pub struct PhoneRoot {
     pub(super) photos: Arc<dyn PhotoPicker>,
     /// The platform's file picker, which the Attach sheet's Files opens.
     pub(super) files: Arc<dyn FilePicker>,
+    /// The platform's camera, which the Attach sheet's Camera opens while
+    /// the phone has one.
+    pub(super) camera: Arc<dyn CameraPicker>,
     /// The host browser, drawn over the page shown while open, under the
     /// viewer.
     pub(super) browser: Option<super::browser_view::BrowserPage>,
@@ -326,6 +330,7 @@ impl PhoneRoot {
             control_pastes: super::session_view::control_pastes(),
             photos: Arc::new(LoggingPhotos),
             files: Arc::new(LoggingFiles),
+            camera: Arc::new(LoggingCamera),
             browser: None,
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
@@ -770,6 +775,19 @@ impl PhoneRoot {
     /// Picks files through `files` from now on.
     pub fn set_files(&mut self, files: Arc<dyn FilePicker>) {
         self.files = files;
+    }
+
+    /// The same root taking photos through `camera`; it offers no Camera
+    /// until then.
+    #[must_use]
+    pub fn with_camera(mut self, camera: Arc<dyn CameraPicker>) -> Self {
+        self.camera = camera;
+        self
+    }
+
+    /// Takes photos through `camera` from now on.
+    pub fn set_camera(&mut self, camera: Arc<dyn CameraPicker>) {
+        self.camera = camera;
     }
 
     /// Share on the viewer page: hands the open copy, as it is, to the share
@@ -1845,7 +1863,8 @@ impl PhoneRoot {
         phone_button(id, kind, cx).w_full().min_h(px(TOUCH_TARGET))
     }
 
-    /// The composer's Attach sheet over a scrim: Photos and Files, its bottom
+    /// The composer's Attach sheet over a scrim: Camera while the phone has
+    /// one, then Photos and Files, its bottom
     /// clear of `bottom`'s home indicator. A row closes the sheet and opens
     /// its picker; a tap on the scrim closes it sending nothing. `None` while
     /// it is closed or its session is no longer shown.
@@ -1866,6 +1885,15 @@ impl PhoneRoot {
             .bg(gpui::rgba(t.scrim))
             .occlude()
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_attach(cx)));
+        let camera = self.camera.available().then(|| {
+            Self::sheet_button("phone-attach-camera", ButtonKind::Outlined, cx)
+                .child(CAMERA_LABEL)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.close_attach(cx);
+                    this.take_photo(cx);
+                }))
+        });
         let photos = Self::sheet_button("phone-attach-photos", ButtonKind::Outlined, cx)
             .child(PHOTOS_LABEL)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1894,6 +1922,7 @@ impl PhoneRoot {
             .border_t_1()
             .border_color(gpui::rgb(t.line))
             .bg(gpui::rgb(t.raised))
+            .children(camera)
             .child(photos)
             .child(files);
         Some(

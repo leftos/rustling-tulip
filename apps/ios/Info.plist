@@ -32,6 +32,8 @@
 	<true/>
 	<key>MinimumOSVersion</key>
 	<string>15.0</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Rustling Tulip uses the camera to take a photo and send it into a session.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

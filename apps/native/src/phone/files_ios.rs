@@ -4,7 +4,9 @@
 //! Opening a copy hands back a URL the app may read without security-scoped
 //! access.
 //!
-//! The picked file's name and bytes are read out of that copy and answered
+//! The picked file's size is read first: one over the upload cap is
+//! answered by name alone, never read into memory. Otherwise its name and
+//! bytes are read out of that copy and answered
 //! through a oneshot channel, since the delegate runs on the main thread while
 //! the pick's tap may not.
 
@@ -23,12 +25,14 @@ use objc2_ui_kit::{
 };
 use objc2_uniform_type_identifiers::UTTypeItem;
 
-use super::files_picker::{FilePicker, PickedFile};
+use protocol::UPLOAD_MAX_BYTES;
+
+use super::files_picker::{FilePick, FilePicker};
 use super::photos::PickSlot;
 
 /// The open pick's answer, until the picker finishes and takes it out; a
 /// newer pick replaces one still open, which answers it nothing.
-static WAITING: PickSlot<Option<PickedFile>> = PickSlot::new();
+static WAITING: PickSlot<Option<FilePick>> = PickSlot::new();
 
 // SAFETY:
 // - `UIDocumentPickerDelegate` asks this class only for its two pick methods,
@@ -69,7 +73,7 @@ thread_local! {
 pub struct IosFilePicker;
 
 impl FilePicker for IosFilePicker {
-    fn pick(&self) -> BoxFuture<'static, Option<PickedFile>> {
+    fn pick(&self) -> BoxFuture<'static, Option<FilePick>> {
         let rx = WAITING.open();
         if let Some(mtm) = MainThreadMarker::new() {
             present_on_main(mtm);
@@ -125,8 +129,9 @@ fn present_on_main(mtm: MainThreadMarker) {
 
 /// The picker finished: it is dismissed, its pick's answer is taken out of
 /// [`WAITING`] here, and its first file's name and bytes are read from the
-/// copy the picker made and answered through that answer alone, or nothing
-/// when the pick was cancelled.
+/// copy the picker made and answered through that answer alone, its name
+/// alone when it is over the upload cap, or nothing when the pick was
+/// cancelled.
 fn picked(picker: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
     picker.dismissViewControllerAnimated_completion(true, None);
     let answer = WAITING.take();
@@ -137,8 +142,11 @@ fn picked(picker: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
     };
     let name = url
         .lastPathComponent()
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| "file".to_owned());
+        .map_or_else(|| "file".to_owned(), |name| name.to_string());
+    if over_cap(&url, &name) {
+        answer.send(Some(FilePick::TooLarge(name)));
+        return;
+    }
     let Some(bytes) = NSData::dataWithContentsOfURL(&url) else {
         tracing::warn!(name = %name, "phone: the picked file could not be read");
         answer.send(None);
@@ -149,7 +157,31 @@ fn picked(picker: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
         bytes = bytes.length(),
         "phone: a file was picked"
     );
-    answer.send(Some((name, bytes.to_vec())));
+    answer.send(Some(FilePick::File((name, bytes.to_vec()))));
+}
+
+/// Whether the copy at `url`, named `name`, is over the upload cap, by its
+/// size on disk; a size that cannot be read is logged and counts as within
+/// it, so the copy is read as before.
+fn over_cap(url: &NSURL, name: &str) -> bool {
+    let Some(path) = url.path() else {
+        tracing::warn!(name = %name, "phone: the picked file has no path to size");
+        return false;
+    };
+    match std::fs::metadata(path.to_string()) {
+        Ok(meta) => {
+            let bytes = meta.len();
+            let over = bytes > u64::try_from(UPLOAD_MAX_BYTES).unwrap_or(u64::MAX);
+            if over {
+                tracing::info!(name = %name, bytes, "phone: the picked file is over the upload cap");
+            }
+            over
+        }
+        Err(err) => {
+            tracing::warn!(name = %name, error = %err, "phone: the picked file's size could not be read");
+            false
+        }
+    }
 }
 
 /// The picker was dismissed without a file: the pick is answered nothing.
