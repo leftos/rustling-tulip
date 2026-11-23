@@ -12,9 +12,9 @@
 //! subagent's) and which part of the screen holds the keys, and
 //! [`next_view_key`] gives the one key that moves towards a wanted view.
 //!
-//! The parsers key on the text Claude Code 2.1.307 draws (the captures in
-//! the daemon's `screen/fixtures/`), never on colour, which the rows do not
-//! carry. Claude Code 2.1.319 also draws a named session's name in a rule
+//! The parsers key on the text Claude Code draws, from 2.1.307 to 2.1.330
+//! (the captures in the daemon's `screen/fixtures/`), never on colour, which
+//! the rows do not carry. Claude Code 2.1.319 also draws a named session's name in a rule
 //! under a permission dialog, the screen's last row.
 
 use std::cmp::Ordering;
@@ -2920,6 +2920,83 @@ mod tests {
                 model(6, "More models", None, false),
             ]
         );
+    }
+
+    /// The `/model` picker as 2.1.330 draws it at 120 columns, the cursor on
+    /// the current model, and the same picker after one Down.
+    const PICKER_V2330: &str =
+        include_str!("../../../daemon/src/screen/fixtures/claude--v2330-model-picker.txt");
+    const PICKER_V2330_DOWN: &str =
+        include_str!("../../../daemon/src/screen/fixtures/claude--v2330-model-picker-down.txt");
+
+    #[test]
+    fn the_2_1_330_model_picker_reads_its_rows_and_recipe() {
+        let rows = [
+            model(
+                1,
+                "Default (recommended)",
+                Some("Sonnet 5.5 · Efficient for routine tasks"),
+                false,
+            ),
+            model(
+                2,
+                "Sonnet",
+                Some("Sonnet 5.5 · Efficient for routine tasks"),
+                false,
+            ),
+            model(
+                3,
+                "Fable",
+                Some("Fable 5.2 · Most capable for your hardest and longest-running tasks"),
+                false,
+            ),
+            model(
+                4,
+                "Opus",
+                Some("Opus 5.5 · Best for everyday, complex tasks"),
+                false,
+            ),
+            model(
+                5,
+                "Haiku",
+                Some("Current · Haiku 5.5 · Fastest for quick answers"),
+                false,
+            ),
+        ];
+        for (text, cursor, keys) in [
+            (PICKER_V2330, 5, vec![Key::Up; 3]),
+            (PICKER_V2330_DOWN, 1, vec![Key::Down]),
+        ] {
+            let screen = read(&capture(text));
+            assert_eq!(screen.composer, ComposerState::Dialog);
+            let prompt = screen.prompt.expect("a picker prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::ModelPicker);
+            assert_eq!(prompt.subject, "Select model");
+            assert_eq!(prompt.body, "");
+            assert_eq!(prompt.cursor, Some(cursor));
+            assert_eq!(prompt.adjust.as_deref(), Some("Medium effort (default)"));
+            // The highlighted row is the selected one; the tick reads as the
+            // current model's "Current · " description.
+            let mut wanted = rows.clone();
+            for option in &mut wanted {
+                option.selected = option.number == cursor;
+            }
+            assert_eq!(prompt.options, wanted);
+            let steps = recipe(&prompt, &pick(2)).expect("a recipe").steps;
+            assert_eq!(
+                steps,
+                [
+                    RecipeStep {
+                        keys,
+                        expect: ScreenExpect::OptionSelected(2),
+                    },
+                    RecipeStep {
+                        keys: vec![Key::Text("s".to_owned())],
+                        expect: ScreenExpect::Any,
+                    },
+                ]
+            );
+        }
     }
 
     #[test]

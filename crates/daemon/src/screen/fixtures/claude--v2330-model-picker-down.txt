@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude API
+ ▝▝   ▝▝   X:\dev\rustling-tulip\.tmp\rt525\repo
+
+⚠ Code Mode (experimental) is off for this session, as you chose. To stop being asked, remove
+  CLAUDE_CODE_EXPERIMENTAL_CODE_MODE from your shell or settings.json.
+
+▎ Auto mode is now Claude Code's default permission mode.
+▎ Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and
+▎ prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+  1 more notice hidden (ctrl+o to expand)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Select model
+  Your pick is the default for new sessions. For other models, use --model.
+
+  ❯ 1. Default (recommended)  Sonnet 5.5 · Efficient for routine tasks
+    2. Sonnet                 Sonnet 5.5 · Efficient for routine tasks
+    3. Fable                  Fable 5.2 · Most capable for your hardest and longest-running tasks
+    4. Opus                   Opus 5.5 · Best for everyday, complex tasks
+    5. Haiku ✔                Haiku 5.5 · Fastest for quick answers
+
+  ◐ Medium effort (default) ←/→ to adjust
+
+  s to use this session only · Enter to save · Esc to cancel

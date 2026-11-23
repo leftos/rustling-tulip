@@ -1457,7 +1457,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 112] = [
+        let cases: [(&str, &str, Verdict); 113] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1980,6 +1980,11 @@ mod tests {
             (
                 "claude--v2330-model-picker",
                 include_str!("fixtures/claude--v2330-model-picker.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-model-picker-down",
+                include_str!("fixtures/claude--v2330-model-picker-down.txt"),
                 Keep,
             ),
             (

@@ -5834,27 +5834,35 @@ fn question_screen() -> ChatScreen {
     }
 }
 
-/// The `chat-model-picker` shot's screen: the 2.1.329 `/model` picker with
-/// its rows as the daemon reads them, its first the current model.
+/// The `chat-model-picker` shot's screen: the 2.1.330 `/model` picker with
+/// its five rows as the daemon reads them, the cursor on the current model,
+/// Haiku, its last.
 fn model_picker_screen() -> ChatScreen {
     let options = [
         (
             1,
             "Default (recommended)",
-            Some("Current · Opus 5.5 · Best for everyday, complex tasks"),
+            "Sonnet 5.5 · Efficient for routine tasks",
         ),
-        (2, "Opus 5.5", Some("For complex work and everyday tasks")),
-        (3, "Fable 5.2", Some("For your toughest challenges")),
-        (4, "Sonnet 5.5", Some("Most efficient for simpler tasks")),
-        (5, "Haiku 5.5", Some("Fastest for quick answers")),
-        (6, "More models", None),
+        (2, "Sonnet", "Sonnet 5.5 · Efficient for routine tasks"),
+        (
+            3,
+            "Fable",
+            "Fable 5.2 · Most capable for your hardest and longest-running tasks",
+        ),
+        (4, "Opus", "Opus 5.5 · Best for everyday, complex tasks"),
+        (
+            5,
+            "Haiku",
+            "Current · Haiku 5.5 · Fastest for quick answers",
+        ),
     ]
     .into_iter()
     .map(|(number, label, description)| ChatOption {
         number,
         label: label.to_owned(),
-        description: description.map(str::to_owned),
-        selected: number == 1,
+        description: Some(description.to_owned()),
+        selected: number == 5,
     })
     .collect();
     ChatScreen {
@@ -5869,8 +5877,8 @@ fn model_picker_screen() -> ChatScreen {
             can_amend: false,
             always_allow_tip: None,
             multi: false,
-            cursor: Some(1),
-            adjust: Some("High effort".to_owned()),
+            cursor: Some(5),
+            adjust: Some("Medium effort (default)".to_owned()),
         }),
     }
 }

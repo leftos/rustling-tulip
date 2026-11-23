@@ -601,6 +601,16 @@ mod tests {
         (6, "More models"),
     ];
 
+    /// The model rows of the 2.1.330 `/model` picker captures, which draw
+    /// no More models row.
+    const V2330_PICKER_MODELS: [(u32, &str); 5] = [
+        (1, "Default (recommended)"),
+        (2, "Sonnet"),
+        (3, "Fable"),
+        (4, "Opus"),
+        (5, "Haiku"),
+    ];
+
     /// The explanation the 2.1.329 Switch model? dialog draws.
     const SWITCH_BODY: &str = "Your next response will be slower and use more tokens\n\n\
         This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.";
@@ -1037,6 +1047,22 @@ mod tests {
                 "claude--v2.1.329-model-picker-more-models-right",
                 include_str!("fixtures/claude--v2.1.329-model-picker-more-models-right.txt"),
                 picker(6, None),
+            ),
+            (
+                "claude--v2330-model-picker",
+                include_str!("fixtures/claude--v2330-model-picker.txt"),
+                Expected {
+                    adjust: Some("Medium effort (default)"),
+                    ..dialog(ModelPicker, "Select model", &V2330_PICKER_MODELS, Some(5))
+                },
+            ),
+            (
+                "claude--v2330-model-picker-down",
+                include_str!("fixtures/claude--v2330-model-picker-down.txt"),
+                Expected {
+                    adjust: Some("Medium effort (default)"),
+                    ..dialog(ModelPicker, "Select model", &V2330_PICKER_MODELS, Some(1))
+                },
             ),
             (
                 "claude--v2.1.329-model-typed-during-turn-0.7s",
