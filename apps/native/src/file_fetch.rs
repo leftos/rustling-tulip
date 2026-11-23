@@ -870,6 +870,8 @@ pub struct FetchEntry {
     finishing: bool,
     /// The link's other readings, when this fetch is one of them.
     group: Option<ProbeGroup>,
+    /// The phone's tap this fetch came from; `None` on the desktop.
+    tap: Option<PhoneTap>,
     /// Started from the Fetch file… dialog, which shows its progress and
     /// errors in place of toasts.
     popup: bool,
@@ -942,6 +944,7 @@ impl FetchEntry {
             },
             finishing: false,
             group: None,
+            tap: None,
             popup: false,
             parent: None,
             batch: None,
@@ -1018,6 +1021,12 @@ impl FetchEntry {
     #[must_use]
     pub fn group(&self) -> Option<&ProbeGroup> {
         self.group.as_ref()
+    }
+
+    /// The phone's tap this fetch came from; `None` on the desktop.
+    #[must_use]
+    pub fn tap(&self) -> Option<&PhoneTap> {
+        self.tap.as_ref()
     }
 
     /// Notes that `Done` went to the writer: the fetch now ends by the
@@ -1521,6 +1530,13 @@ impl FetchRegistry {
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut FetchEntry> {
         self.entries.get_mut(id)
+    }
+
+    /// Notes the phone's tap `tap` on the fetch `id`, while it is in flight.
+    pub fn set_tap(&mut self, id: &str, tap: Option<PhoneTap>) {
+        if let Some(entry) = self.entries.get_mut(id) {
+            entry.tap = tap;
+        }
     }
 
     /// The id of the fetch the toast keyed `key` follows: a fetch keyed by

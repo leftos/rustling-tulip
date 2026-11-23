@@ -2504,6 +2504,63 @@ fn a_tapped_path_outside_the_sessions_repos_says_why_on_the_phone(cx: &mut TestA
 }
 
 #[gpui::test]
+fn a_tapped_file_the_host_fails_to_send_says_why_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = terminal_showing(cx, &dir, &[NOTES]);
+    tap_cell(&mut h, 3, 0);
+    let mut sent = stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    // Fail every reading the phone fetches until it fetches no more.
+    loop {
+        let ids: Vec<String> = sent
+            .iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::FetchHostFile { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let Some(id) = ids.first() else { break };
+        h.host(&saved_remote()).send(DaemonMessage::FileFetchError {
+            id: id.clone(),
+            error: "reading the file: access denied".to_owned(),
+        });
+        h.cx.run_until_parked();
+        sent = h.host(&saved_remote()).sent();
+    }
+    assert_eq!(
+        path_note(&mut h).as_deref(),
+        Some("reading the file: access denied")
+    );
+    assert!(drawn(&mut h, "phone-path-note"), "the line shows");
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new(), "no toast");
+}
+
+#[gpui::test]
+fn a_tapped_file_already_fetching_says_so_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = terminal_showing(cx, &dir, &[NOTES]);
+    tap_cell(&mut h, 3, 0);
+    let first = stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    assert_eq!(fetches(&first).len(), 1, "the first tap fetches: {first:?}");
+    tap_cell(&mut h, 3, 0);
+    stat_answered(&mut h, NOTES, protocol::PathKind::File);
+    assert_eq!(
+        path_note(&mut h).as_deref(),
+        Some("Already fetching notes.txt")
+    );
+    // The "Fetching notes.txt from …" info toast the first tap pushed is the
+    // desktop's, and the root holds it on the phone too; only a failure
+    // toast would mean the note was not the phone's answer.
+    let titles = toast_titles(&mut h);
+    assert!(
+        !titles
+            .iter()
+            .any(|title| title.starts_with("Couldn't fetch")
+                || title.starts_with("Already fetching")),
+        "no failure toast: {titles:?}"
+    );
+}
+
+#[gpui::test]
 fn a_tap_on_a_host_too_old_for_folders_says_why_on_the_phone(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = older_terminal_showing(cx, &dir, &[REPO_ROOT]);

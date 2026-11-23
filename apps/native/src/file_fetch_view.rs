@@ -54,8 +54,8 @@ pub(crate) const FETCH_REVEAL: ToastAction = ToastAction {
     danger: false,
 };
 
-/// Why the phone's browser says a saved folder failed when it landed
-/// outside the copies folder, so the phone cannot keep it.
+/// Why the phone says a saved fetch failed when it landed outside the
+/// copies folder, so the phone cannot keep it.
 const PHONE_FOLDER_NOT_KEPT: &str = "it was saved outside the copies folder";
 
 /// The detail of the toast refusing a link's fetch, outside every repo or
@@ -189,7 +189,7 @@ impl RootView {
         request: FetchRequest,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        self.start_fetch(request, None, cx)
+        self.start_fetch(request, None, None, cx)
     }
 
     /// Asks the remote host for `request`'s folder, unpacked under this
@@ -514,7 +514,7 @@ impl RootView {
         let Some(root) = readings.first().map(|r| r.repo_name.clone()) else {
             return;
         };
-        if !self.start_file_flow(readings, None, cx) {
+        if !self.start_file_flow(readings, None, tap.as_ref(), cx) {
             tracing::info!(host = ?host, "the host cannot send the folder a link names");
             self.push_too_old(host, &root, tap.as_ref(), cx);
         }
@@ -724,6 +724,7 @@ impl RootView {
         &mut self,
         readings: Vec<FetchRequest>,
         key: Option<&str>,
+        tap: Option<&file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) -> bool {
         let mut files: Vec<FetchRequest> = readings
@@ -738,7 +739,7 @@ impl RootView {
             Some(key) => self.fetches.new_group_keyed(key.to_owned(), files),
             None => self.fetches.new_group(files),
         };
-        if self.start_fetch(first, Some(group), cx).is_none()
+        if self.start_fetch(first, Some(group), tap, cx).is_none()
             && let Some(key) = key
         {
             self.dismiss_toast_key(key, cx);
@@ -929,7 +930,7 @@ impl RootView {
             .then(|| readings.first().map(|reading| reading.host.clone()))
             .flatten();
         let host = readings.first().map(|reading| reading.host.clone());
-        if !self.start_file_flow(readings, Some(key), cx) {
+        if !self.start_file_flow(readings, Some(key), tap, cx) {
             self.dismiss_toast_key(key, cx);
             let detail = match root_host {
                 Some(host) => format!("{name} is not on {}.", self.host_label_of(&host)),
@@ -1075,18 +1076,30 @@ impl RootView {
     }
 
     /// [`Self::fetch_remote_file`], as one reading of `group`'s link when
-    /// given: its "Fetching" toast is the group's, updated in place. A
-    /// refusal is a toast.
+    /// given: its "Fetching" toast is the group's, updated in place. On the
+    /// phone, `tap` is the tap this fetch came from, which its later
+    /// failures name on its session's page; a refusal is a toast, or that
+    /// page's note.
     fn start_fetch(
         &mut self,
         request: FetchRequest,
         group: Option<ProbeGroup>,
+        tap: Option<&file_fetch::PhoneTap>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        let host = request.host.clone();
         match self.try_start_fetch(request, group, false, cx) {
-            Ok(id) => Some(id),
+            Ok(id) => {
+                self.fetches.set_tap(&id, tap.cloned());
+                Some(id)
+            }
             Err(refusal) => {
-                self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+                match tap.filter(|_| self.shape == crate::RootShape::Phone) {
+                    Some(tap) => {
+                        self.warn_tap(&host, Some(tap), &refusal.title, refusal.detail, cx);
+                    }
+                    None => self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx),
+                }
                 None
             }
         }
@@ -1484,13 +1497,18 @@ impl RootView {
             self.push_too_old(&host, entry.file_name(), None, cx);
             return;
         }
+        // The retried reading is the same tap's fetch on the phone.
+        let tap = self.fetches.get(id).and_then(FetchEntry::tap).cloned();
         match self.fetches.next_reading(id) {
             Some((next, group)) => {
                 tracing::info!(id, next = %next.rel_path, "a link's reading is not on the host: {error}");
                 let key = group.key().to_owned();
                 // A refused retry shows its own toast, and the link's
                 // "Fetching" toast, keyed by the group, goes with it.
-                if self.start_fetch(next, Some(group), cx).is_none() {
+                if self
+                    .start_fetch(next, Some(group), tap.as_ref(), cx)
+                    .is_none()
+                {
                     self.dismiss_toast_key(&key, cx);
                 }
             }
@@ -1972,8 +1990,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         if self.shape == crate::RootShape::Phone {
-            if let Some(saved) = self.phone_fetched_of(entry, &path) {
-                self.phone_file_saved(saved, cx);
+            match self.phone_fetched_of(entry, &path) {
+                Some(saved) => self.phone_file_saved(saved, cx),
+                None => self.warn_tap(
+                    entry.host_key(),
+                    entry.tap(),
+                    &failed_title(entry.file_name()),
+                    Some(PHONE_FOLDER_NOT_KEPT.to_owned()),
+                    cx,
+                ),
             }
             return;
         }
@@ -2199,6 +2224,18 @@ impl RootView {
             self.fail_fetch_dialog(detail, window, cx);
             return;
         }
+        if self.shape == crate::RootShape::Phone
+            && let Some(tap) = entry.tap()
+        {
+            self.warn_tap(
+                entry.host_key(),
+                Some(tap),
+                &failed_title(entry.file_name()),
+                Some(detail),
+                cx,
+            );
+            return;
+        }
         self.push_toast(
             ToastKind::Error,
             &failed_title(entry.file_name()),
@@ -2246,6 +2283,18 @@ impl RootView {
             }
             if entry.reports_to_popup() && self.fetch_dialog_follows(&id) {
                 self.fail_fetch_dialog(failure_detail(&entry, &reason), window, cx);
+                continue;
+            }
+            if self.shape == crate::RootShape::Phone
+                && let Some(tap) = entry.tap()
+            {
+                self.warn_tap(
+                    entry.host_key(),
+                    Some(tap),
+                    &failed_title(entry.file_name()),
+                    Some(failure_detail(&entry, &reason)),
+                    cx,
+                );
                 continue;
             }
             self.push_toast(
