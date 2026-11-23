@@ -354,7 +354,7 @@ fn closes_on_the_second_click(h: &mut Harness, tab_id: &str) {
 }
 
 #[gpui::test]
-fn a_tab_of_empty_panes_keeps_the_two_click_close(cx: &mut TestAppContext) {
+fn a_tab_of_empty_panes_closes_at_once(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = two_tabs();
     fixture.tabs.push(tab(
@@ -366,7 +366,14 @@ fn a_tab_of_empty_panes_keeps_the_two_click_close(cx: &mut TestAppContext) {
         ),
     ));
     let mut h = Harness::with(cx, &dir, &fixture);
-    closes_on_the_second_click(&mut h, "t3");
+    h.sent();
+    h.click_on("tab-close-t3");
+    assert!(!tab_close_open(&mut h), "no dialog");
+    assert_eq!(
+        closes_and_stops(&h.sent()),
+        ["close t3"],
+        "one click closes a tab of empty panes"
+    );
 }
 
 #[gpui::test]

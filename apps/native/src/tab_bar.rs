@@ -1209,8 +1209,8 @@ impl RootView {
     }
 
     /// A close click: asks in the tab-close dialog when the tab shows a
-    /// live session; otherwise closes the tab, or arms the close when the
-    /// tab holds a session or a split. Returns whether it closed the tab or
+    /// live session; otherwise closes the tab, or arms the close when a
+    /// pane of the tab shows a session. Returns whether it closed the tab or
     /// opened the dialog.
     fn close_tab_click(
         &mut self,

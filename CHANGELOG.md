@@ -63,6 +63,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A session that finishes its turn while a subagent's question waits keeps its background marker once you answer, so keep-awake and the Finished alert wait for its running work.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
 
+### Changed
+
+- Closing a tab of only dispatch run or subagent views, or of empty panes, no longer asks for a second click.
+
 ## v0.18.3-alpha
 
 ### Highlights

@@ -1993,7 +1993,9 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
     fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
-    fixture.sessions.push(session("s2").in_repo("r2").build());
+    fixture
+        .sessions
+        .push(session("s2").in_repo("r2").status("stopped").build());
     let mut h = Harness::with(cx, &dir, &fixture);
     h.answer_scrollback("s1", b"");
     h.sent_input("s1");
@@ -2071,7 +2073,7 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
     );
 
     // An armed confirm survives the Escape that clears the row focus.
-    send_empty_split_tab(&mut h, "t9");
+    send_arming_split_tab(&mut h, "t9");
     let closes = |sent: &[ClientMessage], id: &str| {
         sent.iter()
             .filter(|message| matches!(message, ClientMessage::CloseTab { tab_id } if tab_id == id))
@@ -2099,13 +2101,14 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
     );
 }
 
-/// Adds tab `tab_id` of two empty panes, which keeps the two-click close (a
-/// tab showing a live session asks in a dialog instead), and drains what
-/// was sent.
-fn send_empty_split_tab(h: &mut Harness, tab_id: &str) {
+/// Adds tab `tab_id` holding the stopped session `s2` beside an empty pane,
+/// which keeps the two-click close (a tab showing a live session asks in a
+/// dialog instead, and one of read-only views or empty panes closes at
+/// once), and drains what was sent.
+fn send_arming_split_tab(h: &mut Harness, tab_id: &str) {
     let grid = split(
         SplitDirection::Horizontal,
-        pane(&format!("{tab_id}-a"), None),
+        pane(&format!("{tab_id}-a"), Some("s2")),
         pane(&format!("{tab_id}-b"), None),
     );
     h.send(DaemonMessage::TabUpdated {

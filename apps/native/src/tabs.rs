@@ -1112,12 +1112,14 @@ pub fn session_pane_count(grid: &GridNode) -> usize {
         .count()
 }
 
-/// Whether closing `tab` loses something worth a second click: a bound
-/// pane, a session or a follow, or a layout of two panes or more.
+/// Whether closing `tab` loses something worth a second click: a pane
+/// showing a session. A tab of read-only views (follows, viewers) and empty
+/// panes closes at once.
 pub fn needs_confirm(tab: &TabEntry) -> bool {
     tab.grid().is_some_and(|grid| {
-        let panes = collect_panes(grid);
-        panes.len() >= 2 || panes.iter().any(Pane::is_bound)
+        collect_panes(grid)
+            .iter()
+            .any(|pane| pane.session.is_some())
     })
 }
 
@@ -3829,7 +3831,7 @@ pub(crate) mod tests {
     fn tabs_close_confirm_arms_and_disarms() {
         let trivial = tab("t0", &pane("a", None));
         let bound = tab("t1", &pane("a", Some("s1")));
-        let two_panes = tab("t2", &split(H, 0.5, pane("a", None), pane("b", None)));
+        let two_panes = tab("t2", &split(H, 0.5, pane("a", Some("s2")), pane("b", None)));
         let mut confirm = CloseConfirm::default();
         assert!(confirm.click(&trivial), "nothing to lose closes at once");
         assert!(!confirm.click(&bound), "a bound session arms first");
@@ -3849,8 +3851,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn closing_a_tab_with_a_follow_pane_needs_confirm() {
-        assert!(needs_confirm(&tab("t", &follow_pane("f", "run-1"))));
+    fn closing_a_tab_of_read_only_views_needs_no_confirm() {
+        assert!(
+            !needs_confirm(&tab("t", &follow_pane("f", "run-1"))),
+            "a follow pane closes at once"
+        );
+        assert!(
+            !needs_confirm(&tab(
+                "t2",
+                &split(
+                    H,
+                    0.5,
+                    follow_pane("f1", "run-1"),
+                    follow_pane("f2", "run-2")
+                )
+            )),
+            "two follows close at once"
+        );
+        assert!(
+            !needs_confirm(&tab("t3", &split(H, 0.5, pane("a", None), pane("b", None)))),
+            "two empty panes close at once"
+        );
+        assert!(
+            needs_confirm(&tab(
+                "t4",
+                &split(H, 0.5, follow_pane("f", "run-1"), pane("s", Some("s1")))
+            )),
+            "a session beside a follow still asks"
+        );
         assert!(
             !needs_confirm(&tab("e", &pane("p", None))),
             "a lone empty pane closes at once"
