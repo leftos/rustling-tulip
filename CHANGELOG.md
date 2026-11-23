@@ -15,7 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - In Chat, a /btw side question's card shows its question and, once it arrives, the answer.
 - In Chat, a question whose options carry previews shows a card to answer it, with the focused option's preview.
 - In Chat, an open transcript, Rewind or /btw screen in the terminal shows a card with a Close button, and the message box waits until it closes.
-- In Chat, Rewind's card lists the messages you can go back to, then its restore choices, each answered from the card.
+- In Chat, Rewind's card lists the messages you can go back to, then its restore choices, each answered from the card; restoring or summarizing asks for a second click.
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 - On the phone, Settings › Notifications sets how long a Finished alert waits after a session goes idle, as the desktop's setting does.
 
