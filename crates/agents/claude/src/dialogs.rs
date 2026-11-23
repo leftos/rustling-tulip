@@ -103,12 +103,20 @@ enum CloseKey {
     Esc,
 }
 
+/// Where an overlay's prompt body comes from.
+enum OverlayBody {
+    /// The same text on every screen.
+    Fixed(&'static str),
+    /// Read from the screen's rows.
+    Read(fn(&[String]) -> String),
+}
+
 /// How the chat closes an overlay: its prompt's subject, the key and the
 /// reading to wait for after it.
 struct OverlayClose {
     label: &'static str,
     /// The prompt's body.
-    body: &'static str,
+    body: OverlayBody,
     key: CloseKey,
     expect: ScreenExpect,
 }
@@ -132,7 +140,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "transcript",
         close: Some(OverlayClose {
             label: "Transcript",
-            body: "",
+            body: OverlayBody::Fixed(""),
             key: CloseKey::Q,
             expect: ScreenExpect::DialogGone,
         }),
@@ -142,7 +150,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "transcript_shortcuts",
         close: Some(OverlayClose {
             label: "Transcript shortcuts",
-            body: "",
+            body: OverlayBody::Fixed(""),
             key: CloseKey::Q,
             expect: ScreenExpect::DialogGone,
         }),
@@ -152,7 +160,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "transcript_search",
         close: Some(OverlayClose {
             label: "Transcript search",
-            body: "",
+            body: OverlayBody::Fixed(""),
             key: CloseKey::Esc,
             expect: ScreenExpect::NextPrompt(ChatPromptKind::Overlay),
         }),
@@ -162,7 +170,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "btw",
         close: Some(OverlayClose {
             label: "Side question",
-            body: "",
+            body: OverlayBody::Read(btw_answered),
             key: CloseKey::Esc,
             expect: ScreenExpect::DialogGone,
         }),
@@ -172,7 +180,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "btw_pending",
         close: Some(OverlayClose {
             label: "Side question",
-            body: "",
+            body: OverlayBody::Read(btw_pending),
             key: CloseKey::Esc,
             expect: ScreenExpect::DialogGone,
         }),
@@ -182,7 +190,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         name: "rewind",
         close: Some(OverlayClose {
             label: "Rewind",
-            body: "",
+            body: OverlayBody::Fixed(""),
             key: CloseKey::Esc,
             expect: ScreenExpect::Any,
         }),
@@ -193,7 +201,7 @@ static OVERLAYS: [OverlayRow; 9] = [
         close: Some(OverlayClose {
             label: "Rewind",
             // A body of its own, so the picker an Esc may lead back to is a new prompt.
-            body: "Choose what to restore in the terminal, or close it.",
+            body: OverlayBody::Fixed("Choose what to restore in the terminal, or close it."),
             key: CloseKey::Esc,
             expect: ScreenExpect::Any,
         }),
@@ -291,7 +299,10 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
             composer: ComposerState::Overlay {
                 name: overlay.name.to_owned(),
             },
-            prompt: overlay.close.as_ref().map(close_prompt),
+            prompt: overlay
+                .close
+                .as_ref()
+                .map(|close| close_prompt(close, rows)),
         };
     }
     let start = after_last_rule(rows);
@@ -663,14 +674,18 @@ fn shows_input_box(rows: &[String], bottom: &[usize]) -> bool {
         && first.is_some_and(|row| row.starts_with(CURSOR) || row.starts_with(BASH_MODE))
 }
 
-/// The prompt an overlay the chat can close shows: its label and one
-/// Close option.
-fn close_prompt(close: &OverlayClose) -> ChatPrompt {
+/// The prompt an overlay the chat can close shows on the screen whose rows
+/// are `rows`: its label, its body and one Close option.
+fn close_prompt(close: &OverlayClose, rows: &[String]) -> ChatPrompt {
+    let body = match close.body {
+        OverlayBody::Fixed(text) => text.to_owned(),
+        OverlayBody::Read(reader) => reader(rows),
+    };
     ChatPrompt {
         id: String::new(),
         kind: ChatPromptKind::Overlay,
         subject: close.label.to_owned(),
-        body: close.body.to_owned(),
+        body,
         options: vec![ChatOption {
             number: 1,
             label: CLOSE_LABEL.to_owned(),
@@ -684,6 +699,57 @@ fn close_prompt(close: &OverlayClose) -> ChatPrompt {
         cursor: None,
         adjust: None,
     }
+}
+
+/// The mark a `/btw` side question's question row starts with.
+const BTW_MARK: &str = "/btw ";
+
+/// The character of the rule a `/btw` side question is drawn under.
+const BTW_RULE: char = '▔';
+
+/// A `/btw` side question on the screen whose rows are `rows`: the question
+/// as typed, the index of the first row after it and the index of its
+/// footer, the last row with text. The question runs from the first row
+/// starting with `/btw ` under the last `▔` rule to the first blank row
+/// before the footer, its rows trimmed and joined with spaces; with no
+/// blank row there it is the `/btw ` row alone. None without a question row.
+fn btw_rows(rows: &[String]) -> Option<(String, usize, usize)> {
+    let start = rows
+        .iter()
+        .rposition(|row| row.trim_start().starts_with(BTW_RULE))
+        .map_or(0, |index| index + 1);
+    let footer = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    let first = (start..footer).find(|&index| rows[index].trim_start().starts_with(BTW_MARK))?;
+    let head = rows[first].trim().strip_prefix(BTW_MARK)?.trim();
+    let end = (first + 1..footer)
+        .find(|&index| rows[index].trim().is_empty())
+        .unwrap_or(first + 1);
+    let question = std::iter::once(head)
+        .chain(rows[first + 1..end].iter().map(|row| row.trim()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((question, end, footer))
+}
+
+/// The body of a `/btw` side question still being answered: its question
+/// alone, the spinner row under it left out; empty without a question row.
+fn btw_pending(rows: &[String]) -> String {
+    btw_rows(rows).map_or_else(String::new, |(question, _, _)| cap_body(question))
+}
+
+/// The body of an answered `/btw` side question: its question, a blank
+/// line and the answer's rows between the question and the footer, their
+/// shared indent taken off; empty without a question row.
+fn btw_answered(rows: &[String]) -> String {
+    let Some((text, after, footer)) = btw_rows(rows) else {
+        return String::new();
+    };
+    let answer: Vec<&str> = rows[after..footer].iter().map(String::as_str).collect();
+    let answer = row_block(&answer);
+    if answer.is_empty() {
+        return cap_body(text);
+    }
+    cap_body(format!("{text}\n\n{answer}"))
 }
 
 /// The Close of the overlay whose prompt is `prompt`: option 1 types the
@@ -2223,7 +2289,11 @@ fn text_block(rows: &[&str], indent: usize) -> String {
     let (Some(first), Some(last)) = (first, last) else {
         return String::new();
     };
-    let mut text = lines[first..=last].join("\n");
+    cap_body(lines[first..=last].join("\n"))
+}
+
+/// `text` cut at [`BODY_CAP`] bytes, on a character boundary.
+fn cap_body(mut text: String) -> String {
     if text.len() > BODY_CAP {
         let mut end = BODY_CAP;
         while !text.is_char_boundary(end) {
@@ -3163,10 +3233,11 @@ mod tests {
             let prompt = screen.prompt.expect("an overlay shows its Close prompt");
             assert_eq!(prompt.kind, ChatPromptKind::Overlay, "{name}");
             assert_eq!(prompt.subject, subject, "{name}");
-            let body = if name == "rewind_restore" {
-                "Choose what to restore in the terminal, or close it."
-            } else {
-                ""
+            let body = match name {
+                "rewind_restore" => "Choose what to restore in the terminal, or close it.",
+                "btw" => "what is 2+2? one word\n\nFour",
+                "btw_pending" => "what is 2+2? one word",
+                _ => "",
             };
             assert_eq!(prompt.body, body, "{name}");
             assert_eq!(
@@ -3180,6 +3251,75 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A `/btw` side question's screen as 2.1.330 draws it once answered.
+    const BTW_ANSWER: &str =
+        include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-answer.txt");
+
+    #[test]
+    fn a_btw_answer_reads_its_question_and_answer() {
+        assert_eq!(prompt_in(BTW_ANSWER).body, "what is 2+2? one word\n\nFour");
+    }
+
+    #[test]
+    fn a_pending_btw_reads_its_question_alone() {
+        let pending =
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-pending.txt");
+        assert_eq!(prompt_in(pending).body, "what is 2+2? one word");
+    }
+
+    #[test]
+    fn a_multi_row_btw_answer_keeps_its_rows() {
+        let text = BTW_ANSWER.replace("    Four", "    One\n      two\n    three");
+        assert!(text.contains("      two"));
+        assert_eq!(
+            prompt_in(&text).body,
+            "what is 2+2? one word\n\nOne\n  two\nthree"
+        );
+    }
+
+    /// The question row `  /btw what is 2+2? one word` split over two rows,
+    /// the second at the first's indent.
+    fn wrap_question(text: &str) -> String {
+        let wrapped = text.replace(
+            "  /btw what is 2+2? one word",
+            "  /btw what is 2+2?\n  one word",
+        );
+        assert!(wrapped.contains("\n  one word\n"));
+        wrapped
+    }
+
+    #[test]
+    fn a_wrapped_btw_question_reads_whole() {
+        assert_eq!(
+            prompt_in(&wrap_question(BTW_ANSWER)).body,
+            "what is 2+2? one word\n\nFour"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_pending_btw_question_reads_whole() {
+        let pending =
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-pending.txt");
+        assert_eq!(
+            prompt_in(&wrap_question(pending)).body,
+            "what is 2+2? one word"
+        );
+    }
+
+    #[test]
+    fn a_btw_screen_with_no_question_reads_no_body() {
+        let text = BTW_ANSWER.replace("  /btw what is 2+2? one word", "");
+        assert!(!text.contains("/btw what"));
+        let screen = read(&capture(&text));
+        assert_eq!(
+            screen.composer,
+            ComposerState::Overlay {
+                name: "btw".to_owned()
+            }
+        );
+        assert_eq!(screen.prompt.expect("the Close prompt").body, "");
     }
 
     #[test]

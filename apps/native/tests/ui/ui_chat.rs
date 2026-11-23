@@ -1771,6 +1771,71 @@ fn an_overlay_card_closes_it_and_disables_the_composer(cx: &mut TestAppContext) 
     assert_eq!(answer_kinds(&mut h), [opt(1)]);
 }
 
+/// A `/btw` side question's Close prompt with id `id` and `body`.
+fn side_question(id: &str, body: &str) -> ChatPrompt {
+    let mut close = prompt(id, ChatPromptKind::Overlay, &[(1, "Close")]);
+    "Side question".clone_into(&mut close.subject);
+    body.clone_into(&mut close.body);
+    close.can_amend = false;
+    close
+}
+
+#[gpui::test]
+fn a_btw_card_shows_its_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let btw = || ComposerState::Overlay {
+        name: "btw".to_owned(),
+    };
+    show_screen(
+        &mut h,
+        btw(),
+        Some(side_question("b1", "what is 2+2? one word")),
+    );
+    assert!(painted(&mut h, "chat-card-body"), "the question");
+    let question = h.bounds("chat-card-body").size.height;
+    show_screen(
+        &mut h,
+        btw(),
+        // The daemon keeps a side question's id as its answer arrives.
+        Some(side_question("b1", "what is 2+2? one word\n\nFour")),
+    );
+    assert_eq!(card(&mut h).map(|(id, _)| id).as_deref(), Some("b1"));
+    let answered = h.bounds("chat-card-body").size.height;
+    assert!(
+        answered > question,
+        "the answer draws under the question: {answered:?} vs {question:?}"
+    );
+    assert!(
+        !h.root(|root, _| root.chat_answered_elsewhere("s1")),
+        "the answered card is the pending one updated"
+    );
+    assert!(painted(&mut h, "chat-card-1"), "the Close button");
+    assert!(!painted(&mut h, "chat-card-2"), "Close is the only button");
+    h.sent();
+    h.click_on("chat-card-1");
+    assert_eq!(answer_kinds(&mut h), [opt(1)]);
+    show_screen(&mut h, ComposerState::Ready, None);
+    assert!(
+        !h.root(|root, _| root.chat_answered_elsewhere("s1")),
+        "closed by our Close"
+    );
+}
+
+#[gpui::test]
+fn a_new_kind_of_card_still_reads_answered_elsewhere(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let list = [(1, "Yes"), (2, "No")];
+    show(&mut h, prompt("q1", ChatPromptKind::Question, &list));
+    show(&mut h, prompt("q2", ChatPromptKind::Question, &list));
+    assert_eq!(card(&mut h).map(|(id, _)| id).as_deref(), Some("q2"));
+    assert!(
+        h.root(|root, _| root.chat_answered_elsewhere("s1")),
+        "an unsubmitted question replaced by another reads answered elsewhere"
+    );
+}
+
 #[gpui::test]
 fn the_effort_buttons_send_adjust_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();

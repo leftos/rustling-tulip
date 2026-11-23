@@ -15,7 +15,7 @@ use agent_api::{
     AnswerRecipe, AnswerRefusal, DraftReading, ScreenExpect, ScreenWork, ViewGoal, ViewReading,
     ViewRefusal, ViewStep,
 };
-use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen, ComposerState};
+use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
 
 use super::Screen;
 use crate::osc_title::agent_title_text;
@@ -155,13 +155,23 @@ pub fn next_view_key(agent: &AgentId, goal: ViewGoal, reading: &ViewReading) -> 
 /// What makes `prompt` the same prompt across readings: its kind, subject,
 /// body, its options' numbers in order and its question tabs' labels. The
 /// cursor, which option is selected, the options' labels (a field being
-/// typed into) and the id are left out. Stable within one process only.
+/// typed into) and the id are left out. An overlay's body counts only up to
+/// its first blank line, so a side question keeps one identity while its
+/// answer arrives, scrolls or re-wraps. Stable within one process only.
 #[must_use]
 pub fn prompt_identity(prompt: &ChatPrompt) -> u64 {
     let mut hasher = DefaultHasher::new();
     std::mem::discriminant(&prompt.kind).hash(&mut hasher);
     prompt.subject.hash(&mut hasher);
-    prompt.body.hash(&mut hasher);
+    let body = if prompt.kind == ChatPromptKind::Overlay {
+        prompt
+            .body
+            .split_once("\n\n")
+            .map_or(prompt.body.as_str(), |(first, _)| first)
+    } else {
+        prompt.body.as_str()
+    };
+    body.hash(&mut hasher);
     for option in &prompt.options {
         option.number.hash(&mut hasher);
     }
@@ -256,6 +266,26 @@ mod tests {
             prompt_identity(&choice),
             "an Esc from the choice screen back to the picker is a new prompt"
         );
+    }
+
+    /// A `/btw` side question's screen as 2.1.330 draws it once answered.
+    const BTW_ANSWER: &str = include_str!("fixtures/claude--v2330-btw-answer.txt");
+
+    #[test]
+    fn a_side_questions_pending_and_answered_screens_are_one_prompt() {
+        let pending = prompt_of(include_str!("fixtures/claude--v2330-btw-pending.txt"));
+        let answered = prompt_of(BTW_ANSWER);
+        assert_ne!(pending.body, answered.body);
+        assert_eq!(prompt_identity(&pending), prompt_identity(&answered));
+    }
+
+    #[test]
+    fn a_scrolled_side_question_keeps_its_identity() {
+        let scrolled = BTW_ANSWER.replace("    Four", "    Four\n    and more");
+        let longer = prompt_of(&scrolled);
+        let answered = prompt_of(BTW_ANSWER);
+        assert_ne!(longer.body, answered.body);
+        assert_eq!(prompt_identity(&longer), prompt_identity(&answered));
     }
 
     /// What one capture must read as.
@@ -1166,7 +1196,10 @@ mod tests {
             (
                 "v141-btw",
                 include_str!("fixtures/v141-btw.txt"),
-                closable("btw", "Side question"),
+                Expected {
+                    body: Some("what is 2+2\n\n4"),
+                    ..closable("btw", "Side question")
+                },
             ),
             (
                 "claude--v2330-transcript-overlay",
@@ -1201,12 +1234,18 @@ mod tests {
             (
                 "claude--v2330-btw-pending",
                 include_str!("fixtures/claude--v2330-btw-pending.txt"),
-                closable("btw_pending", "Side question"),
+                Expected {
+                    body: Some("what is 2+2? one word"),
+                    ..closable("btw_pending", "Side question")
+                },
             ),
             (
                 "claude--v2330-btw-answer",
                 include_str!("fixtures/claude--v2330-btw-answer.txt"),
-                closable("btw", "Side question"),
+                Expected {
+                    body: Some("what is 2+2? one word\n\nFour"),
+                    ..closable("btw", "Side question")
+                },
             ),
             (
                 "v03-ready",

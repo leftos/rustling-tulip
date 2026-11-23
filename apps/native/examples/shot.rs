@@ -346,6 +346,8 @@ const SUMMARY_OPEN_LINE: &str = "t1";
 const CHAT_OPEN_STRETCH: &str = "pills";
 /// The prompt id the `chat-model-picker` shot's card answers.
 const MODEL_PICKER_PROMPT: &str = "model-1";
+/// The prompt id the `chat-btw` shot's card closes.
+const BTW_PROMPT: &str = "btw-1";
 /// The `chat` shot's running Bash call, drawn open one statement per line.
 const FOOTER_SPECS: &str = "cargo build -p rustling-tulip-native 2>&1 | tail -n 3; \
      cargo nextest run -p rustling-tulip-native -E 'test(/footer/)' > .tmp/footer.log 2>&1 && \
@@ -407,6 +409,7 @@ enum View {
     Chat,
     ChatCompact,
     ChatModelPicker,
+    ChatBtw,
     ChatDraftClear,
     Summary,
     Themes,
@@ -465,7 +468,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 78] = [
+    const ALL: [Self; 79] = [
         Self::Main,
         Self::MainCompact,
         Self::MainNarrow,
@@ -489,6 +492,7 @@ impl View {
         Self::Chat,
         Self::ChatCompact,
         Self::ChatModelPicker,
+        Self::ChatBtw,
         Self::ChatDraftClear,
         Self::Summary,
         Self::Themes,
@@ -657,6 +661,7 @@ impl View {
             Self::Chat => "chat",
             Self::ChatCompact => "chat-compact",
             Self::ChatModelPicker => "chat-model-picker",
+            Self::ChatBtw => "chat-btw",
             Self::ChatDraftClear => "chat-draft-clear",
             Self::Summary => "summary",
             Self::Themes => "themes",
@@ -758,9 +763,11 @@ impl View {
             Self::Toast => TOAST_WINDOW_SIZE,
             Self::DashboardCompact => DASHBOARD_COMPACT_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
-            Self::Chat | Self::ChatCompact | Self::ChatModelPicker | Self::ChatDraftClear => {
-                CHAT_WINDOW_SIZE
-            }
+            Self::Chat
+            | Self::ChatCompact
+            | Self::ChatModelPicker
+            | Self::ChatBtw
+            | Self::ChatDraftClear => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             Self::PhoneHome
             | Self::PhoneHomeSorted
@@ -966,6 +973,13 @@ impl View {
                         .chat_card("s-petal")
                         .is_some_and(|(prompt, _)| prompt == MODEL_PICKER_PROMPT)
             }
+            // The chat with an answered `/btw` side question's card up.
+            Self::ChatBtw => {
+                root.pane_shows_chat("p1")
+                    && root
+                        .chat_card("s-petal")
+                        .is_some_and(|(prompt, _)| prompt == BTW_PROMPT)
+            }
             // The chat over a terminal draft, its Clear armed: the note
             // beside Pull, Send, Confirm clear and Cancel.
             Self::ChatDraftClear => {
@@ -1106,6 +1120,7 @@ impl Shot {
             | View::Chat
             | View::ChatCompact
             | View::ChatModelPicker
+            | View::ChatBtw
             | View::ChatDraftClear
             | View::Summary
             | View::Themes
@@ -2990,7 +3005,7 @@ fn drive(
         View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
         View::SettingsLinear => drive_settings_linear(step, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
-        View::ChatCompact | View::ChatModelPicker => open_chat(window, cx),
+        View::ChatCompact | View::ChatModelPicker | View::ChatBtw => open_chat(window, cx),
         View::ChatDraftClear if step == 0 => open_chat(window, cx),
         View::ChatDraftClear => {
             let root = window
@@ -4700,6 +4715,7 @@ impl FakeDaemon {
             View::Summary => permission_screen(),
             View::Chat => question_screen(),
             View::ChatModelPicker => model_picker_screen(),
+            View::ChatBtw => btw_screen(),
             View::ChatDraftClear => ChatScreen {
                 composer: ComposerState::Draft,
                 prompt: None,
@@ -5829,6 +5845,35 @@ fn question_screen() -> ChatScreen {
             always_allow_tip: None,
             multi: false,
             cursor: Some(1),
+            adjust: None,
+        }),
+    }
+}
+
+/// The `chat-btw` shot's screen: an answered `/btw` side question as the
+/// daemon reads the 2.1.330 screen, its question and answer as the card's
+/// body and Close its one option.
+fn btw_screen() -> ChatScreen {
+    ChatScreen {
+        composer: ComposerState::Overlay {
+            name: "btw".to_owned(),
+        },
+        prompt: Some(ChatPrompt {
+            id: BTW_PROMPT.to_owned(),
+            kind: ChatPromptKind::Overlay,
+            subject: "Side question".to_owned(),
+            body: "what is 2+2? one word\n\nFour".to_owned(),
+            options: vec![ChatOption {
+                number: 1,
+                label: "Close".to_owned(),
+                description: None,
+                selected: false,
+            }],
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
             adjust: None,
         }),
     }

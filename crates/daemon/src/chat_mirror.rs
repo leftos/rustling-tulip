@@ -2892,6 +2892,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_answered_side_question_keeps_its_prompt_id() {
+        let side_question = |body: &str| ChatScreen {
+            composer: protocol::ComposerState::Overlay {
+                name: "btw".to_owned(),
+            },
+            prompt: Some(ChatPrompt {
+                id: String::new(),
+                kind: protocol::ChatPromptKind::Overlay,
+                subject: "Side question".to_owned(),
+                body: body.to_owned(),
+                options: vec![protocol::ChatOption {
+                    number: 1,
+                    label: "Close".to_owned(),
+                    description: None,
+                    selected: false,
+                }],
+                questions: Vec::new(),
+                can_amend: false,
+                always_allow_tip: None,
+                multi: false,
+                cursor: None,
+                adjust: None,
+            }),
+        };
+        let mut state = ScreenState::default();
+        assert!(state.observe(side_question("what is 2+2? one word"), None, &[]));
+        let pending = card_prompt(&state.shown).id.clone();
+        assert!(
+            state.observe(side_question("what is 2+2? one word\n\nFour"), None, &[]),
+            "the answer is sent to the clients"
+        );
+        let answered = card_prompt(&state.shown);
+        assert_eq!(answered.id, pending, "the card keeps its id");
+        assert_eq!(answered.body, "what is 2+2? one word\n\nFour");
+    }
+
     const REPL: &str = include_str!("../../agents/claude/tests/fixtures/transcripts/repl.jsonl");
 
     #[test]
