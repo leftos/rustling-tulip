@@ -1486,7 +1486,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 131] = [
+        let cases: [(&str, &str, Verdict); 142] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -1800,6 +1800,67 @@ mod tests {
                 "v2319-heads-up-quoted-synthesized",
                 include_str!("fixtures/v2319-heads-up-quoted-synthesized.txt"),
                 State(Idle),
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x20-clipped.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-offer-40x16-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-offer-40x16-clipped.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-after-ctrlx-tab",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-explanation-lazy-60x20-clipped-top",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-explanation-lazy-60x20-clipped-top.txt"
+                ),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-explanation-60x20-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-explanation-60x20-clipped.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-explanation-short-100x20-focused",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-explanation-short-100x20-focused.txt"
+                ),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-explanation-scrolled-40x16",
+                include_str!("fixtures/claude--v2330-heads-up-explanation-scrolled-40x16.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused.txt"
+                ),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-agent-view-60x20-with-offer",
+                include_str!("fixtures/claude--v2330-heads-up-agent-view-60x20-with-offer.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-offer-inline-60x40-idle",
+                include_str!("fixtures/claude--v2330-heads-up-offer-inline-60x40-idle.txt"),
+                Keep,
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x40-fullscreen",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x40-fullscreen.txt"),
+                State(Working),
             ),
             (
                 "claude--menu-model-picker",

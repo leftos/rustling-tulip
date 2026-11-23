@@ -1,0 +1,20 @@
+  esc returns to it · ctrl+c twice exits and it keeps
+  running
+
+  Needs input
+  Sessions that have a question or need your decision land
+  here
+
+  Working
+  Sessions at work, even after you exit. New ones default to
+  a git worktree
+❯ ✻ [[S:steps:9:1500]] [[YSK…  Done after 9 steps.       55s
+
+  A different way to work with Claude: hand off a bigger
+  task than you would chat through, and Claude organizes it
+  in the sections above so you know when it needs you.
+
+────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits · enter to return · space to reply · ? fo…

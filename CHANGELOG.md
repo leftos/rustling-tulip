@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Session status stays right on Claude Code 2.1.330 with its file panel open, a long task list, or Rewind, transcript, /btw and sessions screens up.
 - A Heads up notice quoted in Claude's reply no longer keeps a session's status from updating, and a notice's "One moment…" no longer reads as idle.
 - In Chat, a Heads up notice in a narrow terminal offers every option, and one quoted in Claude's reply no longer raises a card.
+- A Heads up notice cut off by its band in Claude Code's full-screen view now keeps the session's status and shows a card in Chat.
 - A subagent running for over a day, or a background shell under an older Claude Code's default mode, now counts as running work.
 - When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - On the phone, tapping a path that cannot be fetched, or whose fetch fails, now says why on the session page instead of showing nothing.

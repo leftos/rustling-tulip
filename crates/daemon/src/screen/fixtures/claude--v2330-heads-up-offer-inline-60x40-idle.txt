@@ -1,0 +1,40 @@
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   X:\dev\.tmp\rt-2189-cap\repo
+
+
+❯ /plugin
+
+❯ [[S:steps:9:1500]] [[YSK:long]] Walk the notes.
+
+  Searched for 9 patterns (ctrl+o to expand)
+
+● Done after 9 steps.
+
+✻ Baked for 15s · done 9:59 AM
+                                                        [-]
+✦ Heads up · The nightly sync job you set up earlier
+  copies every note in this folder, including the
+  private ones, to a shared drive that anyone with the
+  link can open, so the private notes are readable by
+  people outside your team right now.
+  1: Learn more   2: Knew this already   0: Dismiss
+
+────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle)
+
+
+
+
+
+
+
+
+
+
+
+
+
+

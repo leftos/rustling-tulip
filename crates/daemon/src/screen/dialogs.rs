@@ -613,6 +613,32 @@ mod tests {
     const EXPLAINED_SUBJECT: &str = "Heads up · Note number 6 says a nightly job posts your \
         files to a shared drive anyone can read.";
 
+    /// The three title rows the 60x20 clipped offer shows, joined.
+    const CLIPPED_TITLE_60: &str = "Heads up · The nightly sync job you set up earlier copies every \
+        note in this folder, including the private ones, to a shared drive that anyone with the";
+
+    /// The one title row the 40x16 clipped offer shows.
+    const CLIPPED_TITLE_40: &str = "Heads up · The nightly sync job";
+
+    /// The two title rows the lazily fetched explanation shows.
+    const CLIPPED_LAZY_TITLE: &str = "Heads up · A nightly job copies this folder, private notes \
+        included, to a shared drive (case g).";
+
+    /// The five title rows the unclipped inline offer shows, joined.
+    const OFFER_TITLE: &str = "Heads up · The nightly sync job you set up earlier copies every note \
+        in this folder, including the private ones, to a shared drive that anyone with the link \
+        can open, so the private notes are readable by people outside your team right now.";
+
+    /// The fullscreen offer's title rows, which end with the capture's case tag.
+    const FULLSCREEN_TITLE: &str = "Heads up · The nightly sync job you set up earlier copies every \
+        note in this folder, including the private ones, to a shared drive that anyone with the \
+        link can open, so the private notes are readable by people outside your team right now \
+        (case b).";
+
+    /// The collapsed offer's keys.
+    const OFFER_OPTIONS: [(u32, &str); 3] =
+        [(1, "Learn more"), (2, "Knew this already"), (0, "Dismiss")];
+
     const LONG_QUESTION: &str = "Where should RT-1245 (Open a remote host's default shell in one step) go? Today Open \
         shell runs on whichever host the focused pane is on, so a remote shell means focusing \
         one of that host's panes first. The fix adds an entry that names the host (likely on \
@@ -1053,7 +1079,7 @@ mod tests {
                 },
             ),
             (
-                // hand-made from v152-learn-more: no capture of the collapsed notice exists
+                // made by hand from v152-learn-more; the 2.1.330 offers capture the same collapsed notice
                 "v152-heads-up-collapsed",
                 include_str!("fixtures/v152-heads-up-collapsed.txt"),
                 Expected {
@@ -1128,6 +1154,111 @@ mod tests {
                 "v2319-heads-up-one-moment",
                 include_str!("fixtures/v2319-heads-up-one-moment.txt"),
                 no_prompt(Ready),
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x20-clipped.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, CLIPPED_TITLE_60, &[], None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-offer-40x16-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-offer-40x16-clipped.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, CLIPPED_TITLE_40, &[], None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-after-ctrlx-tab",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, "", &OFFER_OPTIONS, None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-explanation-lazy-60x20-clipped-top",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-explanation-lazy-60x20-clipped-top.txt"
+                ),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, CLIPPED_LAZY_TITLE, &[], None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-explanation-60x20-clipped",
+                include_str!("fixtures/claude--v2330-heads-up-explanation-60x20-clipped.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(
+                        HeadsUp,
+                        "",
+                        &[(1, "Understood"), (2, "Chat in main session")],
+                        None,
+                    )
+                },
+            ),
+            (
+                "claude--v2330-heads-up-explanation-short-100x20-focused",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-explanation-short-100x20-focused.txt"
+                ),
+                Expected {
+                    composer: Ready,
+                    ..dialog(
+                        HeadsUp,
+                        "",
+                        &[
+                            (1, "Understood"),
+                            (2, "Chat in main session"),
+                            (0, "Dismiss"),
+                        ],
+                        None,
+                    )
+                },
+            ),
+            (
+                "claude--v2330-heads-up-explanation-scrolled-40x16",
+                include_str!("fixtures/claude--v2330-heads-up-explanation-scrolled-40x16.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, "", &[], None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused",
+                include_str!(
+                    "fixtures/claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused.txt"
+                ),
+                Expected {
+                    composer: Draft,
+                    ..dialog(HeadsUp, CLIPPED_TITLE_60, &[], None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-agent-view-60x20-with-offer",
+                include_str!("fixtures/claude--v2330-heads-up-agent-view-60x20-with-offer.txt"),
+                no_prompt(Draft),
+            ),
+            (
+                "claude--v2330-heads-up-offer-inline-60x40-idle",
+                include_str!("fixtures/claude--v2330-heads-up-offer-inline-60x40-idle.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, OFFER_TITLE, &OFFER_OPTIONS, None)
+                },
+            ),
+            (
+                "claude--v2330-heads-up-offer-60x40-fullscreen",
+                include_str!("fixtures/claude--v2330-heads-up-offer-60x40-fullscreen.txt"),
+                Expected {
+                    composer: Working,
+                    ..dialog(HeadsUp, FULLSCREEN_TITLE, &OFFER_OPTIONS, None)
+                },
             ),
             (
                 "v95-rewind",

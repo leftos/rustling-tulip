@@ -293,6 +293,20 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             verdict: ScreenVerdict::Keep,
         },
         ScreenRule {
+            // A band the fullscreen TUI clips to the last rows above the box
+            // ends with a row counting the rows hidden on either side, and
+            // when the notice scrolled off its title that row is all the
+            // screen still shows of it, so the status stays put under it.
+            name: "overlay_heads_up_clipped".to_string(),
+            priority: 960,
+            region: ScreenRegion::AbovePromptBox { rows: 1 },
+            matcher: LineMatcher::Regex(
+                r"^(?:↑ \d+ more(?: · ↓ \d+ more)?|↓ \d+ more)\s*$".to_string(),
+            ),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Keep,
+        },
+        ScreenRule {
             name: "overlay_you_should_know".to_string(),
             priority: 960,
             region: ScreenRegion::AbovePromptBox { rows: 24 },
@@ -439,6 +453,7 @@ mod tests {
                 ("turn_hooks_running", 975),
                 ("turn_spinner", 970),
                 ("overlay_heads_up", 960),
+                ("overlay_heads_up_clipped", 960),
                 ("overlay_you_should_know", 960),
                 ("overlay_heads_up_dismissed", 960),
                 ("overlay_heads_up_one_moment", 960),
@@ -450,7 +465,7 @@ mod tests {
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 29);
+        assert_eq!(screen_rules().rules.len(), 30);
     }
 
     #[test]

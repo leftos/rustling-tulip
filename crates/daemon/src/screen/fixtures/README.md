@@ -24,11 +24,25 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v330-mcp-servers-6-synthesized.txt` is made by hand from `v330-mcp-servers.txt`: the title's count raised to 6 and two more server rows, the fifth drawn with the `↓` Claude puts in the cursor column of a list's last shown row when it holds more servers than the five it shows. `v330-auto-mode-hint-synthesized.txt` is `v330-auto-mode.txt` with a blank row and the hint row `  Not answered yet · ↑/↓ to choose · Esc to cancel` under the options, the text Claude Code's source draws there once keys are typed while the dialog is up; no capture of either exists.
 
-`v152-heads-up-collapsed.txt` is the one capture made by hand: `v152-learn-more.txt` with the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`, since no capture of the collapsed notice exists.
+`v152-heads-up-collapsed.txt` is made by hand from `v152-learn-more.txt`: the expanded title and bullet rows taken out and the key row replaced by the collapsed notice's `1: Learn more   2: Knew this already   0: Dismiss`. The 2.1.330 captures below show the collapsed notice as the CLI draws it.
 
 `v2319-heads-up-quoted-synthesized.txt` is `v2319-heads-up-explained.txt` with the rows above its prompt box replaced by a reply quoting the notice's titles, its key row and `✦ One moment…`, each indented under the reply row: a quoted title is transcript, not the notice, so the idle box reads.
 
 `v2319-heads-up-offer-w40-synthesized.txt` is `v2319-heads-up-explained.txt`'s offer redrawn at 40 columns with no explanation, its key row wrapped so the first row holds one pair: every pair still reads.
+
+`claude--v2330-heads-up-offer-60x20-clipped.txt`, `claude--v2330-heads-up-offer-40x16-clipped.txt` and `claude--v2330-heads-up-explanation-lazy-60x20-clipped-top.txt` are Claude Code 2.1.330's fullscreen Heads up band clipped from below: the `[-]` hide-toggle row, the notice's title rows (three at 60x20, one at 40x16, two for the lazily fetched explanation), then `↓ 3 more`, `↓ 10 more` or `↓ 29 more` directly above the input box.
+
+The offer's choices, or the explanation's, sit below the clip row.
+
+`claude--v2330-heads-up-offer-60x20-after-ctrlx-tab.txt` is the same offer after ctrl+x Tab scrolled the band to its end: the last three text rows, the first ending in `[-]`, the choices row `1: Learn more   2: Knew this already   0: Dismiss`, then `↑ 3 more`.
+
+`claude--v2330-heads-up-explanation-60x20-clipped.txt` is an explanation opened in place on its choices: two body rows, the key row `1: Understood   2: Chat in main session` and `↑ 31 more · ↓ 1 more`, with `0: Dismiss` below the clip.
+
+`claude--v2330-heads-up-explanation-short-100x20-focused.txt` is a short offer's explanation at 100 columns with all three choices and `↑ 5 more`; `claude--v2330-heads-up-explanation-scrolled-40x16.txt` is a scrolled explanation at 40x16 with neither title nor key row, `↑ 31 more · ↓ 8 more`.
+
+`claude--v2330-heads-up-offer-60x20-clipped-digit1-unfocused.txt` is the clipped offer with `1` typed into the box and no ctrl+x Tab: the box reads `❯ 1` and the band does not move. `claude--v2330-heads-up-agent-view-60x20-with-offer.txt` is Claude's agent view at 60x20 with the offer still up in the session: the agent list and its own box, and no band at all.
+
+`claude--v2330-heads-up-offer-inline-60x40-idle.txt` and `claude--v2330-heads-up-offer-60x40-fullscreen.txt` are an unclipped offer at 60x40, inline and in fullscreen with the turn still running: the `[-]` row, five title rows and the three choices all on screen. Inline never clips the band at any width tried.
 
 `v03-ready-quoting-question-footer--synthesized.txt` is `v03-ready.txt` with a user prompt and a reply quoting a question's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`) written into the blank rows above the idle box: a quoted footer is transcript, not a dialog.
 

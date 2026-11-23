@@ -1,0 +1,20 @@
+
+※ recap: Done after 9 steps. (turn off recaps in /config)
+
+❯ [[S:steps:9:1500]] [[YSK:short:e]] Walk the notes a fifth time.
+
+  Searched for 9 patterns
+
+● Done after 9 steps.
+
+✻ Crunched for 17s · done 10:09 AM
+  - The nightly job posts what it finds to a shared drive.                                      [-]
+  - Anyone with the link can read it there.
+
+  1: Understood   2: Chat in main session   0: Dismiss
+↑ 5 more
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle)

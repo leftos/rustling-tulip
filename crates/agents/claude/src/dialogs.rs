@@ -1713,13 +1713,18 @@ enum HeadsUpAnchor {
     Dismissed(Vec<ChatOption>),
 }
 
+/// Whether `row` starts a Heads up notice's title row at column 0.
+fn is_heads_up_title(row: &str) -> bool {
+    row.starts_with("✦ Heads up ·") || row.starts_with("✦ You should know ·")
+}
+
 /// The lowest row a Heads up notice or its dismissed step starts on, so a
 /// quoted notice higher in the transcript never beats a real one. The row
 /// starts at column 0: a notice quoted inside a reply is indented, and is
 /// transcript rather than the notice.
 fn heads_up_anchor(rows: &[String]) -> Option<(usize, HeadsUpAnchor)> {
     rows.iter().enumerate().rev().find_map(|(anchor, row)| {
-        if row.starts_with("✦ Heads up ·") || row.starts_with("✦ You should know ·") {
+        if is_heads_up_title(row) {
             return Some((anchor, HeadsUpAnchor::Tagged));
         }
         let keys = key_pairs_any(row.strip_prefix("✦ Dismissed.")?)?;
@@ -1731,8 +1736,15 @@ fn heads_up_anchor(rows: &[String]) -> Option<(usize, HeadsUpAnchor)> {
 /// `✦ You should know · …`) row and its wrapped rows, the expanded title and
 /// bullets when shown, and the key row of `N: label` pairs; or the
 /// `✦ Dismissed.` step the notice leads to, its keys on its own row and the
-/// rows it wraps onto.
+/// rows it wraps onto; or, when the fullscreen TUI clips the band, the rows
+/// the band still shows.
 fn parse_heads_up(rows: &[String]) -> Option<ChatPrompt> {
+    parse_title_heads_up(rows).or_else(|| clipped_heads_up(rows))
+}
+
+/// The notice whose title row shows: its keys when the key row does, the
+/// dismissed step when that is what shows.
+fn parse_title_heads_up(rows: &[String]) -> Option<ChatPrompt> {
     let (anchor, found) = heads_up_anchor(rows)?;
     if let HeadsUpAnchor::Dismissed(options) = found {
         return Some(heads_up_prompt(
@@ -1747,6 +1759,93 @@ fn parse_heads_up(rows: &[String]) -> Option<ChatPrompt> {
         .find_map(|key_row| heads_up_key_row(rows, key_row).map(|options| (key_row, options)))?;
     let (subject, index) = heads_up_subject(rows, anchor, key_row);
     Some(heads_up_prompt(rows, key_row, options, subject, index))
+}
+
+/// The band a fullscreen frame clips, from its first visible row (the one
+/// ending in the `[-]` hide toggle) to the clip row that closes it, when the
+/// last non-empty row above the input box is a clip row.
+fn clipped_band(rows: &[String]) -> Option<(usize, usize)> {
+    let (box_top, _) = box_rules(rows)?;
+    let clip = rows[..box_top]
+        .iter()
+        .rposition(|row| !row.trim().is_empty())?;
+    if !is_clip_row(&rows[clip]) {
+        return None;
+    }
+    let first = (0..clip)
+        .rev()
+        .find(|&index| ends_with_hide_toggle(&rows[index]))?;
+    Some((first, clip))
+}
+
+/// A Heads up notice whose band a fullscreen frame clips: the title rows
+/// still in the band joined, no body, and the key pairs a visible key row
+/// holds, none while that row is off screen.
+fn clipped_heads_up(rows: &[String]) -> Option<ChatPrompt> {
+    let (first, clip) = clipped_band(rows)?;
+    let subject = (first..clip)
+        .find(|&index| is_heads_up_title(&rows[index]))
+        .map_or_else(String::new, |anchor| heads_up_subject(rows, anchor, clip).0);
+    Some(prompt(
+        ChatPromptKind::HeadsUp,
+        subject,
+        String::new(),
+        clipped_key_pairs(rows, first, clip),
+    ))
+}
+
+/// The pairs the first key row inside the band `rows[first..clip]` holds,
+/// each row read with its ` [-]` hide toggle stripped, and the rows wrapping
+/// under it; none when no key row shows.
+fn clipped_key_pairs(rows: &[String], first: usize, clip: usize) -> Vec<ChatOption> {
+    let pairs = |index: usize| key_pairs_any(without_hide_toggle(&rows[index]));
+    let Some(start) = (first..clip).find(|&index| pairs(index).is_some()) else {
+        return Vec::new();
+    };
+    let mut options = Vec::new();
+    for index in start..clip {
+        match pairs(index) {
+            Some(more) => options.extend(more),
+            None => break,
+        }
+    }
+    options
+}
+
+/// Whether `row` is the clip row a fullscreen band ends with: the count of
+/// rows hidden below it (`↓ 3 more`), above it (`↑ 3 more`), or both
+/// (`↑ 31 more · ↓ 1 more`).
+fn is_clip_row(row: &str) -> bool {
+    let text = row.trim();
+    if let Some(hidden) = text.strip_prefix("↓ ") {
+        return is_more_count(hidden);
+    }
+    let Some(hidden) = text.strip_prefix("↑ ") else {
+        return false;
+    };
+    match hidden.split_once(" · ↓ ") {
+        Some((above, below)) => is_more_count(above) && is_more_count(below),
+        None => is_more_count(hidden),
+    }
+}
+
+/// Whether `text` is a clip row's `N more`.
+fn is_more_count(text: &str) -> bool {
+    text.strip_suffix(" more")
+        .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether `row` ends in the band's `[-]` hide toggle.
+fn ends_with_hide_toggle(row: &str) -> bool {
+    row.trim_end().ends_with(" [-]")
+}
+
+/// `row` without the ` [-]` hide toggle it ends in, as the key-pair parse
+/// reads it.
+fn without_hide_toggle(row: &str) -> &str {
+    row.trim_end()
+        .strip_suffix(" [-]")
+        .unwrap_or(row.trim_end())
 }
 
 /// The notice `subject` with `options`, the rows of its expanded text from
@@ -1773,14 +1872,19 @@ fn heads_up_prompt(
 }
 
 /// The notice's title (`Heads up · …` without its `✦`), then the non-blank
-/// rows under it up to `end`, and the index of the row after them.
+/// rows under it up to `end`, and the index of the row after them. Each row
+/// is read without the band's ` [-]` hide toggle, which the row the band
+/// starts on carries.
 fn heads_up_subject(rows: &[String], anchor: usize, end: usize) -> (String, usize) {
-    let first = rows[anchor].trim();
+    let first = without_hide_toggle(&rows[anchor]).trim();
     let mut subject = first.strip_prefix('✦').unwrap_or(first).trim().to_owned();
     let mut index = anchor + 1;
     while index < end && !rows[index].trim().is_empty() {
-        subject.push(' ');
-        subject.push_str(rows[index].trim());
+        let text = without_hide_toggle(&rows[index]).trim();
+        if !text.is_empty() {
+            subject.push(' ');
+            subject.push_str(text);
+        }
         index += 1;
     }
     (subject, index)
@@ -5564,6 +5668,88 @@ mod tests {
                 (0, "Dismiss".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn a_heads_up_row_with_no_clip_row_reads_as_today() {
+        let rows = over_box(&[
+            "                                                           [-]",
+            "✦ Heads up · A note says the drive gets wiped.",
+            "  1: Understood   0: Dismiss",
+        ]);
+        let prompt = read(&rows).prompt.expect("today's key-row path reads it");
+        assert_eq!(prompt.kind, ChatPromptKind::HeadsUp);
+        assert_eq!(
+            prompt.subject,
+            "Heads up · A note says the drive gets wiped."
+        );
+        assert_eq!(
+            labels_of(&rows),
+            [(1, "Understood".to_owned()), (0, "Dismiss".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_heads_up_clipped_band_key_row_ending_in_the_hide_toggle_reads_its_pairs() {
+        let rows = over_box(&[
+            "  1: Learn more   2: Knew this already   0: Dismiss  [-]",
+            "↓ 3 more",
+        ]);
+        let prompt = read(&rows).prompt.expect("the clipped band reads");
+        assert_eq!(prompt.kind, ChatPromptKind::HeadsUp);
+        assert_eq!(prompt.subject, "");
+        assert_eq!(prompt.body, "");
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "Learn more".to_owned()),
+                (2, "Knew this already".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_heads_up_clipped_band_reads_a_clip_row_counting_both_sides() {
+        let rows = over_box(&[
+            "  - Step 11: the nightly job copies the note  [-]",
+            "    note 11 to the shared drive.",
+            "↑ 3 more · ↓ 2 more",
+        ]);
+        let prompt = read(&rows)
+            .prompt
+            .expect("the clip row counting both sides reads");
+        assert_eq!(prompt.kind, ChatPromptKind::HeadsUp);
+        assert_eq!(prompt.subject, "");
+        assert_eq!(labels_of(&rows), []);
+    }
+
+    #[test]
+    fn a_quoted_heads_up_title_inside_a_clipped_band_does_not_anchor_it() {
+        let rows = over_box(&[
+            "  a reply quoting the notice  [-]",
+            "  ✦ Heads up · a quoted title",
+            "  more quoted text",
+            "↓ 3 more",
+        ]);
+        let prompt = read(&rows).prompt.expect("the clipped band reads");
+        assert_eq!(prompt.subject, "");
+    }
+
+    #[test]
+    fn a_heads_up_title_row_carrying_the_hide_toggle_drops_it() {
+        let rows = over_box(&[
+            "✦ Heads up · The nightly sync job you set up earlier     [-]",
+            "  copies every note in this folder, including the",
+            "↑ 1 more · ↓ 2 more",
+        ]);
+        let prompt = read(&rows).prompt.expect("the clipped band reads");
+        assert_eq!(
+            prompt.subject,
+            "Heads up · The nightly sync job you set up earlier copies every note in this folder, \
+             including the"
+        );
+        assert_eq!(labels_of(&rows), []);
     }
 
     #[test]
