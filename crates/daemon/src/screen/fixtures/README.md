@@ -81,6 +81,22 @@ What the captures measured about the box, which the draft reader and the clear r
 
 `claude--v2330-ask-preview-first.txt` and `claude--v2330-ask-preview-down.txt` are a one-question previews dialog as Claude Code 2.1.330 draws it, before and after one Down: a six-row preview on the first option, a five-row one on the second.
 
+`claude--v2330-rewind-picker-code.txt` is a Claude Code 2.1.330 screen (120 columns) taken for RT-2164: the Rewind picker after a turn that changed code (`WRITEFILE please create cats.md` with `cats.md +3`, then `say ok` with `No code changes`), the cursor on `(current)`, under the footer `Enter to continue · Esc to cancel`. The picker reads as an Overlay prompt whose options are its messages, `(current)` and Close.
+
+`claude--v2330-rewind-picker-code-up2.txt` is that picker after two Ups, the cursor on the code-changing message.
+
+`claude--v2330-rewind-picker-up.txt` is the two-turn picker of the 2026-11-22 captures after one Up, the cursor on its second message; its numbers count the visible window only.
+
+`claude--v2330-rewind-confirm-code.txt` is the choice screen for that code-changing message: `Restore to the point before you sent this message:`, the message and its age behind `│`, the `The code will be restored -3 in cats.md.` line, the six rows from `Restore code and conversation` to `Never mind`, and the `⚠` warning. It reads as an Overlay prompt whose options are the numbered rows and Close.
+
+`claude--v2330-rewind-confirm-code-down.txt` is the same choice screen after one Down: the cursor on `Restore conversation` and, on the line that follows the cursor, `The code will be unchanged.` The prompt keeps its identity across the move.
+
+`claude--v2330-rewind-enter-current.txt` is the idle box after Enter on `(current)`: the picker closed with the conversation as it was, no other screen shown and no prompt to read.
+
+`claude--v2330-rewind-restored-conversation.txt` is the box after `Restore conversation`: everything above it cleared, the rewound prompt `❯ WRITEFILE please create cats.md` held as an editable draft, and `cats.md` still in the repo.
+
+`claude--v2330-rewind-restored-code-and-conversation.txt` is the same box after `Restore code and conversation`, with `cats.md` deleted.
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.

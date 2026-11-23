@@ -268,6 +268,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_rewind_choice_keeps_its_identity_as_the_cursor_and_clock_move() {
+        let chosen = prompt_of(include_str!(
+            "fixtures/claude--v2330-rewind-confirm-code.txt"
+        ));
+        let moved = prompt_of(include_str!(
+            "fixtures/claude--v2330-rewind-confirm-code-down.txt"
+        ));
+        let aged = prompt_of(
+            &include_str!("fixtures/claude--v2330-rewind-confirm-code.txt")
+                .replace("(52s ago)", "(2m ago)"),
+        );
+        assert_ne!(chosen.body, moved.body);
+        assert_eq!(
+            prompt_identity(&chosen),
+            prompt_identity(&moved),
+            "a moved cursor does not open a new choice screen"
+        );
+        assert_eq!(
+            prompt_identity(&chosen),
+            prompt_identity(&aged),
+            "the clock does not either"
+        );
+    }
+
     /// A `/btw` side question's screen as 2.1.330 draws it once answered.
     const BTW_ANSWER: &str = include_str!("fixtures/claude--v2330-btw-answer.txt");
 
@@ -340,11 +365,22 @@ mod tests {
 
     /// An overlay named `name` whose prompt, `subject`, offers only Close.
     fn closable(name: &str, subject: &'static str) -> Expected {
+        closable_with(name, subject, &[(1, "Close")], None)
+    }
+
+    /// An overlay named `name` whose prompt, `subject`, offers `options`,
+    /// the cursor on `cursor`.
+    fn closable_with(
+        name: &str,
+        subject: &'static str,
+        options: &[(u32, &'static str)],
+        cursor: Option<u32>,
+    ) -> Expected {
         Expected {
             composer: ComposerState::Overlay {
                 name: name.to_owned(),
             },
-            ..dialog(ChatPromptKind::Overlay, subject, &[(1, "Close")], None)
+            ..dialog(ChatPromptKind::Overlay, subject, options, cursor)
         }
     }
 
@@ -744,6 +780,20 @@ mod tests {
             adjust,
             ..dialog(ModelPicker, "Select model", &PICKER_MODELS, Some(cursor))
         };
+        // A Rewind picker's body: its heading alone, and with the scroll
+        // mark's count in a second paragraph.
+        let rewind_body = "Restore the code and/or conversation to the point before…";
+        let rewind_scrolled = "Restore the code and/or conversation to the point before…\n\n\
+                               2 earlier messages are in the terminal.";
+        // The choice screen for the code-changing message of the 2.1.330
+        // captures, with the cursor on Restore code and conversation.
+        let confirm_body = "Restore to the point before you sent this message:\n\
+                            WRITEFILE please create cats.md\n\n\
+                            (52s ago)\n\
+                            The conversation goes back to before this message.\n\
+                            The code will be restored -3 in cats.md.\n\
+                            ⚠ Restored files go back whole, losing later changes by anyone. \
+                            Bash changes to other files are not undone.";
         let v140_models: [(u32, &str); 10] = [
             (1, "Default (recommended)"),
             (2, "Opus 5.5"),
@@ -1082,7 +1132,40 @@ mod tests {
             (
                 "v95-rewind",
                 include_str!("fixtures/v95-rewind.txt"),
-                closable("rewind", "Rewind"),
+                Expected {
+                    body: Some(rewind_scrolled),
+                    ..closable_with(
+                        "rewind",
+                        "Rewind",
+                        &[
+                            (
+                                1,
+                                "Use the AskUserQuestion tool once, with three questions: (1) single choice, header \"Next fn\": which function to add next (su…",
+                            ),
+                            (
+                                2,
+                                "Plan adding a div(a, b) function to calc.py plus one pytest test that division by zero raises ZeroDivisionError. Keep the pl…",
+                            ),
+                            (
+                                3,
+                                "when you finish, also tell me how many lines calc.py has",
+                            ),
+                            (4, "and a second queued message"),
+                            (
+                                5,
+                                "Do three things in parallel in one message: (a) start a background Bash command with run_in_background: python -c \"import ti…",
+                            ),
+                            (6, "! git status --short"),
+                            (
+                                7,
+                                "Without using any tools, write a numbered list of 40 short fruit facts, one line each, then one closing sentence.",
+                            ),
+                            (8, "(current)"),
+                            (9, "Close"),
+                        ],
+                        Some(8),
+                    )
+                },
             ),
             (
                 "v96-ctrl-o",
@@ -1275,12 +1358,159 @@ mod tests {
             (
                 "claude--v2330-rewind-picker",
                 include_str!("fixtures/claude--v2330-rewind-picker.txt"),
-                closable("rewind", "Rewind"),
+                Expected {
+                    body: Some(rewind_body),
+                    ..closable_with(
+                        "rewind",
+                        "Rewind",
+                        &[
+                            (
+                                1,
+                                "Call the AskUserQuestion tool once: one question \"Which layout?\", header \"Layout\", two options \"Grid\" and \"Li…",
+                            ),
+                            (2, "Reply with the single word: ok"),
+                            (3, "(current)"),
+                            (4, "Close"),
+                        ],
+                        Some(3),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-rewind-picker-up",
+                include_str!("fixtures/claude--v2330-rewind-picker-up.txt"),
+                Expected {
+                    body: Some(rewind_body),
+                    ..closable_with(
+                        "rewind",
+                        "Rewind",
+                        &[
+                            (
+                                1,
+                                "Call the AskUserQuestion tool once: one question \"Which layout?\", header \"Layout\", two options \"Grid\" and \"Li…",
+                            ),
+                            (2, "Reply with the single word: ok"),
+                            (3, "(current)"),
+                            (4, "Close"),
+                        ],
+                        Some(2),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-rewind-picker-code",
+                include_str!("fixtures/claude--v2330-rewind-picker-code.txt"),
+                Expected {
+                    body: Some(rewind_body),
+                    ..closable_with(
+                        "rewind",
+                        "Rewind",
+                        &[
+                            (1, "WRITEFILE please create cats.md"),
+                            (2, "say ok"),
+                            (3, "(current)"),
+                            (4, "Close"),
+                        ],
+                        Some(3),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-rewind-picker-code-up2",
+                include_str!("fixtures/claude--v2330-rewind-picker-code-up2.txt"),
+                Expected {
+                    body: Some(rewind_body),
+                    ..closable_with(
+                        "rewind",
+                        "Rewind",
+                        &[
+                            (1, "WRITEFILE please create cats.md"),
+                            (2, "say ok"),
+                            (3, "(current)"),
+                            (4, "Close"),
+                        ],
+                        Some(1),
+                    )
+                },
             ),
             (
                 "claude--v2330-rewind-confirm",
                 include_str!("fixtures/claude--v2330-rewind-confirm.txt"),
-                closable("rewind_restore", "Rewind"),
+                Expected {
+                    body: Some(
+                        "Restore to the point before you sent this message:\n\
+                         Reply with the single word: ok\n\n\
+                         (17s ago)\n\
+                         The conversation goes back to before this message.\n\
+                         The code will be unchanged.",
+                    ),
+                    ..closable_with(
+                        "rewind_restore",
+                        "Rewind",
+                        &[
+                            (1, "Restore conversation"),
+                            (2, "Summarize from here"),
+                            (3, "Summarize up to here"),
+                            (4, "Never mind"),
+                            (5, "Close"),
+                        ],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-rewind-confirm-code",
+                include_str!("fixtures/claude--v2330-rewind-confirm-code.txt"),
+                Expected {
+                    body: Some(confirm_body),
+                    ..closable_with(
+                        "rewind_restore",
+                        "Rewind",
+                        &[
+                            (1, "Restore code and conversation"),
+                            (2, "Restore conversation"),
+                            (3, "Restore code"),
+                            (4, "Summarize from here"),
+                            (5, "Summarize up to here"),
+                            (6, "Never mind"),
+                            (7, "Close"),
+                        ],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "claude--v2330-rewind-confirm-code-down",
+                include_str!("fixtures/claude--v2330-rewind-confirm-code-down.txt"),
+                closable_with(
+                    "rewind_restore",
+                    "Rewind",
+                    &[
+                        (1, "Restore code and conversation"),
+                        (2, "Restore conversation"),
+                        (3, "Restore code"),
+                        (4, "Summarize from here"),
+                        (5, "Summarize up to here"),
+                        (6, "Never mind"),
+                        (7, "Close"),
+                    ],
+                    Some(2),
+                ),
+            ),
+            (
+                "claude--v2330-rewind-enter-current",
+                include_str!("fixtures/claude--v2330-rewind-enter-current.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "claude--v2330-rewind-restored-conversation",
+                include_str!("fixtures/claude--v2330-rewind-restored-conversation.txt"),
+                no_prompt(Draft),
+            ),
+            (
+                "claude--v2330-rewind-restored-code-and-conversation",
+                include_str!("fixtures/claude--v2330-rewind-restored-code-and-conversation.txt"),
+                no_prompt(Draft),
             ),
             (
                 "claude--v2330-btw-pending",
@@ -2519,6 +2749,9 @@ mod tests {
         let v31 = include_str!("fixtures/v31-ask-q1.txt");
         let preview3 = include_str!("fixtures/claude--v2330-ask-preview3-first.txt");
         let preview_multi = include_str!("fixtures/claude--v2330-ask-preview-multi-q1.txt");
+        let rewind_picker_code = include_str!("fixtures/claude--v2330-rewind-picker-code.txt");
+        let rewind_confirm_code = include_str!("fixtures/claude--v2330-rewind-confirm-code.txt");
+        let v95_rewind = include_str!("fixtures/v95-rewind.txt");
         let v32 = include_str!("fixtures/v32-ask-q2.txt");
         let v33 = include_str!("fixtures/v33-ask-q2-toggled.txt");
         let v36 = include_str!("fixtures/v36-ask-other-cursor.txt");
@@ -2943,6 +3176,66 @@ mod tests {
                 preview3,
                 ChatAnswerKind::Skip,
                 refused.clone(),
+            ),
+            // A Rewind prompt: the arrows move the cursor to the row and
+            // Enter picks it; its Close is the last option, whatever its
+            // number, and Esc is its key.
+            (
+                "claude--v2330-rewind-picker-code",
+                rewind_picker_code,
+                option(1),
+                Ok(vec![
+                    (vec![Key::Up; 2], OptionSelected(1)),
+                    (vec![Key::Enter], Any),
+                ]),
+            ),
+            (
+                "claude--v2330-rewind-picker-code",
+                rewind_picker_code,
+                option(3),
+                Ok(vec![(vec![Key::Enter], Any)]),
+            ),
+            (
+                "claude--v2330-rewind-picker-code",
+                rewind_picker_code,
+                option(4),
+                Ok(vec![(vec![Key::Esc], Any)]),
+            ),
+            (
+                "claude--v2330-rewind-confirm-code",
+                rewind_confirm_code,
+                option(2),
+                Ok(vec![
+                    (vec![Key::Down], OptionSelected(2)),
+                    (vec![Key::Enter], Any),
+                ]),
+            ),
+            (
+                "claude--v2330-rewind-confirm-code",
+                rewind_confirm_code,
+                option(6),
+                Ok(vec![
+                    (vec![Key::Down; 5], OptionSelected(6)),
+                    (vec![Key::Enter], Any),
+                ]),
+            ),
+            (
+                "claude--v2330-rewind-confirm-code",
+                rewind_confirm_code,
+                option(7),
+                Ok(vec![(vec![Key::Esc], Any)]),
+            ),
+            (
+                "claude--v2330-rewind-confirm-code",
+                rewind_confirm_code,
+                toggle(1),
+                refused.clone(),
+            ),
+            (
+                "v95-rewind",
+                v95_rewind,
+                option(9),
+                Ok(vec![(vec![Key::Esc], Any)]),
             ),
             (
                 "v32-ask-q2",

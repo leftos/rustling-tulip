@@ -1,0 +1,40 @@
+ ▝▝   ▝▝   X:\dev\.tmp\rt-525-cap\repo
+
+
+❯ WRITEFILE please create cats.md
+
+● Write(cats.md)
+  ⎿  Wrote 3 lines to cats.md
+      1 Cats sleep a lot.
+      2 Cats purr.
+      3 Cats land on their feet.
+
+● Mock: got the tool result.
+
+✻ Sautéed for 0s · done 9:48 PM
+
+❯ say ok
+
+● ok
+
+✻ Brewed for 0s · done 9:48 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Rewind
+
+  Restore to the point before you sent this message:
+
+  │ WRITEFILE please create cats.md
+  │ (52s ago)
+
+  The conversation goes back to before this message.
+  The code will be unchanged.
+
+    1. Restore code and conversation
+  ❯ 2. Restore conversation
+    3. Restore code
+    4. Summarize from here
+    5. Summarize up to here
+    6. Never mind
+
+  ⚠ Restored files go back whole, losing later changes by anyone. Bash changes to other files are not undone.
+

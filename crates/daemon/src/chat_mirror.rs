@@ -1951,8 +1951,12 @@ fn same_but_cursor(a: &ChatScreen, b: &ChatScreen) -> bool {
     // cursor is, so its mark moves with the cursor. A model picker keeps
     // both: its card fills the highlighted row. So does a question whose
     // options carry previews: its card shows the cursor's option's preview.
+    // So does an overlay offering options: its card fills the cursor's row.
     let without_cursor = |prompt: &ChatPrompt| {
-        if prompt.kind == ChatPromptKind::ModelPicker || prompt.preview.is_some() {
+        let fills_row = prompt.kind == ChatPromptKind::ModelPicker
+            || prompt.preview.is_some()
+            || (prompt.kind == ChatPromptKind::Overlay && prompt.options.len() > 1);
+        if fills_row {
             return prompt.clone();
         }
         let mut prompt = prompt.clone();
@@ -2926,6 +2930,51 @@ mod tests {
         assert!(
             !same_but_cursor(&screen(1, Some("")), &screen(2, Some(""))),
             "a moved cursor on a preview question is a change even with no box drawn"
+        );
+    }
+
+    #[test]
+    fn a_cursor_move_on_a_rewind_prompt_is_a_change() {
+        let overlay = |cursor: Option<u32>, count: u32| {
+            let options = (1..=count)
+                .map(|number| protocol::ChatOption {
+                    number,
+                    label: if number == count {
+                        "Close".to_owned()
+                    } else {
+                        format!("message {number}")
+                    },
+                    description: None,
+                    selected: Some(number) == cursor,
+                })
+                .collect();
+            ChatScreen {
+                composer: protocol::ComposerState::Overlay {
+                    name: "rewind".to_owned(),
+                },
+                prompt: Some(ChatPrompt {
+                    id: String::new(),
+                    kind: protocol::ChatPromptKind::Overlay,
+                    subject: "Rewind".to_owned(),
+                    body: "Restore the code and/or conversation to the point before…".to_owned(),
+                    options,
+                    questions: Vec::new(),
+                    can_amend: false,
+                    always_allow_tip: None,
+                    multi: false,
+                    cursor,
+                    adjust: None,
+                    preview: None,
+                }),
+            }
+        };
+        assert!(
+            !same_but_cursor(&overlay(Some(2), 3), &overlay(Some(3), 3)),
+            "a moved cursor on a Rewind prompt fills another row"
+        );
+        assert!(
+            same_but_cursor(&overlay(None, 1), &overlay(Some(1), 1)),
+            "a Close-only overlay keeps the no-push rule"
         );
     }
 

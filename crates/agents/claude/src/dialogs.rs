@@ -115,10 +115,23 @@ enum OverlayBody {
 /// reading to wait for after it.
 struct OverlayClose {
     label: &'static str,
-    /// The prompt's body.
+    /// The prompt's body, when `rows` names no reader.
     body: OverlayBody,
+    /// The reader for the rows an overlay offers as options beside its
+    /// Close, with the prompt's body; none for an overlay offering only
+    /// Close.
+    rows: Option<fn(&[String]) -> RewindRows>,
     key: CloseKey,
     expect: ScreenExpect,
+}
+
+/// The options an overlay's rows reader offers, the option the cursor is on
+/// and the prompt's body, which is the reader's to give.
+#[derive(Default)]
+struct RewindRows {
+    options: Vec<ChatOption>,
+    cursor: Option<u32>,
+    body: String,
 }
 
 /// One overlay: how its key line is found, the name the chat gives it, and
@@ -140,6 +153,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Transcript",
             body: OverlayBody::Fixed(""),
+            rows: None,
             key: CloseKey::Q,
             expect: ScreenExpect::DialogGone,
         }),
@@ -150,6 +164,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Transcript shortcuts",
             body: OverlayBody::Fixed(""),
+            rows: None,
             key: CloseKey::Q,
             expect: ScreenExpect::DialogGone,
         }),
@@ -160,6 +175,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Transcript search",
             body: OverlayBody::Fixed(""),
+            rows: None,
             key: CloseKey::Esc,
             expect: ScreenExpect::NextPrompt(ChatPromptKind::Overlay),
         }),
@@ -170,6 +186,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Side question",
             body: OverlayBody::Read(btw_answered),
+            rows: None,
             key: CloseKey::Esc,
             expect: ScreenExpect::DialogGone,
         }),
@@ -180,6 +197,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Side question",
             body: OverlayBody::Read(btw_pending),
+            rows: None,
             key: CloseKey::Esc,
             expect: ScreenExpect::DialogGone,
         }),
@@ -190,6 +208,7 @@ static OVERLAYS: [OverlayRow; 8] = [
         close: Some(OverlayClose {
             label: "Rewind",
             body: OverlayBody::Fixed(""),
+            rows: Some(rewind_picker),
             key: CloseKey::Esc,
             expect: ScreenExpect::Any,
         }),
@@ -199,8 +218,8 @@ static OVERLAYS: [OverlayRow; 8] = [
         name: "rewind_restore",
         close: Some(OverlayClose {
             label: "Rewind",
-            // A body of its own, so the picker an Esc may lead back to is a new prompt.
-            body: OverlayBody::Fixed("Choose what to restore in the terminal, or close it."),
+            body: OverlayBody::Fixed(""),
+            rows: Some(rewind_choice),
             key: CloseKey::Esc,
             expect: ScreenExpect::Any,
         }),
@@ -690,31 +709,260 @@ fn shows_input_box(rows: &[String], bottom: &[usize]) -> bool {
 }
 
 /// The prompt an overlay the chat can close shows on the screen whose rows
-/// are `rows`: its label, its body and one Close option.
+/// are `rows`: its label, its body and its Close, numbered after the rows its
+/// reader offers as options.
 fn close_prompt(close: &OverlayClose, rows: &[String]) -> ChatPrompt {
-    let body = match close.body {
-        OverlayBody::Fixed(text) => text.to_owned(),
-        OverlayBody::Read(reader) => reader(rows),
+    let body = match close.rows {
+        Some(reader) => reader(rows).body,
+        None => match close.body {
+            OverlayBody::Fixed(text) => text.to_owned(),
+            OverlayBody::Read(reader) => reader(rows),
+        },
     };
+    let read = close.rows.map(|reader| reader(rows)).unwrap_or_default();
+    let (mut options, cursor) = (read.options, read.cursor);
+    options.push(ChatOption {
+        number: options.last().map_or(1, |option| option.number + 1),
+        label: CLOSE_LABEL.to_owned(),
+        description: None,
+        selected: false,
+    });
     ChatPrompt {
         id: String::new(),
         kind: ChatPromptKind::Overlay,
         subject: close.label.to_owned(),
         body,
-        options: vec![ChatOption {
-            number: 1,
-            label: CLOSE_LABEL.to_owned(),
-            description: None,
-            selected: false,
-        }],
+        options,
         questions: Vec::new(),
         can_amend: false,
         always_allow_tip: None,
         multi: false,
-        cursor: None,
+        cursor,
         adjust: None,
         preview: None,
     }
+}
+
+/// The title row both Rewind screens draw.
+const REWIND_TITLE: &str = "Rewind";
+
+/// The Rewind picker's footer row.
+const REWIND_FOOTER: &str = "Enter to continue · Esc to cancel";
+
+/// The head of the Rewind picker's heading row, the one under its title.
+const REWIND_HEADING: &str = "Restore the code and/or conversation";
+
+/// The Rewind picker's last row: the conversation as it stands.
+const REWIND_CURRENT: &str = "(current)";
+
+/// The Rewind picker's messages as options, the row the cursor is on and its
+/// body, from the rows between its title and footer: a block of an indented
+/// text row and its one sub-line is a message, its text the label and its
+/// sub-line the description; a block reading `(current)` is the
+/// conversation's end, with no sub-line. An `↑ N more` or `↓ N more` row is
+/// a scroll mark, not a message: its count goes into a second body
+/// paragraph, so the first one does not move with scrolling or the cursor.
+fn rewind_picker(rows: &[String]) -> RewindRows {
+    // The title is the row directly above the heading: a message reading
+    // `Rewind` sits below it and is no title.
+    let Some(heading) = rows
+        .iter()
+        .position(|row| row.trim_start().starts_with(REWIND_HEADING))
+    else {
+        return RewindRows::default();
+    };
+    let Some(title) = rows[..heading]
+        .iter()
+        .rposition(|row| row.trim() == REWIND_TITLE)
+    else {
+        return RewindRows::default();
+    };
+    let footer = find(rows, title + 1, |row| row.contains(REWIND_FOOTER)).unwrap_or(rows.len());
+    let mut blocks = rows[title + 1..footer]
+        .split(|row| row.trim().is_empty())
+        .filter(|block| !block.is_empty());
+    let _ = blocks.next();
+    let mut body = rows[heading].trim().to_owned();
+    let mut earlier = None;
+    let mut later = None;
+    let mut number = 0;
+    let mut options: Vec<ChatOption> = Vec::new();
+    for block in blocks {
+        let mut block = block;
+        // A scroll mark heads the block of the message it sits above.
+        while let Some((up, count)) = block.first().and_then(|row| scroll_mark(cursor_row(row).1)) {
+            if up {
+                earlier = Some(count);
+            } else {
+                later = Some(count);
+            }
+            block = &block[1..];
+        }
+        let Some(row) = block.first() else {
+            continue;
+        };
+        let (selected, text) = cursor_row(row);
+        number += 1;
+        let description = block
+            .get(1)
+            .map(|row| row.trim())
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned);
+        options.push(ChatOption {
+            number,
+            label: text.to_owned(),
+            description: if text == REWIND_CURRENT {
+                None
+            } else {
+                description
+            },
+            selected,
+        });
+    }
+    append_hidden(&mut body, earlier, later);
+    RewindRows {
+        cursor: options
+            .iter()
+            .find(|option| option.selected)
+            .map(|option| option.number),
+        options,
+        body: cap_body(body),
+    }
+}
+
+/// `body` with the second paragraph naming the messages a Rewind picker's
+/// scroll marks hide: `earlier` above the window, `later` below it.
+fn append_hidden(body: &mut String, earlier: Option<usize>, later: Option<usize>) {
+    let hidden: Vec<String> = [("earlier", earlier), ("later", later)]
+        .into_iter()
+        .filter_map(|(when, count)| count.map(|count| in_terminal(count, when)))
+        .collect();
+    if !hidden.is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&hidden.join("\n"));
+    }
+}
+
+/// "N earlier messages are in the terminal.", or its singular.
+fn in_terminal(count: usize, when: &str) -> String {
+    if count == 1 {
+        format!("1 {when} message is in the terminal.")
+    } else {
+        format!("{count} {when} messages are in the terminal.")
+    }
+}
+
+/// `row` after its cursor mark with its trailing spaces trimmed, and whether
+/// it carries the cursor.
+fn cursor_row(row: &str) -> (bool, &str) {
+    let text = row.trim_start();
+    match text.strip_prefix(CURSOR) {
+        Some(rest) => (true, rest.trim_start().trim_end()),
+        None => (false, text.trim_end()),
+    }
+}
+
+/// The count a Rewind picker's scroll mark names, and whether it is the
+/// `↑ N more` mark of the messages above the window rather than `↓ N more`.
+fn scroll_mark(text: &str) -> Option<(bool, usize)> {
+    let (up, rest) = match text.strip_prefix('↑') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('↓')?),
+    };
+    let count = rest.trim().strip_suffix("more")?.trim();
+    Some((up, count.parse().ok()?))
+}
+
+/// The Rewind choice screen's numbered rows as options, the row the cursor
+/// is on and its body, from the rows under its title: the heading and the
+/// message quoted behind `│` (its rows joined with a space) as the first
+/// paragraph, then the age row, the description lines and the warning as the
+/// second, so the prompt keeps its identity as the cursor and the clock move.
+fn rewind_choice(rows: &[String]) -> RewindRows {
+    let Some(title) = rows.iter().rposition(|row| row.trim() == REWIND_TITLE) else {
+        return RewindRows::default();
+    };
+    let end = rows[title + 1..]
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(title + 1, |last| title + 1 + last + 1);
+    let region = &rows[title + 1..end];
+    let options = collect_options(region, |_| false);
+    RewindRows {
+        cursor: options
+            .iter()
+            .find(|option| option.selected)
+            .map(|option| option.number),
+        options,
+        body: rewind_choice_body(region),
+    }
+}
+
+/// One row of a Rewind choice screen's body.
+enum ChoiceRow<'a> {
+    /// The heading, `Restore to the point before you sent this message:`.
+    Heading(&'a str),
+    /// A row of the message quoted behind `│`.
+    Quoted(&'a str),
+    /// Any other line, from the age row to the warning.
+    Line(&'a str),
+}
+
+/// `row` as a line of a Rewind choice screen's body; `None` for a blank row
+/// or one of its numbered options. The first non-blank row is the heading.
+fn choice_row(row: &str, first: bool) -> Option<ChoiceRow<'_>> {
+    let text = row.trim();
+    if text.is_empty() || numbered(text).is_some() {
+        return None;
+    }
+    if first {
+        return Some(ChoiceRow::Heading(text));
+    }
+    let Some(line) = text.strip_prefix(PANEL_EDGE) else {
+        return Some(ChoiceRow::Line(text));
+    };
+    let line = line.trim();
+    Some(if is_age_row(line) {
+        ChoiceRow::Line(line)
+    } else {
+        ChoiceRow::Quoted(line)
+    })
+}
+
+/// Whether `text` is a Rewind choice screen's age row, `(52s ago)`.
+fn is_age_row(text: &str) -> bool {
+    text.starts_with('(') && text.ends_with(" ago)")
+}
+
+/// A Rewind choice screen's body from its rows: the heading and the quoted
+/// message as the first paragraph, then the age row, the other lines and the
+/// warning as the second.
+fn rewind_choice_body(region: &[String]) -> String {
+    let mut heading = String::new();
+    let mut quoted: Vec<&str> = Vec::new();
+    let mut rest: Vec<&str> = Vec::new();
+    let mut first = true;
+    for row in region {
+        match choice_row(row, first) {
+            Some(ChoiceRow::Heading(text)) => {
+                first = false;
+                text.clone_into(&mut heading);
+            }
+            Some(ChoiceRow::Quoted(line)) => quoted.push(line),
+            Some(ChoiceRow::Line(line)) => rest.push(line),
+            None => {}
+        }
+    }
+    let mut body = heading;
+    if !quoted.is_empty() {
+        body.push('\n');
+        body.push_str(&quoted.join(" "));
+    }
+    if !rest.is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&rest.join("\n"));
+    }
+    cap_body(body)
 }
 
 /// The mark a `/btw` side question's question row starts with.
@@ -768,31 +1016,58 @@ fn btw_answered(rows: &[String]) -> String {
     cap_body(format!("{text}\n\n{answer}"))
 }
 
-/// The Close of the overlay whose prompt is `prompt`: option 1 types the
-/// key of the first overlay labelled as the prompt's subject. The two
-/// Rewind screens share a label and a Close.
+/// The answer to the overlay whose prompt is `prompt`: an option labelled
+/// [`CLOSE_LABEL`], at whatever number it sits, types the key of the first
+/// overlay labelled as the prompt's subject; any other option of a Rewind
+/// prompt picks its row ([`rewind_answer`]). The two Rewind screens share a
+/// label and a Close.
 fn overlay_recipe(
     prompt: &ChatPrompt,
     answer: &ChatAnswerKind,
 ) -> Result<AnswerRecipe, AnswerRefusal> {
-    if *answer != (ChatAnswerKind::Option { number: 1 }) {
+    let ChatAnswerKind::Option { number } = answer else {
         return Err(AnswerRefusal::NotThisDialog);
-    }
+    };
     let close = OVERLAYS
         .iter()
         .filter_map(|overlay| overlay.close.as_ref())
         .find(|close| close.label == prompt.subject)
         .ok_or(AnswerRefusal::NotThisDialog)?;
-    let key = match close.key {
-        CloseKey::Q => Key::Text("q".to_owned()),
-        CloseKey::Esc => Key::Esc,
-    };
-    Ok(AnswerRecipe {
-        steps: vec![RecipeStep {
-            keys: vec![key],
-            expect: close.expect.clone(),
-        }],
-    })
+    if close_option(prompt) == Some(*number) {
+        let key = match close.key {
+            CloseKey::Q => Key::Text("q".to_owned()),
+            CloseKey::Esc => Key::Esc,
+        };
+        return Ok(one_step(vec![key], close.expect.clone()));
+    }
+    if close.label != REWIND_TITLE {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    rewind_answer(prompt, *number)
+}
+
+/// The number of the option a prompt offers as its Close: the last one,
+/// labelled [`CLOSE_LABEL`]. A message row may read `Close` too, and is no
+/// Close.
+fn close_option(prompt: &ChatPrompt) -> Option<u32> {
+    prompt
+        .options
+        .last()
+        .filter(|option| option.label == CLOSE_LABEL)
+        .map(|option| option.number)
+}
+
+/// The keys that pick option `number` of a Rewind prompt: the arrows to its
+/// row, waiting for the cursor there, then Enter, waiting for the screen to
+/// move on. Digits are never typed on Rewind: they are unmeasured on both of
+/// its screens.
+fn rewind_answer(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
+    let mut steps: Vec<RecipeStep> = cursor_move(prompt, number)?.into_iter().collect();
+    steps.push(RecipeStep {
+        keys: vec![Key::Enter],
+        expect: ScreenExpect::Any,
+    });
+    Ok(AnswerRecipe { steps })
 }
 
 /// A permission dialog: the kind row under the dialog's rule, the subject,
@@ -3341,9 +3616,10 @@ mod tests {
             .expect("the capture shows a prompt")
     }
 
-    /// The 2.1.330 overlays the chat can close: the capture, the overlay's
-    /// name and its prompt's subject.
-    const CLOSABLE_OVERLAYS: [(&str, &str, &str); 8] = [
+    /// The 2.1.330 overlays the chat can close with no options of their own:
+    /// the capture, the overlay's name and its prompt's subject, which is the
+    /// overlay's. The two Rewind screens are read on their own.
+    const CLOSABLE_OVERLAYS: [(&str, &str, &str); 6] = [
         (
             include_str!(
                 "../../../daemon/src/screen/fixtures/claude--v2330-transcript-overlay.txt"
@@ -3373,16 +3649,6 @@ mod tests {
             "Transcript shortcuts",
         ),
         (
-            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker.txt"),
-            "rewind",
-            "Rewind",
-        ),
-        (
-            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-rewind-confirm.txt"),
-            "rewind_restore",
-            "Rewind",
-        ),
-        (
             include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-pending.txt"),
             "btw_pending",
             "Side question",
@@ -3409,7 +3675,6 @@ mod tests {
             assert_eq!(prompt.kind, ChatPromptKind::Overlay, "{name}");
             assert_eq!(prompt.subject, subject, "{name}");
             let body = match name {
-                "rewind_restore" => "Choose what to restore in the terminal, or close it.",
                 "btw" => "what is 2+2? one word\n\nFour",
                 "btw_pending" => "what is 2+2? one word",
                 _ => "",
@@ -3426,6 +3691,137 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A Rewind picker's message row: its text and the sub-line under it.
+    fn message(number: u32, label: &str, description: Option<&str>) -> ChatOption {
+        ChatOption {
+            number,
+            label: label.to_owned(),
+            description: description.map(str::to_owned),
+            selected: false,
+        }
+    }
+
+    /// The message the Rewind picker's cursor is on.
+    fn current(number: u32, label: &str, description: Option<&str>) -> ChatOption {
+        ChatOption {
+            selected: true,
+            ..message(number, label, description)
+        }
+    }
+
+    /// The Close option an overlay's prompt ends with.
+    fn closing(number: u32) -> ChatOption {
+        message(number, "Close", None)
+    }
+
+    #[test]
+    fn a_rewind_picker_reads_its_rows_cursor_and_close() {
+        let picker = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        ));
+        assert_eq!(picker.kind, ChatPromptKind::Overlay);
+        assert_eq!(picker.subject, "Rewind");
+        assert_eq!(
+            picker.body,
+            "Restore the code and/or conversation to the point before…"
+        );
+        assert_eq!(
+            picker.options,
+            [
+                message(1, "WRITEFILE please create cats.md", Some("cats.md +3")),
+                message(2, "say ok", Some("No code changes")),
+                current(3, "(current)", None),
+                closing(4),
+            ]
+        );
+        assert_eq!(picker.cursor, Some(3));
+        let up = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code-up2.txt"
+        ));
+        assert_eq!(up.cursor, Some(1));
+        assert!(up.options[0].selected);
+    }
+
+    #[test]
+    fn a_picker_message_reading_rewind_is_a_row() {
+        let text = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        )
+        .replace("    WRITEFILE please create cats.md", "    Rewind");
+        assert!(text.contains("\n    Rewind\n    cats.md +3\n"));
+        let picker = prompt_in(&text);
+        assert_eq!(
+            picker.body,
+            "Restore the code and/or conversation to the point before…"
+        );
+        assert_eq!(
+            picker
+                .options
+                .iter()
+                .map(|option| (option.number, option.label.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "Rewind"), (2, "say ok"), (3, "(current)"), (4, "Close")]
+        );
+        assert_eq!(picker.cursor, Some(3));
+        // With the cursor on that row it is still the same prompt.
+        let moved = text.replace("    Rewind\n", "  ❯ Rewind\n");
+        assert!(moved.contains("\n  ❯ Rewind\n"));
+        let moved = prompt_in(&moved);
+        assert_eq!(moved.cursor, Some(1));
+        assert_eq!(moved.body, picker.body);
+        assert_eq!(
+            moved
+                .options
+                .iter()
+                .map(|option| option.number)
+                .collect::<Vec<_>>(),
+            picker
+                .options
+                .iter()
+                .map(|option| option.number)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_rewind_choice_reads_its_options_cursor_and_close() {
+        let choice = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-confirm-code.txt"
+        ));
+        assert_eq!(choice.kind, ChatPromptKind::Overlay);
+        assert_eq!(choice.subject, "Rewind");
+        let body = "Restore to the point before you sent this message:\n\
+                    WRITEFILE please create cats.md\n\n\
+                    (52s ago)\n\
+                    The conversation goes back to before this message.\n\
+                    The code will be restored -3 in cats.md.\n\
+                    ⚠ Restored files go back whole, losing later changes by anyone. \
+                    Bash changes to other files are not undone.";
+        assert_eq!(choice.body, body);
+        assert_eq!(
+            choice.options,
+            [
+                current(1, "Restore code and conversation", None),
+                message(2, "Restore conversation", None),
+                message(3, "Restore code", None),
+                message(4, "Summarize from here", None),
+                message(5, "Summarize up to here", None),
+                message(6, "Never mind", None),
+                closing(7),
+            ]
+        );
+        assert_eq!(choice.cursor, Some(1));
+        let down = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-confirm-code-down.txt"
+        ));
+        assert!(down.body.contains("\nThe code will be unchanged.\n"));
+        assert!(
+            down.body
+                .ends_with("Bash changes to other files are not undone.")
+        );
+        assert_eq!(down.cursor, Some(2));
     }
 
     /// A `/btw` side question's screen as 2.1.330 draws it once answered.
@@ -3792,7 +4188,6 @@ mod tests {
                 ScreenExpect::NextPrompt(ChatPromptKind::Overlay),
             ),
             ("Side question", Key::Esc, ScreenExpect::DialogGone),
-            ("Rewind", Key::Esc, ScreenExpect::Any),
         ];
         for (subject, key, expect) in cases {
             let prompt = overlay_prompt(subject);
@@ -3812,6 +4207,18 @@ mod tests {
                 );
             }
         }
+        // A Rewind prompt's Close is its last option, whatever its number.
+        let picker = prompt_in(include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        ));
+        assert_eq!(
+            recipe(&picker, &ChatAnswerKind::Option { number: 4 }).map(|recipe| recipe.steps),
+            Ok(vec![RecipeStep {
+                keys: vec![Key::Esc],
+                expect: ScreenExpect::Any,
+            }]),
+            "Rewind's Close"
+        );
         assert_eq!(
             recipe(
                 &overlay_prompt("Elsewhere"),
@@ -3819,6 +4226,43 @@ mod tests {
             ),
             Err(AnswerRefusal::NotThisDialog),
             "a subject in no overlay row"
+        );
+    }
+
+    #[test]
+    fn a_picker_message_reading_close_is_a_row_not_close() {
+        let text = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        )
+        .replace("    WRITEFILE please create cats.md", "    Close");
+        assert!(text.contains("\n    Close\n    cats.md +3\n"));
+        let picker = prompt_in(&text);
+        assert_eq!(
+            picker.options.first().map(|option| option.label.as_str()),
+            Some("Close"),
+            "the first row reads Close"
+        );
+        assert_eq!(
+            recipe(&picker, &ChatAnswerKind::Option { number: 1 }).map(|recipe| recipe.steps),
+            Ok(vec![
+                RecipeStep {
+                    keys: vec![Key::Up, Key::Up],
+                    expect: ScreenExpect::OptionSelected(1),
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::Any,
+                },
+            ]),
+            "the Close-reading row is answered like any other"
+        );
+        assert_eq!(
+            recipe(&picker, &ChatAnswerKind::Option { number: 4 }).map(|recipe| recipe.steps),
+            Ok(vec![RecipeStep {
+                keys: vec![Key::Esc],
+                expect: ScreenExpect::Any,
+            }]),
+            "the last option is the Close"
         );
     }
 

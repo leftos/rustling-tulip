@@ -1,0 +1,40 @@
+▎ https://code.claude.com/docs/en/permission-modes
+  1 more notice hidden (ctrl+o to expand)
+
+❯ /model
+  ⎿  Kept model as Haiku 5.5
+
+❯ /btw
+  ⎿  Usage: /btw <your question>
+
+❯ Call the AskUserQuestion tool once: one question "Which layout?", header "Layout", two options "Grid" and "List", and
+  give each option a preview field holding a 3-line ASCII sketch. Do nothing else.
+
+● Answered Claude's questions:
+  ⎿  · Which layout? → Grid
+
+● You picked Grid for the layout.
+
+✻ Baked for 2s · done 3:16 PM
+
+❯ Reply with the single word: ok
+
+● ok
+
+✻ Cooked for 0s · done 3:16 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Rewind
+
+  Restore the code and/or conversation to the point before…
+
+    Call the AskUserQuestion tool once: one question "Which layout?", header "Layout", two options "Grid" and "Li…
+    No code changes
+
+  ❯ Reply with the single word: ok
+    No code changes
+
+    (current)
+
+
+
+  Enter to continue · Esc to cancel
