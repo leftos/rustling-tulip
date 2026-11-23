@@ -142,23 +142,25 @@ pub struct AttentionEvent {
     pub reason: AttentionReason,
 }
 
-/// What a plain shell's status watcher reads: the session's output broadcast,
-/// the byte counts of the user input forwarded to it, the grid it feeds that
+/// What a plain shell's status watcher reads: the session's output, every
+/// chunk of it, the byte counts of the user input forwarded to it, the grid it feeds that
 /// output into and reads the agent's screen from, the agent's rules, and the
 /// chat mirror's tap each reading of a running agent's screen goes to.
 pub struct ShellStreams {
-    pub output: broadcast::Receiver<Vec<u8>>,
+    /// The output's lossless tap ([`crate::pty::PtyOutput::subscribe_lossless`]).
+    pub output: mpsc::UnboundedReceiver<Vec<u8>>,
     pub input_pulses: mpsc::UnboundedReceiver<usize>,
     pub screen: SharedScreen,
     pub rules: Arc<CompiledRules>,
     pub chat: ChatTap,
 }
 
-/// What an agent session's status watcher reads: the session's output
-/// broadcast, the grid it feeds that output into and reads the status from,
+/// What an agent session's status watcher reads: the session's output, every
+/// chunk of it, the grid it feeds that output into and reads the status from,
 /// the agent's rules, and the chat mirror's tap each reading goes to.
 pub struct AgentStreams {
-    pub output: broadcast::Receiver<Vec<u8>>,
+    /// The output's lossless tap ([`crate::pty::PtyOutput::subscribe_lossless`]).
+    pub output: mpsc::UnboundedReceiver<Vec<u8>>,
     pub screen: SharedScreen,
     pub rules: Arc<CompiledRules>,
     pub chat: ChatTap,
@@ -206,10 +208,9 @@ struct Sight {
 /// When another writer (a hook event, a chat answer, an exit) changes the
 /// record's status, hook stamp or hook-driven flag, the screen is left unread
 /// for [`FOREIGN_WRITE_HOLD`], and so it is when the watcher starts (while a
-/// reattached session's replay lands), after the output stream lagged, and
-/// when a check finds the grid resized; the screen is read again once the
-/// hold ends, output or not. The write itself is refused unless the
-/// record still holds the status, hook stamp and hook-driven flag the window
+/// reattached session's replay lands) and when a check finds the grid
+/// resized; the screen is read again once the hold ends, output or not. The
+/// write itself is refused unless the record still holds the status, hook stamp and hook-driven flag the window
 /// read (see [`apply_screen_status`]).
 ///
 /// A main `Stop` on this record is held as its `turn_end`, the status staying
@@ -450,8 +451,8 @@ struct Confirm {
     hold_until: Instant,
     /// Another writer's move started the hold that runs until `hold_until`:
     /// its checks still hand the grid to the chat mirror. False for the
-    /// starting, resize and lagged-output holds, whose frames may be half
-    /// drawn, reflowed or missing rows.
+    /// starting and resize holds, whose frames may be half drawn or
+    /// reflowed.
     chat_through_hold: bool,
     /// The record and status the last executed check asked to publish at
     /// once but could not, because output had not settled.
@@ -674,7 +675,7 @@ impl ScreenWatch {
         }
     }
 
-    async fn run_agent(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
+    async fn run_agent(&mut self, output: &mut mpsc::UnboundedReceiver<Vec<u8>>) {
         loop {
             let next_check = self.next_check();
             // In arm order: output is fed before a due check reads the grid,
@@ -683,14 +684,13 @@ impl ScreenWatch {
             tokio::select! {
                 biased;
                 msg = output.recv() => match msg {
-                    Ok(bytes) => {
+                    Some(bytes) => {
                         let now = Instant::now();
                         if self.feed(&bytes, now) && self.check(now, Mode::Agent) == Checked::Gone {
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => self.lagged(n),
-                    Err(broadcast::error::RecvError::Closed) => return,
+                    None => return,
                 },
                 event = self.wake.events.recv(), if self.wake.open => {
                     let before = self.wake.seen;
@@ -713,14 +713,6 @@ impl ScreenWatch {
         crate::sync::lock(&self.screen).feed(bytes);
         self.last_output = Some(now);
         self.confirm.schedule(now)
-    }
-
-    /// The output stream skipped `n` chunks: the grid may hold a cut escape
-    /// sequence and a frame missing its rows.
-    fn lagged(&mut self, n: u64) {
-        warn!(session_id = %self.session_id, lagged = n, "pty state lagged");
-        crate::sync::lock(&self.screen).reset_parser();
-        self.confirm.hold(Instant::now());
     }
 
     /// One check of the screen; then, while a view key is outstanding, the
@@ -2170,7 +2162,7 @@ impl ShellWatcher {
         self.launching_until.is_some_and(|until| now < until) && self.mode() == Mode::Shell
     }
 
-    async fn run(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
+    async fn run(&mut self, output: &mut mpsc::UnboundedReceiver<Vec<u8>>) {
         loop {
             let mode = self.mode();
             let next_check = self.watch.next_check();
@@ -2185,13 +2177,12 @@ impl ShellWatcher {
             tokio::select! {
                 biased;
                 msg = output.recv() => match msg {
-                    Ok(bytes) => {
+                    Some(bytes) => {
                         if self.on_output(&bytes, mode).is_break() {
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => self.watch.lagged(n),
-                    Err(broadcast::error::RecvError::Closed) => return,
+                    None => return,
                 },
                 pulse = self.input_pulses.recv() => {
                     if let Some(n) = pulse {
@@ -3027,7 +3018,9 @@ mod hysteresis_tests {
 
     struct Harness {
         registry: Arc<SessionRegistry>,
-        output: broadcast::Sender<Vec<u8>>,
+        /// The session's output: the watcher reads its lossless tap, and a
+        /// test may subscribe a title watcher to its broadcast.
+        output: crate::pty::PtyOutput,
         /// A plain shell watcher's input pulses; holding it keeps the channel
         /// open.
         input: mpsc::UnboundedSender<usize>,
@@ -3102,7 +3095,8 @@ mod hysteresis_tests {
             Arc::new(tokio::sync::watch::channel(0usize).0),
         );
         let chat = mirror.tap(SESSION, &agent_registry::default_agent());
-        let (output, output_rx) = broadcast::channel(64);
+        let output = crate::pty::PtyProducer::channel(64).0.output();
+        let output_rx = output.subscribe_lossless();
         let (input, input_rx) = mpsc::unbounded_channel();
         let (attention_tx, attention_rx) = mpsc::unbounded_channel();
         let unread_input = if plain_shell {
@@ -3191,9 +3185,7 @@ mod hysteresis_tests {
         /// Emit one elapsed-time title repaint, e.g. `ESC ] 0 ; ⠋ 3s BEL`.
         fn heartbeat(&self, tick: u32) {
             let frame = format!("\x1b]0;\u{280b} {tick}s\x07");
-            self.output
-                .send(frame.into_bytes())
-                .expect("watcher still subscribed");
+            self.chunk(frame.into_bytes());
         }
 
         /// Change the session record the way a hook event does while the
@@ -3204,7 +3196,8 @@ mod hysteresis_tests {
 
         /// Send one chunk of PTY output.
         fn chunk(&self, bytes: Vec<u8>) {
-            self.output.send(bytes).expect("watcher still subscribed");
+            let taken = self.output.send_to_watchers(bytes);
+            assert!(taken > 0, "watcher still subscribed");
         }
 
         /// How many `Attention` events the watcher raised since the last call.
@@ -4930,7 +4923,7 @@ mod hysteresis_tests {
         const GRID: (u16, u16) = (156, 74);
 
         struct Tui {
-            output: broadcast::Sender<Vec<u8>>,
+            output: mpsc::UnboundedSender<Vec<u8>>,
             input: mpsc::UnboundedReceiver<Vec<u8>>,
             events: broadcast::Receiver<SessionEvent>,
             registry: Arc<SessionRegistry>,
@@ -4957,7 +4950,7 @@ mod hysteresis_tests {
                 Arc::new(tokio::sync::watch::channel(0usize).0),
             )
             .tap(SESSION, &agent_registry::default_agent());
-            let (output, output_rx) = broadcast::channel(64);
+            let (output, output_rx) = mpsc::unbounded_channel();
             let (attention_tx, attention) = mpsc::unbounded_channel();
             watch(
                 &registry,
@@ -5576,6 +5569,49 @@ mod hysteresis_tests {
         h.chunk(git_bash_exit_frame());
         advance(Duration::from_secs(1)).await;
         assert_eq!(terminal_title(&h), None, "the agent's title left with it");
+    }
+
+    /// Feed `chunks` to the watcher in one burst it cannot run inside, then a
+    /// reference grid of the harness's size; answers the watcher's grid and
+    /// the reference as `(rows, fed)`.
+    async fn burst(chunks: &[Vec<u8>], tag: &str) -> ((Vec<String>, u64), (Vec<String>, u64)) {
+        let h = start(tag, false);
+        settle().await;
+        for chunk in chunks {
+            h.chunk(chunk.clone());
+        }
+        settle().await;
+        let mut reference = Screen::new(COLS, ROWS);
+        for chunk in chunks {
+            reference.feed(chunk);
+        }
+        let grid = h.screen.lock().expect("grid lock");
+        (
+            (grid.rows(), grid.fed()),
+            (reference.rows(), reference.fed()),
+        )
+    }
+
+    /// A burst of more lines than the output channel holds, sent while the
+    /// watcher cannot run, reaches the grid whole: every byte is applied and
+    /// the rows match a grid fed every chunk.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_past_the_channel_reaches_the_grid_whole() {
+        let chunks: Vec<Vec<u8>> = (0..200)
+            .map(|n| format!("line {n}\r\n").into_bytes())
+            .collect();
+        let ((rows, fed), (want_rows, want_fed)) = burst(&chunks, "burst-lines").await;
+        assert_eq!(fed, want_fed, "bytes the grid applied of the burst");
+        assert_eq!(rows, want_rows, "the grid after the burst");
+    }
+
+    /// A burst that does not scroll shows every chunk on the grid: the
+    /// numbers the channel would drop stay visible.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_past_the_channel_shows_every_chunk_on_the_grid() {
+        let chunks: Vec<Vec<u8>> = (0..200).map(|n| format!("{n} ").into_bytes()).collect();
+        let ((rows, _), (want_rows, _)) = burst(&chunks, "burst-words").await;
+        assert_eq!(rows, want_rows, "the grid after the burst");
     }
 
     #[tokio::test(start_paused = true)]
@@ -9409,31 +9445,6 @@ mod hysteresis_tests {
             "continuous repaints held the check past its longest wait"
         );
         assert_eq!(h.attentions(), 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_overflowing_broadcast_restarts_the_window() {
-        let h = start_record("lagged", false, hook_record(SessionStatus::Working));
-        pass_hold().await;
-        h.chunk(idle_frame(&[]));
-        advance(ms(200)).await;
-        // More chunks than the broadcast holds, with no yield: the watcher lags.
-        for _ in 0..70 {
-            h.chunk(idle_frame(&[]));
-        }
-        // The lag at 200 ms holds the screen until 900 ms.
-        advance(ms(690)).await;
-        assert_eq!(
-            h.status(),
-            SessionStatus::Working,
-            "a write landed inside the lag's hold"
-        );
-        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
-        assert_eq!(
-            h.status(),
-            SessionStatus::Idle,
-            "the window after the lag publishes"
-        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -352,13 +352,6 @@ impl PromptMarks {
     pub fn at_prompt(&self) -> bool {
         self.marks_commands && self.last == Some(LastMark::Prompt)
     }
-
-    /// Forgets the last mark and any half-read sequence, for a stream that
-    /// lost bytes: a command's start may be among them.
-    pub fn forget(&mut self) {
-        self.parser = Parser::new(false);
-        self.last = None;
-    }
 }
 
 /// The OSC parameter of shell integration's prompt and command marks.

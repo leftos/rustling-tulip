@@ -193,7 +193,6 @@ mod tests {
     };
     use protocol::{AttentionReason, SessionMode, SessionStatus};
     use std::sync::{Arc, Mutex};
-    use tokio::sync::broadcast;
     use tower::ServiceExt as _;
 
     /// A `MakeWriter` that keeps what a subscriber formats, for the
@@ -487,7 +486,7 @@ mod tests {
     async fn hook_awaiting_input_raises_one_attention() {
         let (hub, _scratch, mut attention) = test_hub_with_attention("hook-attention");
         hub.sessions.insert(idle_record("s1"));
-        let (output, output_rx) = broadcast::channel(16);
+        let (output, output_rx) = tokio::sync::mpsc::unbounded_channel();
         let screen: crate::screen::SharedScreen =
             std::sync::Arc::new(std::sync::Mutex::new(crate::screen::Screen::new(140, 40)));
         pty_state::watch(

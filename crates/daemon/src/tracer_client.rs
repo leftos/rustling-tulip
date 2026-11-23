@@ -783,7 +783,8 @@ where
     // then end its lifecycle queue with the exit (`TracerLost` on stream EOF
     // or a read error).
     //
-    // Yield until every startup watcher has called `output_tx.subscribe()`
+    // Yield until every startup watcher has subscribed (the status watcher's
+    // lossless tap and the title watcher's broadcast receiver both count)
     // before starting the pipe read loop, so the first Output frame (the
     // tracer's ring snapshot containing shell startup bytes) reaches every
     // watcher. The lifecycle task needs no wait: its queue holds every chunk

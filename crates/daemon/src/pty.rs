@@ -95,23 +95,72 @@ impl std::fmt::Debug for PtySpawnSpec {
 }
 
 /// The watchers' side of a PTY session's output: a bounded broadcast for the
-/// status, title and injector watchers, which may lag and skip.
+/// title and injector watchers and the screen readers, which may lag and
+/// skip, and lossless taps for the status watchers, which feed the screen
+/// grid and so must see every chunk. A tap is unbounded: a slow status
+/// watcher grows its queue but never makes the PTY wait.
 #[derive(Clone)]
 pub struct PtyOutput {
     watchers: broadcast::Sender<Vec<u8>>,
+    /// Every lossless subscriber's sender; dropped with the last clone of
+    /// this output, which ends each tap as the broadcast closes.
+    taps: Arc<Mutex<Vec<mpsc::UnboundedSender<Vec<u8>>>>>,
 }
 
 impl PtyOutput {
+    fn new(capacity: usize) -> Self {
+        let (watchers, _) = broadcast::channel(capacity);
+        Self {
+            watchers,
+            taps: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     /// A watcher's receiver, starting at the next chunk sent.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.watchers.subscribe()
     }
 
-    /// How many watchers are subscribed; the lifecycle queue is not counted.
+    /// A receiver that gets every chunk sent from now on, in order, none
+    /// skipped; it ends once the output's last sender is gone.
+    #[must_use]
+    pub fn subscribe_lossless(&self) -> mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        crate::sync::lock(&self.taps).push(tx);
+        rx
+    }
+
+    /// How many watchers are subscribed, broadcast receivers and lossless
+    /// taps alike; the lifecycle queue is not counted.
     #[must_use]
     pub fn receiver_count(&self) -> usize {
-        self.watchers.receiver_count()
+        let taps = crate::sync::lock(&self.taps)
+            .iter()
+            .filter(|tap| !tap.is_closed())
+            .count();
+        self.watchers.receiver_count() + taps
+    }
+
+    /// Sends one chunk to every watcher, dropping each tap whose receiver is
+    /// gone; answers how many taps took it.
+    fn deliver(&self, bytes: Vec<u8>) -> usize {
+        let mut taps = crate::sync::lock(&self.taps);
+        if !taps.is_empty() {
+            taps.retain(|tap| tap.send(bytes.clone()).is_ok());
+        }
+        let taken = taps.len();
+        drop(taps);
+        let _ = self.watchers.send(bytes);
+        taken
+    }
+
+    /// [`PtyProducer::send`]'s delivery to the watchers alone, for tests
+    /// that feed a watcher with no lifecycle queue; answers how many
+    /// lossless taps took the chunk.
+    #[cfg(test)]
+    pub fn send_to_watchers(&self, bytes: Vec<u8>) -> usize {
+        self.deliver(bytes)
     }
 }
 
@@ -132,11 +181,10 @@ impl PtyProducer {
     #[must_use]
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<LifecycleItem>) {
         let (lifecycle, lifecycle_rx) = mpsc::channel(LIFECYCLE_OUTPUT_CAPACITY);
-        let (watchers, _) = broadcast::channel(capacity);
         (
             Self {
                 lifecycle,
-                output: PtyOutput { watchers },
+                output: PtyOutput::new(capacity),
             },
             lifecycle_rx,
         )
@@ -149,14 +197,15 @@ impl PtyProducer {
     }
 
     /// Sends one chunk to the lifecycle queue, waiting while it is full, then
-    /// to the watchers. Neither having no receiver is an error: a session
-    /// nobody reads drops its output.
+    /// to the watchers' lossless taps and broadcast, which never wait. A
+    /// missing receiver on either side is not an error: a session nobody
+    /// reads drops its output.
     pub async fn send(&self, bytes: Vec<u8>) {
         let _ = self
             .lifecycle
             .send(LifecycleItem::Chunk(bytes.clone()))
             .await;
-        let _ = self.output.watchers.send(bytes);
+        self.output.deliver(bytes);
     }
 
     /// [`Self::send`] from a thread outside the runtime, for tests that feed
@@ -166,7 +215,7 @@ impl PtyProducer {
         let _ = self
             .lifecycle
             .blocking_send(LifecycleItem::Chunk(bytes.clone()));
-        let _ = self.output.watchers.send(bytes);
+        self.output.deliver(bytes);
     }
 
     /// Ends the lifecycle queue with `exit`, after every chunk sent before
@@ -396,5 +445,47 @@ mod tests {
             chunks.push(chunk);
         }
         assert_eq!(chunks, vec![input]);
+    }
+
+    /// A lossless subscriber gets every chunk, in order, of a burst that
+    /// laps the broadcast: each send is polled once by hand, outside tokio's
+    /// cooperative budget, so nothing reads the output in between.
+    #[tokio::test]
+    async fn a_lagging_broadcast_leaves_the_status_grid_whole() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        const SENT: usize = 100;
+        let (producer, _lifecycle_output) = PtyProducer::channel(16);
+        let output = producer.output();
+        let mut lossy = output.subscribe();
+        let mut lossless = output.subscribe_lossless();
+        let mut cx = Context::from_waker(Waker::noop());
+        for seq in 0..SENT {
+            let send = std::pin::pin!(tokio::task::unconstrained(
+                producer.send(format!("<{seq}>").into_bytes())
+            ));
+            assert!(
+                send.poll(&mut cx).is_ready(),
+                "send {seq} completes at once"
+            );
+        }
+        assert!(
+            matches!(
+                lossy.try_recv(),
+                Err(broadcast::error::TryRecvError::Lagged(_))
+            ),
+            "the broadcast lagged"
+        );
+        let mut got = Vec::new();
+        while let Ok(chunk) = lossless.try_recv() {
+            got.push(chunk);
+        }
+        let want: Vec<Vec<u8>> = (0..SENT)
+            .map(|seq| format!("<{seq}>").into_bytes())
+            .collect();
+        assert_eq!(got, want, "the lossless subscriber's chunks");
+        drop(producer);
+        drop(output);
+        assert_eq!(lossless.recv().await, None, "the tap ends with the output");
     }
 }

@@ -238,7 +238,7 @@ async fn reattach_one(
                     &sessions,
                     meta.session_id.clone(),
                     pty_state::ShellStreams {
-                        output: pty.output.subscribe(),
+                        output: pty.output.subscribe_lossless(),
                         input_pulses: in_rx,
                         screen,
                         rules: rules_for(&agent),
@@ -253,7 +253,7 @@ async fn reattach_one(
                     &sessions,
                     meta.session_id.clone(),
                     pty_state::AgentStreams {
-                        output: pty.output.subscribe(),
+                        output: pty.output.subscribe_lossless(),
                         screen,
                         rules: rules_for(&agent),
                         chat: outlets.chat.tap(&meta.session_id, &agent),

@@ -128,15 +128,6 @@ impl Screen {
         self.fed
     }
 
-    /// Drops any escape sequence the parser had half read, so the rest of the
-    /// stream starts from the ground state instead of being swallowed, and
-    /// forgets the shell's last OSC 133 mark, since the lost bytes may have
-    /// held a command's start.
-    pub fn reset_parser(&mut self) {
-        self.parser = Processor::new();
-        self.marks.forget();
-    }
-
     /// Whether the shell, which marks its commands with OSC 133, last marked
     /// a prompt start after any command's start or end.
     #[must_use]
@@ -367,7 +358,6 @@ mod tests {
         screen.feed(b"\x1b[2J");
         screen.feed(b"");
         assert_eq!(screen.fed(), 9, "every byte counts, escape sequences too");
-        screen.reset_parser();
         screen.resize(40, 5);
         assert_eq!(screen.fed(), 9, "only feeding moves the count");
     }
@@ -540,14 +530,5 @@ mod tests {
         screen.resize(40, 0);
         assert_eq!(screen.rows()[0], "keep me");
         assert_eq!(screen.rows().len(), 6);
-    }
-
-    #[test]
-    fn a_reset_parser_drops_a_cut_sequence() {
-        let mut screen = Screen::new(40, 6);
-        screen.feed(b"\x1b]0;half a title");
-        screen.reset_parser();
-        screen.feed(b"\r\nafter");
-        assert_eq!(screen.bottom_non_empty_lines(1), ["after"]);
     }
 }

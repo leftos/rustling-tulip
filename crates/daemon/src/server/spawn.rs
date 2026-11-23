@@ -2011,7 +2011,7 @@ async fn spawn_interactive_session(
             &hub.sessions,
             session_id.clone(),
             pty_state::ShellStreams {
-                output: pty.output.subscribe(),
+                output: pty.output.subscribe_lossless(),
                 input_pulses: in_rx,
                 screen,
                 rules: rules_for(&agent),
@@ -2026,7 +2026,7 @@ async fn spawn_interactive_session(
             &hub.sessions,
             session_id.clone(),
             pty_state::AgentStreams {
-                output: pty.output.subscribe(),
+                output: pty.output.subscribe_lossless(),
                 screen,
                 rules: rules_for(&agent),
                 chat: hub.chat_mirror.tap(&session_id, &agent),
@@ -2242,7 +2242,7 @@ async fn spawn_plain_shell_session(
         &hub.sessions,
         session_id.clone(),
         pty_state::ShellStreams {
-            output: pty.output.subscribe(),
+            output: pty.output.subscribe_lossless(),
             input_pulses: in_rx,
             screen,
             rules: rules_for(&default_agent()),
@@ -2448,7 +2448,7 @@ pub(crate) async fn spawn_command_session(
         &hub.sessions,
         session_id.clone(),
         pty_state::ShellStreams {
-            output: pty.output.subscribe(),
+            output: pty.output.subscribe_lossless(),
             input_pulses: in_rx,
             screen,
             rules: rules_for(&default_agent()),

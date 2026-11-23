@@ -2817,19 +2817,6 @@ mod tests {
         );
     }
 
-    /// A lagged stream may have lost a command's start: the marks read before
-    /// the lag no longer say where the shell is.
-    #[test]
-    fn a_lag_forgets_the_prompt_mark() {
-        let mut screen = Screen::new(80, 12);
-        screen.feed(&marked_run_then("\x1b]133;A\x07me@box ~> \x1b]133;B\x07"));
-        screen.reset_parser();
-        assert!(
-            !last_row_is_shell_prompt(&screen),
-            "a prompt mark read before a lag still counted"
-        );
-    }
-
     /// pwsh's own fallback prompt and a nested prompt's repeated `>`.
     #[test]
     fn a_bare_or_nested_powershell_prompt_is_the_shells_prompt() {
