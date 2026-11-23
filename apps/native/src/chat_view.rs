@@ -2740,8 +2740,8 @@ impl RootView {
     /// Makes session `session_id`'s composer once its chat has loaded:
     /// Ctrl+Enter and Esc in it go through [`Self::chat_key`], and every edit
     /// repaints the buttons beside it. The phone's sessions build it with the
-    /// phone's values: its own placeholder, one to five rows and the soft
-    /// keyboard's Send action key.
+    /// phone's values: its own placeholder, one to five rows and a plain
+    /// Return as the soft keyboard's action key.
     fn ensure_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let wanted = self
             .chat
@@ -4890,8 +4890,9 @@ pub(crate) fn composer_line_disables(line: Option<&ComposerLine>) -> bool {
     matches!(line, Some(ComposerLine::Note(note)) if note.disables())
 }
 
-/// The soft keyboard the phone's composer asks for: Send as its action key,
-/// with autocorrect and sentence autocapitalization on. Word suggestions
+/// The soft keyboard the phone's composer asks for: a plain Return as its
+/// action key, which breaks the line (Send is the composer's button), with
+/// autocorrect and sentence autocapitalization on. Word suggestions
 /// stay off: the platform's inline predictions arrive as marked text, which
 /// a Send could carry.
 fn phone_composer_configuration() -> TextInputConfiguration {
@@ -4899,7 +4900,7 @@ fn phone_composer_configuration() -> TextInputConfiguration {
         autocorrect: true,
         suggestions: false,
         autocapitalize: Autocapitalize::Sentences,
-        input_action: TextInputAction::Send,
+        input_action: TextInputAction::Enter,
         keyboard: KeyboardKind::Text,
     }
 }
@@ -6025,7 +6026,7 @@ mod tests {
             "no predictive text: its inline predictions arrive as marked text"
         );
         assert_eq!(config.autocapitalize, Autocapitalize::Sentences);
-        assert_eq!(config.input_action, TextInputAction::Send);
+        assert_eq!(config.input_action, TextInputAction::Enter);
     }
 
     /// A scroll area from 100 to 700 px, as the edge scroll sees it.

@@ -56,6 +56,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A session whose Claude hangs after finishing its turn, its spinner frozen on screen, now turns Idle a minute later instead of staying Working.
 - On the phone, the Chat message box draws its text at the chat's size instead of oversized.
 - On the phone, buttons take less padding, so labels such as Photos and Quick show whole, and every button stays at least a fingertip wide.
+- On the phone, the Chat box's Return key starts a new line, with any keyboard, SwiftKey included; Send sends.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
 
 ## v0.18.3-alpha

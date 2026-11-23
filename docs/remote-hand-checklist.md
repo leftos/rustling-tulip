@@ -262,6 +262,7 @@ These need a TestFlight build from this work, an iPhone at iOS's default "Paste 
 - [ ] Copy a HEIC photo from Photos and paste it into the Chat box, then copy a GIF and paste it. **Expect:** each attaches, with at most one "Allow Paste" question per paste (none on iOS 16 and later through the paste button).
 - [ ] Paste or pick a photo over 8 MB. **Expect:** it attaches; on the host its longer side is exactly 2048 pixels.
 - [ ] With a hardware keyboard, in the Terminal page select text and press Command-C, then press Command-V in the Chat box. **Expect:** the text copies and pastes. If Command-V does nothing or iOS refuses it, report it.
+- [ ] With Microsoft SwiftKey (and then the stock iOS keyboard) as the keyboard, type a line in a session's Chat box and tap the keyboard's Return key. **Expect:** the key reads as Return, a new line starts in the box, and nothing is sent until you tap `Send`.
 - [ ] On the Terminal page tap the key bar's `Ctrl`, then the keyboard's Backspace. **Expect:** Claude's input deletes a word (Ctrl+Backspace), and the next letter you type is plain.
 - [ ] On the Terminal page open the Quick dock and tap `Back`. **Expect:** the dock closes and the page stays; a second `Back` leaves the page.
 - [ ] With the keyboard up on the Terminal page, look at the key bar's right end. **Expect:** `Hide` sits apart from the scrolling keys behind a thin line, and no key looks cut by it. Turn the phone on its side. **Expect:** the session's status sits in its own box between `Back` and the keys, readable.

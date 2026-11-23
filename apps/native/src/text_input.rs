@@ -1186,6 +1186,13 @@ impl TextInput {
         if self.read_only {
             return;
         }
+        // A third-party keyboard's Return can arrive as "\r" or "\r\n": it is
+        // the same line break as "\n".
+        let new_text = if matches!(new_text, "\r" | "\r\n") {
+            "\n"
+        } else {
+            new_text
+        };
         // iOS delivers Return as an inserted line break, never as a key event.
         // A ranged replacement (UIKit's `replaceRange:withText:`) is an edit.
         if new_text == "\n" && range_utf16.is_none() && !self.mode.is_multi_line() {
@@ -3453,6 +3460,37 @@ mod tests {
         cx.simulate_input("\n");
         assert_eq!(text_of(&input, cx), "ab\n");
         assert!(seen.borrow().is_empty(), "a line break is not a submit");
+    }
+
+    #[gpui::test]
+    fn a_lone_carriage_return_from_the_platform_breaks_a_multi_line_input(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "ab");
+        let seen = events(&input, cx);
+        cx.simulate_input("\r");
+        assert_eq!(text_of(&input, cx), "ab\n");
+        assert!(seen.borrow().is_empty(), "a line break is not a submit");
+    }
+
+    #[gpui::test]
+    fn a_crlf_from_the_platform_breaks_a_multi_line_input_once(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, multi, "ab");
+        let seen = events(&input, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "\r\n", window, cx);
+            });
+        });
+        assert_eq!(text_of(&input, cx), "ab\n", "one line break, not two");
+        assert!(seen.borrow().is_empty(), "a line break is not a submit");
+    }
+
+    #[gpui::test]
+    fn a_lone_carriage_return_submits_a_single_line_input(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "ab");
+        let seen = events(&input, cx);
+        cx.simulate_input("\r");
+        assert_eq!(text_of(&input, cx), "ab", "Return inserts nothing");
+        assert_eq!(*seen.borrow(), [TextInputEvent::Submit]);
     }
 
     #[gpui::test]
