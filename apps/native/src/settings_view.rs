@@ -3075,6 +3075,14 @@ impl RootView {
         self.settings_open() && apply_enabled(&self.pending_edits())
     }
 
+    /// The footer's third button's label, for the specs: [`cancel_label`] over
+    /// whether Apply can be pressed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn settings_cancel_label(&self) -> &'static str {
+        cancel_label(self.settings_apply_enabled())
+    }
+
     /// Apply: every host's pending edits are sent to that host, one message
     /// per pending row (a host's remote access, and its Dashboard rows, as
     /// one message each), and This PC's pending settings are saved, while
@@ -5662,8 +5670,9 @@ impl RootView {
         Some(backdrop("settings", panel, &theme(cx)))
     }
 
-    /// The footer: OK, Apply and Cancel, right-aligned. OK and Apply are
-    /// disabled while [`Self::settings_apply_enabled`] says no.
+    /// The footer: OK, Apply and Cancel, or Close while nothing is changed,
+    /// right-aligned. OK and Apply are disabled while
+    /// [`Self::settings_apply_enabled`] says no.
     fn settings_footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let focused = self.focused_settings_control(window, cx);
         let applies = self.settings_apply_enabled();
@@ -5685,7 +5694,7 @@ impl RootView {
             ))
             .child(settings_button(
                 SettingsControl::FooterCancel,
-                "Cancel",
+                cancel_label(applies),
                 true,
                 focused,
                 cx,
@@ -10527,6 +10536,12 @@ struct PendingEdit {
     valid: bool,
 }
 
+/// The footer's third button: Close while there is nothing to apply, Cancel
+/// once there is.
+fn cancel_label(applies: bool) -> &'static str {
+    if applies { "Cancel" } else { "Close" }
+}
+
 /// Whether OK and Apply can be pressed over every host's `pending` edits:
 /// some host holds one, and none fails its local validation.
 fn apply_enabled(pending: &HashMap<HostKey, Vec<PendingEdit>>) -> bool {
@@ -11253,8 +11268,9 @@ mod tests {
 
     use super::{
         AgentTab, AgentTabs, HostAgentTabs, HostPending, LocalPending, PendingEdit, PendingRow,
-        PendingSettings, SettingsTab, apply_enabled, control_matches, intern, next_hit_slot,
-        owned_hit, row_tabs, settings_host_after_close, tab_kept, tab_rows, text_pending,
+        PendingSettings, SettingsTab, apply_enabled, cancel_label, control_matches, intern,
+        next_hit_slot, owned_hit, row_tabs, settings_host_after_close, tab_kept, tab_rows,
+        text_pending,
     };
     use crate::agent_options::{FieldEditor, FieldView};
     use crate::target::HostKey;
@@ -11938,6 +11954,12 @@ mod tests {
             !apply_enabled(&pending(vec![(HostKey::Local, Vec::new())])),
             "a host listed with no edit holds nothing pending"
         );
+    }
+
+    #[test]
+    fn the_footer_says_close_with_nothing_to_apply() {
+        assert_eq!(cancel_label(false), "Close");
+        assert_eq!(cancel_label(true), "Cancel");
     }
 
     #[test]

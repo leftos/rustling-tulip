@@ -5017,6 +5017,31 @@ fn a_pending_toggle_opens_the_apply_gate(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_footer_says_close_until_a_setting_changes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    assert_eq!(
+        h.root(|root, _| root.settings_cancel_label()),
+        "Close",
+        "nothing is pending, so there is nothing to cancel"
+    );
+    h.click_on("settings-notify-finished");
+    assert_eq!(
+        h.root(|root, _| root.settings_cancel_label()),
+        "Cancel",
+        "the toggle pends, so it can be cancelled"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(
+        h.root(|root, _| root.settings_cancel_label()),
+        "Close",
+        "Apply took it, so the footer closes again"
+    );
+}
+
+#[gpui::test]
 fn a_pending_worktrees_path_opens_the_apply_gate(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

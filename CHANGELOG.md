@@ -76,6 +76,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - Closing a tab of only dispatch run or subagent views, or of empty panes, no longer asks for a second click.
+- The Settings window's Cancel button reads Close while you have changed nothing.
 
 ## v0.18.3-alpha
 
