@@ -186,6 +186,13 @@ pub struct HookReport {
     pub agent_started: bool,
     /// A subagent fired the event, not the main agent.
     pub subagent: bool,
+    /// The subagent that fired the event, by its payload's non-empty
+    /// `agent_id`; `None` for the main agent's event and for a payload that
+    /// names no agent.
+    pub agent_id: Option<String>,
+    /// A subagent ended (`SubagentStop`); [`Self::agent_id`] names it when
+    /// the payload does.
+    pub subagent_stopped: bool,
     /// Whether work runs on beside an idle turn, when the main agent's turn
     /// end says so: the payload's own rule (any running background task or
     /// any one-shot cron), so true even for an element [`Self::stop_work`]

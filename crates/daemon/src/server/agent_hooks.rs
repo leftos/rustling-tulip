@@ -987,6 +987,47 @@ mod tests {
         assert!(text.contains("dark"), "the user's settings stay: {text}");
     }
 
+    /// An install an older release wrote holds every event its table named
+    /// and none of the newer `SubagentStop`; the start refresh completes it,
+    /// keeping a handler of the user's own there.
+    #[test]
+    fn startup_refresh_completes_an_older_releases_install() {
+        let scratch = ScratchDir::new("hooks-refresh-older");
+        let settings = scratch.path().join("settings.json");
+        let plugin = hooks_plugin();
+        let shim = scratch.path().join("hook-shim").join("rt-hook");
+        let current = plugin
+            .install_user_hooks(Some("{\"theme\": \"dark\"}\n"), &shim)
+            .expect("install with the current shim");
+        let mut older: serde_json::Value =
+            serde_json::from_str(&current).expect("the install is JSON");
+        let user_group =
+            serde_json::json!({ "hooks": [{ "type": "command", "command": "notify.sh" }] });
+        older["hooks"]["SubagentStop"] = serde_json::json!([user_group.clone()]);
+        std::fs::write(
+            &settings,
+            serde_json::to_string_pretty(&older).expect("render"),
+        )
+        .expect("write the older install");
+        let site = site(shim.clone());
+
+        refresh_one(plugin, &settings, &site);
+
+        let text = read(&settings);
+        assert_eq!(
+            plugin.user_hooks_state(Some(&text), &shim).expect("state"),
+            agent_api::UserHooksState::On,
+            "the older install is completed: {text}"
+        );
+        let document: serde_json::Value = serde_json::from_str(&text).expect("the file is JSON");
+        let groups = document["hooks"]["SubagentStop"]
+            .as_array()
+            .expect("SubagentStop groups");
+        assert_eq!(groups.len(), 2, "the user's group and ours: {text}");
+        assert_eq!(groups[0], user_group, "the user's own handler stays first");
+        assert!(text.contains("dark"), "the user's settings stay: {text}");
+    }
+
     #[test]
     fn startup_refresh_leaves_an_off_file_alone() {
         let scratch = ScratchDir::new("hooks-refresh-off");

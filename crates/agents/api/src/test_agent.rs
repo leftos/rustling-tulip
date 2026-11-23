@@ -224,6 +224,8 @@ impl Agent for TestAgent {
             agent_ended: false,
             agent_started: false,
             subagent: false,
+            agent_id: None,
+            subagent_stopped: false,
             background: None,
             stop_work: None,
             weak_idle: false,

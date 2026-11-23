@@ -95,7 +95,7 @@ At spawn the daemon creates `sessions/<id>/` and writes `hook-settings.json` the
 
 The file is removed with the rest of `sessions/<id>/` on a graceful stop. It contains no secret: the token is read from `daemon.json` at call time.
 
-`SubagentStop` is not subscribed: the CLI's own prompt-suggestion agent fires it 1.5-2 s after every interactive `Stop`, with an empty `agent_type`, so it says nothing about work. Should it ever be added, an empty `agent_type` must not count as work.
+`SubagentStop` is subscribed only to end the prompt its subagent raised (matched by `agent_id`); it sets no status. The CLI's own prompt-suggestion agent fires it 1.5-2 s after every interactive `Stop`, with an empty `agent_type`, so it never counts as work.
 
 Only the primary cwd's settings load: hooks and `env` in an `--add-dir` root's `.claude/settings.json` do not. A workspace session therefore gets only `members[0]`'s repo hooks, and the injected `--settings` file is unaffected.
 

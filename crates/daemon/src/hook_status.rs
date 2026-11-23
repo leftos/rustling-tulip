@@ -543,10 +543,16 @@ pub(crate) fn apply_to_record(
     let Some(event_time) = event_time else {
         return Applied::default();
     };
-    if record.last_hook_time.is_some_and(|last| event_time <= last) {
+    if record.last_hook_time.is_some_and(|last| event_time <= last)
+        && !late_raiser_stop(record, report, event_time)
+    {
         return Applied::default();
     }
-    record.last_hook_time = Some(event_time);
+    record.last_hook_time = Some(
+        record
+            .last_hook_time
+            .map_or(event_time, |last| last.max(event_time)),
+    );
     if !report.subagent {
         record.main_hook_time = Some(event_time);
     }
@@ -601,7 +607,9 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             crate::osc_title::clear_agent_title(&mut record.terminal_title, &record.agent);
         }
     }
-    if leaves_pending_alone(record, report) {
+    if subagent_stop_ends_its_prompt(record, report) {
+        end_subagents_prompt(record);
+    } else if leaves_pending_alone(record, report) {
         return Applied {
             entered_awaiting: false,
             status_change: None,
@@ -678,6 +686,11 @@ fn apply_pending(
                 .unwrap_or(PromptRaise {
                     event_time,
                     at: tokio::time::Instant::now(),
+                    raiser: report
+                        .agent_id
+                        .as_deref()
+                        .filter(|_| report.subagent)
+                        .map(PromptRaise::agent_key),
                 });
             record.pending_input = Some(pending.clone());
             record.pending_owner = owner;
@@ -720,6 +733,49 @@ fn main_turn_end_ends_the_wait(record: &SessionRecord) -> bool {
             .pending_input
             .as_ref()
             .is_some_and(|pending| agent_api::hook_vocabulary::pending_tool(pending).is_none())
+}
+
+/// Whether `report` is the stop of the subagent whose prompt `record` holds,
+/// which ends it: a subagent's prompt outlives main's turn end and main's
+/// other tools, and one nobody answered through us (it was answered in the
+/// subagent's own view, or the agent was stopped) dies with its subagent. A
+/// prompt with no stored raiser (a subagent's notification filled the slot)
+/// is no stop's to end, nor is another subagent's prompt or main's: the CLI
+/// fires a nameless prompt-suggestion stop after every `Stop`.
+fn subagent_stop_ends_its_prompt(record: &SessionRecord, report: &HookReport) -> bool {
+    if !report.subagent_stopped
+        || record.pending_owner != PromptOwner::Subagent
+        || record.pending_input.is_none()
+    {
+        return false;
+    }
+    let stopped = report.agent_id.as_deref().map(PromptRaise::agent_key);
+    record
+        .pending_raise
+        .and_then(|raise| raise.raiser)
+        .is_some_and(|raiser| stopped == Some(raiser))
+}
+
+/// Whether `report`, stamped `event_time` at or before the record's last
+/// event, is still applied: the raiser's stop ending its prompt, newer than
+/// the raise. Its end sets off a task notification the CLI stamps later,
+/// whose `UserPromptSubmit` can land first; the raiser sends nothing after
+/// its stop, so no later state is overwritten. Every other stale event is
+/// dropped.
+fn late_raiser_stop(record: &SessionRecord, report: &HookReport, event_time: u128) -> bool {
+    subagent_stop_ends_its_prompt(record, report)
+        && record
+            .pending_raise
+            .is_some_and(|raise| raise.event_time < event_time)
+}
+
+/// End the subagent's prompt `record` holds as main's own tool ending it
+/// would: the prompt and its owner go, and a wait on it leaves for `Working`.
+fn end_subagents_prompt(record: &mut SessionRecord) {
+    record.clear_pending();
+    if record.status == SessionStatus::AwaitingInput {
+        crate::pty_state::apply_status(record, SessionStatus::Working);
+    }
 }
 
 /// Whether an event must leave the record's status and pending input alone,
@@ -1554,6 +1610,179 @@ mod tests {
             "the subagent's prompt is pending: {:?}",
             record.pending_input
         );
+    }
+
+    /// A `SubagentStop` of subagent `agent_id`, or of one its payload does not
+    /// name.
+    fn subagent_stop(agent_id: Option<&str>) -> Value {
+        let mut body = json!({
+            "hook_event_name": "SubagentStop",
+            "agent_type": "general-purpose",
+            "stop_hook_active": false,
+            "last_assistant_message": "sub done",
+        });
+        if let Some(id) = agent_id {
+            body["agent_id"] = json!(id);
+        }
+        body
+    }
+
+    /// A record whose prompt subagent `agent_id`'s Bash `PermissionRequest`
+    /// raised, at 2.
+    fn record_with_a_prompt_raised_by(agent_id: &str) -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        let request = json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": agent_id,
+            "agent_type": "general-purpose",
+            "tool_name": "Bash",
+            "tool_input": {"command": "mkdir sub-dir"},
+        });
+        apply_body(&mut record, 2, &request);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
+        record
+    }
+
+    #[test]
+    fn a_subagents_stop_clears_the_prompt_it_raised() {
+        let mut record = record_with_a_prompt_raised_by("A");
+        apply_body(&mut record, 3, &subagent_stop(Some("A")));
+        assert_eq!(
+            record.pending_input, None,
+            "the raiser's stop kept its prompt"
+        );
+        assert_eq!(
+            record.pending_owner,
+            PromptOwner::Main,
+            "the clear kept the owner"
+        );
+        assert_eq!(record.pending_raise, None);
+        assert_eq!(record.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn another_subagents_stop_leaves_the_prompt() {
+        let mut record = record_with_a_prompt_raised_by("A");
+        apply_body(&mut record, 3, &subagent_stop(Some("B")));
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(
+                &record.pending_input,
+                Some(PendingInput::Permission { tool_name, .. }) if tool_name == "Bash"
+            ),
+            "another subagent's stop ended A's prompt: {:?}",
+            record.pending_input
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
+    }
+
+    #[test]
+    fn a_subagent_stop_never_clears_a_main_prompt() {
+        for stop in [subagent_stop(Some("A")), subagent_stop(None)] {
+            let mut record = record_with_open_prompt();
+            apply_body(&mut record, 2, &stop);
+            assert_eq!(record.status, SessionStatus::AwaitingInput, "{stop}");
+            assert_eq!(record.pending_input, Some(main_prompt()), "{stop}");
+            assert_eq!(record.pending_owner, PromptOwner::Main, "{stop}");
+        }
+    }
+
+    /// Only a subagent's notification fill leaves a subagent's prompt with no
+    /// stored raiser (a payload with no `agent_id` raises main's), and no
+    /// subagent's stop may end it: the CLI's prompt-suggestion stop fires
+    /// 1.5-2 s after every `Stop`.
+    #[test]
+    fn a_subagent_stop_leaves_a_filled_prompt_with_no_raiser() {
+        for stop in [subagent_stop(Some("B")), subagent_stop(None)] {
+            let mut filled = crate::history::test_support::record("s1", SessionMode::Interactive);
+            filled.status = SessionStatus::Working;
+            filled.last_hook_time = Some(1);
+            filled.hook_driven = true;
+            let notification = json!({
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "Claude needs your permission to use Bash",
+                "agent_id": "A",
+            });
+            apply_body(&mut filled, 2, &notification);
+            assert_eq!(filled.pending_owner, PromptOwner::Subagent, "{stop}");
+            assert_eq!(filled.pending_raise, None, "{stop}");
+            filled.status = SessionStatus::AwaitingInput;
+            apply_body(&mut filled, 3, &stop);
+            assert_eq!(filled.status, SessionStatus::AwaitingInput, "{stop}");
+            assert!(
+                filled.pending_input.is_some(),
+                "a stop ended a prompt with no raiser: {stop}"
+            );
+            assert_eq!(filled.pending_owner, PromptOwner::Subagent, "{stop}");
+        }
+    }
+
+    /// The raiser's `SubagentStop` can land after the task notification its
+    /// end set off, which is stamped later: it still ends the prompt it raised,
+    /// while a stop older than the raise stays dropped.
+    #[test]
+    fn a_late_raiser_stop_clears_its_prompt() {
+        let delivered = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "<task-notification>\n<task-id>A</task-id>\n</task-notification>",
+        });
+        let mut record = record_with_a_prompt_raised_by("A");
+        apply_body(&mut record, 5, &delivered);
+        assert_eq!(
+            record.status,
+            SessionStatus::AwaitingInput,
+            "the delivery answers nobody"
+        );
+        apply_body(&mut record, 4, &subagent_stop(Some("A")));
+        assert_eq!(
+            record.pending_input, None,
+            "the late raiser's stop kept its prompt"
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Main);
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(
+            record.last_hook_time,
+            Some(5),
+            "a late event never moves the stamp back"
+        );
+
+        let mut older = record_with_a_prompt_raised_by("A");
+        apply_body(&mut older, 5, &delivered);
+        apply_body(&mut older, 1, &subagent_stop(Some("A")));
+        assert_eq!(older.status, SessionStatus::AwaitingInput);
+        assert!(
+            older.pending_input.is_some(),
+            "a stop older than the raise ended it"
+        );
+        assert_eq!(older.last_hook_time, Some(5));
+    }
+
+    /// Claude's Agent tool always backgrounds: main's `PostToolUse(Agent)`
+    /// fires at the launch, not when the agent finishes.
+    #[test]
+    fn an_async_agent_launch_leaves_the_subagents_prompt() {
+        let mut record = record_with_a_prompt_raised_by("A");
+        apply_body(
+            &mut record,
+            3,
+            &json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Agent",
+                "tool_input": {"description": "Make a folder", "subagent_type": "general-purpose"},
+                "tool_response": {"isAsync": true, "status": "async_launched", "agentId": "B"},
+            }),
+        );
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            record.pending_input.is_some(),
+            "the launch ended the subagent's prompt"
+        );
+        assert_eq!(record.pending_owner, PromptOwner::Subagent);
     }
 
     fn subagent_permission_request() -> Value {

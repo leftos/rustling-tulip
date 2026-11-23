@@ -514,6 +514,20 @@ pub struct PromptRaise {
     pub event_time: u128,
     /// When the raise was applied, on the tokio clock.
     pub at: tokio::time::Instant,
+    /// The subagent whose hook raised the prompt, as the
+    /// [`Self::agent_key`] of its `agent_id` (a key, so the raise stays
+    /// `Copy`); `None` for main's prompt and for a subagent's payload that
+    /// names no agent. That subagent's stop ends the prompt.
+    pub raiser: Option<u64>,
+}
+
+impl PromptRaise {
+    /// The key [`Self::raiser`] stores for the subagent `agent_id`.
+    #[must_use]
+    pub fn agent_key(agent_id: &str) -> u64 {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        BuildHasherDefault::<DefaultHasher>::default().hash_one(agent_id)
+    }
 }
 
 /// What the screen's sighting of an agent in a shell did to its record (see

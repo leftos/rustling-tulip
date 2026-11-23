@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A question or permission a subagent raised no longer leaves its session waiting on you after that subagent stops.
 - Session status stays right on Claude Code 2.1.330 with its file panel open, a long task list, or Rewind, transcript, /btw and sessions screens up.
 - A Heads up notice quoted in Claude's reply no longer keeps a session's status from updating, and a notice's "One moment…" no longer reads as idle.
 - A subagent running for over a day, or a background shell under an older Claude Code's default mode, now counts as running work.

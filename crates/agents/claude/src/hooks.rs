@@ -55,6 +55,7 @@ const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
     ("Elicitation", None),
     ("Stop", None),
     ("StopFailure", None),
+    ("SubagentStop", None),
     ("SessionEnd", None),
     ("MessageDisplay", None),
     ("PreToolUse", Some("AskUserQuestion|ExitPlanMode")),
@@ -63,6 +64,12 @@ const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
         Some("permission_prompt|elicitation_dialog|elicitation_url_dialog|idle_prompt"),
     ),
 ];
+
+/// The events [`HOOK_EVENTS`] gained after releases had already written
+/// user hooks: an install holding ours in every other event but missing
+/// these was written by an older release, and reads stale (out of date, and
+/// completed by the start refresh) rather than partial.
+const NEWER_EVENTS: &[&str] = &["SubagentStop"];
 
 /// The name the plan's settings file lands under inside the session's own
 /// directory.
@@ -562,6 +569,25 @@ fn state_of(fits: &[Fit], outside: bool) -> UserHooksState {
     }
 }
 
+/// Read a [`NEWER_EVENTS`] event missing ours as one to rebuild when any
+/// other event holds ours, so an older release's install reads stale; `fits`
+/// holds one read per table event, in table order.
+fn older_release_gaps(fits: &mut [Fit]) {
+    let newer = |event: &str| NEWER_EVENTS.contains(&event);
+    let held = HOOK_EVENTS
+        .iter()
+        .zip(fits.iter())
+        .any(|(&(event, _), fit)| !newer(event) && *fit != Fit::None);
+    if !held {
+        return;
+    }
+    for (&(event, _), fit) in HOOK_EVENTS.iter().zip(fits.iter_mut()) {
+        if newer(event) && *fit == Fit::None {
+            *fit = Fit::Rebuild;
+        }
+    }
+}
+
 /// Whether `events` holds a handler of ours in an event the table no longer
 /// names.
 fn outside_table(events: &Map<String, Value>, shim: &str) -> bool {
@@ -579,7 +605,8 @@ fn outside_table(events: &Map<String, Value>, shim: &str) -> bool {
 /// An event reads current only when it holds exactly one current handler of
 /// ours in a group with the table's matcher; a stale handler, a duplicate or
 /// a wrong matcher reads stale. `On` needs every event of the table current,
-/// `Stale` needs every event holding ours, and a handler of ours in an event
+/// `Stale` needs every event holding ours (an older release's install, ours
+/// in every event but the [`NEWER_EVENTS`], counts), and a handler of ours in an event
 /// outside the table makes the whole state `Stale`; `Off` is none of ours
 /// anywhere, and `Partial` anything else.
 pub(crate) fn user_hooks_state(
@@ -592,7 +619,7 @@ pub(crate) fn user_hooks_state(
     let root = parse_settings(text)?;
     let shim = shim.to_string_lossy();
     let events = root.get("hooks").and_then(Value::as_object);
-    let fits: Vec<Fit> = HOOK_EVENTS
+    let mut fits: Vec<Fit> = HOOK_EVENTS
         .iter()
         .map(|&(event, matcher)| {
             events
@@ -601,6 +628,7 @@ pub(crate) fn user_hooks_state(
                 .map_or(Fit::None, |groups| fit(groups, &shim, matcher))
         })
         .collect();
+    older_release_gaps(&mut fits);
     let outside = events.is_some_and(|events| outside_table(events, &shim));
     Ok(state_of(&fits, outside))
 }
@@ -724,7 +752,8 @@ mod tests {
 
     /// The `--settings` document [`build_hook_settings`] wrote for [`TRACER_EXE`],
     /// [`SESSION_ID`] and [`CONFIG_DIR`] before its events moved into one table,
-    /// with the injected-hooks marker's `env` block added since.
+    /// with the injected-hooks marker's `env` block and the `SubagentStop`
+    /// event added since.
     const HOOK_SETTINGS_BEFORE_THE_TABLE: &str = r#"{
   "env": {
     "RUSTLING_TULIP_HOOKS_INJECTED": "1"
@@ -930,6 +959,24 @@ mod tests {
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--session",
+              "0b6f4c7e-1111-4222-8333-944455556666",
+              "--config-dir",
+              "C:/Users/lefto/AppData/Roaming/leftos/rustling-tulip/config"
+            ],
+            "async": true,
+            "command": "C:/rt/binaries/rt-tracer-0123456789abcdef.exe",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -999,6 +1046,7 @@ mod tests {
                 "SessionStart",
                 "Stop",
                 "StopFailure",
+                "SubagentStop",
                 "UserPromptSubmit",
             ]
         );
@@ -1019,6 +1067,7 @@ mod tests {
             "Elicitation",
             "Stop",
             "StopFailure",
+            "SubagentStop",
             "SessionEnd",
             "MessageDisplay",
         ] {
@@ -1027,6 +1076,11 @@ mod tests {
                 "{event} runs for every input and names no matcher"
             );
         }
+        assert_eq!(
+            groups(&document, "SubagentStop"),
+            groups(&document, "Stop"),
+            "a subagent's stop runs the tracer as main's stop does"
+        );
     }
 
     #[test]

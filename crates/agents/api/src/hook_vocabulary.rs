@@ -129,6 +129,8 @@ pub struct HookDetails {
     /// non-empty `agent_id`. (`agent_type` alone also marks a main agent run
     /// with `--agent`, so it is not the marker.)
     pub subagent: bool,
+    /// The payload's non-empty `agent_id`: the subagent that fired the event.
+    pub agent_id: Option<String>,
     /// The work the payload reports running beside an idle turn: its
     /// `background_tasks` elements with `"status": "running"`, and its
     /// `session_crons` elements with `"recurring": false` (pending one-shot
@@ -161,6 +163,7 @@ pub fn details(body: &Value) -> HookDetails {
             .or_else(|| text("message")),
         reason: text("reason"),
         subagent: text("agent_id").is_some_and(|id| !id.is_empty()),
+        agent_id: text("agent_id").filter(|id| !id.is_empty()),
         background_work: background_work(body),
         reports_background: reports_background_work(body),
     }
@@ -379,7 +382,11 @@ fn report(signal: Signal, details: &HookDetails, delivered: bool) -> HookReport 
         permission_mismatch: None,
         agent_ended: event == "SessionEnd" && details.reason.as_deref() != Some("clear"),
         agent_started: event == "SessionStart",
-        subagent: details.subagent,
+        // A `SubagentStop` is a subagent's event even when its payload names
+        // no agent.
+        subagent: details.subagent || event == "SubagentStop",
+        agent_id: details.agent_id.clone(),
+        subagent_stopped: event == "SubagentStop",
         background,
         stop_work,
     }
@@ -399,7 +406,10 @@ fn map_signal(body: &Value) -> Option<Signal> {
             status: session_start_status(body),
             pending: PendingUpdate::Clear,
         }),
-        "SessionEnd" => Some(signal(None, PendingUpdate::Clear)),
+        // A subagent's end says nothing about main's status, and as a
+        // subagent's event it spares a waiting prompt unless that prompt is
+        // the one it raised (the daemon's rule).
+        "SessionEnd" | "SubagentStop" => Some(signal(None, PendingUpdate::Clear)),
         "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" => {
             Some(signal(Some(SessionStatus::Working), PendingUpdate::Clear))
         }
@@ -896,6 +906,70 @@ mod tests {
         );
     }
 
+    /// The `SubagentStop` Claude Code 2.1.330 fired when an async subagent
+    /// ended, as captured: it names the agent that stopped.
+    #[test]
+    fn a_subagent_stop_reports_the_agent_that_stopped() {
+        let body = json!({
+            "session_id": "ad08a9e8-43b6-4d9a-a7fe-a8352a76fe8e",
+            "transcript_path": concat!(
+                "X:\\dev\\rustling-tulip.wt\\rt-549-cap\\.tmp\\rt549\\home330\\projects\\",
+                "X--dev-rustling-tulip-wt-rt-549-cap--tmp-rt549-proj330\\",
+                "ad08a9e8-43b6-4d9a-a7fe-a8352a76fe8e.jsonl",
+            ),
+            "cwd": "X:\\dev\\rustling-tulip.wt\\rt-549-cap\\.tmp\\rt549\\proj330",
+            "prompt_id": "14cc5ae3-e69d-415a-abee-cf6a740609e4",
+            "permission_mode": "default",
+            "agent_id": "a8d62a562343558c3",
+            "agent_type": "general-purpose",
+            "effort": {"level": "medium"},
+            "hook_event_name": "SubagentStop",
+            "stop_hook_active": false,
+            "agent_transcript_path": concat!(
+                "X:\\dev\\rustling-tulip.wt\\rt-549-cap\\.tmp\\rt549\\home330\\projects\\",
+                "X--dev-rustling-tulip-wt-rt-549-cap--tmp-rt549-proj330\\",
+                "ad08a9e8-43b6-4d9a-a7fe-a8352a76fe8e\\subagents\\agent-a8d62a562343558c3.jsonl",
+            ),
+            "last_assistant_message": "sub done",
+            "background_tasks": [{
+                "id": "a8d62a562343558c3",
+                "type": "subagent",
+                "status": "running",
+                "description": "Make a folder",
+                "agent_type": "general-purpose",
+            }],
+            "session_crons": [],
+        });
+        let stop = signal(&body);
+        assert!(
+            stop.subagent_stopped,
+            "a SubagentStop reports a subagent's end"
+        );
+        assert_eq!(stop.agent_id.as_deref(), Some("a8d62a562343558c3"));
+        assert!(stop.subagent, "a SubagentStop is a subagent's event");
+        assert_eq!(
+            stop.status, None,
+            "a subagent's end says nothing of main's status"
+        );
+        assert_eq!(stop.background, None, "a subagent's end reports no work");
+        assert_eq!(
+            stop.last_message, None,
+            "a subagent's message is not main's"
+        );
+
+        let unnamed = signal(&json!({"hook_event_name": "SubagentStop"}));
+        assert!(unnamed.subagent_stopped);
+        assert!(
+            unnamed.subagent,
+            "an unnamed SubagentStop is still a subagent's"
+        );
+        assert_eq!(unnamed.agent_id, None);
+
+        let main = signal(&json!({"hook_event_name": "Stop"}));
+        assert!(!main.subagent_stopped, "main's Stop ends no subagent");
+        assert_eq!(main.agent_id, None);
+    }
+
     #[test]
     fn a_prompt_with_a_source_is_delivered() {
         let delivered = |body: Value| signal(&body).delivered;
@@ -1373,6 +1447,7 @@ mod tests {
                 failure_detail: Some("overloaded".to_owned()),
                 reason: Some("overloaded".to_owned()),
                 subagent: false,
+                agent_id: None,
                 background_work: StopWork {
                     tasks: vec![StopTask {
                         id: "b1".to_owned(),
@@ -1400,6 +1475,7 @@ mod tests {
                 failure_detail: None,
                 reason: None,
                 subagent: false,
+                agent_id: None,
                 background_work: StopWork::default(),
                 reports_background: false,
             }
