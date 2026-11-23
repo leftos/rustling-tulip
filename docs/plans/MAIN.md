@@ -4,7 +4,7 @@
 
 ## Do first
 
-- [/] RT-2180 Fetch a file from a link tap in the phone's chat cards and terminal on an SSH host · release vNext — High · Phone app
+- [ ] RT-2194 Find why a tapped file does not fetch on the owner's iPhone over SSH — High · Phone app
 
 ## Session status and screen reading
 
@@ -15,14 +15,14 @@
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 - [ ] RT-289 Classify a plain shell by its command marks, child processes and prompt, not by output volume
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit
-- [ ] RT-548 Read running-subagent rows past an hour in the background rule · release vNext
-- [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay · release vNext
 - [ ] RT-755 Log every status writer and every toast decision
 - [ ] RT-767 Work through the held turn end's leftover cases
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
-- [ ] RT-1271 Close the remaining gaps in turn-end and pending-prompt reading · release vNext
+  - [ ] RT-2188 Keep a Heads up key row that wraps to one pair on its first row (RT-1270 A2) · release vNext
+  - [ ] RT-2189 Capture a clipped Heads up offer and explanation, and what ctrl+x does (RT-1270 B) · release vNext
+  - [ ] RT-2190 Answer a clipped Heads up explanation from the chat (RT-1270 C) · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 - [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
@@ -187,7 +187,7 @@
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
   - [ ] RT-2164 Answer Rewind from the chat: pick a point, then restore or summarize · release vNext
-  - [ ] RT-2165 Answer an AskUserQuestion with previews from the chat · release vNext
+  - [/] RT-2165 Answer an AskUserQuestion with previews from the chat · release vNext
   - [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
@@ -221,6 +221,7 @@
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
 - [ ] RT-2175 Settle a pasted image's pending send when its upload path is quoted
 - [ ] RT-2176 Leave no Answered elsewhere line when an overlay card closes in the terminal
+- [ ] RT-2199 Read a preview question's wrapped option label whole
 
 ## Settings and themes
 
@@ -494,7 +495,6 @@
 - [ ] RT-1648 Harden the push relay: re-mint the cached APNs token after a key change, refuse an oversized body before reading it
 - [ ] RT-1675 Tell the platform about a text input's own edits and selection changes
 - [ ] RT-1681 Polish the phone's add-host form and Pair dialog: Return, keys, scrim, Cancel
-- [ ] RT-1709 Find why the notification extension does not launch for a simulator push · release vNext
 - [ ] RT-1735 Make the phone composer's keyboard Send key send, or label it Return
 - [ ] RT-1737 Polish how the phone's content follows the keyboard
   - [ ] RT-1738 Keep the phone's prompt sheet steady when a drag hides the keyboard
@@ -806,6 +806,16 @@
 - [ ] RT-2167 Report Claude's 2.1.330 sessions list as an overlay in the chat reader
 - [ ] RT-2168 Read session status while Claude Code's file panel is open
 - [ ] RT-2169 Keep quoted heads-up text from reading as a heads-up overlay
+- [ ] RT-2186 Stop the phone holding fetch toasts it never draws
+- [ ] RT-2191 Say why a tapped folder fails on a host too old to send folders, on the phone
+- [ ] RT-2192 Open a tapped .html page on the phone
+- [ ] RT-2193 Say why a tapped path failed when the connection closes before its stat answers, on the phone
+- [ ] RT-2196 Spare Claude Code older than 2.1.152 the Settings Warning about MessageDisplay
+- [ ] RT-2198 Recheck instead of showing push off when a grace re-register cannot read its keys
+
+## No project
+
+- [ ] RT-2197 Route the iOS check on builder@mac-mini through the gate and preinstall the pinned toolchain
 
 ## Design files
 
