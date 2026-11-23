@@ -135,10 +135,10 @@ struct Toggle {
 pub(super) struct KeyEditor {
     /// The editor sub-page the field and the draft belong to.
     sub: SubPage,
-    label: Entity<TextInput>,
+    pub(super) label: Entity<TextInput>,
     draft: KeyDraft,
     /// The picker's one-character field, while the picker shows.
-    picker: Option<Entity<TextInput>>,
+    pub(super) picker: Option<Entity<TextInput>>,
     error: Option<String>,
     picker_error: Option<String>,
     _keys: Subscription,

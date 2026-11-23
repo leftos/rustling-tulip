@@ -39,6 +39,32 @@ fn open_hosts(h: &mut Harness<'_>) {
     h.click_on("phone-settings-row-hosts");
 }
 
+/// Opens Settings' Hosts page and its add form on a phone with no system
+/// paste control (iOS 15, or any other platform), so each field's Paste
+/// button's own tap pastes.
+fn open_host_form(h: &mut Harness<'_>) {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_control_pastes(false));
+    });
+    open_hosts(h);
+    h.click_on("phone-host-add-another");
+}
+
+/// The text of the phone field tagged `selector`, while it is drawn.
+fn field_text(h: &mut Harness<'_>, selector: &str) -> Option<String> {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.read(cx).field_text(selector, cx)
+    })
+}
+
 /// Opens Settings, then its Appearance page, where the theme list and the
 /// text-size row draw.
 fn open_appearance(h: &mut Harness<'_>) {
@@ -503,6 +529,103 @@ fn the_hosts_page_lists_the_saved_hosts_and_adds_one(cx: &mut TestAppContext) {
             .is_some_and(|hosts| hosts.iter().any(|host| host["name"] == TYPED)),
         "Add saves it: {saved}"
     );
+}
+
+#[gpui::test]
+fn the_host_name_field_pastes_the_clipboard(cx: &mut TestAppContext) {
+    const COPIED: &str = "box.tail1234.ts.net";
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_host_form(&mut h);
+    h.set_clipboard(COPIED);
+
+    h.click_on("phone-host-name-paste");
+
+    assert_eq!(
+        field_text(&mut h, "phone-host-name").as_deref(),
+        Some(COPIED)
+    );
+}
+
+#[gpui::test]
+fn a_pasted_hostname_keeps_one_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_host_form(&mut h);
+    h.set_clipboard("box.tail1234.ts.net\n");
+
+    h.click_on("phone-host-name-paste");
+
+    // The single-line rule turns the line break into a space.
+    assert_eq!(
+        field_text(&mut h, "phone-host-name").as_deref(),
+        Some("box.tail1234.ts.net ")
+    );
+}
+
+#[gpui::test]
+fn a_pasted_hostname_with_a_newline_adds(cx: &mut TestAppContext) {
+    const COPIED: &str = "box.tail1234.ts.net";
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_host_form(&mut h);
+    h.set_clipboard("box.tail1234.ts.net\n");
+
+    h.click_on("phone-host-name-paste");
+    h.click_on("phone-host-add");
+
+    assert!(!drawn(&mut h, "phone-host-error"), "no refusal shows");
+    let saved = saved_ui(&dir)["saved_hosts"].clone();
+    assert!(
+        saved
+            .as_array()
+            .is_some_and(|hosts| hosts.iter().any(|host| host["name"] == COPIED)),
+        "Add saves the name without the line break: {saved}"
+    );
+}
+
+#[gpui::test]
+fn a_pasted_ssh_host_with_a_newline_adds(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_host_form(&mut h);
+    h.click_on("phone-host-mode-ssh");
+    h.set_clipboard("me@box\n");
+
+    h.click_on("phone-host-ssh-paste");
+    h.click_on("phone-host-add");
+
+    assert!(!drawn(&mut h, "phone-host-error"), "no refusal shows");
+    let saved = saved_ui(&dir)["saved_hosts"].clone();
+    assert!(
+        saved.as_array().is_some_and(|hosts| hosts
+            .iter()
+            .any(|host| host["kind"] == "ssh" && host["name"] == "me@box")),
+        "Add saves the SSH host without the line break: {saved}"
+    );
+}
+
+#[gpui::test]
+fn every_host_field_draws_a_paste_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    open_host_form(&mut h);
+
+    for button in ["phone-host-name-paste", "phone-host-port-paste"] {
+        assert!(drawn(&mut h, button), "the tailnet form draws {button}");
+        assert!(
+            h.bounds(button).size.height >= touch_target(),
+            "{button} is a touch target tall"
+        );
+    }
+    h.click_on("phone-host-mode-ssh");
+    for button in ["phone-host-ssh-paste", "phone-host-command-paste"] {
+        assert!(drawn(&mut h, button), "the SSH form draws {button}");
+        assert!(
+            h.bounds(button).size.height >= touch_target(),
+            "{button} is a touch target tall"
+        );
+    }
 }
 
 #[gpui::test]

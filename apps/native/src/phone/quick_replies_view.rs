@@ -87,7 +87,7 @@ fn reply_count(n: usize) -> String {
 pub(super) struct TextEditor {
     /// The editor sub-page this field belongs to.
     sub: SubPage,
-    input: Entity<TextInput>,
+    pub(super) input: Entity<TextInput>,
     error: Option<String>,
     _keys: Subscription,
 }

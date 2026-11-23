@@ -13,7 +13,9 @@ use gpui::{
 
 use super::PhoneRoot;
 use super::home_view::TOUCH_TARGET;
+use super::pasteboard::PasteSpot;
 use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
+use super::session_view::record_paste_bounds;
 use super::settings::Page;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
@@ -159,13 +161,19 @@ impl PhoneHosts {
     }
 
     /// The target the form's fields name, or why the mode refuses them.
+    /// The tailnet name and the SSH host are read without the whitespace at
+    /// either end (a pasted line keeps its line break as a space); the
+    /// remote command is taken as typed.
     fn typed(&self, cx: &App) -> Result<Target, String> {
         match self.mode {
-            HostMode::Tailnet => typed_target(self.name.read(cx).text(), self.port.read(cx).text())
-                .map_err(|refusal| refusal.to_string()),
-            HostMode::Ssh => {
-                typed_phone_ssh_target(self.ssh.read(cx).text(), self.command.read(cx).text())
+            HostMode::Tailnet => {
+                typed_target(self.name.read(cx).text().trim(), self.port.read(cx).text())
+                    .map_err(|refusal| refusal.to_string())
             }
+            HostMode::Ssh => typed_phone_ssh_target(
+                self.ssh.read(cx).text().trim(),
+                self.command.read(cx).text(),
+            ),
         }
     }
 
@@ -453,8 +461,12 @@ pub(super) fn phone_button(
     .min_w(px(TOUCH_TARGET))
 }
 
-/// A field in its outlined box, tagged `selector`; a press anywhere on the
-/// box gives the field the keyboard.
+/// The label of the Paste button inside every phone field's box.
+pub(crate) const FIELD_PASTE_LABEL: &str = "Paste";
+
+/// A field in its outlined box, tagged `selector`, with its Paste button
+/// on the right ([`field_paste`]); a press anywhere on the box gives the
+/// field the keyboard.
 pub(super) fn field_box(
     selector: &'static str,
     input: &Entity<TextInput>,
@@ -465,6 +477,8 @@ pub(super) fn field_box(
     div()
         .driver_id(|| selector.to_owned())
         .flex()
+        .items_center()
+        .gap(px(8.0))
         .w_full()
         .px(px(8.0))
         .py(px(8.0))
@@ -474,10 +488,69 @@ pub(super) fn field_box(
         .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
             focus.focus(window, cx);
         })
-        .child(input.clone())
+        .child(div().flex_1().min_w_0().child(input.clone()))
+        .child(field_paste(selector, input, cx))
+}
+
+/// The Paste button of the field tagged `selector`, tagged
+/// `{selector}-paste`: its tap gives the field the keyboard and pastes the
+/// clipboard's text at its caret, as the field's own paste does. On iOS 16
+/// and later the system's paste control over it takes the tap instead
+/// ([`PasteSpot::Field`]), so the GPUI tap only focuses.
+fn field_paste(
+    selector: &'static str,
+    input: &Entity<TextInput>,
+    cx: &Context<PhoneRoot>,
+) -> Stateful<Div> {
+    let input = input.clone();
+    let drawn = phone_button(&format!("{selector}-paste"), ButtonKind::Outlined, cx)
+        .flex_none()
+        .min_h(px(TOUCH_TARGET))
+        .justify_center()
+        .child(FIELD_PASTE_LABEL)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            if !this.control_pastes {
+                input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+            }
+        }));
+    record_paste_bounds(drawn, PasteSpot::Field(selector))
 }
 
 impl PhoneRoot {
+    /// The input of the phone field tagged `selector` while its page draws
+    /// it: the hosts form's fields of the form's mode, the key editor's
+    /// label and its picker's character while the editor is open, the
+    /// quick replies editor's field while it is open; `None` for any other.
+    pub(super) fn field_input(&self, selector: &str) -> Option<Entity<TextInput>> {
+        let hosts = &self.hosts;
+        match (selector, hosts.mode()) {
+            ("phone-host-name", HostMode::Tailnet) => Some(hosts.name.clone()),
+            ("phone-host-port", HostMode::Tailnet) => Some(hosts.port.clone()),
+            ("phone-host-ssh", HostMode::Ssh) => Some(hosts.ssh.clone()),
+            ("phone-host-command", HostMode::Ssh) => Some(hosts.command.clone()),
+            ("phone-key-editor-label", _) => {
+                self.key_editor.as_ref().map(|editor| editor.label.clone())
+            }
+            ("phone-key-picker-char", _) => self
+                .key_editor
+                .as_ref()
+                .and_then(|editor| editor.picker.clone()),
+            ("phone-edit-field", _) => self
+                .reply_editor
+                .as_ref()
+                .map(|editor| editor.input.clone()),
+            _ => None,
+        }
+    }
+
+    /// The text of the phone field tagged `selector`, while its page draws
+    /// it ([`Self::field_input`]).
+    pub fn field_text(&self, selector: &str, cx: &App) -> Option<String> {
+        self.field_input(selector)
+            .map(|input| input.read(cx).text().to_owned())
+    }
+
     /// The hosts screen: under the header with its `Settings` button, the
     /// hosts' content, which Settings' Hosts page draws too, scrolling so
     /// Add stays above the keyboard the SSH form raises.

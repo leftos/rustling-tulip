@@ -7,8 +7,9 @@
 //! Each Paste spot ([`PasteSpot`]) has a control of its own: the composer's
 //! Paste button, the Keys dock's Paste key and the composer's edit bar's
 //! Paste item (on screen together, all pasting into the composer; the
-//! bar's closes it) and the terminal key bar's Paste key (text only, into
-//! the terminal). The edit bar and the selection's handles draw over the
+//! bar's closes it), the terminal key bar's Paste key (text only, into
+//! the terminal) and each phone field's Paste button (text only, into that
+//! field, on whatever page draws it: [`PasteSpot::Field`]). The edit bar and the selection's handles draw over the
 //! window, so a control under them hides while they are drawn: a native
 //! control sits above every GPUI view and would take their taps.
 //!
@@ -30,7 +31,7 @@ use std::cell::{OnceCell, RefCell};
 use block2::RcBlock;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
-use gpui::{App, Bounds, Context, ImageFormat, Pixels, WeakEntity};
+use gpui::{App, Bounds, Context, Focusable as _, ImageFormat, Pixels, WeakEntity};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -74,16 +75,22 @@ enum Pasted {
     Image { session: String, image: PastedImage },
     /// Text, to paste into the session's open terminal.
     Terminal { session: String, text: String },
+    /// Text, to go in at the caret of the phone field tagged `selector`.
+    Field {
+        selector: &'static str,
+        text: String,
+    },
 }
 
 impl Pasted {
-    /// The session whose page the paste was made on.
-    fn session(&self) -> &str {
+    /// The session whose page the paste was made on; none for a field's.
+    fn session(&self) -> Option<&str> {
         match self {
             Self::BarTapped { session }
             | Self::Text { session, .. }
             | Self::Image { session, .. }
-            | Self::Terminal { session, .. } => session,
+            | Self::Terminal { session, .. } => Some(session),
+            Self::Field { .. } => None,
         }
     }
 }
@@ -227,7 +234,7 @@ pub(super) fn record_touch_cover(cover: Bounds<Pixels>) {
 
 /// The end of `PhoneRoot`'s frame: each Paste drawn in it gets its spot's
 /// control, for the session that spot pastes into; the control of a spot
-/// not drawn, with no session or under what touch editing drew over the
+/// not drawn, with no session (a field's needs none) or under what touch editing drew over the
 /// window ([`covered_spots`]), hides, and every control hides when a sheet
 /// covered the page.
 pub(super) fn frame_end(frame: &PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mut App) {
@@ -242,8 +249,10 @@ pub(super) fn frame_end(frame: &PasteFrame, root: WeakEntity<PhoneRoot>, cx: &mu
         drawn
             .into_iter()
             .filter(|(spot, _)| {
-                spot.session(frame.session.clone(), frame.terminal.clone())
-                    .is_some()
+                spot.pastes_without_session()
+                    || spot
+                        .session(frame.session.clone(), frame.terminal.clone())
+                        .is_some()
             })
             .collect()
     };
@@ -441,7 +450,15 @@ fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
         tracing::info!("phone: a control paste came from no known control");
         return;
     };
-    let (Some(session), Some(sender)) = (session, sender) else {
+    let Some(sender) = sender else {
+        tracing::info!("phone: a control paste had nothing to paste into");
+        return;
+    };
+    if let PasteSpot::Field(selector) = spot {
+        pasted_into_field(selector, providers, sender);
+        return;
+    }
+    let Some(session) = session else {
         tracing::info!("phone: a control paste had nothing to paste into");
         return;
     };
@@ -500,6 +517,41 @@ fn pasted(target: &PasteTarget, providers: &NSArray<NSItemProvider>) {
     });
 }
 
+/// A control's tap at the Paste of the field tagged `selector`: the first
+/// item's text, when it holds any, is sent to the GPUI side for that field;
+/// a field takes no image.
+fn pasted_into_field(
+    selector: &'static str,
+    providers: &NSArray<NSItemProvider>,
+    sender: UnboundedSender<Pasted>,
+) {
+    let Some(provider) = providers.firstObject() else {
+        tracing::info!("phone: a control paste had no item");
+        return;
+    };
+    let offered: Vec<String> = provider
+        .registeredTypeIdentifiers()
+        .iter()
+        .map(|kind| kind.to_string())
+        .collect();
+    let types: Vec<&str> = offered.iter().map(String::as_str).collect();
+    let conforms =
+        |kind: &str| provider.hasItemConformingToTypeIdentifier(&NSString::from_str(kind));
+    if paste_kind(&types, conforms, false) != PasteKind::Text {
+        tracing::info!(types = ?types, selector, "phone: a field's control paste held no text");
+        return;
+    }
+    tracing::info!(types = ?types, selector, "phone: control paste into a field");
+    let load_as = TEXT_TYPES
+        .into_iter()
+        .find(|kind| types.contains(kind))
+        .unwrap_or(TEXT_TYPES[0]);
+    load(&provider, load_as, move |bytes| {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        send(&sender, Pasted::Field { selector, text });
+    });
+}
+
 /// Loads `provider`'s data as `kind` and hands the bytes to `done`, on the
 /// queue the provider completes on; a failed load is logged.
 fn load(provider: &NSItemProvider, kind: &str, done: impl Fn(Vec<u8>) + 'static) {
@@ -553,20 +605,52 @@ fn apply_text(
     }
 }
 
+/// Whether the session page `pasted` was made on is no longer the one
+/// shown (or the open terminal's); a field's paste has no page, its field
+/// is looked up when it lands ([`apply_field`]).
+fn page_left(this: &PhoneRoot, pasted: &Pasted) -> bool {
+    let shown = match pasted {
+        Pasted::Field { .. } => return false,
+        Pasted::Terminal { .. } => this.terminal_session(),
+        _ => this.shown.as_ref().map(|(_, session)| session.clone()),
+    };
+    shown.as_deref() != pasted.session()
+}
+
+/// Pastes a control's `text` into the field tagged `selector`, as the
+/// edit bar's Paste pastes, after giving it the keyboard; dropped when that
+/// field is no longer drawn.
+fn apply_field(this: &PhoneRoot, selector: &str, text: &str, cx: &mut Context<PhoneRoot>) {
+    let Some(input) = this.field_input(selector) else {
+        tracing::info!(
+            selector,
+            "phone: a paste for a field no longer drawn was dropped"
+        );
+        return;
+    };
+    let focus = input.read(cx).focus_handle(cx);
+    let window = cx.active_window().or_else(|| cx.windows().first().copied());
+    if let Some(window) = window
+        && window
+            .update(cx, |_, window, cx| focus.focus(window, cx))
+            .is_err()
+    {
+        tracing::debug!("phone: the pasted field's window was gone");
+    }
+    input.update(cx, |input, cx| input.paste_from_control(text, cx));
+}
+
 /// Applies a control paste on the GPUI side, while its session's page (or
 /// open terminal) is still the one shown: text goes in at the composer's
 /// caret or into the terminal as its Paste key pastes, an image uploads as
 /// the clipboard's image paste does, to a host that takes uploads.
 fn apply(this: &mut PhoneRoot, pasted: Pasted, cx: &mut Context<PhoneRoot>) {
-    let shown = match &pasted {
-        Pasted::Terminal { .. } => this.terminal_session(),
-        _ => this.shown.as_ref().map(|(_, session)| session.clone()),
-    };
-    if shown.as_deref() != Some(pasted.session()) {
+    if page_left(this, &pasted) {
         tracing::info!("phone: a paste for a page no longer shown was dropped");
         return;
     }
     match pasted {
+        Pasted::Field { selector, text } => apply_field(this, selector, &text, cx),
         Pasted::Terminal { session, text } => {
             if text.is_empty() {
                 tracing::debug!("phone: a control paste into the terminal had no text");

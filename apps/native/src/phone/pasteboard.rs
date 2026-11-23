@@ -215,6 +215,11 @@ pub(crate) enum PasteSpot {
     EditBar,
     /// The terminal key bar's Paste key: text pasted into the terminal.
     Terminal,
+    /// The Paste button inside the box of the phone field tagged with this
+    /// selector (the hosts form's, the key editor's, the quick replies
+    /// editor's): text pasted at that field's caret, on whatever page draws
+    /// it, so it pastes with no session.
+    Field(&'static str),
 }
 
 #[cfg_attr(
@@ -224,22 +229,30 @@ pub(crate) enum PasteSpot {
 impl PasteSpot {
     /// The type identifiers the control offers to paste here: text and
     /// images at the composer, the dock and the edit bar, text only at the
-    /// terminal.
+    /// terminal and a field.
     pub(crate) const fn accepts(self) -> &'static [&'static str] {
         match self {
             Self::Composer | Self::Dock | Self::EditBar => &COMPOSER_ACCEPTS,
-            Self::Terminal => &TERMINAL_ACCEPTS,
+            Self::Terminal | Self::Field(_) => &TERMINAL_ACCEPTS,
         }
     }
 
     /// The session a paste here goes to: the shown session's composer (from
     /// its Paste, the dock's or its edit bar's), or the session the open
-    /// terminal shows.
+    /// terminal shows; none for a field, which pastes with no session.
     pub(crate) fn session(self, shown: Option<String>, terminal: Option<String>) -> Option<String> {
         match self {
             Self::Composer | Self::Dock | Self::EditBar => shown,
             Self::Terminal => terminal,
+            Self::Field(_) => None,
         }
+    }
+
+    /// Whether the control goes over this spot with no session to paste
+    /// into: only a field's Paste, whose field is looked up when its paste
+    /// arrives.
+    pub(crate) const fn pastes_without_session(self) -> bool {
+        matches!(self, Self::Field(_))
     }
 
     /// Whether an image pastes here, the host taking uploads when
@@ -250,12 +263,13 @@ impl PasteSpot {
 
     /// Whether the control goes over this spot drawn at `bounds` inside the
     /// visible `clip`: the composer's button, the dock's key and the edit
-    /// bar's item always, the key bar's key only while
-    /// [`spot_fully_visible`] (its bar scrolls sideways).
+    /// bar's item always, the key bar's key and a field's button only while
+    /// [`spot_fully_visible`] (the bar scrolls sideways, the field's page up
+    /// and down).
     pub(crate) fn shown_in(self, bounds: Bounds<Pixels>, clip: Bounds<Pixels>) -> bool {
         match self {
             Self::Composer | Self::Dock | Self::EditBar => true,
-            Self::Terminal => spot_fully_visible(bounds, clip),
+            Self::Terminal | Self::Field(_) => spot_fully_visible(bounds, clip),
         }
     }
 
@@ -600,6 +614,17 @@ mod tests {
                 "public.image"
             ]
         );
+    }
+
+    #[test]
+    fn a_field_spot_takes_text_only() {
+        assert_eq!(
+            PasteSpot::Field("x").accepts(),
+            ["public.utf8-plain-text", "public.plain-text"]
+        );
+        assert!(!PasteSpot::Field("x").takes_images(true));
+        assert!(PasteSpot::Field("x").pastes_without_session());
+        assert!(!PasteSpot::Composer.pastes_without_session());
     }
 
     #[test]

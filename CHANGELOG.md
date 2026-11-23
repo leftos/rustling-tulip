@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, an image in the viewer zooms with a pinch, pans with one finger while zoomed, and a double tap switches between fit and twice the size.
 - On the phone, Chat's Attach button takes a photo with the camera, or sends several photos or a file into the message.
 - On the iPad and the phone on its side, Hide list in a session's header gives Chat or the terminal the full width.
+- On the phone, every text field, such as Add a host's name, has a Paste button.
 
 ### Fixed
 
