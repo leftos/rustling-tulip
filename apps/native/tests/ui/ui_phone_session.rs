@@ -3832,6 +3832,26 @@ fn a_tap_on_a_handle_reaches_the_card_under_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_tap_on_a_handle_leaves_hover_hidden(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded(cx, &dir, vec![tailing_tool("t1")]);
+    // Its one-liner is "cargo build > build.log": the "log".
+    select(&mut h, "a", pos("t1", 0, 21), pos("t1", 0, 24));
+    let (start, _) = handle_aims(&mut h);
+    // A finger's jitter inside the tap slop leaves it a tap.
+    let jittered = point(start.x, start.y + px(2.0));
+
+    h.touch(TouchPhase::Started, start);
+    h.touch(TouchPhase::Moved, jittered);
+    h.touch(TouchPhase::Ended, jittered);
+
+    assert!(
+        h.cx.update(|window, _| window.last_input_was_touch()),
+        "the replayed tap keeps the touch modality, so hover stays hidden"
+    );
+}
+
+#[gpui::test]
 fn a_tap_on_a_handle_that_jitters_keeps_the_selection(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded(cx, &dir, vec![answer_with("a1", "alpha bravo charlie")]);

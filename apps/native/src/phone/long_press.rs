@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, DispatchPhase, GestureTuning, Hitbox, HitboxBehavior, IntoElement, LongPressEvent,
-    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, PlatformInput, Point,
-    Styled as _, TouchDragEvent, TouchPhase, Window, canvas, px,
+    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Styled as _,
+    TouchDragEvent, TouchPhase, Window, canvas, px,
 };
 
 /// Whether a long press's `phase` event, seen in `dispatch`, is one this
@@ -210,6 +210,7 @@ impl TouchDrag {
 /// Replays a tap at window point `at` once the current dispatch is over:
 /// one left-button press and release, as gpui makes of a tap, through the
 /// window's own event path, so what lies under the point takes it.
+/// It leaves the input modality as touch, so hover stays hidden after the tap.
 fn replay_tap(at: Point<Pixels>, window: &Window, cx: &mut App) {
     window.defer(cx, move |window, cx| {
         let down = MouseDownEvent {
@@ -225,8 +226,7 @@ fn replay_tap(at: Point<Pixels>, window: &Window, cx: &mut App) {
             modifiers: Modifiers::default(),
             click_count: 1,
         };
-        window.dispatch_event(PlatformInput::MouseDown(down), cx);
-        window.dispatch_event(PlatformInput::MouseUp(up), cx);
+        window.dispatch_tap(down, up, cx);
     });
 }
 
