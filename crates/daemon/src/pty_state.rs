@@ -842,7 +842,9 @@ impl ScreenWatch {
     /// hook raised whose dialog no reading saw (answered inside a hold or the
     /// debounce) ends on the first settled reading in any subagent's view;
     /// once a dialog was read in any view, only the same-view edge ends it.
-    /// A half-drawn frame counts for nothing, and a dialog read in another
+    /// A half-drawn frame counts for nothing, a dialog on it included, so it
+    /// neither records the dialog's view nor lifts the draw guard, in a
+    /// subagent's view as in main's; and a dialog read in another
     /// subagent's view keeps its prompt: it may still be up, out of sight. An
     /// answered subagent dialog never ends a prompt main's hook raised. Only
     /// the rules start the edge, since the plugin's view also reads an
@@ -865,8 +867,10 @@ impl ScreenWatch {
         self.key_dialog_memory(read.raise);
         self.forget_spent_prompt(read);
         if reads_dialog(reading) {
-            self.subagent_dialog = in_view.map(str::to_owned);
-            self.prompt_dialog_read |= quiet;
+            if quiet {
+                self.subagent_dialog = in_view.map(str::to_owned);
+                self.prompt_dialog_read = true;
+            }
             return;
         }
         let Some(seen) = self.subagent_edge(in_view, quiet) else {
@@ -1516,7 +1520,8 @@ impl ScreenWatch {
     /// frame that asks for it, logging a turn end's landing as `how`; answers
     /// whether it wrote. A write that lands is this watcher's own, so its
     /// broadcast starts no hold; the flag written beside `Idle` is the screen's
-    /// own only when no held turn end also reported background work.
+    /// own only when no held turn end, nor a spared `Stop` beside the wait it
+    /// leaves, also reported background work.
     fn publish_as(
         &mut self,
         from: StatusRead,
@@ -1557,6 +1562,7 @@ impl ScreenWatch {
             });
             self.screen_set_background = next == SessionStatus::Idle
                 && shown
+                && !spared_background(from)
                 && !from.held.is_some_and(|held| held.background);
             if from.held.is_some() && next == SessionStatus::Idle {
                 info!(session_id = %self.session_id, how, "turn end landed");
@@ -1695,6 +1701,8 @@ struct ScreenWrite {
 /// asks for it and consumes a held turn end in the same update: either's flag
 /// lands beside the status, since a broadcast of `Idle` without it would arm
 /// a client's Finished hold, and the alert follows that update's broadcast.
+/// Leaving `AwaitingInput`, it also keeps the flag a spared main `Stop` wrote
+/// beside the wait ([`spared_background`]).
 fn apply_screen_status(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
@@ -1720,7 +1728,8 @@ fn apply_screen_status(
             rec.turn_unconfirmed = promoted_unconfirmed(before);
         }
         if next == SessionStatus::Idle {
-            rec.background = shown || held.as_ref().is_some_and(|held| held.background);
+            let spared = before.0 == SessionStatus::AwaitingInput && before.1;
+            rec.background = shown || spared || held.as_ref().is_some_and(|held| held.background);
         }
         Some(
             held.and_then(|held| held.alert)
@@ -2466,14 +2475,22 @@ fn moves_status_or_background(before: Option<StatusRead>, seen: Option<StatusRea
 
 /// The background flag a screen write of `next` over `from` leaves on the
 /// record, with `shown` the frame's background reading
-/// ([`apply_screen_status`]): an `Idle` landing writes the reading or the
-/// held turn end's flag, any other status change clears it.
+/// ([`apply_screen_status`]): an `Idle` landing writes the reading, the
+/// held turn end's flag or a spared `Stop`'s ([`spared_background`]), any
+/// other status change clears it.
 fn written_background(from: StatusRead, next: SessionStatus, shown: bool) -> bool {
     if next == SessionStatus::Idle {
-        shown || from.held.is_some_and(|held| held.background)
+        shown || spared_background(from) || from.held.is_some_and(|held| held.background)
     } else {
         from.background && from.status == next
     }
+}
+
+/// Whether `from` carries the flag a main `Stop` that spared a wait wrote
+/// beside `AwaitingInput`: the screen never sets it there, so it is the
+/// hook's, and the `Idle` that ends the wait keeps it.
+fn spared_background(from: StatusRead) -> bool {
+    from.status == SessionStatus::AwaitingInput && from.background
 }
 
 /// The hook raise of a pending prompt a [`StatusRead`] saw.
@@ -2626,8 +2643,8 @@ fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state
 
 /// Apply `next` to `record` when it is a real change.
 ///
-/// Sets the status, clears the background flag (true only beside the `Idle`
-/// a `Stop` or a held turn end writes after this) and records the
+/// Sets the status, clears the background flag (a `Stop`, a held turn end
+/// or a spared `Stop`'s carried flag sets it again after this) and records the
 /// `"awaiting input"` action on entry. A held turn end is settled by the
 /// registry update around it, as every status change does. Answers whether
 /// the record entered `AwaitingInput`, so a caller holding a registry update
@@ -7473,6 +7490,50 @@ mod hysteresis_tests {
         assert!(h.background(), "the screen cleared a flag it never set");
     }
 
+    /// A main `Stop` that a subagent's prompt spares writes its background
+    /// flag beside `AwaitingInput`; the screen's `Idle` that ends the wait
+    /// keeps it, in the same update, and a footer-less frame leaves it.
+    #[tokio::test(start_paused = true)]
+    async fn a_spared_stops_background_flag_survives_the_idle_that_ends_the_wait() {
+        let h = start_record("spared-stop-bg", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        let mut events = h.registry.subscribe();
+        h.hook(2, &subagent_permission_request());
+        h.hook(3, &main_stop(true));
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "main's Stop ended the subagent's prompt"
+        );
+        assert!(h.background(), "the spared Stop wrote no flag");
+        assert!(!h.holds_turn_end(), "the spared Stop was held");
+        h.chunk(idle_frame(&[]));
+        advance(DIALOG_DRAW_DEADLINE + Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box past the deadline did not end the prompt"
+        );
+        assert!(
+            h.background(),
+            "the screen's Idle dropped the spared Stop's flag"
+        );
+        let idles: Vec<_> = updates(&mut events)
+            .into_iter()
+            .filter(|(status, _)| *status == SessionStatus::Idle)
+            .collect();
+        assert!(
+            !idles.is_empty() && idles.iter().all(|(_, background)| *background),
+            "an Idle went out without the flag: {idles:?}"
+        );
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(3)).await;
+        assert!(
+            h.background(),
+            "a footer-less frame cleared the hook's flag"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn no_evidence_of_hooks_lands_idle_after_the_hold() {
         let overlay = transcript_overlay_frame();
@@ -8198,14 +8259,31 @@ mod hysteresis_tests {
         rec.lock().expect("record lock").pending_owner == PromptOwner::Subagent
     }
 
-    /// A subagent's prompt answered before any settled reading saw its
-    /// dialog: the first settled reading in a subagent's view ends it.
+    /// A subagent's hook-raised prompt answered before any settled reading
+    /// saw its dialog: a settled reading in a subagent's view ends it once
+    /// its draw deadline has passed, not before.
     #[tokio::test(start_paused = true)]
-    async fn a_subagent_raised_prompt_with_no_dialog_read_ends_on_the_first_settled_reading() {
-        let h = start_record("agent-view-unseen", false, subagent_pending_record());
+    async fn a_subagent_raised_prompt_with_no_dialog_read_ends_at_the_draw_deadline() {
+        let h = start_record(
+            "agent-view-unseen",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &subagent_permission_request());
         pass_hold().await;
         h.chunk(capture_frame(SUBAGENT_IN_VIEW));
         advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the prompt ended before its draw deadline"
+        );
+        assert!(
+            has_pending(&h),
+            "the prompt was dropped before its deadline"
+        );
+        advance(DIALOG_DRAW_DEADLINE).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,
@@ -9014,6 +9092,94 @@ mod hysteresis_tests {
             "the view past the deadline did not end the prompt"
         );
         assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    /// Chunk `frame` faster than the debounce for longer than the max wait,
+    /// so a check reads it before the output settles: a half-drawn reading.
+    async fn half_drawn(h: &Harness, frame: impl Fn() -> Vec<u8>) {
+        let mut since = Duration::ZERO;
+        while since < CHECK_MAX_WAIT + CHECK_DEBOUNCE {
+            h.chunk(frame());
+            advance(ms(30)).await;
+            since += ms(30);
+        }
+    }
+
+    /// A half-drawn dialog in a subagent's view counts for nothing: the
+    /// settled view without it holds the hook-raised prompt to its deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_half_drawn_dialog_in_a_subagents_view_keeps_the_prompt_to_its_deadline() {
+        let h = start_record(
+            "half-drawn-subagent-view",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &subagent_permission_request());
+        pass_hold().await;
+        half_drawn(&h, subagent_view_with_a_question).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a half-drawn dialog lifted the draw guard"
+        );
+        advance(DIALOG_DRAW_DEADLINE).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the view past the deadline did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    /// The same in main's view: a half-drawn dialog leaves the guard up, and
+    /// the settled idle box ends the prompt only at its deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_half_drawn_dialog_in_mains_view_keeps_the_prompt_to_its_deadline() {
+        let h = start_record(
+            "half-drawn-main-view",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_permission_request());
+        pass_hold().await;
+        half_drawn(&h, permission_frame).await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a half-drawn dialog lifted the draw guard"
+        );
+        advance(DIALOG_DRAW_DEADLINE).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box past the deadline did not end the prompt"
+        );
+        assert!(!has_pending(&h), "the ended prompt stayed pending");
+    }
+
+    /// A prompt of unknown owner with no hook raise does not end on a
+    /// subagent's view after only a half-drawn dialog there.
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_owners_prompt_outlives_a_half_drawn_dialog_in_a_subagents_view() {
+        let mut record = pending_record();
+        record.pending_owner = PromptOwner::Unknown;
+        let h = start_record("half-drawn-unknown-owner", false, record);
+        pass_hold().await;
+        half_drawn(&h, subagent_view_with_a_question).await;
+        h.chunk(capture_frame(SUBAGENT_IN_VIEW));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a half-drawn dialog counted as read"
+        );
+        assert!(has_pending(&h), "the prompt was dropped");
     }
 
     /// A subagent's prompt whose dialog was read in its view, answered from

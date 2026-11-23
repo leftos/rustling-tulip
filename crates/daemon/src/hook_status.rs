@@ -562,6 +562,7 @@ pub(crate) fn apply_to_record(
 
 /// The state writes of one ordered event on a running `record`.
 fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u128) -> Applied {
+    let from = record.status;
     if confirms_turn(report) {
         record.turn_unconfirmed = false;
     }
@@ -625,7 +626,7 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             })
             .is_some_and(|status| crate::pty_state::apply_status(record, status))
     };
-    apply_pending(record, report, event_time);
+    apply_pending(record, report, event_time, from);
     Applied {
         entered_awaiting,
         status_change: None,
@@ -638,12 +639,19 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
 
 /// Write what `report` says about the pending prompt. Whose prompt it is goes
 /// with it: a subagent's view ends only a prompt that is not main's. A `Set`
-/// records its raise, which the screen watcher's draw guard counts from; one
-/// that replaces the same tool's prompt from the same agent (a question's
-/// `PermissionRequest` after its `PreToolUse`) keeps the first raise. A
-/// `KeepOr` fill records none, and one with no `agent_id` cannot say whose
-/// prompt it fills.
-fn apply_pending(record: &mut SessionRecord, report: &HookReport, event_time: u128) {
+/// records its raise, which the screen watcher's draw guard counts from; a
+/// question or plan that replaces its own prompt from the same agent while
+/// the record was already `AwaitingInput` (`from`, the status before this
+/// event: a question's `PermissionRequest` after its `PreToolUse`) keeps the
+/// first raise. Any other `Set`, a second permission of the same tool
+/// included, is a fresh raise. A `KeepOr` fill records none, and one with no
+/// `agent_id` cannot say whose prompt it fills.
+fn apply_pending(
+    record: &mut SessionRecord,
+    report: &HookReport,
+    event_time: u128,
+    from: SessionStatus,
+) {
     match &report.pending {
         PendingUpdate::Clear => record.clear_pending(),
         PendingUpdate::Set(pending) => {
@@ -653,7 +661,12 @@ fn apply_pending(record: &mut SessionRecord, report: &HookReport, event_time: u1
                 PromptOwner::Main
             };
             let tool = agent_api::hook_vocabulary::pending_tool(pending);
-            let same_prompt = tool.is_some()
+            let same_prompt = from == SessionStatus::AwaitingInput
+                && matches!(
+                    pending,
+                    protocol::PendingInput::Question { .. }
+                        | protocol::PendingInput::PlanApproval { .. }
+                )
                 && record.pending_owner == owner
                 && record
                     .pending_input
@@ -1907,6 +1920,41 @@ mod tests {
             "the empty slot was not filled"
         );
         assert_eq!(raise_time(&filled), None, "a KeepOr fill recorded a raise");
+    }
+
+    /// A second dialog of the same tool is a prompt of its own: its draw
+    /// guard counts from its own hook.
+    #[test]
+    fn a_second_tool_permission_gets_its_own_raise() {
+        let mut record = turn_record();
+        apply_body(&mut record, 2, &main_permission_request());
+        apply_body(&mut record, 3, &main_permission_request());
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert_eq!(
+            raise_time(&record),
+            Some(3),
+            "the second permission kept the first one's raise"
+        );
+    }
+
+    /// A question re-reported while it waits is the same prompt: the raise
+    /// stays the first one's.
+    #[test]
+    fn a_repeated_question_keeps_its_raise() {
+        let question = json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": []},
+        });
+        let mut record = turn_record();
+        apply_body(&mut record, 2, &question);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        apply_body(&mut record, 3, &question);
+        assert_eq!(
+            raise_time(&record),
+            Some(2),
+            "the same question was restamped"
+        );
     }
 
     #[test]
