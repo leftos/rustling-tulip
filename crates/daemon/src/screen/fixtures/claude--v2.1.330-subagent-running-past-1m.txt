@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   X:\dev\rustling-tulip.wt\rt-549-cap\.tmp\rt549\proj330
+
+
+❯ [[S:agenthold:150]] Start a long agent.
+
+● Agent(Long wait)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● agent started
+
+✻ Waiting for 1 background agent to finish
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ↓ to manage
+
+  ● main
+  ◯ general-purpose  Long wait                                                                     1m 3s · ↑ 50 tokens

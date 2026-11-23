@@ -51,20 +51,26 @@ pub(crate) fn is_spinner_line(row: &str) -> bool {
 const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ hooks…";
 
 /// The mode line under the prompt box counting the work still running in the
-/// background: the mode's glyph, then one `·`-separated item per kind of work,
-/// drawn as Claude Code 2.1.317 renders it: `· 1 shell`/`· N shells`,
-/// `· 1 monitor`/`· N monitors`, `· 1 MCP task`/`· N MCP tasks`, or
-/// `· N background tasks` when several kinds run together. Shells and monitors
-/// share an item, joined with a comma (`· 1 shell, 2 monitors`). The vim
-/// editor mode's `-- INSERT -- ` marker heads the line in insert mode.
-const BACKGROUND_SHELLS: &str = r"^\s*(?:-- INSERT -- )?(?:⏵⏵|⏸) .* · \d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
+/// background: one `·`-separated item per kind of work, drawn as Claude Code
+/// 2.1.317 renders it: `· 1 shell`/`· N shells`, `· 1 monitor`/`· N monitors`,
+/// `· 1 MCP task`/`· N MCP tasks`, or `· N background tasks` when several kinds
+/// run together. Shells and monitors share an item, joined with a comma
+/// (`· 1 shell, 2 monitors`). The mode's glyph and hint head the line when the
+/// CLI draws one (`⏸ manual mode on · 1 shell · ↓ to manage`); a CLI in a mode
+/// that draws none heads it with the count (`  1 shell · ↓ to manage`, Claude
+/// Code 2.1.150 in the default permission mode). The vim editor mode's
+/// `-- INSERT -- ` marker heads the line in insert mode.
+const BACKGROUND_SHELLS: &str = r"^\s*(?:-- INSERT -- )?(?:(?:⏵⏵|⏸) .* · )?\d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
 
 /// A running subagent's row in the panel under the prompt box: the hollow
 /// marker, the agent type, its task when the width leaves room for one, then
-/// its elapsed time and token count, hours and minutes ahead of the seconds;
-/// at narrow widths the task is gone and the word `tokens` with it.
+/// its elapsed time and token count, in the largest units first: seconds
+/// (`59s`), minutes and seconds (`1m 3s`), hours, minutes and seconds
+/// (`1h 2m 3s`), and past a day days, hours and minutes with no seconds
+/// (`1d 1h 0m`); at narrow widths the task is gone and the word `tokens` with
+/// it.
 const RUNNING_SUBAGENT: &str =
-    r"^\s+◯ \S+(?:  \S.*)?\s(?:\d+[hm] )*\d+s · [↑↓] \S+(?: tokens)?\s*$";
+    r"^\s+◯ \S+(?:  \S.*)?\s(?:\d+d \d+h \d+m|(?:\d+h )?(?:\d+m )?\d+s) · [↑↓] \S+(?: tokens)?\s*$";
 
 /// How much output and how long a silence the daemon waits for before it
 /// types a prompt into Claude's TUI: the banner tuning the heuristic was
@@ -471,6 +477,74 @@ mod tests {
         ];
         for row in others {
             assert!(!is_spinner_line(row), "should not be a spinner: {row:?}");
+        }
+    }
+
+    #[test]
+    fn running_subagent_reads_rows_by_elapsed() {
+        let pattern =
+            regex::Regex::new(super::RUNNING_SUBAGENT).expect("the subagent row pattern compiles");
+        let rows = [
+            "  ◯ general-purpose  Long wait … 1m 3s · ↑ 50 tokens",
+            "  ◯ general-purpose  Long wait … 2m 5s · ↑ 50 tokens",
+            "  ◯ general-purpose 2m 7s · ↓ 66.5k",
+            "  ◯ general-purpose  Long wait   59s · ↓ 1.2k tokens",
+            "  ◯ general-purpose  Long wait   1h 0m 0s · ↓ 1.2k tokens",
+            "  ◯ general-purpose  Long wait   1h 2m 3s · ↓ 1.2k tokens",
+            "  ◯ general-purpose  Long wait   1d 1h 0m · ↓ 1.2k tokens",
+            "  ◯ general-purpose  Long wait   2d 3h 4m · ↓ 1.2k tokens",
+        ];
+        for row in rows {
+            assert!(
+                pattern.is_match(row),
+                "should be a running subagent row: {row:?}"
+            );
+        }
+        let others = [
+            "  ◯ general-purpose  waiting on 2 monitors · ↓ to manage · since 3:21 PM",
+            "  ◯ main",
+            "  ● main",
+            "✻ Cooked for 1h 2m 3s · ↓ 1.2k tokens",
+            "  ◯ general-purpose  Long wait   1h 2m · ↓ 1.2k tokens",
+        ];
+        for row in others {
+            assert!(
+                !pattern.is_match(row),
+                "should not be a running subagent row: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_shells_reads_its_footers() {
+        let pattern = regex::Regex::new(super::BACKGROUND_SHELLS)
+            .expect("the background footer pattern compiles");
+        let rows = [
+            "  1 shell · ↓ to manage",
+            "  ⏸ manual mode on · 1 shell, 1 monitor · ↓ to manage",
+            "  ⏸ manual mode on · 1 shell, 1 monitor · esc to interrupt · ↓ to manage",
+            "  ⏸ manual mode on · 2 background tasks · ↓ to manage",
+            "  ⏵⏵ auto mode on · 1 shell · ↓ to manage",
+        ];
+        for row in rows {
+            assert!(
+                pattern.is_match(row),
+                "should be a background footer: {row:?}"
+            );
+        }
+        let others = [
+            "  ⏸ manual mode on · ? for shortcuts · ← for agents",
+            "  ⏸ manual mode on · ? for shortcuts · ↓ to manage",
+            "  ? for shortcuts",
+            "  ? for shortcuts · Found 1 settings issue · /doctor for details",
+            "✻ Cooked for 0s · 1 shell still running",
+            "  ⎿  Running in the background (↓ to manage)",
+        ];
+        for row in others {
+            assert!(
+                !pattern.is_match(row),
+                "should not be a background footer: {row:?}"
+            );
         }
     }
 

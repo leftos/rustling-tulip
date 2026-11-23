@@ -1,0 +1,40 @@
+
+  Ran 2 shell commands
+
+● done
+
+✻ Sautéed for 1s · done 9:59 PM
+
+❯ [[S:agentperm]] Use an agent to make a folder.
+
+● Agent(Make a folder)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● agent done
+
+✻ Waiting for 1 background agent to finish
+
+● Agent "Make a folder" finished · 3s
+
+● agent done
+
+✻ Sautéed for 3s · done 9:59 PM
+
+❯ [[S:stopbg]] Start a background shell and a monitor.
+
+  Ran 1 shell command
+
+● Monitor(Mock monitor)
+  ⎿  Monitor started · task bkwld1ziu · timeout 30m
+
+✻ Crunched for 0s · done 10:00 PM
+
+❯ [[S:slow]] Reply slowly.
+
+✢ Spinning…
+  ⎿  Tip: Use /statusline to add your own status line below the prompt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · 1 shell, 1 monitor · esc to interrupt · ↓ to manage

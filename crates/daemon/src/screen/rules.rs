@@ -977,6 +977,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row per capture; the table is the test"
+    )]
     fn background_footer_is_read_from_fixtures() {
         let shown = [
             (
@@ -1028,6 +1032,31 @@ mod tests {
                 "claude--v2330-manual-mode-bg-shell-and-agent",
                 include_str!("fixtures/claude--v2330-manual-mode-bg-shell-and-agent.txt"),
                 "background_shell",
+            ),
+            (
+                "claude--v2.1.150-default-mode-bg-shell",
+                include_str!("fixtures/claude--v2.1.150-default-mode-bg-shell.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2.1.330-default-mode-bg-shell-and-monitor",
+                include_str!("fixtures/claude--v2.1.330-default-mode-bg-shell-and-monitor.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2.1.330-slow-first-token-5s",
+                include_str!("fixtures/claude--v2.1.330-slow-first-token-5s.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2.1.330-subagent-running-past-1m",
+                include_str!("fixtures/claude--v2.1.330-subagent-running-past-1m.txt"),
+                "background_subagents",
+            ),
+            (
+                "claude--v2.1.330-subagent-running-past-2m",
+                include_str!("fixtures/claude--v2.1.330-subagent-running-past-2m.txt"),
+                "background_subagents",
             ),
         ];
         for (name, text, rule) in shown {
@@ -1457,7 +1486,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 117] = [
+        let cases: [(&str, &str, Verdict); 131] = [
             (
                 "claude--suggestion",
                 include_str!("fixtures/claude--suggestion.txt"),
@@ -2026,6 +2055,76 @@ mod tests {
                 "claude--v2330-manual-mode-bg-shell-and-agent",
                 include_str!("fixtures/claude--v2330-manual-mode-bg-shell-and-agent.txt"),
                 State(Idle),
+            ),
+            (
+                "claude--v2.1.150-default-mode-bg-shell",
+                include_str!("fixtures/claude--v2.1.150-default-mode-bg-shell.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.330-default-mode-bg-shell-and-monitor",
+                include_str!("fixtures/claude--v2.1.330-default-mode-bg-shell-and-monitor.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.330-slow-first-token-5s",
+                include_str!("fixtures/claude--v2.1.330-slow-first-token-5s.txt"),
+                State(Working),
+            ),
+            (
+                "claude--v2.1.330-subagent-running-past-1m",
+                include_str!("fixtures/claude--v2.1.330-subagent-running-past-1m.txt"),
+                State(Idle),
+            ),
+            (
+                "claude--v2.1.330-subagent-running-past-2m",
+                include_str!("fixtures/claude--v2.1.330-subagent-running-past-2m.txt"),
+                State(Idle),
+            ),
+            (
+                "v175-main-heads-up-panel-keys",
+                include_str!("fixtures/v175-main-heads-up-panel-keys.txt"),
+                Keep,
+            ),
+            (
+                "v176-main-heads-up-box-keys",
+                include_str!("fixtures/v176-main-heads-up-box-keys.txt"),
+                Keep,
+            ),
+            (
+                "v177-main-heads-up-expanded",
+                include_str!("fixtures/v177-main-heads-up-expanded.txt"),
+                Keep,
+            ),
+            (
+                "v152-heads-up-collapsed",
+                include_str!("fixtures/v152-heads-up-collapsed.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-dismissed-w60",
+                include_str!("fixtures/v2319-heads-up-dismissed-w60.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-dismissed-w120",
+                include_str!("fixtures/v2319-heads-up-dismissed-w120.txt"),
+                Keep,
+            ),
+            (
+                "v2319-heads-up-explained-dismissed",
+                include_str!("fixtures/v2319-heads-up-explained-dismissed.txt"),
+                Keep,
+            ),
+            (
+                "v174-agent-view-heads-up-builtin",
+                include_str!("fixtures/v174-agent-view-heads-up-builtin.txt"),
+                State(Working),
+            ),
+            (
+                "v178-agent-view-heads-up-expanded",
+                include_str!("fixtures/v178-agent-view-heads-up-expanded.txt"),
+                State(Working),
             ),
         ];
         let mut wrong = Vec::new();

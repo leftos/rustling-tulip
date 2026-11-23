@@ -1,0 +1,40 @@
+  Welcome to Opus 4.7 xhigh! · /effort to tune speed vs. intelligence
+
+ ⚠ Large X:\dev\rustling-tulip.wt\rt-549-cap\CLAUDE.md will impact performance (44.3k chars > 40.0k) · /memory to edit
+
+❯ [[S:hello]] Reply with ok.
+
+● ok
+
+✻ Cooked for 0s
+
+❯ [[S:perm]] Make a folder.
+
+● ok
+
+✻ Sautéed for 0s
+
+❯ [[S:perm]] Make a folder.
+
+● Bash(mkdir perm-dir)
+  ⎿  Done
+
+● done
+
+✻ Cooked for 9s
+
+❯ [[S:bgshell]] Start a background sleep.
+
+● Bash(sleep 600)
+  ⎿  Running in the background (↓ to manage)
+
+● Background sleep is running.
+
+✻ Cooked for 0s · 1 shell still running
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1 shell · ↓ to manage
+
+

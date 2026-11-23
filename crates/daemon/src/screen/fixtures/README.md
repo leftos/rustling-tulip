@@ -63,6 +63,12 @@ What the captures measured about the box, which the draft reader and the clear r
 
 `claude--v2330-review-quoted-with-bar--synthesized.txt` is a reply quoting that 2.1.330 review step whole, its tab bar included, above the idle box: a quoted review is transcript, not a dialog. `claude--v2330-review-under-quoted-ready--synthesized.txt` is a reply quoting a 2.1.307 review's `Ready to submit your answers?` row and options above a live 2.1.330 review whose bar has scrolled off the top: the quoted row is not the live step's own, and the live review reads as the dialog.
 
+`claude--v2.1.150-default-mode-bg-shell.txt` and `claude--v2.1.330-default-mode-bg-shell-and-monitor.txt` are Claude Code 2.1.150 and 2.1.330 screens (120 columns) taken for RT-548: a background shell with the footer the CLI draws when it shows no mode glyph (`  1 shell · ↓ to manage`), and a shell with a monitor under the manual mode's footer (`⏸ manual mode on · 1 shell, 1 monitor · ↓ to manage`).
+
+`claude--v2.1.330-slow-first-token-5s.txt` is the 2.1.330 session captured for RT-1271 5.6 s after Enter with the first token held back: the spinner with no details (`✢ Spinning…`) and the footer counting a shell and a monitor (`⏸ manual mode on · 1 shell, 1 monitor · esc to interrupt · ↓ to manage`).
+
+`claude--v2.1.330-subagent-running-past-1m.txt` and `claude--v2.1.330-subagent-running-past-2m.txt` are Claude Code 2.1.330 screens (120 columns) taken for RT-548 63.6 s and 126.4 s after a prompt started a subagent held open for 150 s: the agents panel's running row `◯ general-purpose  Long wait 1m 3s · ↑ 50 tokens`, and the same row at `2m 5s · ↑ 50 tokens`, under the footer `⏸ manual mode on · ? for shortcuts · ↓ to manage`.
+
 `screen/rules.rs` and `screen/dialogs.rs` load each file with `include_str!` as one screen (`screen/fixture_screen.rs`): its lines are the rows, fed to a grid wide enough for the widest of them.
 
 `every_fixture_reads_its_state` pins the state each one must read as, and `every_fixture_reads_its_dialog` the input box and dialog the chat reads off it; a capture whose state changes upstream is replaced with a fresh one, never reinterpreted by editing the rule table or the parsers.
