@@ -168,17 +168,21 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # (src/phone/pasteboard_ios.rs): `UIPasteboard`, and `UIImage` to re-encode
 # or scale a pasted or picked image. The composer's Paste on iOS 16 and later
 # (src/phone/paste_control_ios.rs): `UIPasteControl`, its configuration and
-# colours, and the target it pastes into.
+# colours, and the target it pastes into. The composer's Files
+# (src/phone/files_ios.rs): `UIDocumentPickerViewController` and its
+# delegate, opening any file as a copy.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
     "objc2-core-foundation",
+    "objc2-uniform-type-identifiers",
     "UIActivity",
     "UIActivityViewController",
     "UIApplication",
     "UIButtonConfiguration",
     "UIColor",
     "UIControl",
+    "UIDocumentPickerViewController",
     "UIGraphicsImageRenderer",
     "UIGraphicsRenderer",
     "UIImage",
@@ -192,6 +196,13 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIView",
     "UIViewController",
     "UIWindow",
+] }
+# The type the composer's Files opens any document under (`UTTypeItem`,
+# src/phone/files_ios.rs), which the document picker takes.
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
+    "std",
+    "UTCoreTypes",
+    "UTType",
 ] }
 # The size a pasted or picked image is scaled to (`CGSize`).
 objc2-core-foundation = { version = "0.3", default-features = false, features = [

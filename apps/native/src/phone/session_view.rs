@@ -19,7 +19,7 @@ use super::hosts_view::{PHONE_BUTTON_PAD_X, phone_button};
 use super::key_grid::{self, GridKey, KeyAction, KeyModes};
 use super::long_press::{long_press_drag_area, touch_drag_area};
 use super::pasteboard::{self, PasteSpot};
-use super::photos::{self, PHOTOS_LABEL};
+use super::photos;
 use super::prompt_sheet;
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
@@ -47,11 +47,13 @@ const BACK_LABEL: &str = "Back";
 const SEND_LABEL: &str = "Send";
 /// The composer's Paste button's label.
 const PASTE_LABEL: &str = "Paste";
+/// The composer's Attach button's label.
+const ATTACH_LABEL: &str = "Attach";
 /// The Quick dock's button's label.
 const QUICK_LABEL: &str = "Quick";
 
 /// Whether session `session_id`'s chat host takes uploads
-/// (`FEATURE_UPLOAD_FILE`), so the composer offers Photos.
+/// (`FEATURE_UPLOAD_FILE`), so the composer offers Attach.
 pub(super) fn takes_uploads(root: &RootView, session_id: &str) -> bool {
     root.loaded_chat_host(session_id)
         .and_then(|host| root.conn_of(&host))
@@ -143,8 +145,8 @@ const DRAFT_CLEAR_ASK: &str = "Clear the terminal's draft?";
 enum ComposerButton {
     /// Paste the clipboard's text into the field, or upload its image.
     Paste,
-    /// Pick a photo to upload.
-    Photos,
+    /// Open the Attach sheet: Photos or Files to upload.
+    Attach,
     /// Open the Quick replies' dock.
     Quick,
     /// Open the Keys tray's dock.
@@ -158,7 +160,7 @@ impl ComposerButton {
     fn id(self) -> &'static str {
         match self {
             Self::Paste => "phone-composer-paste",
-            Self::Photos => "phone-composer-photos",
+            Self::Attach => "phone-composer-photos",
             Self::Quick => "phone-composer-quick",
             Self::Keys => "phone-composer-keys",
             Self::Hide => "phone-composer-hide",
@@ -169,7 +171,7 @@ impl ComposerButton {
     fn label(self) -> &'static str {
         match self {
             Self::Paste => PASTE_LABEL,
-            Self::Photos => PHOTOS_LABEL,
+            Self::Attach => ATTACH_LABEL,
             Self::Quick => QUICK_LABEL,
             Self::Keys => KEYS_LABEL,
             Self::Hide => HIDE_LABEL,
@@ -177,13 +179,13 @@ impl ComposerButton {
     }
 }
 
-/// The composer row's buttons in the order it draws them: Paste, Photos
-/// while the session's host takes uploads (`photos`), Quick and Keys, and
+/// The composer row's buttons in the order it draws them: Paste, Attach
+/// while the session's host takes uploads (`uploads`), Quick and Keys, and
 /// Hide keyboard while the on-screen keyboard is up.
-fn buttons_shown(keyboard_up: bool, photos: bool) -> Vec<ComposerButton> {
+fn buttons_shown(keyboard_up: bool, uploads: bool) -> Vec<ComposerButton> {
     let mut buttons = vec![ComposerButton::Paste];
-    if photos {
-        buttons.push(ComposerButton::Photos);
+    if uploads {
+        buttons.push(ComposerButton::Attach);
     }
     buttons.extend([ComposerButton::Quick, ComposerButton::Keys]);
     if keyboard_up {
@@ -738,7 +740,7 @@ impl PhoneRoot {
         };
         let hook = edit_bar_paste(self.control_pastes);
         input.update(cx, |input, _| input.set_system_paste(hook));
-        let photos = takes_uploads(self.root.read(cx), session_id);
+        let uploads = takes_uploads(self.root.read(cx), session_id);
         let chip_live = !composer_line_disables(line.as_ref());
         let note = line.map(|line| self.composer_note_row(session_id, &line, cx));
         let chip = chip
@@ -813,7 +815,7 @@ impl PhoneRoot {
                         .text_color(gpui::rgb(t.danger))
                         .child(reason)
                 }))
-                .child(Self::composer_buttons(keyboard_up, photos, cx)),
+                .child(Self::composer_buttons(keyboard_up, uploads, cx)),
         )
     }
 
@@ -1041,16 +1043,16 @@ impl PhoneRoot {
     }
 
     /// The buttons under the composer's field, in the order
-    /// [`buttons_shown`] gives them: Paste, Photos while the host takes
+    /// [`buttons_shown`] gives them: Paste, Attach while the host takes
     /// uploads, Quick and Keys, and Hide keyboard while the on-screen
     /// keyboard is up. Each takes an equal share of the row, and a label
     /// wider than its share truncates, so the last button stays inside.
-    fn composer_buttons(keyboard_up: bool, photos: bool, cx: &mut Context<Self>) -> Div {
+    fn composer_buttons(keyboard_up: bool, uploads: bool, cx: &mut Context<Self>) -> Div {
         let mut row = div()
             .driver_id(|| "phone-composer-buttons".to_owned())
             .flex()
             .gap(px(COMPOSER_GAP));
-        for button in buttons_shown(keyboard_up, photos) {
+        for button in buttons_shown(keyboard_up, uploads) {
             let drawn = phone_button(button.id(), ButtonKind::Outlined, cx)
                 .px(px(COMPOSER_ROW_PAD_X))
                 .min_h(px(TOUCH_TARGET))
@@ -1073,8 +1075,8 @@ impl PhoneRoot {
                     })),
                     PasteSpot::Composer,
                 ),
-                ComposerButton::Photos => {
-                    drawn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_photo(cx)))
+                ComposerButton::Attach => {
+                    drawn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_attach(cx)))
                 }
                 ComposerButton::Quick => drawn.on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.tap_composer_quick(cx)),
@@ -1179,10 +1181,10 @@ impl PhoneRoot {
         None
     }
 
-    /// Photos' tap: the platform's picker opens for one image, which uploads
-    /// to the shown session's host as a pasted image does; a cancelled pick
-    /// sends nothing.
-    fn pick_photo(&mut self, cx: &mut Context<Self>) {
+    /// Photos' tap in the Attach sheet: the platform's picker opens for one
+    /// image, which uploads to the shown session's host as a pasted image
+    /// does; a cancelled pick sends nothing.
+    pub(super) fn pick_photo(&mut self, cx: &mut Context<Self>) {
         let Some((_, session_id)) = self.shown.clone() else {
             return;
         };
@@ -1200,6 +1202,32 @@ impl PhoneRoot {
             });
             if sent.is_err() {
                 tracing::debug!("phone: a photo was picked after the phone's root was gone");
+            }
+        })
+        .detach();
+    }
+
+    /// Files' tap in the Attach sheet: the platform's picker opens for one
+    /// file, which uploads under its own name to the shown session's host,
+    /// its host path landing in the composer as a pasted image's does; a
+    /// cancelled pick sends nothing.
+    pub(super) fn pick_file(&mut self, cx: &mut Context<Self>) {
+        let Some((_, session_id)) = self.shown.clone() else {
+            return;
+        };
+        let picked = self.files.pick();
+        cx.spawn(async move |this, cx| {
+            let Some((name, bytes)) = picked.await else {
+                tracing::info!(session = %session_id, "phone: no file picked");
+                return;
+            };
+            let sent = this.update(cx, |this, cx| {
+                this.root.update(cx, |root, cx| {
+                    root.on_chat_upload_file(&session_id, &name, &bytes, cx);
+                });
+            });
+            if sent.is_err() {
+                tracing::debug!("phone: a file was picked after the phone's root was gone");
             }
         })
         .detach();
@@ -1631,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_shows_photos_after_paste_only_when_the_host_takes_uploads() {
+    fn the_composer_shows_attach_after_paste_only_when_the_host_takes_uploads() {
         let shown: Vec<ComposerButton> = buttons_shown(false, true);
         assert_eq!(
             shown.iter().map(|button| button.id()).collect::<Vec<_>>(),
@@ -1642,6 +1670,6 @@ mod tests {
                 "phone-composer-keys"
             ]
         );
-        assert_eq!(ComposerButton::Photos.label(), "Photos");
+        assert_eq!(ComposerButton::Attach.label(), "Attach");
     }
 }

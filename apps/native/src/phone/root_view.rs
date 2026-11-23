@@ -16,13 +16,14 @@ use protocol::{ClientMessage, PathKind};
 
 use super::browser::FolderEnd;
 use super::fetched::{self, Entry, Freshness, HostStat, Index};
+use super::files_picker::{FILES_LABEL, FilePicker, LoggingFiles};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
 use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
 use super::pasteboard::{LoggingPasteboard, PhonePasteboard};
-use super::photos::{LoggingPhotos, PhotoPicker};
+use super::photos::{LoggingPhotos, PHOTOS_LABEL, PhotoPicker};
 use super::prompt_sheet::SheetState;
 use super::push::{self, Authorization, Effect, PushPlatform, PushState};
 use super::quick_replies::{ReplyGroup, ReplySet};
@@ -127,6 +128,9 @@ pub struct PhoneRoot {
     pub(super) home_scroll: gpui::ScrollHandle,
     /// The sheet a long press on a Home row opened, while it is open.
     sheet: Option<Sheet>,
+    /// The id of the session whose composer's Attach sheet is open, while it
+    /// is.
+    attach: Option<String>,
     /// Whether Home's sort sheet is open.
     pub(super) sort_menu: bool,
     /// Settings, drawn in place of Home or the hosts screen while open.
@@ -203,8 +207,10 @@ pub struct PhoneRoot {
     /// Whether the system paste control, not a GPUI tap, takes the Paste
     /// buttons' and keys' pastes: on iOS 16 and later.
     pub(super) control_pastes: bool,
-    /// The platform's photo picker, which the composer's Photos opens.
+    /// The platform's photo picker, which the Attach sheet's Photos opens.
     pub(super) photos: Arc<dyn PhotoPicker>,
+    /// The platform's file picker, which the Attach sheet's Files opens.
+    pub(super) files: Arc<dyn FilePicker>,
     /// The host browser, drawn over the page shown while open, under the
     /// viewer.
     pub(super) browser: Option<super::browser_view::BrowserPage>,
@@ -288,6 +294,7 @@ impl PhoneRoot {
             tray: super::tray::Tray::default(),
             home_scroll: gpui::ScrollHandle::new(),
             sheet: None,
+            attach: None,
             sort_menu: false,
             settings: None,
             reply_editor: None,
@@ -318,6 +325,7 @@ impl PhoneRoot {
             pasteboard: Arc::new(LoggingPasteboard),
             control_pastes: super::session_view::control_pastes(),
             photos: Arc::new(LoggingPhotos),
+            files: Arc::new(LoggingFiles),
             browser: None,
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
@@ -751,6 +759,19 @@ impl PhoneRoot {
         self.photos = photos;
     }
 
+    /// The same root picking files through `files`; its Files picks nothing
+    /// until then.
+    #[must_use]
+    pub fn with_files(mut self, files: Arc<dyn FilePicker>) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Picks files through `files` from now on.
+    pub fn set_files(&mut self, files: Arc<dyn FilePicker>) {
+        self.files = files;
+    }
+
     /// Share on the viewer page: hands the open copy, as it is, to the share
     /// sheet; nothing while the page is closed.
     pub(super) fn share_viewer(&self) {
@@ -1021,6 +1042,7 @@ impl PhoneRoot {
         self.shown = Some(shown.clone());
         self.prompt_sheet = SheetState::default();
         self.sheet = None;
+        self.attach = None;
         self.sort_menu = false;
         // The page's context label reads the host's Dashboard facts.
         self.root.update(cx, |root, cx| {
@@ -1102,6 +1124,23 @@ impl PhoneRoot {
     /// Closes the sheet; a resume out still gets its follow-up.
     pub(super) fn close_sheet(&mut self, cx: &mut Context<Self>) {
         self.sheet = None;
+        cx.notify();
+    }
+
+    /// Opens the shown session's composer's Attach sheet: Photos or Files to
+    /// upload. Nothing while no session's page shows.
+    pub(super) fn open_attach(&mut self, cx: &mut Context<Self>) {
+        let Some((_, session_id)) = self.shown.as_ref() else {
+            return;
+        };
+        tracing::debug!(session = %session_id, "phone: opening the composer's Attach sheet");
+        self.attach = Some(session_id.clone());
+        cx.notify();
+    }
+
+    /// Closes the Attach sheet, sending nothing.
+    pub(super) fn close_attach(&mut self, cx: &mut Context<Self>) {
+        self.attach = None;
         cx.notify();
     }
 
@@ -1282,6 +1321,7 @@ impl PhoneRoot {
         self.draft_clear_asking = None;
         self.composer_dock = super::composer::Dock::None;
         self.prompt_sheet = SheetState::default();
+        self.attach = None;
         self.root.update(cx, |root, cx| {
             root.dismiss_phone_card(cx);
             root.show_phone_chat(None, cx);
@@ -1319,6 +1359,7 @@ impl PhoneRoot {
             self.landscape_return = None;
             self.composer_dock = super::composer::Dock::None;
             self.prompt_sheet = SheetState::default();
+            self.attach = None;
             self.root.update(cx, |root, cx| {
                 root.dismiss_phone_card(cx);
                 root.show_phone_chat(None, cx);
@@ -1803,6 +1844,71 @@ impl PhoneRoot {
     pub(super) fn sheet_button(id: &str, kind: ButtonKind, cx: &Context<Self>) -> Stateful<Div> {
         phone_button(id, kind, cx).w_full().min_h(px(TOUCH_TARGET))
     }
+
+    /// The composer's Attach sheet over a scrim: Photos and Files, its bottom
+    /// clear of `bottom`'s home indicator. A row closes the sheet and opens
+    /// its picker; a tap on the scrim closes it sending nothing. `None` while
+    /// it is closed or its session is no longer shown.
+    fn attach_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
+        let session = self.attach.as_deref()?;
+        let (_, shown) = self.shown.as_ref()?;
+        if shown != session {
+            return None;
+        }
+        let t = theme(cx);
+        let scrim = div()
+            .id("phone-attach-scrim")
+            .driver_id(|| "phone-attach-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_attach(cx)));
+        let photos = Self::sheet_button("phone-attach-photos", ButtonKind::Outlined, cx)
+            .child(PHOTOS_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.close_attach(cx);
+                this.pick_photo(cx);
+            }));
+        let files = Self::sheet_button("phone-attach-files", ButtonKind::Outlined, cx)
+            .child(FILES_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.close_attach(cx);
+                this.pick_file(cx);
+            }));
+        let panel = div()
+            .id("phone-attach-sheet")
+            .driver_id(|| "phone-attach-sheet".to_owned())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pt(px(16.0))
+            .pb(bottom + px(16.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .child(photos)
+            .child(files);
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(panel),
+        )
+    }
 }
 
 /// How far below the safe area's top the copied chip sits: under the
@@ -1859,6 +1965,8 @@ enum SheetLayer {
     BrowserSheet,
     /// The prompt sheet.
     PromptSheet,
+    /// The composer's Attach sheet.
+    AttachSheet,
     /// The Linear card sheet, over Home while no session page draws.
     CardSheet,
     /// The device pairing layer, over the whole window.
@@ -1871,7 +1979,7 @@ impl SheetLayer {
     const fn pane(self) -> Option<Pane> {
         match self {
             Self::HomeSheet | Self::SortSheet | Self::CardSheet => Some(Pane::List),
-            Self::BrowserSheet | Self::PromptSheet => Some(Pane::Session),
+            Self::BrowserSheet | Self::PromptSheet | Self::AttachSheet => Some(Pane::Session),
             Self::Pairing => None,
         }
     }
@@ -2052,9 +2160,10 @@ impl PhoneRoot {
     }
 
     /// The sheets over the page, in order: Home's long-press sheet, the
-    /// browser's folder sheet, the prompt sheet, then the Linear card sheet
-    /// Home raised; in two panes each covers its own pane only. With them,
-    /// whether any covers the session pane ([`layer_covers_session`]).
+    /// browser's folder sheet, the prompt sheet, the composer's Attach sheet,
+    /// then the Linear card sheet Home raised; in two panes each covers its
+    /// own pane only. With them, whether any covers the session pane
+    /// ([`layer_covers_session`]).
     fn sheet_layers(
         &mut self,
         host_open: bool,
@@ -2081,6 +2190,10 @@ impl PhoneRoot {
             .prompt_sheet_shown(cx)
             .then(|| self.prompt_sheet_layer(padding, screen_height, cx))
             .flatten();
+        let attach_sheet = self
+            .attach_shown(cx)
+            .then(|| self.attach_layer(padding.bottom, cx))
+            .flatten();
         let card_sheet = self
             .home_card_over(host_open, cx)
             .then(|| self.card_sheet_layer(padding.bottom, cx))
@@ -2090,6 +2203,7 @@ impl PhoneRoot {
             (SheetLayer::SortSheet, sort_sheet),
             (SheetLayer::BrowserSheet, browser_sheet),
             (SheetLayer::PromptSheet, prompt_sheet),
+            (SheetLayer::AttachSheet, attach_sheet),
             (SheetLayer::CardSheet, card_sheet),
         ];
         let covers_session = drawn
@@ -2133,6 +2247,19 @@ impl PhoneRoot {
     /// on top, under no viewer and no Settings.
     fn browser_sheet_shown(&self) -> bool {
         self.viewer.is_none() && self.settings.is_none()
+    }
+
+    /// Whether the composer's Attach sheet may draw: it is open for the
+    /// session whose page is shown, under no viewer, browser, Settings or
+    /// Linear card sheet.
+    fn attach_shown(&self, cx: &App) -> bool {
+        let Some(session) = self.attach.as_deref() else {
+            return false;
+        };
+        self.shown
+            .as_ref()
+            .is_some_and(|(_, shown)| shown == session)
+            && self.prompt_sheet_shown(cx)
     }
 
     /// Whether the prompt sheet may draw: a session's page is shown with no
@@ -2279,12 +2406,14 @@ mod tests {
             (true, SheetLayer::SortSheet, false),
             (true, SheetLayer::BrowserSheet, true),
             (true, SheetLayer::PromptSheet, true),
+            (true, SheetLayer::AttachSheet, true),
             (true, SheetLayer::CardSheet, false),
             (true, SheetLayer::Pairing, true),
             (false, SheetLayer::HomeSheet, true),
             (false, SheetLayer::SortSheet, true),
             (false, SheetLayer::BrowserSheet, true),
             (false, SheetLayer::PromptSheet, true),
+            (false, SheetLayer::AttachSheet, true),
             (false, SheetLayer::CardSheet, true),
             (false, SheetLayer::Pairing, true),
         ];

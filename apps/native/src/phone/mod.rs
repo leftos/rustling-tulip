@@ -7,6 +7,9 @@ pub(crate) mod browser;
 mod browser_view;
 mod composer;
 mod fetched;
+#[cfg(target_os = "ios")]
+mod files_ios;
+pub mod files_picker;
 mod home;
 mod home_view;
 mod hosts_view;
@@ -66,6 +69,7 @@ use crate::{
     LiveSeams, NoTaskbarBadge, NoToastPlacer, RootDeps, RootShape, RootView, SilentNotifier,
     SilentSounder,
 };
+use files_picker::FilePicker;
 pub use layout::PhoneLayout;
 use pasteboard::PhonePasteboard;
 use photos::PhotoPicker;
@@ -104,6 +108,7 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
                         .with_share(root_share)
                         .with_pasteboard(phone_pasteboard())
                         .with_photos(photo_picker())
+                        .with_files(file_picker())
                 })
             });
             if let Err(err) = opened {
@@ -216,6 +221,18 @@ fn photo_picker() -> Arc<dyn PhotoPicker> {
 #[cfg(not(target_os = "ios"))]
 fn photo_picker() -> Arc<dyn PhotoPicker> {
     Arc::new(photos::LoggingPhotos)
+}
+
+/// The phone's file picker on iOS: `UIDocumentPickerViewController`.
+#[cfg(target_os = "ios")]
+fn file_picker() -> Arc<dyn FilePicker> {
+    Arc::new(files_ios::IosFilePicker)
+}
+
+/// No file picker off iOS: Files only logs.
+#[cfg(not(target_os = "ios"))]
+fn file_picker() -> Arc<dyn FilePicker> {
+    Arc::new(files_picker::LoggingFiles)
 }
 
 /// Launched with [`share_ios::SHARE_SELFTEST_ARG`], presents the share sheet

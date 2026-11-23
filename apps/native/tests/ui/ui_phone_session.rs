@@ -25,6 +25,7 @@ use rustling_tulip_native::chat::{self, RowShape};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
+use rustling_tulip_native::phone::files_picker::FakeFilePicker;
 use rustling_tulip_native::phone::pasteboard::FakePasteboard;
 use rustling_tulip_native::phone::photos::FakePhotoPicker;
 use rustling_tulip_native::phone::quick_replies::{ReplyGroup, ReplySet};
@@ -1371,6 +1372,21 @@ fn fake_photos(
     picker
 }
 
+/// Gives the phone a [`FakeFilePicker`] whose every pick answers `answer`,
+/// and hands back the spec's handle on it.
+fn fake_files(h: &mut Harness<'_>, answer: Option<(String, Vec<u8>)>) -> Arc<FakeFilePicker> {
+    let picker = Arc::new(FakeFilePicker::answering(answer));
+    let given = picker.clone();
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.update(cx, |phone, _| phone.set_files(given));
+    });
+    picker
+}
+
 /// An `UploadFile` the phone sent: its request id, session, name and bytes.
 #[derive(Debug)]
 struct Upload {
@@ -1475,30 +1491,56 @@ fn paste_never_reads_the_image_on_a_host_without_upload_file(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn photos_is_drawn_only_when_the_host_takes_uploads(cx: &mut TestAppContext) {
+fn attach_opens_a_sheet_with_photos_and_files(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    assert!(
+        drawn(&mut h, "phone-composer-photos"),
+        "a host that takes uploads draws the Attach button"
+    );
+    assert!(
+        !drawn(&mut h, "phone-attach-photos"),
+        "the Attach sheet starts closed"
+    );
+
+    h.click_on("phone-composer-photos");
+
+    assert!(
+        drawn(&mut h, "phone-attach-photos"),
+        "the sheet offers Photos"
+    );
+    assert!(
+        drawn(&mut h, "phone-attach-files"),
+        "the sheet offers Files"
+    );
+}
+
+#[gpui::test]
+fn attach_hides_without_upload_file(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[]);
     assert!(
         !drawn(&mut h, "phone-composer-photos"),
-        "a host without upload_file draws no Photos"
+        "a host without upload_file draws no Attach"
     );
 
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     assert!(
         drawn(&mut h, "phone-composer-photos"),
-        "a host listing upload_file draws Photos"
+        "a host listing upload_file draws Attach"
     );
 }
 
 #[gpui::test]
-fn a_picked_photo_uploads_and_inserts_its_path(cx: &mut TestAppContext) {
+fn attach_photos_runs_the_photo_flow(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
     let jpeg = vec![0xFF, 0xD8, 0xFF, 4, 5, 6];
     let picker = fake_photos(&mut h, Some((jpeg.clone(), ImageFormat::Jpeg)));
 
     h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-photos");
 
     assert_eq!(picker.picks(), 1, "the tap opens the picker");
     let [upload]: [Upload; 1] = uploads(&mut h).try_into().expect("exactly one upload");
@@ -1531,8 +1573,43 @@ fn a_cancelled_pick_sends_nothing(cx: &mut TestAppContext) {
     let picker = fake_photos(&mut h, None);
 
     h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-photos");
 
     assert_eq!(picker.picks(), 1, "the tap opens the picker");
+    assert!(uploads(&mut h).is_empty(), "a cancelled pick sends nothing");
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+}
+
+#[gpui::test]
+fn attach_files_uploads_the_picked_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let picker = fake_files(&mut h, Some(("notes.pdf".to_owned(), b"%PDF".to_vec())));
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-files");
+
+    assert_eq!(picker.picks(), 1, "the row opens the picker");
+    let [upload]: [Upload; 1] = uploads(&mut h).try_into().expect("exactly one upload");
+    assert_eq!(upload.session_id, "a");
+    assert_eq!(upload.name, "notes.pdf", "the picked file keeps its name");
+    assert_eq!(upload.bytes, b"%PDF", "the picked bytes go up");
+    assert!(
+        !drawn(&mut h, "phone-attach-files"),
+        "the sheet closes on its row's tap"
+    );
+}
+
+#[gpui::test]
+fn attach_files_cancel_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_loaded_on(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    let picker = fake_files(&mut h, None);
+
+    h.click_on("phone-composer-photos");
+    h.click_on("phone-attach-files");
+
+    assert_eq!(picker.picks(), 1, "the row opens the picker");
     assert!(uploads(&mut h).is_empty(), "a cancelled pick sends nothing");
     assert_eq!(composer_text(&mut h).as_deref(), Some(""));
 }
@@ -3076,7 +3153,7 @@ fn the_composer_row_keeps_hide_inside_it_with_the_keyboard_up(cx: &mut TestAppCo
 
     assert!(
         drawn(&mut h, "phone-composer-photos"),
-        "a host that takes uploads adds Photos, so the row holds five"
+        "a host that takes uploads adds Attach, so the row holds five"
     );
     let row = h.bounds("phone-composer-buttons");
     let hide = h.bounds("phone-composer-hide");
@@ -3127,7 +3204,7 @@ fn the_composer_row_fits_its_labels_at_402(cx: &mut TestAppContext) {
 
     for (id, label) in [
         ("paste", "Paste"),
-        ("photos", "Photos"),
+        ("photos", "Attach"),
         ("quick", "Quick"),
         ("keys", "Keys"),
         ("hide", "Hide"),

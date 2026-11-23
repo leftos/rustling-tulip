@@ -5271,6 +5271,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "objc2-uniform-type-identifiers",
 ]
 
 [[package]]
@@ -6936,6 +6937,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-photos-ui",
  "objc2-ui-kit",
+ "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
  "png 0.18.1",
  "protocol",

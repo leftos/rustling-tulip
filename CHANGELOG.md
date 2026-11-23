@@ -20,6 +20,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, Settings › Notifications sets how long a Finished alert waits after a session goes idle, as the desktop's setting does.
 - On the phone, an image in the viewer zooms with a pinch, pans with one finger while zoomed, and a double tap switches between fit and twice the size.
 
+- On the phone, the Chat box's Attach button offers Photos and Files, and a picked file goes up into the message like a pasted image.
+
 ### Fixed
 
 - A question or permission a subagent raised no longer leaves its session waiting on you after that subagent stops.
