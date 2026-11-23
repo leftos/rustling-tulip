@@ -29,6 +29,8 @@ const OPEN_LABEL: &str = "Settings";
 pub(super) const BACK_LABEL: &str = "Back";
 /// What the Notifications page says while no host draws a switch.
 const NO_NOTIFICATIONS_TEXT: &str = "No host offers notifications yet.";
+/// The Notifications page's heading over the Finished grace row.
+const FINISHED_GRACE_LABEL: &str = "Finished alerts wait";
 /// The mark at a category row's right end.
 pub(super) const CHEVRON: &str = "›";
 /// The Appearance page's heading over the theme list.
@@ -375,6 +377,65 @@ impl PhoneRoot {
             .p(px(SIDE_PADDING))
             .children(lines)
             .children(empty)
+            .child(self.finished_grace_section(t, cx))
+    }
+
+    /// The Finished grace row: one button per hold a Finished alert waits,
+    /// the one chosen filled; a tap chooses it.
+    fn finished_grace_section(&self, t: &UiTheme, cx: &mut Context<Self>) -> Div {
+        let chosen = self
+            .root
+            .read(cx)
+            .sidebar
+            .ui_state()
+            .notifications
+            .finished_grace_secs;
+        let choices = crate::sidebar::FINISHED_GRACE_CHOICES.map(|secs| {
+            let text = match secs {
+                0 => "None",
+                2 => "2 s",
+                5 => "5 s",
+                10 => "10 s",
+                _ => "20 s",
+            };
+            let kind = if secs == chosen {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Outlined
+            };
+            phone_button(&format!("phone-settings-finished-grace-{secs}"), kind, cx)
+                .min_h(px(TOUCH_TARGET))
+                .flex_none()
+                .child(text)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.pick_finished_grace(secs, cx);
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(section_label(FINISHED_GRACE_LABEL, t, cx))
+            .child(div().flex().flex_wrap().gap(px(8.0)).children(choices))
+    }
+
+    /// Saves `secs` as how long a Finished alert waits, then registers
+    /// again with each host whose switch is on so its daemon holds the new
+    /// grace; the grace already chosen changes nothing.
+    fn pick_finished_grace(&mut self, secs: u32, cx: &mut Context<Self>) {
+        let changed = self.root.update(cx, |root, cx| {
+            let changed = root.sidebar.set_finished_grace(secs);
+            root.push_hosts_mut().set_grace(secs);
+            if changed {
+                root.save_ui();
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            self.reregister_push(cx);
+        }
+        cx.notify();
     }
 
     /// The Appearance page: every theme that loads, the one the phone draws

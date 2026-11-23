@@ -17,6 +17,7 @@ use futures::future::BoxFuture;
 use protocol::{ApnsEnvironment, DaemonMessage, PushRegistration, Secret};
 use push_crypto::InstallKeys;
 
+use crate::sidebar::DEFAULT_FINISHED_GRACE_SECS;
 use crate::target::HostKey;
 
 /// The switch's label.
@@ -661,6 +662,17 @@ impl PushState {
         }]
     }
 
+    /// A setting the registration carries changed: a switch that is on with
+    /// nothing out takes a registration out again, its fresh request id
+    /// given; any other switch takes none.
+    fn reregister(&mut self) -> Option<String> {
+        if self.status != Status::On || self.busy() {
+            return None;
+        }
+        self.status = Status::Registering;
+        Some(self.issue(Request::Register))
+    }
+
     /// A registration out.
     fn register(&mut self) -> Vec<Effect> {
         self.status = Status::Registering;
@@ -724,6 +736,9 @@ pub struct PushHosts {
     /// switch reuses none.
     spent: HashMap<HostKey, u64>,
     current: Option<String>,
+    /// This phone's Finished grace in seconds, once set; until then the
+    /// default.
+    grace: Option<u32>,
     outbox: Vec<(HostKey, Effect)>,
 }
 
@@ -851,26 +866,64 @@ impl PushHosts {
     /// Folds a daemon message from `host`: a `PushStatus` that answers the
     /// switch's request out (a refusal comes through [`Self::on_refused`]).
     /// Whether the switch changed.
+    ///
+    /// The answer to an open's status request that holds this phone's token
+    /// with another Finished grace (none reads as the default) registers
+    /// again, so the daemon holds the phone's grace; a register or re-check
+    /// answer never does, so a daemon that keeps no grace cannot loop.
     pub fn on_message(&mut self, host: &HostKey, msg: &DaemonMessage) -> bool {
         let DaemonMessage::PushStatus {
             device_token,
+            finished_grace_secs,
             request_id,
             ..
         } = msg
         else {
             return false;
         };
+        let grace = self.grace();
         let Some(state) = self.hosts.get_mut(host) else {
             return false;
         };
+        let asked_status = matches!(state.pending, Some((_, Request::Status)));
         let token = device_token.as_ref().map(|token| token.0.as_str());
         let current = self.current.as_deref();
-        let Some(effects) = state.status_reply(request_id.as_deref(), token, current) else {
+        let Some(mut effects) = state.status_reply(request_id.as_deref(), token, current) else {
             return false;
         };
+        let held = finished_grace_secs.unwrap_or(DEFAULT_FINISHED_GRACE_SECS);
+        if asked_status && token.is_some() && token == current && held != grace {
+            effects.extend(state.register());
+        }
         self.outbox
             .extend(effects.into_iter().map(|effect| (host.clone(), effect)));
         true
+    }
+
+    /// A setting the registration carries changed: each host whose switch is
+    /// on with nothing out takes a registration out again, and each gives its
+    /// fresh request id. None does while this phone's device token is not
+    /// known, since the registration must carry it.
+    pub fn reregister_on(&mut self) -> Vec<(HostKey, String)> {
+        if self.current.is_none() {
+            return Vec::new();
+        }
+        self.hosts
+            .iter_mut()
+            .filter_map(|(host, state)| state.reregister().map(|id| (host.clone(), id)))
+            .collect()
+    }
+
+    /// This phone's Finished grace in seconds, the default until set.
+    #[must_use]
+    pub fn grace(&self) -> u32 {
+        self.grace.unwrap_or(DEFAULT_FINISHED_GRACE_SECS)
+    }
+
+    /// This phone's Finished grace is `secs`, which the next open's status
+    /// answer compares against.
+    pub fn set_grace(&mut self, secs: u32) {
+        self.grace = Some(secs);
     }
 
     /// The effects queued since the last call, in order.

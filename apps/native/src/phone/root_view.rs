@@ -231,6 +231,10 @@ impl PhoneRoot {
         cx: &mut Context<Self>,
     ) -> Self {
         let root_changed = cx.observe(&root, |this, root, cx| this.on_root_changed(&root, cx));
+        root.update(cx, |root, _| {
+            let grace = root.sidebar.ui_state().notifications.finished_grace_secs;
+            root.push_hosts_mut().set_grace(grace);
+        });
         if platform.supported() {
             Self::learn_token(&platform, cx);
         }
@@ -1511,6 +1515,7 @@ impl PhoneRoot {
         match registration {
             Ok((token, registration)) => self.root.update(cx, |root, cx| {
                 root.push_hosts_mut().set_current(&token);
+                let grace = root.sidebar.ui_state().notifications.finished_grace_secs;
                 root.send_to(
                     host,
                     ClientMessage::RegisterPush {
@@ -1518,7 +1523,7 @@ impl PhoneRoot {
                         needs_you: true,
                         finished: true,
                         hold_at_desk: true,
-                        finished_grace_secs: None,
+                        finished_grace_secs: Some(grace),
                         request_id,
                     },
                 );
@@ -1532,6 +1537,25 @@ impl PhoneRoot {
                     }
                 });
             }
+        }
+    }
+
+    /// The Finished grace changed: each host whose switch is on registers
+    /// again with this phone's current device token, so its daemon holds
+    /// Finished pushes for the new grace. A host that is off is not touched.
+    pub(super) fn reregister_push(&mut self, cx: &mut Context<Self>) {
+        let (token, hosts) = self.root.update(cx, |root, _| {
+            let push = root.push_hosts_mut();
+            (
+                push.current_token().map(str::to_owned),
+                push.reregister_on(),
+            )
+        });
+        let Some(token) = token else {
+            return;
+        };
+        for (host, request_id) in hosts {
+            self.send_registration(&host, request_id, Ok(token.clone()), cx);
         }
     }
 

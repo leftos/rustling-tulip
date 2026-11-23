@@ -145,6 +145,12 @@ fn closed(target: Target) -> Connection {
 /// The daemon's `PushStatus` holding `token` for this phone, answering
 /// `request_id`.
 fn status(token: Option<&str>, request_id: &str) -> DaemonMessage {
+    status_holding(token, request_id, None)
+}
+
+/// The daemon's `PushStatus` holding `token` and the Finished grace
+/// `grace` for this phone, answering `request_id`.
+fn status_holding(token: Option<&str>, request_id: &str, grace: Option<u32>) -> DaemonMessage {
     DaemonMessage::PushStatus {
         vapid_public_key: "vapid".to_owned(),
         endpoint: None,
@@ -152,9 +158,23 @@ fn status(token: Option<&str>, request_id: &str) -> DaemonMessage {
         needs_you: true,
         finished: true,
         hold_at_desk: true,
-        finished_grace_secs: None,
+        finished_grace_secs: grace,
         request_id: Some(request_id.to_owned()),
     }
+}
+
+/// A phone like [`phone`]'s whose saved Finished grace is `secs`.
+fn phone_with_grace<'a>(cx: &'a mut TestAppContext, dir: &TestDir, secs: u32) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({
+            "saved_hosts": [{ "name": REMOTE, "port": 8787 }],
+            "notifications": { "finished_grace_secs": secs },
+        }),
+    );
+    let h = Harness::phone_with(cx, dir, Arc::new(FakePushPlatform::default()));
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    h
 }
 
 /// Each `RegisterPush` in `sent`: its registration, its three switches and
@@ -174,6 +194,19 @@ fn registers(sent: Vec<ClientMessage>) -> Vec<(PushRegistration, [bool; 3], Stri
                 [needs_you, finished, hold_at_desk],
                 request_id,
             )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `finished_grace_secs` of each `RegisterPush` in `sent`.
+fn graces(sent: Vec<ClientMessage>) -> Vec<Option<u32>> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RegisterPush {
+                finished_grace_secs,
+                ..
+            } => Some(finished_grace_secs),
             _ => None,
         })
         .collect()
@@ -818,6 +851,124 @@ fn two_hosts_at_push_1_stay_apart(cx: &mut TestAppContext) {
     assert!(
         drawn(&mut h, &format!("phone-host-push-{OTHER_HOST}-empty")),
         "the other host's switch waits for its own reply"
+    );
+}
+
+#[gpui::test]
+fn a_registration_carries_the_default_finished_grace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+    let asked = open_with_relay_push(&mut h);
+    h.host(&saved_remote()).send(status(None, &asked));
+    open_notifications(&mut h);
+
+    h.click_on(&switch());
+
+    assert_eq!(
+        graces(h.host(&saved_remote()).sent()),
+        vec![Some(5)],
+        "a phone that never chose a grace sends the default 5 s"
+    );
+}
+
+#[gpui::test]
+fn choosing_a_finished_grace_saves_it_and_reregisters_the_hosts_on(cx: &mut TestAppContext) {
+    const OTHER_HOST: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "name": OTHER_HOST, "port": 8787 },
+            ]
+        }),
+    );
+    let mut h = Harness::phone_with(cx, &dir, Arc::new(FakePushPlatform::default()));
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    h.tokens().set(OTHER_HOST, "t2").expect("seed a token");
+    let other = Target::tailnet(OTHER_HOST, Some(8787));
+    let mine = open_with_relay_push(&mut h);
+    let theirs = open_target_with_relay_push(&mut h, &other);
+    h.host(&saved_remote())
+        .send(status(Some(FakePushPlatform::TOKEN), &mine));
+    h.host(&other).send(status(None, &theirs));
+    open_notifications(&mut h);
+    assert!(drawn(&mut h, &format!("{}-tick", switch())), "on");
+    assert!(
+        drawn(&mut h, &format!("phone-host-push-{OTHER_HOST}-empty")),
+        "the other host is off"
+    );
+    assert_eq!(registers(h.host(&saved_remote()).sent()), Vec::new());
+
+    h.click_on("phone-settings-finished-grace-20");
+
+    assert_eq!(
+        support::saved_ui(&dir)["notifications"]["finished_grace_secs"],
+        json!(20),
+        "the choice is saved"
+    );
+    let sent = h.host(&saved_remote()).sent();
+    let [(registration, switches, _)] = registers(sent.clone()).try_into().unwrap_or_else(|sent| {
+        panic!("one RegisterPush to the host that is on: {sent:?}");
+    });
+    assert_eq!(registration, fake_registration(), "with this phone's token");
+    assert_eq!(switches, [true, true, true]);
+    assert_eq!(graces(sent), vec![Some(20)], "carrying the new grace");
+    assert_eq!(
+        registers(h.host(&other).sent()),
+        Vec::new(),
+        "a host that is off is not registered"
+    );
+}
+
+#[gpui::test]
+fn a_host_holding_another_grace_is_registered_again_on_its_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_grace(cx, &dir, 20);
+    let asked = open_with_relay_push(&mut h);
+
+    h.host(&saved_remote()).send(status_holding(
+        Some(FakePushPlatform::TOKEN),
+        &asked,
+        Some(5),
+    ));
+
+    assert_eq!(
+        graces(h.host(&saved_remote()).sent()),
+        vec![Some(20)],
+        "the host learns the phone's grace"
+    );
+}
+
+#[gpui::test]
+fn a_host_holding_the_same_grace_is_left_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_grace(cx, &dir, 20);
+    let asked = open_with_relay_push(&mut h);
+
+    h.host(&saved_remote()).send(status_holding(
+        Some(FakePushPlatform::TOKEN),
+        &asked,
+        Some(20),
+    ));
+
+    assert_eq!(registers(h.host(&saved_remote()).sent()), Vec::new());
+}
+
+#[gpui::test]
+fn a_host_answering_no_grace_is_left_alone_at_the_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone_with_grace(cx, &dir, 5);
+    let asked = open_with_relay_push(&mut h);
+
+    h.host(&saved_remote())
+        .send(status_holding(Some(FakePushPlatform::TOKEN), &asked, None));
+
+    assert_eq!(
+        registers(h.host(&saved_remote()).sent()),
+        Vec::new(),
+        "no grace reads as the default 5 s"
     );
 }
 
