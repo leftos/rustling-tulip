@@ -19,7 +19,7 @@ workspace = true
 [dependencies]
 rustling-tulip-native = { path = "../native" }
 
-gpui = { git = "https://github.com/leftos/zed", rev = "ce7d714c7f23fb78549f4ff759cfbde21e826cb5" }
+gpui = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-gpui_ios = { git = "https://github.com/leftos/zed", rev = "ce7d714c7f23fb78549f4ff759cfbde21e826cb5" }
+gpui_ios = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989" }

@@ -12,6 +12,7 @@ mod home_view;
 mod hosts_view;
 #[cfg(target_os = "ios")]
 mod idiom_ios;
+mod image_zoom;
 mod key_bar;
 pub mod key_grid;
 #[cfg(target_os = "ios")]

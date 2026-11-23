@@ -63,9 +63,9 @@ chrono = { workspace = true }
 # dependencies are target-gated in its own manifest.
 rustling-tulip-ios-notify = { path = "../ios-notify" }
 
-gpui = { git = "https://github.com/leftos/zed", rev = "ce7d714c7f23fb78549f4ff759cfbde21e826cb5" }
+gpui = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989" }
 # gpui 0.2.2 turned these on by default; without `font-kit` macOS draws no text.
-gpui_platform = { git = "https://github.com/leftos/zed", rev = "ce7d714c7f23fb78549f4ff759cfbde21e826cb5", features = [
+gpui_platform = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989", features = [
     "font-kit",
     "wayland",
     "x11",
@@ -118,6 +118,15 @@ interprocess = { version = "2", features = ["tokio"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 # Pasting a copied bitmap into a remote session sends it as a PNG.
 png = "0.18"
+# The image page's zoom: the copy's own pixel size, read from its header
+# alone (`image::image_dimensions`), for the five formats the viewer shows.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+] }
 # The in-process SSH transport (`src/ssh_inproc.rs`): the session, the phone's
 # ed25519 key (made with `rand`), and its error type.
 russh = { workspace = true }
@@ -313,7 +322,7 @@ agent-api = { workspace = true, features = ["test-support"] }
 agent-registry = { workspace = true, features = ["test-support"] }
 # The live tier's isolated daemon, which `tests/support/live.rs` wraps.
 dev-daemon = { workspace = true }
-gpui = { git = "https://github.com/leftos/zed", rev = "ce7d714c7f23fb78549f4ff759cfbde21e826cb5", features = ["test-support"] }
+gpui = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989", features = ["test-support"] }
 png = "0.18"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.
 tokio = { workspace = true, features = ["test-util"] }

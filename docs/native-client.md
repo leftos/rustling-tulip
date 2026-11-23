@@ -1253,7 +1253,7 @@ A file whose name has an image extension (`viewer_text::is_image_path`: png, jpg
 
 A file the text view cannot show (binary, not decodable or over 2 MiB) draws the card in place of the viewer's banner: the file name, its size and "This file can't be shown here." The header's Share button (`phone-viewer-share`, right of the name, host and path, labelled `SHARE_LABEL`) hands the open copy, stale or not, to the `ShareSheet` seam in `phone/share.rs` (`PhoneRoot::with_share` and `set_share`): on iOS `share_ios.rs` presents a `UIActivityViewController` for the copy's file URL, as a popover anchored at the top right of the presenting view on an iPad, and elsewhere `LoggingShare` only logs "phone: no share sheet on this platform" with the path, while `FakeShareSheet` records the request for the UI specs.
 
-Pinch to zoom is not part of the page yet.
+An image zooms with a pinch about the fingers, from fit to five times, pans with one finger while zoomed, and a double tap switches between fit and twice the size; text and Markdown pages do not zoom.
 
 The host browser (`phone/browser.rs` the state, `phone/browser_view.rs` the page, held as `PhoneRoot`'s browser) draws over whatever page is showing, as the viewer does, and opening it closes the viewer. `PhoneRoot::open_browser(host, path, cx)` opens it, as a tapped folder does and specs do, which read it through `browser_path`, `browser_rows` and `browser_error`. The header has Back, the host label, the folder's path and a "Show hidden" toggle, off on every open and not saved.
 

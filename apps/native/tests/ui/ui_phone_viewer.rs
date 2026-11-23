@@ -10,7 +10,11 @@ use crate::support;
 
 use base64::Engine as _;
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{BackGesturePhase, Entity, RetainAllImageCache, TestAppContext, point, px};
+use gpui::{
+    BackGesturePhase, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, PinchEvent, Pixels,
+    Point, RetainAllImageCache, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+    point, px,
+};
 use protocol::{ClientMessage, DaemonMessage, FEATURE_HOST_PATHS, FEATURE_RELAY_PUSH, PathKind};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::phone::PhoneRoot;
@@ -767,6 +771,133 @@ fn a_saved_image_shows_scaled_to_fit(cx: &mut TestAppContext) {
     );
 }
 
+/// A pinch at `at` from the fit size to twice it, as the platform reports
+/// it: its start with no change, the change that doubles it, then the lift.
+fn pinch_zoom(h: &mut Harness<'_>, at: Point<Pixels>) {
+    let steps = [
+        (TouchPhase::Started, 0.0),
+        (TouchPhase::Moved, 1.0),
+        (TouchPhase::Ended, 0.0),
+    ];
+    for (phase, delta) in steps {
+        h.cx.simulate_event(PinchEvent {
+            position: at,
+            delta,
+            modifiers: Modifiers::none(),
+            phase,
+        });
+    }
+    h.cx.run_until_parked();
+}
+
+/// A touch pan at `at` moving what is under it `dx` pixels right.
+fn pan_right(h: &mut Harness<'_>, at: Point<Pixels>, dx: Pixels) {
+    h.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(dx, px(0.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+        source: ScrollSource::Touch,
+    });
+    h.cx.run_until_parked();
+}
+
+/// A double tap at `at`, as the platform reports the second press of it.
+fn double_tap(h: &mut Harness<'_>, at: Point<Pixels>) {
+    h.cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    h.cx.run_until_parked();
+}
+
+/// Whether `a` is `b` at twice its width, to within a pixel.
+fn twice_the_width(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+    ((a.size.width - b.size.width * 2.0) / px(1.0)).abs() <= 1.0
+}
+
+#[gpui::test]
+fn a_pinch_zooms_an_image(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows");
+    let area = h.bounds("phone-viewer-image");
+    let at_fit = h.bounds("phone-viewer-image-zoom");
+
+    pinch_zoom(&mut h, area.center());
+
+    let zoomed = h.bounds("phone-viewer-image-zoom");
+    assert!(drawn(&mut h, "phone-viewer-image-zoom"), "zoomed");
+    assert_eq!(
+        h.bounds("phone-viewer-image"),
+        area,
+        "the area keeps its bounds"
+    );
+    assert!(
+        twice_the_width(zoomed, at_fit),
+        "the picture draws twice its fit width: {zoomed:?} over {at_fit:?}"
+    );
+}
+
+#[gpui::test]
+fn a_drag_pans_a_zoomed_image(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows");
+    let area = h.bounds("phone-viewer-image");
+    let at_fit = h.bounds("phone-viewer-image-zoom");
+
+    pan_right(&mut h, area.center(), px(50.0));
+
+    assert_eq!(
+        h.bounds("phone-viewer-image-zoom"),
+        at_fit,
+        "at the fit size a drag moves nothing"
+    );
+
+    pinch_zoom(&mut h, area.center());
+    let zoomed = h.bounds("phone-viewer-image-zoom");
+    pan_right(&mut h, area.center(), px(50.0));
+    let panned = h.bounds("phone-viewer-image-zoom");
+    let moved = (panned.origin.x - zoomed.origin.x) / px(1.0);
+    let edge = (area.origin.x - zoomed.origin.x) / px(1.0);
+    assert!(
+        (moved - 50.0).abs() <= 1.0 || (moved - edge).abs() <= 1.0,
+        "the image moves 50 px right or to its edge: {panned:?} from {zoomed:?} of {area:?}"
+    );
+}
+
+#[gpui::test]
+fn a_double_tap_toggles_the_zoom(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    save_bytes(&mut h, &copies, "shot.png", TWO_BY_TWO_PNG);
+    assert!(drawn(&mut h, "phone-viewer-image"), "the image shows");
+    let area = h.bounds("phone-viewer-image");
+    let at_fit = h.bounds("phone-viewer-image-zoom");
+
+    double_tap(&mut h, area.center());
+
+    let zoomed = h.bounds("phone-viewer-image-zoom");
+    assert!(
+        twice_the_width(zoomed, at_fit),
+        "a double tap zooms to twice the fit: {zoomed:?} over {at_fit:?}"
+    );
+
+    double_tap(&mut h, area.center());
+
+    let fitted = h.bounds("phone-viewer-image-zoom");
+    assert_eq!(fitted, at_fit, "a second double tap returns to fit");
+}
+
 #[gpui::test]
 fn a_saved_binary_file_shows_a_card_with_its_name_and_size(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -782,6 +913,31 @@ fn a_saved_binary_file_shows_a_card_with_its_name_and_size(cx: &mut TestAppConte
     assert!(
         !drawn(&mut h, "viewer-phone-viewer"),
         "the text body does not"
+    );
+}
+
+#[gpui::test]
+fn a_broken_image_card_does_not_zoom(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+
+    save_bytes(&mut h, &copies, "broken.png", b"not an image\n");
+
+    assert!(drawn(&mut h, "phone-viewer-card"), "the card stands in");
+    let card = h.bounds("phone-viewer-card");
+    let area = h.bounds("phone-viewer-image");
+
+    double_tap(&mut h, point(area.origin.x + px(40.0), area.center().y));
+
+    assert_eq!(
+        h.bounds("phone-viewer-card"),
+        card,
+        "a card does not zoom or move"
+    );
+    assert!(
+        !drawn(&mut h, "phone-viewer-image-zoom"),
+        "and it has no zoom box"
     );
 }
 

@@ -18,6 +18,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - In Chat, Rewind's card lists the messages you can go back to, then its restore choices, each answered from the card; restoring or summarizing asks for a second click.
 - On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
 - On the phone, Settings › Notifications sets how long a Finished alert waits after a session goes idle, as the desktop's setting does.
+- On the phone, an image in the viewer zooms with a pinch, pans with one finger while zoomed, and a double tap switches between fit and twice the size.
 
 ### Fixed
 
