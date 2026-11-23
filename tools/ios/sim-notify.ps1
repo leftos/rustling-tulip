@@ -1,7 +1,8 @@
 #-------------------------------------------------------------------------------
 # tools/ios/sim-notify.ps1 -- build the phone app with its notification service
-# extension, run it in the iPhone Simulator on the Mac mini builder and check
-# that the system knows the extension and that a push does not crash it.
+# extension, run it in the iPhone Simulator on the Mac mini builder, and prove a
+# push reached the app's notification pipeline. It also reports whether the
+# extension ran, which on `simctl push` it never does, and fails if it crashed.
 #
 # On this PC (no switch) it runs itself with -OnMac as one heavy gate run pinned
 # to the Mac (log .tmp/ios-sim-notify.log), which echoes the files' contents;
@@ -16,12 +17,16 @@
 #   1. saves pluginkit's list of notification service extensions to
 #      .tmp/ios/pluginkit.txt, and fails unless it names the extension;
 #   2. sends a mutable-content push with an `e` key that decrypts to nothing,
-#      waits 10 s, saves the extension's log lines to .tmp/ios/notify-log.txt
+#      waits up to 60 s for the push's delivery lines in the system log, then
+#      saves them and the extension's own log lines to .tmp/ios/notify-log.txt
 #      and any crash report of the extension from this run to
 #      .tmp/ios/notify-crash.txt; it prints whether the simulator accepted the
-#      push, whether the log shows the extension launching and whether a crash
-#      report exists, and fails when the push is refused or the extension
-#      crashed (whether it ran is a measurement only);
+#      push, whether the push reached the app's notifications and whether the
+#      extension ran, and fails when the push is refused, the push never reached
+#      the app or the extension crashed (whether it ran is a measurement only:
+#      `simctl push` delivers a local notification request and runs no
+#      notification service extension -- Xcode 11.4 release notes, known issue
+#      55822721);
 #   3. waits up to 60 s each for the app's "phone: provisional push permission
 #      granted" line and for "phone: the app delegate received a device token"
 #      or "phone: the app delegate failed to register for pushes", which the
@@ -33,8 +38,8 @@
 #
 #   pwsh -NoProfile -File tools/ios/sim-notify.ps1
 #
-# Prints the three measurements, the app's push log lines and the three file
-# paths on success.
+# Prints the measurements, the app's push log lines and the three file paths on
+# success.
 #-------------------------------------------------------------------------------
 [CmdletBinding()]
 param(
@@ -61,6 +66,11 @@ $GrantedLine = 'phone: provisional push permission granted'
 $HookLines = @('phone: the app delegate received a device token', 'phone: the app delegate failed to register for pushes')
 # What NSZombieEnabled writes when a freed object is messaged.
 $ZombieMark = 'message sent to deallocated instance'
+# The two system log lines that show a push reached the app: the one usernotificationsd writes,
+# with CoreSimulatorBridge as its client tag in brackets, forwarding the push as a local
+# addRequest; and SpringBoard's, presenting it.
+$ForwardPattern = 'Forwarding addRequest: ' + [regex]::Escape($BundleId) + '$'
+$PresentPattern = '\[' + [regex]::Escape($BundleId) + '\] willPresentNotification delivery succeeded'
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
 $PluginList = Join-Path $OutDir 'pluginkit.txt'
 $NotifyLog = Join-Path $OutDir 'notify-log.txt'
@@ -165,12 +175,23 @@ function Send-Push([string] $Udid) {
     $script:PushExit = $code
 }
 
-function Save-NotifyLog([string] $Udid) {
-    $predicate = "process == `"$NotifyProcess`" OR eventMessage CONTAINS `"rustling-tulip.phone.notify`""
-    $out = @(& xcrun simctl spawn $Udid log show --last 2m --style compact --predicate $predicate 2>&1 | ForEach-Object { "$_" })
+# Saves the system log's push delivery lines and the extension's own entries from $PushAt on, and
+# reports whether the extension ran. Sets `$script:Delivered` to whether the push reached the app
+# (both delivery lines). The addRequest line is logged at Info level, so `--info` is needed.
+function Save-NotifyLog([string] $Udid, [DateTimeOffset] $PushAt) {
+    $predicate = "process == `"$NotifyProcess`" OR eventMessage CONTAINS `"rustling-tulip.phone.notify`"" +
+    " OR eventMessage CONTAINS `"Forwarding addRequest: $BundleId`"" +
+    " OR (eventMessage CONTAINS `"willPresentNotification delivery succeeded`" AND eventMessage CONTAINS `"[$BundleId]`")"
+    # log(1) takes the zone offset without its colon: it reads '%Y-%m-%d %H:%M:%S%z'.
+    $start = $PushAt.ToString('yyyy-MM-dd HH:mm:ss') + $PushAt.ToString('zzz').Replace(':', '')
+    $out = @(& xcrun simctl spawn $Udid log show --start $start --info --style compact --predicate $predicate 2>&1 |
+        ForEach-Object { "$_" })
     $code = $LASTEXITCODE
     Write-TextFile $NotifyLog $out
     if ($code -ne 0) { throw "log show failed (exit $code); output in $NotifyLog" }
+    $forwarded = @($out -match $ForwardPattern).Count -gt 0
+    $presented = @($out -match $PresentPattern).Count -gt 0
+    $script:Delivered = $forwarded -and $presented
     return (@(Get-ExtensionEntry $out).Count -gt 0)
 }
 
@@ -200,15 +221,32 @@ function Save-CrashList([string] $Udid, [datetime] $Since) {
     return , $found
 }
 
+# Reads the system log every 2 s until both delivery lines are in it, for 30 reads (about 60 s);
+# past them it reads once more and lets the checks that follow report what is missing.
+function Wait-Delivery([string] $Udid, [DateTimeOffset] $PushAt) {
+    for ($read = 0; $read -lt 30; $read++) {
+        $launched = Save-NotifyLog $Udid $PushAt
+        if ($script:Delivered) { return $launched }
+        Start-Sleep -Seconds 2
+    }
+    return (Save-NotifyLog $Udid $PushAt)
+}
+
+# The push must reach the app's notification pipeline, and the extension must not crash.
 function Measure-Push([string] $Udid, [datetime] $Since) {
+    $pushAt = [DateTimeOffset]::Now
     Send-Push $Udid
-    Start-Sleep -Seconds 10
-    $launched = Save-NotifyLog $Udid
+    $launched = Wait-Delivery $Udid $pushAt
     $crashes = Save-CrashList $Udid $Since
     Write-Output "extension process in the log: $(if ($launched) { 'yes' } else { 'no' })"
     Write-Output "crash report: $(if ($crashes.Count -gt 0) { $crashes -join ', ' } else { 'none' })"
     if ($crashes.Count -gt 0) { throw "the extension crashed; reports listed in $NotifyCrash" }
     if ($script:PushExit -ne 0) { throw "the simulator refused the push (exit $($script:PushExit))" }
+    Write-Output "push reached the app's notifications: $(if ($script:Delivered) { 'yes' } else { 'no' })"
+    if ($script:Delivered) {
+        Write-Output 'push delivered as a local addRequest (simctl push runs no service extension; Xcode 11.4 note 55822721)'
+    }
+    if (-not $script:Delivered) { throw "the push never reached the app's notification pipeline; system log in $NotifyLog" }
 }
 
 # The app must hold provisional permission, and UIKit must have called one of the methods the
@@ -288,14 +326,17 @@ function Show-PushLine([string[]] $Logs) {
 }
 
 # The files' contents into the run's log, which comes back whether or not the files do. Of the
-# system log only the extension's own entries are shown: other processes' lines carry words
-# the gate reads as a failure.
+# system log only the push delivery lines and the extension's own entries are shown: other
+# processes' lines carry words the gate reads as a failure.
 function Show-RunFile {
     foreach ($path in @($PluginList, $NotifyLog, $NotifyCrash)) {
         Write-Output "----- $path"
         if (-not (Test-Path -LiteralPath $path)) { Write-Output '(not written)'; continue }
         $lines = @(Get-Content -LiteralPath $path)
         if ($path -eq $NotifyLog) {
+            $delivery = @($lines | Where-Object { $_ -match $ForwardPattern -or $_ -match $PresentPattern })
+            Write-Output "($($delivery.Count) push delivery lines)"
+            $delivery
             $lines = @(Get-ExtensionEntry $lines)
             Write-Output "($($lines.Count) entries from the $NotifyProcess process)"
         }
