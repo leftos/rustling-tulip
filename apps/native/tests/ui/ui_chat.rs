@@ -3093,6 +3093,36 @@ fn a_question_card_shows_the_whole_question_option_descriptions_and_the_header_c
 }
 
 #[gpui::test]
+fn a_preview_question_card_draws_the_focused_preview(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut previewed = prompt("p1", ChatPromptKind::Question, &[(1, "Grid"), (2, "List")]);
+    previewed.cursor = Some(1);
+    previewed.preview = Some(String::new());
+    show(&mut h, previewed.clone());
+    assert!(
+        !painted(&mut h, "chat-card-preview"),
+        "an empty preview draws no block"
+    );
+    let mut plain = previewed.clone();
+    plain.id = "p2".to_owned();
+    plain.preview = None;
+    show(&mut h, plain);
+    assert!(
+        !painted(&mut h, "chat-card-preview"),
+        "a question with no preview draws no block"
+    );
+    let mut drawn = previewed;
+    drawn.id = "p3".to_owned();
+    drawn.preview = Some("+--+\n| A|\n+--+".to_owned());
+    show(&mut h, drawn);
+    assert!(
+        painted(&mut h, "chat-card-preview"),
+        "the focused option's preview is drawn"
+    );
+}
+
+#[gpui::test]
 fn clicking_an_option_row_sends_its_answer(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

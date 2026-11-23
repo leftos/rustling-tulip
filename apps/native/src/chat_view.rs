@@ -4472,6 +4472,15 @@ impl RootView {
                 ghosts: chat.stack.ghosts().len(),
                 text_box: chat.card_box.as_ref().map(|card_box| &card_box.input),
                 links: CardLinks { session_id, route },
+                mono: SharedString::from(
+                    self.sidebar
+                        .ui_state()
+                        .terminal_font
+                        .family
+                        .as_deref()
+                        .unwrap_or(DEFAULT_FAMILY)
+                        .to_owned(),
+                ),
             };
             let id = session_id.to_owned();
             let drawn = prompt.clone();

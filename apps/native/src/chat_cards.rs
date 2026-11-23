@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{AnyElement, App, ClickEvent, Div, Entity, Stateful, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, ClickEvent, Div, Entity, SharedString, Stateful, Window, div, prelude::*, px,
+};
 use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage};
 
 use crate::UI_TEXT_SIZE;
@@ -731,7 +733,8 @@ const ANSWERED_MARK: &str = "✔";
 /// submitted and is still up, the daemon's reason for refusing its last
 /// answer, how many cards wait behind it, and its text box, for a card with
 /// an option that takes typed text, and the session and route its question,
-/// body and option descriptions draw their links for.
+/// body and option descriptions draw their links for, and the terminal font
+/// family its preview block draws in.
 pub struct CardView<'a> {
     pub prompt: &'a ChatPrompt,
     pub agent: &'a str,
@@ -740,6 +743,7 @@ pub struct CardView<'a> {
     pub ghosts: usize,
     pub text_box: Option<&'a Entity<TextInput>>,
     pub(crate) links: CardLinks<'a>,
+    pub(crate) mono: SharedString,
 }
 
 /// The session whose card a link is drawn in, and the route a click on it
@@ -772,7 +776,10 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// shows its label (`chat-card-adjust`) under its rows with Less effort
 /// (`chat-card-adjust-down`) and More effort (`chat-card-adjust-up`); a
 /// refusal shows under the buttons (`chat-card-refusal`); a kind the chat
-/// cannot answer says to open the terminal (`chat-card-terminal`).
+/// cannot answer says to open the terminal (`chat-card-terminal`). A
+/// question whose options carry previews fills its focused option's row and
+/// draws the focused option's preview in a monospace block
+/// (`chat-card-preview`) between its body and its buttons.
 pub fn prompt_card(
     offset: i8,
     shift: i8,
@@ -855,6 +862,7 @@ pub fn prompt_card(
                     .child(view.links.text("chat-card-body-text", &prompt.body, t)),
             )
         })
+        .children(preview_block(offset, view, t))
         .child(actions)
         .children(adjust_row(offset, shift, view, on_press, t))
         .when(view.busy, |card| {
@@ -870,6 +878,40 @@ pub fn prompt_card(
         .children((1..=edges).rev().map(|depth| ghost_edge(depth, t)))
         .child(card)
         .into_any_element()
+}
+
+/// The focused option's preview as a monospace block
+/// (`chat-card-preview`), one line per row and an empty line a space so it
+/// keeps its height; none when the prompt carries no preview, or an empty
+/// one.
+fn preview_block(offset: i8, view: &CardView<'_>, t: &UiTheme) -> Option<AnyElement> {
+    let preview = view
+        .prompt
+        .preview
+        .as_deref()
+        .filter(|text| !text.is_empty())?;
+    Some(
+        div()
+            .driver_id(|| "chat-card-preview".to_owned())
+            .flex()
+            .flex_col()
+            .font_family(view.mono.clone())
+            .font_weight(crate::fonts::mono_weight())
+            .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+            .text_color(gpui::rgb(t.text_2))
+            .p(px(CARD_PAD))
+            .rounded(px(CARD_RADIUS))
+            .border_1()
+            .border_color(gpui::rgb(t.line_strong))
+            .children(preview.lines().map(|line| {
+                div().child(if line.is_empty() {
+                    " ".to_owned()
+                } else {
+                    line.to_owned()
+                })
+            }))
+            .into_any_element(),
+    )
 }
 
 /// A model picker card's adjustable row: its label (`chat-card-adjust`),
@@ -909,6 +951,19 @@ fn option_of<'a>(prompt: &'a ChatPrompt, button: &CardButton) -> Option<&'a Chat
         .find(|option| option.number.to_string() == button.id)
 }
 
+/// Whether `option`'s row is filled: a ticked multi-select option, a model
+/// picker's highlighted model, and the focused option of a question that
+/// carries a preview.
+fn option_filled(prompt: &ChatPrompt, option: &ChatOption) -> bool {
+    if prompt.multi || prompt.kind == ChatPromptKind::ModelPicker {
+        option.selected
+    } else if prompt.preview.is_some() {
+        prompt.cursor == Some(option.number)
+    } else {
+        false
+    }
+}
+
 /// A question card's tabs, each tagged `chat-card-tab-<n>` from 1, the
 /// answered ones ticked; the current tab is drawn as the header chip
 /// (`chat-card-header`). None for another kind or a question without tabs.
@@ -942,11 +997,12 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
     Some(div().flex().flex_wrap().gap(px(CARD_GAP)).children(tabs))
 }
 
-/// One button of a card; a selected multi-select option, and a model
-/// picker's highlighted row (whose model the effort belongs to), is filled.
-/// A button answering an option is a full-width row, the option's
-/// description (`chat-card-option-desc-<n>`) under its label; the option
-/// that takes typed text shares its row with the card's box.
+/// One button of a card; a selected multi-select option, a model picker's
+/// highlighted row (whose model the effort belongs to), and the focused
+/// option of a preview question, is filled. A button answering an option is
+/// a full-width row, the option's description
+/// (`chat-card-option-desc-<n>`) under its label; the option that takes
+/// typed text shares its row with the card's box.
 fn card_button(
     offset: i8,
     shift: i8,
@@ -958,8 +1014,7 @@ fn card_button(
     let (prompt, busy) = (view.prompt, view.busy);
     let selector = format!("chat-card-{}", button.id);
     let choice = option_of(prompt, button);
-    let fills = prompt.multi || prompt.kind == ChatPromptKind::ModelPicker;
-    let selected = fills && choice.is_some_and(|option| option.selected);
+    let selected = choice.is_some_and(|option| option_filled(prompt, option));
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
     let text_box = view
@@ -1265,7 +1320,7 @@ mod tests {
     use super::{
         AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, adjust_buttons,
         allow_once_option, always_allow_option, card_answer_message, card_buttons, deny_option,
-        key_action, option_description_color, tray_option_row,
+        key_action, option_description_color, option_filled, tray_option_row,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
     use crate::dashboard_rows::AskOption;
@@ -1848,6 +1903,68 @@ mod tests {
                 .map(|button| button.label.clone()),
             Some("Submit".to_owned()),
             "the last question submits"
+        );
+    }
+
+    /// The numbers of the options a card fills.
+    fn filled(prompt: &ChatPrompt) -> Vec<u32> {
+        prompt
+            .options
+            .iter()
+            .filter(|option| option_filled(prompt, option))
+            .map(|option| option.number)
+            .collect()
+    }
+
+    #[test]
+    fn a_preview_card_fills_the_focused_option() {
+        let mut previewed = prompt_with(
+            ChatPromptKind::Question,
+            &[(1, "Grid"), (2, "List"), (3, "Stack")],
+        );
+        previewed.preview = Some("x".to_owned());
+        previewed.cursor = Some(2);
+        assert_eq!(
+            filled(&previewed),
+            [2],
+            "the focused option of a preview is filled"
+        );
+
+        let mut empty = previewed.clone();
+        empty.preview = Some(String::new());
+        empty.cursor = Some(1);
+        assert_eq!(
+            filled(&empty),
+            [1],
+            "an empty preview still fills the focused option"
+        );
+
+        let mut plain = prompt_with(ChatPromptKind::Question, &[(1, "Grid"), (2, "List")]);
+        plain.options[0].selected = true;
+        assert!(
+            filled(&plain).is_empty(),
+            "a single-select question without a preview fills nothing"
+        );
+
+        let mut multi = prompt_with(ChatPromptKind::Question, &[(1, "Grid"), (2, "List")]);
+        multi.multi = true;
+        multi.options[0].selected = true;
+        multi.cursor = Some(2);
+        assert_eq!(
+            filled(&multi),
+            [1],
+            "a multi-select fills what is ticked, never the cursor"
+        );
+
+        let mut picker = prompt_with(
+            ChatPromptKind::ModelPicker,
+            &[(1, "Sonnet"), (2, "Opus"), (3, "Haiku")],
+        );
+        picker.options[2].selected = true;
+        assert_eq!(
+            filled(&picker),
+            [3],
+            "a model picker fills its highlighted model"
         );
     }
 
