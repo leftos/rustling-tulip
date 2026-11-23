@@ -357,6 +357,17 @@ impl ChatMirror {
             .map(|identity| (screen.prompt_id.clone(), identity))
     }
 
+    /// Record that the chat answered Rewind's Restore for `session_id`, going
+    /// back to before `message` was sent: once the transcript records the
+    /// rewind, the chat drops the turns after that one. Nothing when the
+    /// session has no mirror.
+    pub fn note_restore(&self, session_id: &str, message: &str) {
+        let mut sessions = lock(&self.inner.sessions);
+        if let Some(mirror) = sessions.get_mut(session_id) {
+            mirror.pending_rewind.note(message.to_owned());
+        }
+    }
+
     /// `connection` no longer loads `session_id`'s chat; the last loader
     /// leaving drops the session's mirror and stops its tail.
     pub fn unload(&self, session_id: &str, connection: u64) {
@@ -488,6 +499,7 @@ impl ChatMirror {
         mirror.conversation = conversation;
         mirror.chat = ChatState::starting_with(head, path.is_some());
         mirror.pending.drop_all();
+        mirror.pending_rewind.clear();
         mirror.summary_sent.clear();
         // The new conversation names its model and effort at its first reply.
         mirror.model = None;
@@ -550,6 +562,7 @@ impl ChatMirror {
             TailEvent::Restarted => {
                 mirror.chat.restart();
                 mirror.pending.drop_all();
+                mirror.pending_rewind.clear();
             }
             TailEvent::CaughtUp => {
                 if mirror.chat.catch_up() {
@@ -1220,6 +1233,55 @@ impl Loader {
     }
 }
 
+/// A Restore the chat answered and the transcript has not confirmed yet: the
+/// message the restore goes back to before, and whether a user prompt arrived
+/// since it was set.
+#[derive(Default)]
+struct PendingRewind {
+    /// The message text the restore's choice screen named.
+    message: Option<String>,
+    /// Whether a user prompt arrived since: the restore's own turn is the
+    /// first, and a second one means the turn between them passed without
+    /// the rewind's record, so the restore never happened.
+    prompted: bool,
+}
+
+impl PendingRewind {
+    /// Record that a Restore the chat answered goes back to before `message`.
+    fn note(&mut self, message: String) {
+        self.message = Some(message);
+        self.prompted = false;
+    }
+
+    /// The pending message, cleared.
+    fn take(&mut self) -> Option<String> {
+        self.prompted = false;
+        self.message.take()
+    }
+
+    /// A user prompt arrived: the first since the pending was set is the
+    /// restore's own turn. The second means that turn ended with no rewind's
+    /// record, so the restore never happened and the pending is dropped.
+    /// Returns whether one was dropped.
+    fn saw_prompt(&mut self) -> bool {
+        if self.message.is_none() {
+            return false;
+        }
+        if self.prompted {
+            self.clear();
+            return true;
+        }
+        self.prompted = true;
+        false
+    }
+
+    /// Forget the pending restore.
+    fn clear(&mut self) {
+        self.message = None;
+        self.prompted = false;
+    }
+}
+
 /// One mirrored session.
 struct SessionMirror {
     plugin: &'static dyn AgentPlugin,
@@ -1237,6 +1299,8 @@ struct SessionMirror {
     /// The messages chat sends typed whose transcript record has not
     /// arrived.
     pending: PendingSends,
+    /// A Restore the chat answered and the transcript has not confirmed yet.
+    pending_rewind: PendingRewind,
     screen: ScreenState,
     live_task: tokio::task::AbortHandle,
     /// The work the session's record holds, as its agent's last `Stop`
@@ -1298,6 +1362,7 @@ impl SessionMirror {
             tail: None,
             chat: ChatState::default(),
             pending: PendingSends::default(),
+            pending_rewind: PendingRewind::default(),
             screen: ScreenState::default(),
             live_task,
             work: BackgroundWork::default(),
@@ -1334,6 +1399,14 @@ impl SessionMirror {
         // Kept while the first read catches up too; sent once it ends.
         let model_moved = self.take_model_facts(facts);
         let mut change = self.chat.apply_line(plugin, line, facts);
+        if facts.rewound {
+            self.apply_rewind(session_id);
+        } else if facts.is_user_prompt && self.pending_rewind.saw_prompt() {
+            debug!(
+                session_id,
+                "chat mirror: no rewind's record came; the pending restore is dropped"
+            );
+        }
         // A line applied while the first read catches up is an old one,
         // which lands no pending entry.
         if !self.chat.catching_up {
@@ -1354,6 +1427,32 @@ impl SessionMirror {
         if model_moved {
             self.update_model(session_id);
         }
+    }
+
+    /// The transcript's record confirmed the pending Restore: drop the turns
+    /// the restore went back past, and send the loaders the chat whole, since
+    /// it is no longer the one they hold. A read still catching up sends it at
+    /// its end, as a restart does.
+    fn apply_rewind(&mut self, session_id: &str) {
+        let Some(message) = self.pending_rewind.take() else {
+            return;
+        };
+        if !self.chat.rewind(&message) {
+            return;
+        }
+        debug!(
+            session_id,
+            message, "chat mirror: the chat goes back to the restored turn"
+        );
+        // The loaders are sent the kept stretch lines again with the whole
+        // chat; the writer keeps the lines it already wrote for them, so only
+        // the stretches a dropped turn touched are asked for again.
+        self.summary_sent.clear();
+        if self.chat.catching_up {
+            return;
+        }
+        self.chat.stale = false;
+        self.reset(session_id);
     }
 
     /// Take the model facts `facts` carries: a main-thread reply names its
@@ -2079,6 +2178,86 @@ impl ChatState {
         self.stale = true;
     }
 
+    /// The transcript's record says the conversation was rewound to before
+    /// `message` was sent: the last turn that message began and every entry
+    /// after it go, except the newest turn's own first entry, which the
+    /// transcript wrote before the record. The state of the dropped turns is
+    /// pruned, and the chat is stale, so its loaders are sent it whole.
+    /// Whether anything went; a chat with no turn start, or a message no turn
+    /// before the newest one began with, changes nothing.
+    fn rewind(&mut self, message: &str) -> bool {
+        let Some(keep) = self.newest_turn() else {
+            debug!(message, "chat mirror: the chat began no turn to keep");
+            return false;
+        };
+        let Some(target) = self.last_turn_of(message, keep) else {
+            debug!(
+                message,
+                "chat mirror: no turn before the newest one names the message"
+            );
+            return false;
+        };
+        self.entries.drain(target..keep);
+        self.prune_turns();
+        self.context = None;
+        self.stale = true;
+        true
+    }
+
+    /// The place of the newest entry that began a turn: the turn the rewind
+    /// keeps. The user usually re-sends the restored message, so the newest
+    /// turn holds the target's own words too.
+    fn newest_turn(&self) -> Option<usize> {
+        (0..self.entries.len())
+            .rev()
+            .find(|&at| entry_id(&self.entries[at]).is_some_and(|id| self.turn_starts.contains(id)))
+    }
+
+    /// The place of the last entry before `keep` that began a turn the
+    /// restored `message` names: the same words, or — when the choice screen
+    /// cut the message with `…` — the same opening, with whitespace counted as
+    /// one space either way.
+    fn last_turn_of(&self, message: &str, keep: usize) -> Option<usize> {
+        let target = message.trim();
+        let cut = target.strip_suffix('…');
+        self.entries[..keep]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(at, entry)| {
+                let id = entry_id(entry)?;
+                let ChatEntry::User { text, .. } = entry else {
+                    return None;
+                };
+                (self.turn_starts.contains(id) && user_turn_matches(text, target, cut))
+                    .then_some(at)
+            })
+    }
+
+    /// Rebuild `index` from the entries left, and keep only what still names
+    /// them or the turn the chat is in: a dropped turn's answers, live
+    /// answers and times go with it.
+    fn prune_turns(&mut self) {
+        self.index = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(at, entry)| Some((entry_id(entry)?.to_owned(), at)))
+            .collect();
+        self.times.retain(|id, _| self.index.contains_key(id));
+        self.turn_starts.retain(|id| self.index.contains_key(id));
+        let turn = self.turn_prompt.clone();
+        self.answered
+            .retain(|prompt, _| Some(prompt) == turn.as_ref());
+        self.ended_prompts
+            .retain(|prompt| Some(prompt) == turn.as_ref());
+        self.live.retain(|live| Some(&live.prompt) == turn.as_ref());
+        self.live_next
+            .retain(|prompt, _| Some(prompt) == turn.as_ref());
+        self.finished.clear();
+        self.changed.clear();
+    }
+
     /// The read being caught up with ended: the held live lines take their
     /// places. Returns whether the loaders must be sent the chat whole, which
     /// then carries every live answer.
@@ -2376,6 +2555,29 @@ impl ChatState {
     }
 }
 
+/// Whether the turn `text` is the one the restored `message` names: the same
+/// words when the screen had room for it all, else the same opening, since the
+/// screen cuts a long message with `…`. Whitespace runs count as one space in
+/// both arms, since the recorded message is the screen's wrapped text while
+/// the turn's is the prompt as typed.
+fn user_turn_matches(text: &str, message: &str, cut: Option<&str>) -> bool {
+    match cut {
+        None => {
+            let whole = collapse_whitespace(message);
+            !whole.is_empty() && collapse_whitespace(text) == whole
+        }
+        Some(opening) => {
+            let opening = collapse_whitespace(opening);
+            !opening.is_empty() && collapse_whitespace(text).starts_with(opening.as_str())
+        }
+    }
+}
+
+/// `text` with each run of whitespace one space, its ends trimmed.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The messages a chat send typed whose transcript record has not arrived,
 /// oldest first, shown as pending user entries after the chat's entries.
 /// They start no stretch: the summary reads only the transcript's entries.
@@ -2576,6 +2778,17 @@ pub(crate) mod test_lines {
         record.to_string()
     }
 
+    /// The `last-prompt` record a Restore writes: the leaf of zeros, no
+    /// prompt text.
+    pub(crate) fn rewound() -> String {
+        json!({
+            "type": "last-prompt",
+            "leafUuid": "00000000-0000-0000-0000-000000000000",
+            "explicit": true,
+        })
+        .to_string()
+    }
+
     /// A `MessageDisplay` hook body: piece `index` of message `message_id` in
     /// the turn of `prompt_id`.
     pub(crate) fn live_body(
@@ -2597,7 +2810,7 @@ pub(crate) mod test_lines {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::test_lines::{answer, prompt, queued, stamp};
+    use super::test_lines::{answer, prompt, queued, rewound, stamp};
     use super::*;
 
     fn claude() -> &'static dyn AgentPlugin {
@@ -3455,5 +3668,284 @@ mod tests {
         chat.merge_live(live("P1", "m1", 0, "on its way"));
         chat.restart();
         assert_eq!(chat.reply(), (vec![cleared], 0));
+    }
+
+    /// A chat of the turns `a`, `b` and `c` and the new turn `new`.
+    fn three_turns() -> ChatState {
+        let mut chat = ChatState::starting_with(None, false);
+        for line in [
+            prompt("u-1", 1, Some("P1"), "a"),
+            answer("m-1", 2, "one"),
+            prompt("u-2", 3, Some("P2"), "b"),
+            answer("m-2", 4, "two"),
+            prompt("u-3", 5, Some("P3"), "c"),
+            answer("m-3", 6, "three"),
+            prompt("u-4", 7, Some("P4"), "new"),
+        ] {
+            apply(&mut chat, &line);
+        }
+        chat
+    }
+
+    #[test]
+    fn a_rewind_drops_the_turns_after_the_restored_message() {
+        let mut chat = three_turns();
+        assert!(chat.rewind("b"));
+        assert_eq!(ids(&chat.entries), ["u-1", "m-1", "u-4"]);
+        assert_eq!(chat.index.len(), 3, "the index follows the entries");
+        assert!(
+            chat.turn_starts.contains("u-4"),
+            "the new turn still begins one"
+        );
+        assert!(!chat.turn_starts.contains("u-2"));
+        assert!(chat.stale, "the loaders are sent the chat whole");
+    }
+
+    #[test]
+    fn a_rewind_of_a_message_sent_twice_drops_from_its_last_turn() {
+        let mut chat = ChatState::starting_with(None, false);
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "a"));
+        apply(&mut chat, &prompt("u-2", 2, Some("P2"), "b"));
+        apply(&mut chat, &prompt("u-3", 3, Some("P3"), "b"));
+        apply(&mut chat, &prompt("u-4", 4, Some("P4"), "new"));
+        assert!(chat.rewind("b"));
+        assert_eq!(ids(&chat.entries), ["u-1", "u-2", "u-4"]);
+    }
+
+    #[test]
+    fn a_rewind_when_the_new_turn_repeats_the_restored_message_drops_the_old_turn() {
+        let mut chat = ChatState::starting_with(None, false);
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "a"));
+        apply(&mut chat, &answer("m-1", 2, "one"));
+        apply(&mut chat, &prompt("u-2", 3, Some("P2"), "b"));
+        apply(&mut chat, &answer("m-2", 4, "two"));
+        apply(&mut chat, &prompt("u-3", 5, Some("P3"), "b"));
+        assert!(chat.rewind("b"), "the re-sent message names the old turn");
+        assert_eq!(ids(&chat.entries), ["u-1", "m-1", "u-3"]);
+    }
+
+    /// A chat of the turn `Plan the release notes for v2 and list every
+    /// change`, the turn `say ok`, and the new turn `new`.
+    fn long_prompt_chat() -> ChatState {
+        let mut chat = ChatState::starting_with(None, false);
+        for line in [
+            prompt(
+                "u-1",
+                1,
+                Some("P1"),
+                "Plan the release notes for v2 and list every change",
+            ),
+            answer("m-1", 2, "one"),
+            prompt("u-2", 3, Some("P2"), "say ok"),
+            answer("m-2", 4, "two"),
+            prompt("u-3", 5, Some("P3"), "new"),
+        ] {
+            apply(&mut chat, &line);
+        }
+        chat
+    }
+
+    #[test]
+    fn a_rewind_matches_a_message_the_screen_cut_short() {
+        let mut chat = long_prompt_chat();
+        assert!(chat.rewind("Plan the release notes for v2 and…"));
+        assert_eq!(ids(&chat.entries), ["u-3"], "the new turn alone stays");
+    }
+
+    #[test]
+    fn a_rewind_matches_across_whitespace_runs() {
+        let mut chat = long_prompt_chat();
+        assert!(
+            chat.rewind("Plan  the release notes  for v2 and…"),
+            "the screen's spaces need not be the turn's"
+        );
+        assert_eq!(ids(&chat.entries), ["u-3"]);
+    }
+
+    #[test]
+    fn a_rewind_with_no_cut_matches_a_multi_line_turn_by_its_words() {
+        let mut chat = ChatState::starting_with(None, false);
+        apply(
+            &mut chat,
+            &prompt("u-1", 1, Some("P1"), "Plan the release\nnotes  for v2"),
+        );
+        apply(&mut chat, &answer("m-1", 2, "one"));
+        apply(&mut chat, &prompt("u-2", 3, Some("P2"), "new"));
+        assert!(
+            chat.rewind("Plan the release notes for v2"),
+            "a pasted message's words are the same however it wraps"
+        );
+        assert_eq!(ids(&chat.entries), ["u-2"]);
+    }
+
+    #[test]
+    fn a_rewind_with_no_cut_matches_the_whole_message_only() {
+        let mut chat = long_prompt_chat();
+        assert!(!chat.rewind("Plan the release"));
+        assert_eq!(
+            ids(&chat.entries),
+            ["u-1", "m-1", "u-2", "m-2", "u-3"],
+            "a cut is what makes a shorter message match"
+        );
+    }
+
+    #[test]
+    fn a_rewind_of_a_message_no_turn_began_with_changes_nothing() {
+        let mut chat = three_turns();
+        assert!(!chat.rewind("nowhere"));
+        assert_eq!(
+            ids(&chat.entries),
+            ["u-1", "m-1", "u-2", "m-2", "u-3", "m-3", "u-4"]
+        );
+        assert!(!chat.stale, "nothing is owed a send");
+    }
+
+    /// A mirror of `s1` with one chat loader, and what the loader is sent.
+    fn loaded_mirror() -> (SessionMirror, mpsc::UnboundedReceiver<DaemonMessage>) {
+        let live_task = tokio::spawn(async {}).abort_handle();
+        let mut mirror = SessionMirror::new("s1", claude(), live_task);
+        let (out, sent) = mpsc::unbounded_channel();
+        mirror.loaders.insert(
+            7,
+            Loader {
+                out,
+                floor: 0,
+                chat: true,
+                summary: false,
+            },
+        );
+        (mirror, sent)
+    }
+
+    /// Apply `line` to `mirror` as its tail would.
+    fn tail(mirror: &mut SessionMirror, line: &str) {
+        let facts = claude().chat_line_facts(line);
+        mirror.apply_line("s1", claude(), line, &facts);
+    }
+
+    /// The entry ids of the last whole chat `sent` holds, `None` when it holds
+    /// none.
+    fn whole_chat(sent: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Option<Vec<String>> {
+        let mut whole = None;
+        while let Ok(msg) = sent.try_recv() {
+            if let DaemonMessage::Chat { entries, .. } = msg {
+                whole = Some(entries);
+            }
+        }
+        whole.map(|entries| {
+            entries
+                .iter()
+                .filter_map(entry_id)
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
+    /// An attachment line that yields no entry, as the transcript writes
+    /// several between a turn's user record and its other records.
+    fn quiet_attachment() -> String {
+        serde_json::json!({
+            "type": "attachment", "uuid": "at-1",
+            "attachment": {"type": "file-history-snapshot"},
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_restores_record_drops_the_turns_the_restore_threw_away() {
+        let (mut mirror, mut sent) = loaded_mirror();
+        for line in [
+            prompt("u-1", 1, Some("P1"), "a"),
+            answer("m-1", 2, "one"),
+            prompt("u-2", 3, Some("P2"), "b"),
+            answer("m-2", 4, "two"),
+            prompt("u-3", 5, Some("P3"), "c"),
+            answer("m-3", 6, "three"),
+        ] {
+            tail(&mut mirror, &line);
+        }
+        mirror.pending_rewind.note("b".to_owned());
+        // The transcript writes the new turn's user record, its attachments,
+        // and then the rewind's record.
+        tail(&mut mirror, &prompt("u-4", 7, Some("P4"), "new"));
+        tail(&mut mirror, &quiet_attachment());
+        tail(&mut mirror, &rewound());
+        assert_eq!(
+            whole_chat(&mut sent),
+            Some(vec!["u-1".to_owned(), "m-1".to_owned(), "u-4".to_owned()]),
+            "the chat goes back to the restored turn, and is sent whole"
+        );
+        assert!(
+            mirror.pending_rewind.message.is_none(),
+            "the record applied it once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restores_record_keeps_the_summary_lines_already_written() {
+        let (mut mirror, _sent) = loaded_mirror();
+        mirror.writer = Some(SummaryWriter {
+            jobs: None,
+            memo: HashMap::from([(
+                "s-1".to_owned(),
+                ("d-1".to_owned(), Some("a line".to_owned())),
+            )]),
+            queued: HashMap::new(),
+            watched: None,
+            run: 0,
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        for line in [
+            prompt("u-1", 1, Some("P1"), "a"),
+            answer("m-1", 2, "one"),
+            prompt("u-2", 3, Some("P2"), "b"),
+            answer("m-2", 4, "two"),
+            prompt("u-3", 5, Some("P3"), "c"),
+            answer("m-3", 6, "three"),
+        ] {
+            tail(&mut mirror, &line);
+        }
+        mirror.pending_rewind.note("b".to_owned());
+        tail(&mut mirror, &prompt("u-4", 7, Some("P4"), "new"));
+        tail(&mut mirror, &quiet_attachment());
+        tail(&mut mirror, &rewound());
+        assert!(
+            mirror
+                .writer
+                .as_ref()
+                .is_some_and(|writer| writer.holds("s-1", "d-1")),
+            "the kept stretches' lines are not asked for again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restores_record_with_no_pending_restore_changes_nothing() {
+        let (mut mirror, mut sent) = loaded_mirror();
+        tail(&mut mirror, &prompt("u-1", 1, Some("P1"), "a"));
+        tail(&mut mirror, &answer("m-1", 2, "one"));
+        tail(&mut mirror, &rewound());
+        assert_eq!(ids(&mirror.chat.entries), ["u-1", "m-1"]);
+        assert!(!mirror.chat.stale);
+        assert_eq!(whole_chat(&mut sent), None, "no whole chat is sent");
+    }
+
+    #[tokio::test]
+    async fn a_second_prompt_with_no_restores_record_drops_the_pending_restore() {
+        let (mut mirror, mut sent) = loaded_mirror();
+        tail(&mut mirror, &prompt("u-1", 1, Some("P1"), "a"));
+        mirror.pending_rewind.note("a".to_owned());
+        tail(&mut mirror, &prompt("u-2", 2, Some("P2"), "new"));
+        assert!(
+            mirror.pending_rewind.message.is_some(),
+            "the restore's own turn keeps the pending"
+        );
+        tail(&mut mirror, &prompt("u-3", 3, Some("P3"), "another"));
+        assert!(
+            mirror.pending_rewind.message.is_none(),
+            "the turn between them passed with no record"
+        );
+        tail(&mut mirror, &rewound());
+        assert_eq!(ids(&mirror.chat.entries), ["u-1", "u-2", "u-3"]);
+        assert_eq!(whole_chat(&mut sent), None, "no whole chat is sent");
     }
 }

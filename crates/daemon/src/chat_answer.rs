@@ -216,6 +216,8 @@ async fn run(
     } else {
         (reading, shown)
     };
+    // Read before the answer, while the screen still shows the choice.
+    let restore = restore_message(&shown, &kind);
     let deny_text = match &kind {
         ChatAnswerKind::DenyWithText { text } => Some(text.as_str()),
         _ => None,
@@ -234,6 +236,9 @@ async fn run(
         progress: &mut *progress,
     };
     answerer.type_recipe(&recipe, reading.chat).await?;
+    if let Some(message) = restore {
+        target.mirror.note_restore(&target.session_id, &message);
+    }
     if let Some(text) = deny_text {
         type_message_under(target, &turn, &mut reader, text, &mut progress.pasted).await?;
         // The next writer starts from the frame the Enter brought.
@@ -356,6 +361,39 @@ fn recipe_refusal(refusal: AnswerRefusal) -> TypeRefusal {
         ),
     };
     TypeRefusal { code, message }
+}
+
+/// The heading a Rewind choice screen's body starts with.
+const RESTORE_HEADING: &str = "Restore to the point before you sent this message:";
+
+/// The message a Restore takes the conversation back to before, when `kind`
+/// answers Rewind's choice screen with one: the screen's first paragraph
+/// names the message after its heading. "Restore code" restores the code and
+/// no conversation, and a Summarize, Never mind or close restores nothing.
+fn restore_message(prompt: &ChatPrompt, kind: &ChatAnswerKind) -> Option<String> {
+    let ChatAnswerKind::Option { number } = kind else {
+        return None;
+    };
+    if prompt.kind != ChatPromptKind::Overlay || prompt.subject != "Rewind" {
+        return None;
+    }
+    let option = prompt
+        .options
+        .iter()
+        .find(|option| option.number == *number)?;
+    let label = option.label.trim();
+    if !label.starts_with("Restore") || label == "Restore code" {
+        return None;
+    }
+    let (heading, quoted) = prompt.body.split_once('\n')?;
+    if heading.trim() != RESTORE_HEADING {
+        return None;
+    }
+    let message = quoted.split("\n\n").next().unwrap_or(quoted);
+    // A wrapped message is joined with single spaces, as the transcript's
+    // turn text reads.
+    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!message.is_empty()).then_some(message)
 }
 
 /// The chat screen `reading` shows, when the plugin could read one: `None`
@@ -572,5 +610,123 @@ impl Answerer<'_> {
                 })
             },
         );
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use super::restore_message;
+    use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind};
+
+    /// The body of the 2.1.330 capture's choice screen for a message with
+    /// code changes: its heading and the quoted message, then the lines that
+    /// follow.
+    const CODE_BODY: &str = "Restore to the point before you sent this message:\n\
+                             WRITEFILE please create cats.md\n\n\
+                             (52s ago)\n\
+                             The conversation goes back to before this message.\n\
+                             The code will be restored -3 in cats.md.";
+    /// The choice screen's options, in order.
+    const CODE_LABELS: [&str; 7] = [
+        "Restore code and conversation",
+        "Restore conversation",
+        "Restore code",
+        "Summarize from here",
+        "Summarize up to here",
+        "Never mind",
+        "Close",
+    ];
+
+    /// A Rewind choice screen's prompt with `body` and `labels`.
+    fn rewind_prompt(body: &str, labels: &[&str]) -> ChatPrompt {
+        ChatPrompt {
+            id: "p-rewind".to_owned(),
+            kind: ChatPromptKind::Overlay,
+            subject: "Rewind".to_owned(),
+            body: body.to_owned(),
+            options: labels
+                .iter()
+                .enumerate()
+                .map(|(at, label)| ChatOption {
+                    number: u32::try_from(at + 1).expect("few options"),
+                    label: (*label).to_owned(),
+                    description: None,
+                    selected: false,
+                })
+                .collect(),
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+            adjust: None,
+            preview: None,
+        }
+    }
+
+    fn option(number: u32) -> ChatAnswerKind {
+        ChatAnswerKind::Option { number }
+    }
+
+    #[test]
+    fn a_restore_of_the_conversation_names_the_message() {
+        let prompt = rewind_prompt(CODE_BODY, &CODE_LABELS);
+        for number in [1, 2] {
+            assert_eq!(
+                restore_message(&prompt, &option(number)).as_deref(),
+                Some("WRITEFILE please create cats.md"),
+                "option {number}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restore_of_the_code_alone_and_the_other_answers_name_nothing() {
+        let prompt = rewind_prompt(CODE_BODY, &CODE_LABELS);
+        for number in 3..=7 {
+            assert_eq!(
+                restore_message(&prompt, &option(number)),
+                None,
+                "option {number}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restored_message_reads_with_single_spaces() {
+        let body = "Restore to the point before you sent this message:\n\
+                    WRITEFILE  please   create cats.md\n\n\
+                    (1m ago)";
+        let prompt = rewind_prompt(body, &CODE_LABELS);
+        assert_eq!(
+            restore_message(&prompt, &option(2)).as_deref(),
+            Some("WRITEFILE please create cats.md")
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_is_no_rewind_choice_names_nothing() {
+        let mut subject = rewind_prompt(CODE_BODY, &CODE_LABELS);
+        subject.subject = "Heads up".to_owned();
+        assert_eq!(restore_message(&subject, &option(1)), None);
+
+        let mut kind = rewind_prompt(CODE_BODY, &CODE_LABELS);
+        kind.kind = ChatPromptKind::Question;
+        assert_eq!(restore_message(&kind, &option(1)), None);
+
+        let body = rewind_prompt("Some other body", &CODE_LABELS);
+        assert_eq!(
+            restore_message(&body, &option(1)),
+            None,
+            "a body without the heading names no message"
+        );
+
+        let prompt = rewind_prompt(CODE_BODY, &CODE_LABELS);
+        assert_eq!(restore_message(&prompt, &ChatAnswerKind::Submit), None);
+        assert_eq!(restore_message(&prompt, &option(0)), None, "no such option");
     }
 }

@@ -129,7 +129,25 @@ pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
         model: reply_model(record),
         effort: reply_effort(record),
         model_switch: model_switch(record),
+        rewound: rewound_marker(record),
     }
+}
+
+/// Whether `record` is Claude Code's record that the conversation was rewound
+/// to an earlier point: a `last-prompt` with an all-zero `leafUuid`, an
+/// `explicit` flag, and no prompt text. The end of a turn writes a
+/// `last-prompt` too, with the turn's real `leafUuid` and its prompt's text,
+/// so it is no rewind.
+fn rewound_marker(record: &Value) -> bool {
+    str_at(record, "type") == Some("last-prompt")
+        && flag(record, "explicit")
+        && str_at(record, "lastPrompt").is_none_or(str::is_empty)
+        && str_at(record, "leafUuid").is_some_and(is_zero_leaf)
+}
+
+/// Whether `leaf` is an id of zeros, as a rewind's record writes its leaf.
+fn is_zero_leaf(leaf: &str) -> bool {
+    !leaf.is_empty() && leaf.chars().all(|c| c == '0' || c == '-')
 }
 
 /// Whether `record` is the session's own reply: the model answered, not a
@@ -1532,7 +1550,59 @@ mod tests {
                 model: None,
                 effort: None,
                 model_switch: None,
+                rewound: false,
             }
+        );
+    }
+
+    /// A `last-prompt` record as the turn's end writes it: the prompt's text
+    /// and the leaf it ended on.
+    fn turn_end_marker(leaf: &str, explicit: bool) -> String {
+        json!({
+            "type": "last-prompt", "lastPrompt": "say ok", "leafUuid": leaf,
+            "explicit": explicit,
+        })
+        .to_string()
+    }
+
+    /// A `last-prompt` record as a rewind writes it: no prompt text, the leaf
+    /// of zeros.
+    fn rewind_marker(explicit: bool) -> String {
+        json!({
+            "type": "last-prompt", "leafUuid": "00000000-0000-0000-0000-000000000000",
+            "explicit": explicit,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_rewinds_record_is_the_zero_leaf_last_prompt_and_adds_no_entry() {
+        let line = rewind_marker(true);
+        assert!(line_facts(&line).rewound, "the rewind's marker");
+        assert!(
+            chat_entries(&line, &|_| None).is_empty(),
+            "a marker is no message"
+        );
+    }
+
+    #[test]
+    fn a_turns_end_is_no_rewind() {
+        assert!(
+            !line_facts(&turn_end_marker(
+                "b63fc354-1a2b-4c3d-8e9f-0123456789ab",
+                true
+            ))
+            .rewound,
+            "the turn's own end names its real leaf"
+        );
+        assert!(!line_facts(&rewind_marker(false)).rewound, "not explicit");
+        assert!(
+            !line_facts(&turn_end_marker(
+                "00000000-0000-0000-0000-000000000000",
+                true
+            ))
+            .rewound,
+            "a turn's end with the prompt's text is no marker"
         );
     }
 

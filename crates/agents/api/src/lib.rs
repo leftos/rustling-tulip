@@ -279,6 +279,10 @@ pub struct TranscriptLineFacts {
     /// A model switch this line records, from the agent's own command output
     /// on the main thread; the model's id comes only with the next reply.
     pub model_switch: Option<ModelSwitch>,
+    /// Whether the line is the agent's own record that the conversation was
+    /// rewound (a Restore) to an earlier point, which drops the turns after
+    /// that point: the chat mirror then goes back to the restored turn.
+    pub rewound: bool,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the
