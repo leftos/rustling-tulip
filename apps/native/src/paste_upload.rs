@@ -32,6 +32,8 @@ const UNSUPPORTED_TITLE: &str =
     "This host can't receive pasted images or files until it is updated";
 /// The toast an image that could not be pasted shows.
 const FAILED_TITLE: &str = "Couldn't paste the image";
+/// The toast a file that could not be sent into a chat shows.
+const FILE_FAILED_TITLE: &str = "Couldn't send the file";
 /// The toast a drop holding folders shows on a remote session.
 const FOLDERS_TITLE: &str = "Folders can't be dropped into a remote session";
 /// The toast a drop holding folders shows on a chat.
@@ -39,11 +41,13 @@ const COMPOSER_FOLDERS_TITLE: &str = "Folders can't be attached";
 /// The toast a dropped file that could not go up shows.
 const DROP_FAILED_TITLE: &str = "Couldn't drop the file";
 
-/// What an upload carries: a pasted image, or a file of a drop.
+/// What an upload carries: a pasted image, a file of a drop, or a file sent
+/// into a chat from memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UploadKind {
     Image,
     Drop,
+    File,
 }
 
 impl UploadKind {
@@ -52,6 +56,24 @@ impl UploadKind {
         match self {
             Self::Image => FAILED_TITLE,
             Self::Drop => DROP_FAILED_TITLE,
+            Self::File => FILE_FAILED_TITLE,
+        }
+    }
+
+    /// What an upload of this kind carries, as its logs name it.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Drop | Self::File => "file",
+        }
+    }
+
+    /// The title and detail of the toast an upload of this kind over the
+    /// cap shows, `name` being the file's.
+    fn too_large_toast(self, name: &str) -> (&'static str, String) {
+        match self {
+            Self::Image => (FAILED_TITLE, too_large_detail()),
+            Self::Drop | Self::File => (self.failed_title(), file_too_large_detail(name)),
         }
     }
 }
@@ -189,7 +211,8 @@ impl RootView {
             return;
         }
         let target = UploadTarget::Pane(slot_id.to_owned());
-        self.upload_image(host, target, session_id, (name, bytes), cx);
+        let payload = (name, bytes, UploadKind::Image);
+        self.upload_bytes(host, target, session_id, payload, cx);
     }
 
     /// Session `session_id`'s chat composer pasted the image `bytes` named
@@ -207,18 +230,38 @@ impl RootView {
             tracing::debug!(session = %session_id, "a chat paste with no loaded chat; not uploaded");
             return;
         };
-        self.upload_image(host, UploadTarget::Composer, session_id, (name, bytes), cx);
+        let payload = (name, bytes, UploadKind::Image);
+        self.upload_bytes(host, UploadTarget::Composer, session_id, payload, cx);
     }
 
-    /// Uploads the image `bytes` named `name`, for `session_id` on `host`,
-    /// its path going to `target`; a host that cannot take it, or an image
-    /// over the cap, shows a toast instead.
-    fn upload_image(
+    /// Session `session_id`'s chat sends the file `bytes` named `name`: it
+    /// goes up to the session's host, This PC included, and its host path is
+    /// inserted in the composer, unless that host cannot take it or it is
+    /// over the cap, which a toast says instead.
+    pub fn on_chat_upload_file(
+        &mut self,
+        session_id: &str,
+        name: &str,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.loaded_chat_host(session_id) else {
+            tracing::debug!(session = %session_id, "a chat upload with no loaded chat; not uploaded");
+            return;
+        };
+        let payload = (name, bytes, UploadKind::File);
+        self.upload_bytes(host, UploadTarget::Composer, session_id, payload, cx);
+    }
+
+    /// Uploads the `bytes` named `name` of `kind`, for `session_id` on
+    /// `host`, its path going to `target`; a host that cannot take it, or an
+    /// upload over the cap, shows a toast instead.
+    fn upload_bytes(
         &mut self,
         host: HostKey,
         target: UploadTarget,
         session_id: &str,
-        (name, bytes): (&str, &[u8]),
+        (name, bytes, kind): (&str, &[u8], UploadKind),
         cx: &mut Context<Self>,
     ) {
         if !self
@@ -233,14 +276,11 @@ impl RootView {
             tracing::info!(
                 ?host,
                 bytes = bytes.len(),
-                "paste upload: the image is over the cap"
+                "paste upload: the {} is over the cap",
+                kind.noun()
             );
-            self.push_toast(
-                ToastKind::Warning,
-                FAILED_TITLE,
-                Some(too_large_detail()),
-                cx,
-            );
+            let (title, detail) = kind.too_large_toast(name);
+            self.push_toast(ToastKind::Warning, title, Some(detail), cx);
             return;
         }
         let request_id = crate::new_request_id();
@@ -250,13 +290,14 @@ impl RootView {
             %name,
             bytes = bytes.len(),
             %request_id,
-            "paste upload: sending the image"
+            "paste upload: sending the {}",
+            kind.noun()
         );
         let pending = PendingUpload {
             host,
             target,
             session_id: session_id.to_owned(),
-            kind: UploadKind::Image,
+            kind,
             remaining: Vec::new(),
             uploaded: Vec::new(),
         };

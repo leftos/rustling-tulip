@@ -28,6 +28,9 @@ use support::{Fixture, Harness, TestDir, pane, remote_pane, session, split, tab}
 /// The title of the toast an upload that fails shows.
 const FAILED_TITLE: &str = "Couldn't paste the image";
 
+/// The title of the toast a file sent into a chat that fails shows.
+const FILE_FAILED_TITLE: &str = "Couldn't send the file";
+
 /// One `UploadFile` the client sent, its bytes decoded.
 #[derive(Debug)]
 struct Upload {
@@ -806,6 +809,113 @@ fn a_local_chat_paste_also_uploads(cx: &mut TestAppContext) {
     assert!(
         !has_input(&sent),
         "nothing is typed into the terminal: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_file_sent_into_the_chat_uploads_and_inserts_its_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = local_chat(cx, &dir);
+    h.root_update(|root, _, cx| {
+        root.on_chat_upload_file("s1", "notes.pdf", b"%PDF-1.7", cx);
+    });
+    let sent = h.sent();
+    let [upload]: [Upload; 1] = uploads_in(&sent).try_into().expect("exactly one upload");
+    assert_eq!(upload.session_id, "s1");
+    assert_eq!(upload.name, "notes.pdf");
+    assert_eq!(upload.bytes, b"%PDF-1.7");
+    assert_eq!(
+        composer_of(&mut h, "s1").as_deref(),
+        Some(""),
+        "nothing is inserted before the daemon answers"
+    );
+
+    h.send(DaemonMessage::FileUploaded {
+        request_id: upload.request_id.clone(),
+        session_id: upload.session_id.clone(),
+        path: "/h/.tmp/rt-uploads/notes.pdf".to_owned(),
+    });
+    assert_eq!(
+        composer_of(&mut h, "s1").as_deref(),
+        Some("/h/.tmp/rt-uploads/notes.pdf "),
+        "the host path and one space are inserted at the caret"
+    );
+}
+
+#[gpui::test]
+fn a_file_over_the_cap_is_refused_naming_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = local_chat(cx, &dir);
+    let bytes = vec![7; UPLOAD_MAX_BYTES + 1];
+    h.root_update(|root, _, cx| {
+        root.on_chat_upload_file("s1", "notes.pdf", &bytes, cx);
+    });
+    let sent = h.sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert!(
+        toasts(&mut h).contains(&(
+            FILE_FAILED_TITLE.to_owned(),
+            Some("notes.pdf is larger than 8 MiB.".to_owned())
+        )),
+        "{:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_host_without_upload_file_refuses_a_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat(cx, &dir, &[]);
+    h.root_update(|root, _, cx| {
+        root.on_chat_upload_file("b1", "notes.pdf", b"%PDF-1.7", cx);
+    });
+    let sent = h.host(&support::saved_remote()).sent();
+    assert!(
+        uploads_in(&sent).is_empty(),
+        "nothing is uploaded: {sent:?}"
+    );
+    assert!(
+        toasts(&mut h).contains(&(UNSUPPORTED_TITLE.to_owned(), None)),
+        "{:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn an_error_reply_to_a_file_upload_names_a_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = local_chat(cx, &dir);
+    h.root_update(|root, _, cx| {
+        root.on_chat_upload_file("s1", "notes.pdf", b"%PDF-1.7", cx);
+    });
+    let sent = h.sent();
+    let [upload]: [Upload; 1] = uploads_in(&sent).try_into().expect("exactly one upload");
+    let message = "the file is larger than the host takes";
+    h.send(DaemonMessage::Error {
+        message: message.to_owned(),
+        request_id: Some(upload.request_id.clone()),
+        code: Some("too_large".to_owned()),
+    });
+    let shown = toasts(&mut h);
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|toast| **toast == (FILE_FAILED_TITLE.to_owned(), Some(message.to_owned())))
+            .count(),
+        1,
+        "{shown:?}"
+    );
+    assert!(
+        !shown.iter().any(|(title, _)| title == "Daemon error"),
+        "no generic toast as well: {shown:?}"
+    );
+    assert_eq!(
+        composer_of(&mut h, "s1").as_deref(),
+        Some(""),
+        "nothing is inserted"
     );
 }
 
