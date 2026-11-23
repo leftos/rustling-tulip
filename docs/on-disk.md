@@ -200,9 +200,9 @@ The push feature keeps its files in a machine-local root beside those, `ProjectD
 
 It holds `vapid.json` (`{"private_key": "<base64url of the 32-byte P-256 scalar>"}`, created on the first push request, not at daemon start, never rotated: deleting the folder is the reset; owner-only on Unix) and `subscriptions.json`, one entry per device, keyed by that device's `devices.json` record id, which push leaves untouched.
 
-An entry is the device's switches beside a flattened, `kind`-tagged channel: `{"kind": "web_push", "endpoint", "p256dh", "auth"}`, `{"kind": "apns", "token", "environment": "production" | "sandbox", "p256dh", "auth"}`, or `{"kind": "fcm", "token", "p256dh", "auth"}`. The switches are `needs_you`, `finished` and `hold_at_desk`, beside `created_at`, when the entry was stored.
+An entry is the device's switches beside a flattened, `kind`-tagged channel: `{"kind": "web_push", "endpoint", "p256dh", "auth"}`, `{"kind": "apns", "token", "environment": "production" | "sandbox", "p256dh", "auth"}`, or `{"kind": "fcm", "token", "p256dh", "auth"}`. The switches are `needs_you`, `finished` and `hold_at_desk`, beside `finished_grace_secs` (optional, seconds the device's Finished push waits, capped at 600 and left out when none is set) and `created_at`, when the entry was stored.
 
-`hold_at_desk` reads true when absent, so an entry written before it existed is held. A `web_push` entry is written exactly as earlier releases wrote it, so their files load unchanged.
+`hold_at_desk` reads true when absent, so an entry written before it existed is held; an entry without `finished_grace_secs` reads as the 5 s default. A `web_push` entry is written exactly as earlier releases wrote it, so their files load unchanged.
 
 `subscriptions.json` is also created on the first push request; every push request sweeps the loaded entries, dropping those of devices that are not unrevoked records in `devices.json` (skipped when `devices.json` is corrupt; log `push: dropped the subscriptions of devices no longer paired`), and blocking, forgetting or re-pairing a device deletes its entry (re-pairing deletes the replaced record's).
 

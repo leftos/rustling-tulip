@@ -1518,6 +1518,7 @@ impl PhoneRoot {
                         needs_you: true,
                         finished: true,
                         hold_at_desk: true,
+                        finished_grace_secs: None,
                         request_id,
                     },
                 );

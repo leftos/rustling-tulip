@@ -44,9 +44,9 @@ const LABEL_MOST: usize = 200;
 /// The declarative Web Push magic number (`"web_push": 8030`).
 const DECLARATIVE_WEB_PUSH: u16 = 8030;
 
-/// How long a Finished push waits for its session to stay finished: the
-/// default of the desktop's Finished grace (`apps/native/src/notify.rs`
-/// `hold_finished`).
+/// How long a Finished push waits for its session to stay finished on a
+/// device whose subscription sets no grace of its own: the default of the
+/// desktop's Finished grace (`apps/native/src/notify.rs` `hold_finished`).
 const FINISHED_GRACE: Duration = Duration::from_secs(5);
 
 /// The first back-off after a push service throttled, failed or could not be
@@ -87,14 +87,15 @@ pub(crate) struct FallbackOutcome {
 
 /// Which stored subscriptions a round collects.
 #[derive(Debug, Clone, Copy)]
-enum Pick {
+enum Pick<'a> {
     /// An alert's round: the subscriptions whose switch for `kind` is on,
-    /// held at the desk while `at_desk`, and only the held ones when
-    /// `only_held`.
+    /// held at the desk while `at_desk`, only the held ones when
+    /// `only_held`, and only those of `devices` when it is set.
     Alert {
         kind: PushKind,
         at_desk: bool,
         only_held: bool,
+        devices: Option<&'a [String]>,
     },
     /// A fallback round: every relay subscription, whatever its switches
     /// and the desk say.
@@ -105,10 +106,10 @@ enum Pick {
     Clear { skip_held: bool },
 }
 
-impl Pick {
-    /// Whether the round pushes to `subscription`; a target the desk holds
-    /// back is counted in `held`.
-    fn takes(self, subscription: &Subscription, held: &mut u32) -> bool {
+impl Pick<'_> {
+    /// Whether the round pushes to `device_id`'s `subscription`; a target
+    /// the desk holds back is counted in `held`.
+    fn takes(self, device_id: &str, subscription: &Subscription, held: &mut u32) -> bool {
         match self {
             Self::Fallback => is_relay(subscription),
             Self::Clear { skip_held } => clear_takes(subscription, skip_held),
@@ -116,7 +117,11 @@ impl Pick {
                 kind,
                 at_desk,
                 only_held,
-            } => alert_takes(subscription, kind, at_desk, only_held, held),
+                devices,
+            } => {
+                devices.is_none_or(|ids| ids.iter().any(|id| id == device_id))
+                    && alert_takes(subscription, kind, at_desk, only_held, held)
+            }
         }
     }
 }
@@ -255,44 +260,80 @@ impl Tracker {
     }
 }
 
-/// When each session's Finished push ends its grace (the phone's counterpart
-/// of the desktop's `fold_state` over its held toasts). A hold is only a
-/// deadline: what goes out is read from the registry when it is due.
+/// When each session's Finished push ends its grace on each device (the
+/// phone's counterpart of the desktop's `fold_state` over its held toasts).
+/// A raised push is held per device by [`Trigger::hold_raised`], each device
+/// waiting its own grace. A hold is only a deadline: what goes out is read
+/// from the registry when it is due.
 #[derive(Debug, Default)]
 struct FinishedHolds {
-    until: HashMap<String, Instant>,
+    /// The Finished pushes raised and not yet held per device: when each
+    /// session's was raised.
+    raised: HashMap<String, Instant>,
+    /// Each session's holds: when each device's grace ends, by device id.
+    until: HashMap<String, HashMap<String, Instant>>,
 }
 
 impl FinishedHolds {
-    /// Hold a session's Finished push until `until`.
-    fn hold(&mut self, session_id: &str, until: Instant) {
-        self.until.insert(session_id.to_owned(), until);
+    /// Note that a session's Finished push was raised `at`, replacing any
+    /// hold it had.
+    fn raise(&mut self, session_id: &str, at: Instant) {
+        self.until.remove(session_id);
+        self.raised.insert(session_id.to_owned(), at);
+    }
+
+    /// Take the raised pushes not yet held per device.
+    fn take_raised(&mut self) -> Vec<(String, Instant)> {
+        self.raised.drain().collect()
+    }
+
+    /// Hold a session's Finished push for `device_id` until `until`.
+    fn hold(&mut self, session_id: &str, device_id: &str, until: Instant) {
+        self.until
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(device_id.to_owned(), until);
     }
 
     /// Take in a session's newer copy: one that left `Idle` or shows
-    /// background work drops its hold.
+    /// background work drops every device's hold.
     fn fold(&mut self, snapshot: &SessionSnapshot) {
         if snapshot.status != SessionStatus::Idle || snapshot.background {
-            self.until.remove(&snapshot.id);
+            self.forget(&snapshot.id);
         }
     }
 
-    /// Forget a removed session's hold.
+    /// Forget a session's holds, raised or held.
     fn forget(&mut self, session_id: &str) {
+        self.raised.remove(session_id);
         self.until.remove(session_id);
     }
 
-    /// When the next hold ends.
+    /// When the next hold ends; a raised push not yet held is due at once.
     fn next_due(&self) -> Option<Instant> {
-        self.until.values().min().copied()
+        self.raised
+            .values()
+            .chain(self.until.values().flat_map(HashMap::values))
+            .min()
+            .copied()
     }
 
-    /// Take the sessions whose holds have ended by `now`, each once.
-    fn due(&mut self, now: Instant) -> Vec<String> {
-        self.until
-            .extract_if(|_, until| *until <= now)
-            .map(|(session_id, _)| session_id)
-            .collect()
+    /// Take the devices whose holds have ended by `now`, by session, each
+    /// once; a session's other devices stay held.
+    fn due(&mut self, now: Instant) -> Vec<(String, Vec<String>)> {
+        let mut due = Vec::new();
+        for (session_id, devices) in &mut self.until {
+            let mut ended: Vec<String> = devices
+                .extract_if(|_, until| *until <= now)
+                .map(|(device_id, _)| device_id)
+                .collect();
+            if !ended.is_empty() {
+                ended.sort();
+                due.push((session_id.clone(), ended));
+            }
+        }
+        self.until.retain(|_, devices| !devices.is_empty());
+        due
     }
 }
 
@@ -638,6 +679,9 @@ pub(crate) struct Alert<'a> {
     /// held Needs you push delivered once the owner left the desk, after the
     /// other targets got it the first time.
     pub only_held: bool,
+    /// The only devices pushed to, by device id: a Finished push's devices
+    /// whose grace has ended. `None` leaves every device in.
+    pub devices: Option<&'a [String]>,
 }
 
 /// A session that was in Needs you and left it: what its clear round needs.
@@ -886,8 +930,9 @@ pub(crate) struct Trigger {
     held: HashSet<String>,
     /// The Finished pushes waiting out their grace.
     finishing: FinishedHolds,
-    /// How long a Finished push waits: [`FINISHED_GRACE`], but for a test's.
-    finished_grace: Duration,
+    /// The Finished grace every device waits in place of its own: `None`,
+    /// but for a test's.
+    finished_grace: Option<Duration>,
 }
 
 impl Trigger {
@@ -901,8 +946,63 @@ impl Trigger {
             failures: HashMap::new(),
             held: HashSet::new(),
             finishing: FinishedHolds::default(),
-            finished_grace: FINISHED_GRACE,
+            finished_grace: None,
         }
+    }
+
+    /// Hold each raised Finished push for every subscription that wants
+    /// Finished, until its raise plus that device's grace
+    /// ([`Trigger::grace_of`]).
+    fn hold_raised(&mut self, stores: Stores<'_>) {
+        let raised = self.finishing.take_raised();
+        if raised.is_empty() {
+            return;
+        }
+        let graces = self.finished_graces(stores);
+        for (session_id, at) in raised {
+            for (device_id, grace) in &graces {
+                self.finishing.hold(&session_id, device_id, at + *grace);
+            }
+        }
+    }
+
+    /// Each paired device whose subscription wants Finished, with its grace,
+    /// read under the locks [`Trigger::collect`] takes. None when the push
+    /// state does not load, since no round could send then either.
+    fn finished_graces(&self, stores: Stores<'_>) -> Vec<(String, Duration)> {
+        let (paired, mut push) = lock_push(stores);
+        let loaded = match push.load(paired.as_ref()) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                tracing::warn!(
+                    err = format!("{err:#}"),
+                    "push: the push state did not load; no Finished push is held"
+                );
+                return Vec::new();
+            }
+        };
+        loaded
+            .subs
+            .iter()
+            .filter(|(id, _)| paired.as_ref().is_none_or(|ids| ids.contains(*id)))
+            .filter(|(_, subscription)| PushKind::Finished.wanted_by(subscription))
+            .map(|(id, subscription)| (id.to_owned(), self.grace_of(subscription)))
+            .collect()
+    }
+
+    /// How long `subscription`'s Finished push waits: the test's override,
+    /// else its own grace (at most
+    /// [`FINISHED_GRACE_MOST_SECS`](crate::push::store::FINISHED_GRACE_MOST_SECS)),
+    /// else [`FINISHED_GRACE`].
+    fn grace_of(&self, subscription: &Subscription) -> Duration {
+        self.finished_grace.unwrap_or_else(|| {
+            subscription
+                .finished_grace_secs
+                .map_or(FINISHED_GRACE, |secs| {
+                    let secs = secs.min(crate::push::store::FINISHED_GRACE_MOST_SECS);
+                    Duration::from_secs(u64::from(secs))
+                })
+        })
     }
 
     /// Push `alert` to every subscribed device whose switch for its kind is
@@ -928,6 +1028,7 @@ impl Trigger {
             kind: alert.kind,
             at_desk: alert.at_desk,
             only_held: alert.only_held,
+            devices: alert.devices,
         };
         let Some(mut round) = self.collect(stores, pick, origin.as_deref(), now) else {
             return Vec::new();
@@ -1058,7 +1159,7 @@ impl Trigger {
     fn collect(
         &mut self,
         stores: Stores<'_>,
-        pick: Pick,
+        pick: Pick<'_>,
         origin: Option<&str>,
         now: DateTime<Utc>,
     ) -> Option<Round> {
@@ -1097,7 +1198,7 @@ impl Trigger {
         };
         let live = Live::of(stored(), &relay_origin);
         for (device_id, subscription) in stored() {
-            if !pick.takes(subscription, &mut held) {
+            if !pick.takes(device_id, subscription, &mut held) {
                 continue;
             }
             match self.target(&signer, device_id, subscription, policy) {
@@ -1483,8 +1584,7 @@ impl Trigger {
         match raised {
             None => Step::Nothing,
             Some(PushKind::Finished) => {
-                let until = Instant::now() + self.finished_grace;
-                self.finishing.hold(&snapshot.id, until);
+                self.finishing.raise(&snapshot.id, Instant::now());
                 Step::Nothing
             }
             Some(PushKind::NeedsYou) => {
@@ -1589,6 +1689,7 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
             return;
         }
         loop {
+            trigger.hold_raised(stores);
             let next_finished = trigger.finishing.next_due();
             // In arm order: an event waiting is folded before a hold it may
             // drop can end.
@@ -1614,6 +1715,7 @@ fn run(mut trigger: Trigger, sources: Sources) -> tokio::task::JoinHandle<()> {
                             waiting: Some(&waiting),
                             at_desk: presence.at_desk(),
                             only_held: false,
+                            devices: None,
                         };
                         deliver_alert(&mut trigger, stores, &remote, alert).await;
                     }
@@ -1662,7 +1764,8 @@ async fn deliver_alert(
     );
 }
 
-/// Deliver the Finished pushes whose grace has ended, each read from the
+/// Hold the Finished pushes raised since the last turn, then deliver those
+/// whose grace has ended, each to the devices it ended for, read from the
 /// registry just before its round: only a session that still exists, reads
 /// `Idle` and shows no background work is sent, with the Needs you count as
 /// it stands then.
@@ -1673,7 +1776,8 @@ async fn deliver_finished(
     presence: &Presence,
     remote: &Arc<dyn Fn() -> RemoteState + Send + Sync>,
 ) {
-    for session_id in trigger.finishing.due(Instant::now()) {
+    trigger.hold_raised(stores);
+    for (session_id, devices) in trigger.finishing.due(Instant::now()) {
         let snapshots = sessions.snapshots();
         let Some(session) = snapshots.iter().find(|seen| {
             seen.id == session_id && seen.status == SessionStatus::Idle && !seen.background
@@ -1687,6 +1791,7 @@ async fn deliver_finished(
             waiting: None,
             at_desk: presence.at_desk(),
             only_held: false,
+            devices: Some(&devices),
         };
         deliver_alert(trigger, stores, remote, alert).await;
     }
@@ -1721,6 +1826,7 @@ async fn deliver_held(
             waiting: Some(&waiting),
             at_desk: false,
             only_held: true,
+            devices: None,
         };
         deliver_alert(trigger, stores, remote, alert).await;
     }
@@ -2054,6 +2160,23 @@ mod tests {
             self.subscribe_holding(device_id, endpoint, needs_you, finished, true);
         }
 
+        /// Set `device_id`'s stored Finished grace.
+        fn set_grace(&self, device_id: &str, secs: Option<u32>) {
+            let devices = lock(&self.devices);
+            let mut push = lock(&self.push);
+            let subs = &mut push
+                .load(unrevoked_ids(&devices).as_ref())
+                .expect("load the push state")
+                .subs;
+            let mut subscription = subs
+                .get(device_id)
+                .expect("the device is subscribed")
+                .clone();
+            subscription.finished_grace_secs = secs;
+            subs.put(device_id, subscription)
+                .expect("store the subscription");
+        }
+
         /// [`Setup::subscribe`] with the at-desk hold switch set.
         fn subscribe_holding(
             &self,
@@ -2147,6 +2270,7 @@ mod tests {
                         needs_you: true,
                         finished: true,
                         hold_at_desk: false,
+                        finished_grace_secs: None,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )
@@ -2169,6 +2293,7 @@ mod tests {
                         needs_you: on,
                         finished: on,
                         hold_at_desk: true,
+                        finished_grace_secs: None,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )
@@ -2247,6 +2372,7 @@ mod tests {
                     needs_you,
                     finished,
                     hold_at_desk,
+                    finished_grace_secs: None,
                     created_at: "2026-11-07T00:00:00Z".to_owned(),
                 },
             )
@@ -2337,6 +2463,7 @@ mod tests {
                     waiting: None,
                     at_desk: false,
                     only_held: false,
+                    devices: None,
                 },
                 Utc::now(),
             )
@@ -2381,6 +2508,7 @@ mod tests {
                     waiting: None,
                     at_desk,
                     only_held: false,
+                    devices: None,
                 },
                 Utc::now(),
             )
@@ -3768,13 +3896,32 @@ mod tests {
         );
     }
 
-    /// A trigger holding `s1`'s Finished, raised by a step over `sessions`.
-    fn holding_finished(sessions: &SessionRegistry) -> Trigger {
+    /// A trigger holding `s1`'s Finished for the setup's subscriptions,
+    /// raised by a step over `sessions` and held per device.
+    fn raise_finished(setup: &Setup, sessions: &SessionRegistry) -> Trigger {
         let mut trigger = trigger();
         trigger.tracker.seed([&status("working")]);
         let (_, idle) = update("idle");
         assert_eq!(trigger.step(idle, sessions), Step::Nothing);
+        trigger.hold_raised(setup.stores());
         trigger
+    }
+
+    /// [`raise_finished`] with one device subscribed to Finished at the
+    /// default grace.
+    fn holding_finished(setup: &Setup, sessions: &SessionRegistry) -> Trigger {
+        let device = setup.pair(1);
+        setup.subscribe(&device, "https://push.example/one", true, true);
+        raise_finished(setup, sessions)
+    }
+
+    /// The sessions `holds` hands back as due at `now`.
+    fn due_sessions(holds: &mut FinishedHolds, now: Instant) -> Vec<String> {
+        holds
+            .due(now)
+            .into_iter()
+            .map(|(session_id, _)| session_id)
+            .collect()
     }
 
     /// An instant past the grace of any hold taken before this call.
@@ -3787,22 +3934,25 @@ mod tests {
         let start = Instant::now();
         let until = start + FINISHED_GRACE;
         let mut holds = FinishedHolds::default();
-        holds.hold("s1", until);
+        holds.hold("s1", "d1", until);
 
         assert_eq!(holds.next_due(), Some(until));
         assert!(
             holds.due(until - Duration::from_millis(1)).is_empty(),
             "due inside its grace"
         );
-        assert_eq!(holds.due(until), vec!["s1".to_owned()]);
+        assert_eq!(
+            holds.due(until),
+            vec![("s1".to_owned(), vec!["d1".to_owned()])]
+        );
         assert!(holds.due(until).is_empty(), "sent once");
         assert_eq!(holds.next_due(), None);
 
         let setup = setup("due-after-grace");
         let sessions = registry(&setup);
-        let mut trigger = holding_finished(&sessions);
+        let mut trigger = holding_finished(&setup, &sessions);
         assert_eq!(
-            trigger.finishing.due(past_the_grace()),
+            due_sessions(&mut trigger.finishing, past_the_grace()),
             vec!["s1".to_owned()],
             "the step holds what it did not raise"
         );
@@ -3812,14 +3962,133 @@ mod tests {
     fn a_held_finished_is_dropped_when_the_session_works_again() {
         let setup = setup("due-works-again");
         let sessions = registry(&setup);
-        let mut trigger = holding_finished(&sessions);
+        let mut trigger = holding_finished(&setup, &sessions);
 
         let (_, working) = update("working");
         assert_eq!(trigger.step(working, &sessions), Step::Nothing);
 
         assert_eq!(
-            trigger.finishing.due(past_the_grace()),
+            due_sessions(&mut trigger.finishing, past_the_grace()),
             Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_grace_device_gets_finished_at_once() {
+        let (setup, device, _url, fake, _server) = one_device("grace-zero", 201).await;
+        setup.set_grace(&device, Some(0));
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        let presence = Presence::default();
+        let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
+        let mut trigger = raise_finished(&setup, &sessions);
+
+        assert!(
+            trigger
+                .finishing
+                .next_due()
+                .is_some_and(|due| due <= Instant::now()),
+            "a zero grace is due at once"
+        );
+        deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
+        assert_eq!(fake.posts(), 1, "the Finished push went without waiting");
+    }
+
+    #[test]
+    fn a_twenty_second_device_waits_its_own_grace() {
+        let setup = setup("grace-twenty");
+        let sessions = registry(&setup);
+        let device = setup.pair(1);
+        setup.subscribe(&device, "https://push.example/one", true, true);
+        setup.set_grace(&device, Some(20));
+        let start = Instant::now();
+        let mut trigger = raise_finished(&setup, &sessions);
+
+        assert!(
+            trigger.finishing.due(start + FINISHED_GRACE).is_empty(),
+            "due at the default grace"
+        );
+        assert_eq!(
+            trigger
+                .finishing
+                .due(Instant::now() + Duration::from_secs(20)),
+            vec![("s1".to_owned(), vec![device])]
+        );
+    }
+
+    #[test]
+    fn a_device_without_a_grace_waits_five_seconds() {
+        let setup = setup("grace-absent");
+        let sessions = registry(&setup);
+        let device = setup.pair(1);
+        setup.subscribe(&device, "https://push.example/one", true, true);
+        let start = Instant::now();
+        let mut trigger = raise_finished(&setup, &sessions);
+
+        assert!(
+            trigger
+                .finishing
+                .due(start + FINISHED_GRACE - Duration::from_millis(1))
+                .is_empty(),
+            "due inside the default grace"
+        );
+        assert_eq!(
+            trigger.finishing.due(Instant::now() + FINISHED_GRACE),
+            vec![("s1".to_owned(), vec![device])]
+        );
+    }
+
+    #[test]
+    fn a_held_finished_per_device_is_dropped_when_the_session_works_again() {
+        let setup = setup("grace-works-again");
+        let sessions = registry(&setup);
+        let device = setup.pair(1);
+        setup.subscribe(&device, "https://push.example/one", true, true);
+        setup.set_grace(&device, Some(20));
+        let mut trigger = raise_finished(&setup, &sessions);
+
+        let (_, working) = update("working");
+        assert_eq!(trigger.step(working, &sessions), Step::Nothing);
+
+        assert!(
+            trigger
+                .finishing
+                .due(Instant::now() + Duration::from_secs(20))
+                .is_empty(),
+            "the device's hold went when the session worked again"
+        );
+        assert_eq!(trigger.finishing.next_due(), None);
+    }
+
+    #[tokio::test]
+    async fn two_devices_get_finished_at_their_own_graces() {
+        let setup = setup("grace-two");
+        let at_once = setup.pair(1);
+        let later = setup.pair(2);
+        let (at_once_url, at_once_fake, _at_once_server) = fake_push_service(201, "").await;
+        let (later_url, later_fake, _later_server) = fake_push_service(201, "").await;
+        setup.subscribe(&at_once, at_once_url.as_str(), true, true);
+        setup.subscribe(&later, later_url.as_str(), true, true);
+        setup.set_grace(&at_once, Some(0));
+        setup.set_grace(&later, Some(20));
+        let sessions = registry(&setup);
+        sessions.insert(idle_record("s1"));
+        let presence = Presence::default();
+        let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
+        let mut trigger = raise_finished(&setup, &sessions);
+
+        deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
+        assert_eq!(
+            (at_once_fake.posts(), later_fake.posts()),
+            (1, 0),
+            "only the zero-grace device gets it now"
+        );
+        assert_eq!(
+            trigger
+                .finishing
+                .due(Instant::now() + Duration::from_secs(20)),
+            vec![("s1".to_owned(), vec![later])],
+            "the second device is due at its own grace, the first never again"
         );
     }
 
@@ -3827,14 +4096,14 @@ mod tests {
     fn a_held_finished_is_dropped_when_background_work_starts() {
         let setup = setup("due-background");
         let sessions = registry(&setup);
-        let mut trigger = holding_finished(&sessions);
+        let mut trigger = holding_finished(&setup, &sessions);
 
         let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
         let event = Ok(SessionEvent::Updated(Box::new(holding), None));
         assert_eq!(trigger.step(event, &sessions), Step::Nothing);
 
         assert_eq!(
-            trigger.finishing.due(past_the_grace()),
+            due_sessions(&mut trigger.finishing, past_the_grace()),
             Vec::<String>::new()
         );
     }
@@ -3843,26 +4112,29 @@ mod tests {
     fn a_lag_keeps_a_finished_that_is_still_idle() {
         let setup = setup("due-lag");
         let sessions = registry(&setup);
-        let mut trigger = holding_finished(&sessions);
+        let mut trigger = holding_finished(&setup, &sessions);
 
         assert_eq!(
             trigger.step(Err(RecvError::Lagged(1)), &sessions),
             Step::Nothing
         );
 
-        assert_eq!(trigger.finishing.due(past_the_grace()).len(), 1);
+        assert_eq!(
+            due_sessions(&mut trigger.finishing, past_the_grace()).len(),
+            1
+        );
     }
 
     #[test]
     fn a_removed_sessions_held_finished_is_forgotten() {
         let setup = setup("due-removed");
         let sessions = registry(&setup);
-        let mut trigger = holding_finished(&sessions);
+        let mut trigger = holding_finished(&setup, &sessions);
 
         let removed = Ok(SessionEvent::Removed("s1".to_owned()));
         assert_eq!(trigger.step(removed, &sessions), Step::Nothing);
         assert_eq!(
-            trigger.finishing.due(past_the_grace()),
+            due_sessions(&mut trigger.finishing, past_the_grace()),
             Vec::<String>::new()
         );
     }
@@ -4197,7 +4469,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_due_finished_is_not_sent_when_the_session_works_again_by_delivery() {
-        let (setup, _device, _url, fake, _server) = one_device("due-at-delivery", 201).await;
+        let (setup, device, _url, fake, _server) = one_device("due-at-delivery", 201).await;
         let sessions = registry(&setup);
         sessions.insert(idle_record("s1"));
         sessions.update("s1", |record| record.status = SessionStatus::Working);
@@ -4205,12 +4477,12 @@ mod tests {
         let remote: Arc<dyn Fn() -> RemoteState + Send + Sync> = Arc::new(serving);
         let mut trigger = trigger();
 
-        trigger.finishing.hold("s1", Instant::now());
+        trigger.finishing.hold("s1", &device, Instant::now());
         deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
         assert_eq!(fake.posts(), 0, "the registry says the session works");
 
         sessions.update("s1", |record| record.status = SessionStatus::Idle);
-        trigger.finishing.hold("s1", Instant::now());
+        trigger.finishing.hold("s1", &device, Instant::now());
         deliver_finished(&mut trigger, &sessions, setup.stores(), &presence, &remote).await;
         assert_eq!(fake.posts(), 1, "the registry says the session is idle");
     }
@@ -4219,7 +4491,7 @@ mod tests {
     /// which a paused clock would not wait for.
     fn run_with_no_grace(sources: Sources) -> tokio::task::JoinHandle<()> {
         let mut trigger = trigger();
-        trigger.finished_grace = Duration::ZERO;
+        trigger.finished_grace = Some(Duration::ZERO);
         run(trigger, sources)
     }
 

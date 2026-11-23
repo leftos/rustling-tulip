@@ -4759,8 +4759,13 @@ export type ClientMessage =
    * its Needs you push arrives when the owner leaves, if the session
    * still needs the user, and its Finished push is dropped then. On
    * unless the phone turns it off.
+   *
+   * `finished_grace_secs`: How many seconds a Finished push waits after the session goes
+   * idle, so a quick next turn drops it; `None` is the daemon's
+   * default of 5 s. A registration without it keeps the grace the
+   * daemon stored before; the daemon stores at most 600.
    */
-  | { type: "register_push"; registration: PushRegistration; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id: string }
+  | { type: "register_push"; registration: PushRegistration; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; finished_grace_secs?: number | null; request_id: string }
   /** Removes this device's push subscription; answered by `PushStatus`. */
   | { type: "unregister_push"; request_id: string }
   /**
@@ -6463,8 +6468,11 @@ export type DaemonMessage =
    * its Needs you push arrives when the owner leaves, if the session
    * still needs the user, and its Finished push is dropped then. True
    * when nothing is registered.
+   *
+   * `finished_grace_secs`: The stored Finished grace in seconds; `None` when none is stored
+   * or nothing is registered, which is the daemon's default of 5 s.
    */
-  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; device_token?: Secret | null; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; request_id?: string | null }
+  | { type: "push_status"; vapid_public_key: string; endpoint?: Secret | null; device_token?: Secret | null; needs_you: boolean; finished: boolean; hold_at_desk?: boolean; finished_grace_secs?: number | null; request_id?: string | null }
   /**
    * The answer to [`ClientMessage::LoadChat`], sent to the requester with
    * its `request_id`: the session's chat as it stands. `hidden` counts the

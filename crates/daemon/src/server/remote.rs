@@ -596,6 +596,7 @@ mod tests {
                 needs_you: true,
                 finished: true,
                 hold_at_desk: true,
+                finished_grace_secs: None,
                 request_id: "p2".to_owned(),
             },
             ClientMessage::UnregisterPush {

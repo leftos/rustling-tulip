@@ -151,14 +151,14 @@ fn write(
             needs_you,
             finished,
             hold_at_desk,
+            finished_grace_secs,
             ..
-        } => Some(subscription(
-            registration,
-            *needs_you,
-            *finished,
-            *hold_at_desk,
-            policy,
-        )?),
+        } => {
+            let mut new = subscription(registration, *needs_you, *finished, *hold_at_desk, policy)?;
+            new.finished_grace_secs = finished_grace_secs
+                .map(|secs| secs.min(crate::push::store::FINISHED_GRACE_MOST_SECS));
+            Some(new)
+        }
         _ => None,
     };
     let loaded = push.load_unswept().map_err(|err| Refusal::internal(&err))?;
@@ -183,6 +183,13 @@ fn store(
 ) -> anyhow::Result<bool> {
     match (msg, new_subscription) {
         (ClientMessage::RegisterPush { .. }, Some(mut new)) => {
+            // A registration without a grace keeps the device's stored one.
+            new.finished_grace_secs = new.finished_grace_secs.or_else(|| {
+                loaded
+                    .subs
+                    .get(device_id)
+                    .and_then(|stored| stored.finished_grace_secs)
+            });
             // The same address is the same subscription with new switches:
             // it keeps when it was first stored. A replacement token or
             // endpoint is a new subscription.
@@ -277,6 +284,7 @@ fn subscription(
         needs_you,
         finished,
         hold_at_desk,
+        finished_grace_secs: None,
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })
 }
@@ -377,6 +385,7 @@ fn push_status(loaded: &Loaded, device_id: &str, request_id: &str) -> DaemonMess
         needs_you: stored.is_some_and(|sub| sub.needs_you),
         finished: stored.is_some_and(|sub| sub.finished),
         hold_at_desk: stored.is_none_or(|sub| sub.hold_at_desk),
+        finished_grace_secs: stored.and_then(|sub| sub.finished_grace_secs),
         request_id: Some(request_id.to_owned()),
     }
 }
@@ -434,6 +443,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "p2".to_owned(),
         }
     }
@@ -459,6 +469,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "p2".to_owned(),
         }
     }
@@ -482,6 +493,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "p2".to_owned(),
         }
     }
@@ -523,6 +535,7 @@ mod tests {
                 needs_you,
                 finished,
                 hold_at_desk,
+                finished_grace_secs: _,
                 request_id,
             } => {
                 assert_eq!(request_id.as_deref(), Some(want_id), "{reply:?}");
@@ -716,6 +729,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_push_keeps_the_stored_grace_when_absent() {
+        fn grace_of(reply: &DaemonMessage) -> Option<u32> {
+            match reply {
+                DaemonMessage::PushStatus {
+                    finished_grace_secs,
+                    ..
+                } => *finished_grace_secs,
+                other => panic!("want PushStatus, got {other:?}"),
+            }
+        }
+        let (hub, scratch) = test_hub("push-keep-grace");
+        let device_id = pair(&hub);
+        let with_grace = |secs: Option<u32>| {
+            let (p256dh, auth) = keys();
+            let mut msg = register_with(APPLE, p256dh, auth);
+            if let ClientMessage::RegisterPush {
+                finished_grace_secs,
+                ..
+            } = &mut msg
+            {
+                *finished_grace_secs = secs;
+            }
+            msg
+        };
+        let stored_grace = || {
+            SubscriptionStore::load(&push_dir(&scratch).join(SUBSCRIPTIONS_FILE))
+                .get(&device_id)
+                .expect("stored")
+                .finished_grace_secs
+        };
+
+        let first = dispatch_one_as(&hub, with_grace(Some(900)), &tailnet()).await;
+        assert_eq!(grace_of(&first), Some(600), "the status echoes the grace");
+        assert_eq!(
+            stored_grace(),
+            Some(600),
+            "a grace over ten minutes is stored as ten"
+        );
+
+        let again = dispatch_one_as(&hub, with_grace(None), &tailnet()).await;
+        assert_eq!(
+            grace_of(&again),
+            Some(600),
+            "the status echoes the kept grace"
+        );
+        assert_eq!(
+            stored_grace(),
+            Some(600),
+            "a re-register without a grace keeps the stored one"
+        );
+
+        let changed = dispatch_one_as(&hub, with_grace(Some(0)), &tailnet()).await;
+        assert_eq!(grace_of(&changed), Some(0));
+        assert_eq!(
+            stored_grace(),
+            Some(0),
+            "a re-register with a grace replaces it"
+        );
+    }
+
+    #[tokio::test]
     async fn unregister_removes_the_subscription() {
         let (hub, scratch) = test_hub("push-unregister");
         pair(&hub);
@@ -741,6 +815,7 @@ mod tests {
             needs_you: true,
             finished: true,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "p2".to_owned(),
         };
         refused(
@@ -1072,6 +1147,7 @@ mod tests {
                         needs_you: true,
                         finished: true,
                         hold_at_desk: true,
+                        finished_grace_secs: None,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )

@@ -5979,6 +5979,12 @@ pub enum ClientMessage {
         /// unless the phone turns it off.
         #[serde(default = "default_true")]
         hold_at_desk: bool,
+        /// How many seconds a Finished push waits after the session goes
+        /// idle, so a quick next turn drops it; `None` is the daemon's
+        /// default of 5 s. A registration without it keeps the grace the
+        /// daemon stored before; the daemon stores at most 600.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_grace_secs: Option<u32>,
         request_id: String,
     },
     /// Removes this device's push subscription; answered by `PushStatus`.
@@ -8116,6 +8122,10 @@ pub enum DaemonMessage {
         /// when nothing is registered.
         #[serde(default = "default_true")]
         hold_at_desk: bool,
+        /// The stored Finished grace in seconds; `None` when none is stored
+        /// or nothing is registered, which is the daemon's default of 5 s.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_grace_secs: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -8973,6 +8983,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "r1".to_owned(),
         };
         let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
@@ -9016,6 +9027,7 @@ mod tests {
             needs_you,
             finished,
             hold_at_desk,
+            finished_grace_secs: _,
             request_id,
         }) = decoded
         else {
@@ -9037,6 +9049,7 @@ mod tests {
             needs_you: true,
             finished: true,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: Some("r1".to_owned()),
         };
         let value = serde_json::to_value(&msg).expect("serializes");
@@ -9075,6 +9088,75 @@ mod tests {
     }
 
     #[test]
+    fn register_push_without_finished_grace_reads_none() {
+        let json = r#"{"type":"register_push","registration":{"kind":"web_push","endpoint":"https://web.push.apple.com/send/abc","p256dh":"BPubKey","auth":"authsecret"},"needs_you":true,"finished":true,"request_id":"r1"}"#;
+        let decoded = InboundClientMessage::from_json_str(json).expect("decodes");
+        let InboundClientMessage::Known(ClientMessage::RegisterPush {
+            finished_grace_secs,
+            ..
+        }) = decoded
+        else {
+            panic!("{json} decodes as RegisterPush");
+        };
+        assert_eq!(
+            finished_grace_secs, None,
+            "a phone that sends no grace takes the daemon's default"
+        );
+    }
+
+    #[test]
+    fn register_push_round_trips_finished_grace() {
+        let msg = ClientMessage::RegisterPush {
+            registration: PushRegistration::WebPush {
+                endpoint: Secret("https://push.example.com/send/abc".to_owned()),
+                p256dh: "BPubKey".to_owned(),
+                auth: Secret("authsecret".to_owned()),
+            },
+            needs_you: true,
+            finished: true,
+            hold_at_desk: true,
+            finished_grace_secs: Some(20),
+            request_id: "r1".to_owned(),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""finished_grace_secs":20"#), "{json}");
+        let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+        let InboundClientMessage::Known(back) = decoded else {
+            panic!("{json} decodes as a known message");
+        };
+        assert_eq!(
+            serde_json::to_value(&back).expect("serializes"),
+            serde_json::to_value(&msg).expect("serializes"),
+        );
+
+        let status = |finished_grace_secs| DaemonMessage::PushStatus {
+            vapid_public_key: "BKey".to_owned(),
+            endpoint: None,
+            device_token: None,
+            needs_you: true,
+            finished: true,
+            hold_at_desk: true,
+            finished_grace_secs,
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_string(&status(Some(20))).expect("serializes");
+        assert!(json.contains(r#""finished_grace_secs":20"#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("decodes");
+        assert!(
+            matches!(
+                back,
+                DaemonMessage::PushStatus {
+                    finished_grace_secs: Some(20),
+                    ..
+                }
+            ),
+            "{back:?}"
+        );
+        let json = serde_json::to_string(&status(None)).expect("serializes");
+        assert!(!json.contains("finished_grace_secs"), "{json}");
+    }
+
+    #[test]
     fn push_status_round_trips_hold_at_desk() {
         let msg = DaemonMessage::PushStatus {
             vapid_public_key: "BKey".to_owned(),
@@ -9083,6 +9165,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: false,
+            finished_grace_secs: None,
             request_id: Some("r1".to_owned()),
         };
         let json = serde_json::to_string(&msg).expect("serializes");
@@ -9120,6 +9203,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "r1".to_owned(),
         };
         let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
@@ -9152,6 +9236,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: "r1".to_owned(),
         };
         let wire: serde_json::Value = serde_json::to_value(&msg).expect("serializes");
@@ -9349,6 +9434,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             request_id: None,
         };
         let value = serde_json::to_value(&msg).expect("serializes");

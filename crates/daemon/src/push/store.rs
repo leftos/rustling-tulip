@@ -126,6 +126,9 @@ impl std::fmt::Debug for Channel {
     }
 }
 
+/// The longest Finished grace a subscription keeps, in seconds: ten minutes.
+pub(crate) const FINISHED_GRACE_MOST_SECS: u32 = 600;
+
 /// One device's subscription: where its pushes go, and the two switches the
 /// phone app sets. Its `Debug` redacts the channel's address and keys, so no
 /// log carries them.
@@ -142,6 +145,11 @@ pub(crate) struct Subscription {
     /// desk; on unless the phone turns it off.
     #[serde(default = "default_true")]
     pub hold_at_desk: bool,
+    /// How many seconds the device's Finished push waits after its session
+    /// goes idle, at most [`FINISHED_GRACE_MOST_SECS`]; `None` is the
+    /// daemon's default of 5 s, and what a file no grace was written to reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_grace_secs: Option<u32>,
     /// When the subscription was stored, RFC 3339 UTC; the caller reads the
     /// clock, never this store.
     pub created_at: String,
@@ -154,6 +162,7 @@ impl std::fmt::Debug for Subscription {
             .field("needs_you", &self.needs_you)
             .field("finished", &self.finished)
             .field("hold_at_desk", &self.hold_at_desk)
+            .field("finished_grace_secs", &self.finished_grace_secs)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -464,6 +473,7 @@ mod tests {
             needs_you,
             finished,
             hold_at_desk: true,
+            finished_grace_secs: None,
             created_at: "2026-11-07T00:00:00Z".to_owned(),
         }
     }
@@ -479,6 +489,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             created_at: "2026-11-07T00:00:00Z".to_owned(),
         }
     }
@@ -493,6 +504,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             created_at: "2026-11-07T00:00:00Z".to_owned(),
         }
     }
@@ -547,6 +559,24 @@ mod tests {
         assert!(
             stored.hold_at_desk,
             "a subscription written without the switch is held at the desk"
+        );
+    }
+
+    #[test]
+    fn a_subscription_without_finished_grace_reads_none() {
+        let scratch = Scratch::new("grace-default");
+        std::fs::write(
+            scratch.file(),
+            r#"{"devices":{"dev-1":{"kind":"web_push","endpoint":"https://push.example/one","p256dh":"p256dh-key","auth":"auth-secret","needs_you":true,"finished":true,"hold_at_desk":true,"created_at":"2026-11-07T00:00:00Z"}}}"#,
+        )
+        .expect("write the subscriptions file");
+
+        let store = scratch.store();
+
+        let stored = store.get("dev-1").expect("the device's subscription");
+        assert_eq!(
+            stored.finished_grace_secs, None,
+            "a subscription written without a grace takes the daemon's default"
         );
     }
 
@@ -1038,6 +1068,7 @@ mod tests {
             needs_you: true,
             finished: false,
             hold_at_desk: true,
+            finished_grace_secs: None,
             created_at: "2026-11-07T00:00:00Z".to_owned(),
         };
 

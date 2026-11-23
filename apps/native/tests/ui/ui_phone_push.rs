@@ -152,6 +152,7 @@ fn status(token: Option<&str>, request_id: &str) -> DaemonMessage {
         needs_you: true,
         finished: true,
         hold_at_desk: true,
+        finished_grace_secs: None,
         request_id: Some(request_id.to_owned()),
     }
 }
@@ -166,6 +167,7 @@ fn registers(sent: Vec<ClientMessage>) -> Vec<(PushRegistration, [bool; 3], Stri
                 needs_you,
                 finished,
                 hold_at_desk,
+                finished_grace_secs: _,
                 request_id,
             } => Some((
                 registration,

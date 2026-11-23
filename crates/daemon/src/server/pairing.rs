@@ -1856,6 +1856,7 @@ mod tests {
                         needs_you: true,
                         finished: false,
                         hold_at_desk: true,
+                        finished_grace_secs: None,
                         created_at: "2026-11-07T00:00:00Z".to_owned(),
                     },
                 )
