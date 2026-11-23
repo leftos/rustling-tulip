@@ -120,10 +120,13 @@ const DIALOG_DRAW_DEADLINE: Duration = Duration::from_secs(10);
 const LAUNCH_HOLD: Duration = crate::inject::MIN_STARTUP_CAP;
 
 /// The longest a turn end stays held. Past it a settled frame showing a turn
-/// that runs, by its spinner or its title, drops the turn end; an overlay that
-/// hides the screen keeps it until the overlay closes; anything else lands
-/// `Idle`. After a drop on the title alone, the idle box that follows ends
-/// the turn after [`IDLE_WITHOUT_STOP`] whatever the title says.
+/// that runs by its title alone drops the turn end; a spinner row keeps it
+/// while the terminal still writes, and lands `Idle` once it has been quiet
+/// for [`TITLE_QUIET_LIMIT`]: the held `Stop` ended the turn, and the frozen
+/// frame only lifts the spinner's veto. An overlay that hides the screen keeps
+/// it until the overlay closes; anything else lands `Idle`. After a drop on
+/// the title alone, the idle box that follows ends the turn after
+/// [`IDLE_WITHOUT_STOP`] whatever the title says.
 const TURN_END_CEILING: Duration = Duration::from_secs(60);
 
 /// How soon the view switch reads the screen again after another writer
@@ -349,6 +352,12 @@ struct ScreenWatch {
     /// Cleared by this watcher's next status write, by any other writer's
     /// move of the record, and by a new held turn end.
     stop_dropped: bool,
+    /// [`TURN_END_CEILING`] found a held `Stop` over a spinner row while the
+    /// terminal still wrote: the hold stays, and the ceiling's check waits for
+    /// the terminal to be quiet for [`TITLE_QUIET_LIMIT`] ([`Self::next_check`]).
+    /// Cleared with [`Self::stop_dropped`], by a dropped turn end, and while
+    /// the record holds none.
+    ceiling_waits_quiet: bool,
     /// Takes the terminal back to main for a prompt seen in an agent's view.
     view_return: ViewReturn,
     /// The session's typing lane, held by the view return from the reading
@@ -606,13 +615,21 @@ impl Confirm {
 
 impl ScreenWatch {
     /// The next check due. A held turn end's ceiling waits for the frame to
-    /// settle and for any hold to end, so a ceiling already past never spins.
-    /// An overlay on screen skips it: the check would keep the hold and write
-    /// nothing, and the output that closes the overlay asks for a check itself.
+    /// settle and for any hold to end, so a ceiling already past never spins;
+    /// one that found a spinner while the terminal wrote waits for it to be
+    /// quiet for [`TITLE_QUIET_LIMIT`] ([`Self::ceiling_waits_quiet`]), and
+    /// output before then asks for a check itself. An overlay on screen skips
+    /// it: the check would keep the hold and write nothing, and the output
+    /// that closes the overlay asks for a check itself.
     fn next_check(&self) -> Option<Instant> {
         let overlay = self.last_verdict == Some(Verdict::Keep);
+        let settle = if self.ceiling_waits_quiet {
+            TITLE_QUIET_LIMIT
+        } else {
+            CHECK_DEBOUNCE
+        };
         let ceiling = self.wake.ceiling().filter(|_| !overlay).map(|ceiling| {
-            let settled = self.last_output.map_or(ceiling, |at| at + CHECK_DEBOUNCE);
+            let settled = self.last_output.map_or(ceiling, |at| at + settle);
             ceiling.max(settled).max(self.confirm.hold_until)
         });
         self.confirm.next_check(ceiling)
@@ -648,6 +665,7 @@ impl ScreenWatch {
             screen_set_background: false,
             turn_end: TurnEndWatch::default(),
             stop_dropped: false,
+            ceiling_waits_quiet: false,
             view_return: ViewReturn::default(),
             view_turn: None,
             view_turn_since: None,
@@ -794,10 +812,10 @@ impl ScreenWatch {
         self.last_verdict = Some(reading.verdict);
         self.last_rule.clone_from(&reading.rule);
         self.title_working = title_working;
-        if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
-            self.dialog_edge_armed = true;
-        }
-        if self.turn_end_ceiling(read, &reading, background.is_some(), quiet, now) {
+        self.dialog_edge_armed |= reading.verdict != Verdict::State(ScreenState::AwaitingInput);
+        let back = |watch: &Self| mode == Mode::ShellAgent && prompt && watch.ceiling_waits_quiet;
+        let calm = quiet && !back(self);
+        if self.turn_end_ceiling(read, &reading, background.is_some(), calm, now) && !back(self) {
             return Checked::Done;
         }
         match mode {
@@ -1044,7 +1062,7 @@ impl ScreenWatch {
 
     /// Resolve a held turn end that has reached [`TURN_END_CEILING`], on a
     /// settled frame only: a half-drawn spinner must not land a false `Idle`.
-    /// A spinner or a working title drops it: no status is written. An overlay
+    /// A spinner row is resolved by [`Self::ceiling_spinner`]. An overlay
     /// hides what the turn is doing, so it keeps the hold and writes nothing,
     /// and the reading after the overlay resolves it, or a weak idle lands it
     /// with its flag; meanwhile the check goes on, so a shell's prompt can
@@ -1067,6 +1085,8 @@ impl ScreenWatch {
         }
         self.confirm.window = None;
         self.confirm.candidate = None;
+        // Set again only by a spinner hold this check keeps.
+        self.ceiling_waits_quiet = false;
         if reads_dialog(reading) {
             self.ceiling_dialog(read);
             return true;
@@ -1075,10 +1095,34 @@ impl ScreenWatch {
             self.publish_as(read, SessionStatus::Idle, "ceiling", shown);
             return true;
         }
-        let dropped = self.drop_held_turn_end(read, "ceiling_spinner").is_some();
-        // Only a title-only reading: a spinner row is a turn that went on.
-        self.stop_dropped = dropped && reading.from_title;
+        self.ceiling_spinner(read, reading, shown, now);
         true
+    }
+
+    /// A spinner at the ceiling. A working title alone drops the held turn
+    /// end, writing no status, and the idle box that follows is not held by
+    /// the title ([`Self::stop_dropped`]). A spinner row keeps the hold while
+    /// the terminal has written in the last [`TITLE_QUIET_LIMIT`], writing
+    /// nothing, and the check waits for that quiet
+    /// ([`Self::ceiling_waits_quiet`]), though a shell's prompt under the box
+    /// still hands a shell-hosted agent's shell back: [`Self::check_frame`]
+    /// goes on to it, and skips the ceiling while the hand-back's window
+    /// confirms. Once the terminal has been quiet that
+    /// long it lands `Idle` with the flag the frame shows (`shown`): the held
+    /// `Stop` ended the turn, and the frozen frame only lifts the veto.
+    fn ceiling_spinner(&mut self, read: StatusRead, reading: &Reading, shown: bool, now: Instant) {
+        if reading.from_title {
+            self.stop_dropped = self.drop_held_turn_end(read, "ceiling_spinner").is_some();
+            return;
+        }
+        if self
+            .last_output
+            .is_none_or(|at| at + TITLE_QUIET_LIMIT <= now)
+        {
+            self.publish_as(read, SessionStatus::Idle, "ceiling_frozen", shown);
+        } else {
+            self.ceiling_waits_quiet = true;
+        }
     }
 
     /// A dialog on screen at the ceiling: the agent asks, so the held turn
@@ -1097,6 +1141,7 @@ impl ScreenWatch {
     /// Forget the turn end `read` holds, logging `why`; answers the read with
     /// it gone, or `None` when the record moved first and nothing was written.
     fn drop_held_turn_end(&mut self, read: StatusRead, why: &'static str) -> Option<StatusRead> {
+        self.ceiling_waits_quiet = false;
         if !clear_turn_end(&self.registry, &self.session_id, read) {
             return None;
         }
@@ -1121,9 +1166,11 @@ impl ScreenWatch {
     ) -> bool {
         let Some(held) = read.held else {
             self.turn_end = TurnEndWatch::default();
+            self.ceiling_waits_quiet = false;
             return false;
         };
         self.stop_dropped = false;
+        self.ceiling_waits_quiet = false;
         self.turn_end.track(held.event_time);
         let sign = TurnEndSign::of(reading);
         let first_read = quiet && !self.turn_end.read;
@@ -1494,6 +1541,7 @@ impl ScreenWatch {
         );
         if wrote {
             self.stop_dropped = false;
+            self.ceiling_waits_quiet = false;
             debug!(
                 target: "status_trace",
                 session = %self.session_id,
@@ -1536,6 +1584,7 @@ impl ScreenWatch {
     /// ([`moves_status_or_background`]).
     fn record_moved(&mut self, before: Option<StatusRead>, mode: Mode, now: Instant) -> Moved {
         self.stop_dropped = false;
+        self.ceiling_waits_quiet = false;
         if moves_status_or_background(before, self.wake.seen) {
             self.screen_set_background = false;
         }
@@ -1564,6 +1613,7 @@ impl ScreenWatch {
     /// the hold: at once when the output is already quiet.
     fn foreign_write(&mut self, before: Option<StatusRead>, now: Instant) {
         self.stop_dropped = false;
+        self.ceiling_waits_quiet = false;
         self.note_held_off_dialog();
         let awaiting = |read: Option<StatusRead>| {
             read.is_some_and(|read| read.status == SessionStatus::AwaitingInput)
@@ -6748,7 +6798,7 @@ mod hysteresis_tests {
         }
         h.chunk(idle_frame(&[SPINNER_ROW]));
         advance(ms(100)).await;
-        assert!(!h.holds_turn_end(), "the settled frame decides");
+        assert!(h.holds_turn_end(), "the settled frame decides");
         assert_eq!(h.status(), SessionStatus::Working);
         assert_eq!(h.status_seq(), seq, "a status was written");
     }
@@ -6802,28 +6852,30 @@ mod hysteresis_tests {
         );
     }
 
-    /// A drop on a real spinner row is a turn that went on and fires its own
-    /// `Stop`: the working title still holds its idle box.
+    /// A real spinner row that repaints past the ceiling under a working
+    /// title keeps the held `Stop` and writes nothing: only the title alone
+    /// drops it.
     #[tokio::test(start_paused = true)]
-    async fn a_spinner_dropped_stop_keeps_the_title_hold() {
+    async fn a_repainting_spinner_under_a_working_title_keeps_the_held_stop() {
         let h = start_record(
-            "spinner-dropped-stop",
+            "spinner-title-held-stop",
             false,
             hook_record(SessionStatus::Working),
         );
         h.chunk(under_title(WORKING_TITLE, idle_frame(&[SPINNER_ROW])));
         pass_hold().await;
         h.hook(2, &main_stop(false));
-        advance(Duration::from_secs(61)).await;
-        assert!(!h.holds_turn_end(), "the ceiling drops the held turn end");
-        assert_eq!(h.status(), SessionStatus::Working);
-        h.chunk(under_title(WORKING_TITLE, idle_frame(&[])));
-        advance(FOREIGN_WRITE_HOLD + IDLE_WITHOUT_STOP + CONFIRM_SPACING).await;
-        assert_eq!(
-            h.status(),
-            SessionStatus::Working,
-            "a drop on a spinner let go of the title's hold"
+        let seq = h.status_seq();
+        for _ in 0..65 {
+            h.chunk(under_title(WORKING_TITLE, idle_frame(&[SPINNER_ROW])));
+            advance(Duration::from_secs(1)).await;
+        }
+        assert!(
+            h.holds_turn_end(),
+            "a repainting spinner dropped the held Stop"
         );
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
     }
 
     /// A main hook after the drop is a turn that runs on: the working title
@@ -6966,6 +7018,28 @@ mod hysteresis_tests {
         assert!(h.holds_turn_end(), "the overlay keeps it");
         assert!(h.hook_driven());
         let mut with_prompt = transcript_overlay_frame();
+        with_prompt.extend_from_slice("\r\nPS C:\\Users\\me> ".as_bytes());
+        h.chunk(with_prompt);
+        advance(Duration::from_secs(2)).await;
+        assert!(!h.hook_driven(), "the agent's end hands the shell back");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_kept_spinner_hold_still_hands_a_shell_back() {
+        let h = start_record(
+            "ceiling-spinner-hand-back",
+            true,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        for _ in 0..65 {
+            h.chunk(idle_frame(&[SPINNER_ROW]));
+            advance(Duration::from_secs(1)).await;
+        }
+        assert!(h.holds_turn_end(), "the repainting spinner keeps it");
+        assert!(h.hook_driven());
+        let mut with_prompt = idle_frame(&[SPINNER_ROW]);
         with_prompt.extend_from_slice("\r\nPS C:\\Users\\me> ".as_bytes());
         h.chunk(with_prompt);
         advance(Duration::from_secs(2)).await;
@@ -7407,21 +7481,23 @@ mod hysteresis_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_ceiling_never_lands_on_a_spinner() {
+    async fn the_ceiling_lands_a_frozen_spinner() {
         let h = start_record(
             "ceiling-hooks-spinner",
             false,
             hook_record(SessionStatus::Working),
         );
         pass_hold().await;
-        let seq = h.status_seq();
         h.hook(2, &main_stop(false));
         h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
         pass_hold().await;
         h.chunk(idle_frame(&[SPINNER_ROW]));
         advance(Duration::from_secs(61)).await;
-        assert_eq!(h.status(), SessionStatus::Working);
-        assert_eq!(h.status_seq(), seq, "a status was written");
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a spinner drawn 61 s before held the Stop"
+        );
 
         let h = start_record(
             "ceiling-spinner",
@@ -7430,14 +7506,95 @@ mod hysteresis_tests {
         );
         h.chunk(idle_frame(&[SPINNER_ROW]));
         pass_hold().await;
-        let seq = h.status_seq();
         h.hook(2, &main_stop(false));
         advance(Duration::from_secs(59)).await;
         assert!(h.holds_turn_end(), "only the ceiling decides this one");
-        advance(Duration::from_secs(2)).await;
-        assert!(!h.holds_turn_end(), "the ceiling drops the held turn end");
         assert_eq!(h.status(), SessionStatus::Working);
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the frozen spinner held the Stop"
+        );
+        assert!(!h.holds_turn_end(), "the ceiling lands the held turn end");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repainting_spinner_keeps_a_held_stop_past_the_ceiling() {
+        let h = start_record(
+            "ceiling-repainting-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        let seq = h.status_seq();
+        for _ in 0..120 {
+            h.chunk(idle_frame(&[SPINNER_ROW]));
+            advance(Duration::from_secs(1)).await;
+        }
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert!(
+            h.holds_turn_end(),
+            "a repainting spinner dropped the held Stop"
+        );
         assert_eq!(h.status_seq(), seq, "a status was written");
+
+        advance(Duration::from_secs(58)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "before the terminal went quiet"
+        );
+        assert!(h.holds_turn_end());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_main_hook_after_the_ceiling_leaves_a_frozen_spinner_working() {
+        let h = start_record(
+            "ceiling-spinner-tool",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        for _ in 0..70 {
+            h.chunk(idle_frame(&[SPINNER_ROW]));
+            advance(Duration::from_secs(1)).await;
+        }
+        h.hook(3, &main_tool());
+        pass_hold().await;
+        assert!(!h.holds_turn_end(), "the tool call settles the held Stop");
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(130)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "silence alone ended a turn no Stop is held for"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frozen_spinner_lands_the_frames_background_flag() {
+        let h = start_record(
+            "ceiling-spinner-background",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        h.chunk(box_frame(
+            &["● ok", "", SPINNER_ROW],
+            &["  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage"],
+        ));
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        advance(Duration::from_secs(59)).await;
+        assert!(h.holds_turn_end());
+        assert_eq!(h.status(), SessionStatus::Working);
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the frame's flag lands");
     }
 
     #[tokio::test(start_paused = true)]

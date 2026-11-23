@@ -52,6 +52,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Installed status hooks in Claude's user settings update to the current events and matchers at the next start, and a settings file saved with a byte order mark no longer refuses them.
 - A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.
 - In Chat, a pasted image's message no longer leaves its file path stuck below it as unsent, on the desktop and the phone.
+- A session whose Claude hangs after finishing its turn, its spinner frozen on screen, now turns Idle a minute later instead of staying Working.
 - A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
 
 ## v0.18.3-alpha
