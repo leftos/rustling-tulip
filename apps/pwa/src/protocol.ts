@@ -3080,7 +3080,9 @@ export type ChatPromptKind =
   /** The agent's model picker: a row picks the model for this session. */
   | "model_picker"
   /** A yes-or-no confirmation the agent asks before acting. */
-  | "confirm";
+  | "confirm"
+  /** A full-screen view the agent drew over its prompt, which the chat can only close. */
+  | "overlay";
 
 /** What a [`DaemonMessage::SessionNotice`] tells the user. */
 export type SessionNoticeKind =

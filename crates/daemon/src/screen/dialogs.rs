@@ -247,6 +247,17 @@ mod tests {
             .expect("the capture shows a prompt")
     }
 
+    #[test]
+    fn rewinds_picker_and_choice_screen_are_two_prompts() {
+        let picker = prompt_of(include_str!("fixtures/claude--v2330-rewind-picker.txt"));
+        let choice = prompt_of(include_str!("fixtures/claude--v2330-rewind-confirm.txt"));
+        assert_ne!(
+            prompt_identity(&picker),
+            prompt_identity(&choice),
+            "an Esc from the choice screen back to the picker is a new prompt"
+        );
+    }
+
     /// What one capture must read as.
     #[derive(Debug)]
     struct Expected {
@@ -292,6 +303,16 @@ mod tests {
         no_prompt(ComposerState::Overlay {
             name: name.to_owned(),
         })
+    }
+
+    /// An overlay named `name` whose prompt, `subject`, offers only Close.
+    fn closable(name: &str, subject: &'static str) -> Expected {
+        Expected {
+            composer: ComposerState::Overlay {
+                name: name.to_owned(),
+            },
+            ..dialog(ChatPromptKind::Overlay, subject, &[(1, "Close")], None)
+        }
     }
 
     /// A dialog of `kind` that owns the keyboard.
@@ -980,12 +1001,12 @@ mod tests {
             (
                 "v95-rewind",
                 include_str!("fixtures/v95-rewind.txt"),
-                overlay("rewind"),
+                closable("rewind", "Rewind"),
             ),
             (
                 "v96-ctrl-o",
                 include_str!("fixtures/v96-ctrl-o.txt"),
-                overlay("transcript"),
+                closable("transcript", "Transcript"),
             ),
             (
                 "v140-model-picker",
@@ -1145,7 +1166,47 @@ mod tests {
             (
                 "v141-btw",
                 include_str!("fixtures/v141-btw.txt"),
-                overlay("btw"),
+                closable("btw", "Side question"),
+            ),
+            (
+                "claude--v2330-transcript-overlay",
+                include_str!("fixtures/claude--v2330-transcript-overlay.txt"),
+                closable("transcript", "Transcript"),
+            ),
+            (
+                "claude--v2330-transcript-overlay-search",
+                include_str!("fixtures/claude--v2330-transcript-overlay-search.txt"),
+                closable("transcript_search", "Transcript search"),
+            ),
+            (
+                "claude--v2330-transcript-overlay-search-match",
+                include_str!("fixtures/claude--v2330-transcript-overlay-search-match.txt"),
+                closable("transcript", "Transcript"),
+            ),
+            (
+                "claude--v2330-transcript-overlay-shortcuts",
+                include_str!("fixtures/claude--v2330-transcript-overlay-shortcuts.txt"),
+                closable("transcript_shortcuts", "Transcript shortcuts"),
+            ),
+            (
+                "claude--v2330-rewind-picker",
+                include_str!("fixtures/claude--v2330-rewind-picker.txt"),
+                closable("rewind", "Rewind"),
+            ),
+            (
+                "claude--v2330-rewind-confirm",
+                include_str!("fixtures/claude--v2330-rewind-confirm.txt"),
+                closable("rewind_restore", "Rewind"),
+            ),
+            (
+                "claude--v2330-btw-pending",
+                include_str!("fixtures/claude--v2330-btw-pending.txt"),
+                closable("btw_pending", "Side question"),
+            ),
+            (
+                "claude--v2330-btw-answer",
+                include_str!("fixtures/claude--v2330-btw-answer.txt"),
+                closable("btw", "Side question"),
             ),
             (
                 "v03-ready",
@@ -2298,7 +2359,14 @@ mod tests {
         let refused = Err(AnswerRefusal::NotThisDialog);
         let type_x = || ChatAnswerKind::TypeSomething { text: text("x") };
         let digit = |n: u8| (vec![Key::Digit(n)], DialogGone);
+        let transcript = include_str!("fixtures/claude--v2330-transcript-overlay.txt");
         let cases: Vec<(&str, &str, ChatAnswerKind, Result<Steps, AnswerRefusal>)> = vec![
+            (
+                "claude--v2330-transcript-overlay",
+                transcript,
+                option(1),
+                Ok(vec![(vec![Key::Text(text("q"))], DialogGone)]),
+            ),
             ("c23-perm-bash", c23, option(1), Ok(vec![digit(1)])),
             ("c23-perm-bash", c23, option(2), Ok(vec![digit(2)])),
             ("c23-perm-bash", c23, option(4), Ok(vec![digit(4)])),

@@ -3640,6 +3640,7 @@ impl RootView {
             chat.composer_state.as_ref(),
             chat.sends.in_flight((self.now)()),
             chat.sends.owns_draft((self.now)()),
+            chat.stack.current(),
         )
     }
 

@@ -210,7 +210,7 @@ fn dialog_for<'r>(
     pending: &PendingInput,
     folder: Option<&str>,
 ) -> Result<&'r ChatPrompt, TypeRefusal> {
-    let shown = reading.chat.as_ref().and_then(|chat| chat.prompt.as_ref());
+    let shown = crate::view_drive::asked_prompt(reading.chat.as_ref());
     shown
         .filter(|prompt| match pending {
             PendingInput::Question { questions } => {
@@ -1689,6 +1689,20 @@ mod tests {
                 CHAT_REFUSED,
                 PROMPT_UNREADABLE,
                 "a permission dialog for a question",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_offers_nothing_for_an_open_transcript_overlay() {
+            let transcript =
+                include_str!("../screen/fixtures/claude--v2330-transcript-overlay.txt");
+            let mut w = waiting("dash-answer-transcript", transcript, bash_permission());
+            w.answer(PromptChoice::Allow).await;
+            w.refused(
+                CHAT_REFUSED,
+                PROMPT_UNREADABLE,
+                "an overlay's Close is no answer to the pending call",
             )
             .await;
         }

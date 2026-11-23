@@ -1870,8 +1870,9 @@ pub enum ComposerNote {
     Sending,
     /// The terminal's prompt box holds text of the owner's.
     Draft,
-    /// The named overlay is open in the terminal.
-    Overlay(String),
+    /// A full-screen overlay is open in the terminal, named by its prompt's
+    /// label when it shows one.
+    Overlay(Option<String>),
     /// The screen's prompt box cannot be read.
     Unknown,
 }
@@ -1886,8 +1887,11 @@ impl ComposerNote {
             Self::Draft => {
                 "The prompt box has a draft. Send or clear it in the terminal first.".to_owned()
             }
-            Self::Overlay(name) => {
-                format!("{name} is open in the terminal. Close it there to send.")
+            Self::Overlay(Some(label)) => {
+                format!("{label} is open in the terminal. Close it to send.")
+            }
+            Self::Overlay(None) => {
+                "A full-screen view is open in the terminal. Close it there to send.".to_owned()
             }
             Self::Unknown => "Can't read the prompt box right now.".to_owned(),
         }
@@ -1896,21 +1900,23 @@ impl ComposerNote {
     /// Whether the composer takes no input while it shows this.
     #[must_use]
     pub fn disables(&self) -> bool {
-        matches!(self, Self::NotConnected)
+        matches!(self, Self::NotConnected | Self::Overlay(_))
     }
 }
 
 /// The note the composer shows: none while it can send. `connected` says
 /// the daemon connection is open, `state` is the screen's last composer
 /// state (none before the chat loaded), `sending` says our own send is in
-/// flight, whose paste reads as a draft, and `owns_draft` says a settled
-/// send may still own the draft the screen shows, which then shows no note.
+/// flight, whose paste reads as a draft, `owns_draft` says a settled send
+/// may still own the draft the screen shows, which then shows no note, and
+/// `prompt` is the card the chat shows, whose subject names an overlay.
 #[must_use]
 pub fn composer_note(
     connected: bool,
     state: Option<&ComposerState>,
     sending: bool,
     owns_draft: bool,
+    prompt: Option<&ChatPrompt>,
 ) -> Option<ComposerNote> {
     if !connected {
         return Some(ComposerNote::NotConnected);
@@ -1921,7 +1927,11 @@ pub fn composer_note(
     match state? {
         ComposerState::Draft if owns_draft => None,
         ComposerState::Draft => Some(ComposerNote::Draft),
-        ComposerState::Overlay { name } => Some(ComposerNote::Overlay(name.clone())),
+        ComposerState::Overlay { .. } => Some(ComposerNote::Overlay(
+            prompt
+                .filter(|prompt| prompt.kind == ChatPromptKind::Overlay)
+                .map(|prompt| prompt.subject.clone()),
+        )),
         ComposerState::Unknown => Some(ComposerNote::Unknown),
         _ => None,
     }
@@ -3233,7 +3243,10 @@ mod strip_tests {
     use std::time::{Duration, Instant};
 
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-    use protocol::{ChatEntry, ClientMessage, ComposerState, WorkShell, WorkSubagent};
+    use protocol::{
+        ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage, ComposerState, WorkShell,
+        WorkSubagent,
+    };
 
     use super::{RunningWork, SCREEN_READ_TIP, Strip, StripKind};
 
@@ -3819,35 +3832,36 @@ mod strip_tests {
     fn the_composer_note_says_why_a_send_cannot_go() {
         use super::{ComposerNote, composer_note};
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Ready), false, false),
+            composer_note(true, Some(&ComposerState::Ready), false, false, None),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Working), false, false),
+            composer_note(true, Some(&ComposerState::Working), false, false, None),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Dialog), false, false),
+            composer_note(true, Some(&ComposerState::Dialog), false, false, None),
             None
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), false, false),
+            composer_note(true, Some(&ComposerState::Draft), false, false, None),
             Some(ComposerNote::Draft)
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), true, false),
+            composer_note(true, Some(&ComposerState::Draft), true, false, None),
             Some(ComposerNote::Sending),
             "our own send in flight reads as sending"
         );
         let overlay = ComposerState::Overlay {
-            name: "/model".to_owned(),
+            name: "question_preview".to_owned(),
         };
         assert_eq!(
-            composer_note(true, Some(&overlay), false, false).map(|note| note.text()),
-            Some("/model is open in the terminal. Close it there to send.".to_owned())
+            composer_note(true, Some(&overlay), false, false, None).map(|note| note.text()),
+            Some("A full-screen view is open in the terminal. Close it there to send.".to_owned()),
+            "an overlay with no Close prompt is named by no label"
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Unknown), false, false)
+            composer_note(true, Some(&ComposerState::Unknown), false, false, None)
                 .map(|note| note.text()),
             Some("Can't read the prompt box right now.".to_owned())
         );
@@ -3856,21 +3870,84 @@ mod strip_tests {
             "The prompt box has a draft. Send or clear it in the terminal first."
         );
         assert_eq!(
-            composer_note(false, Some(&ComposerState::Ready), false, false).map(|note| note.text()),
+            composer_note(false, Some(&ComposerState::Ready), false, false, None)
+                .map(|note| note.text()),
             Some("Not connected".to_owned())
         );
         assert!(ComposerNote::NotConnected.disables());
         assert!(!ComposerNote::Draft.disables());
-        assert_eq!(composer_note(true, None, false, false), None);
+        assert_eq!(composer_note(true, None, false, false, None), None);
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), false, true),
+            composer_note(true, Some(&ComposerState::Draft), false, true, None),
             None,
             "a draft the send owns shows no note"
         );
         assert_eq!(
-            composer_note(true, Some(&ComposerState::Draft), true, true),
+            composer_note(true, Some(&ComposerState::Draft), true, true, None),
             Some(ComposerNote::Sending),
             "sending still wins over an owned draft"
+        );
+    }
+
+    /// An overlay's Close prompt with `subject`.
+    fn close_prompt(subject: &str) -> ChatPrompt {
+        ChatPrompt {
+            id: "o1".to_owned(),
+            kind: ChatPromptKind::Overlay,
+            subject: subject.to_owned(),
+            body: String::new(),
+            options: vec![ChatOption {
+                number: 1,
+                label: "Close".to_owned(),
+                description: None,
+                selected: false,
+            }],
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+            adjust: None,
+        }
+    }
+
+    #[test]
+    fn the_composer_note_names_an_overlay_by_its_prompt_and_disables() {
+        use super::{ComposerNote, composer_note};
+        let rewind = ComposerState::Overlay {
+            name: "rewind".to_owned(),
+        };
+        let close = close_prompt("Rewind");
+        let shown = composer_note(true, Some(&rewind), false, false, Some(&close));
+        assert_eq!(
+            shown.as_ref().map(ComposerNote::text),
+            Some("Rewind is open in the terminal. Close it to send.".to_owned())
+        );
+        assert!(
+            shown.is_some_and(|note| note.disables()),
+            "an overlay disables the composer"
+        );
+        let other = ChatPrompt {
+            kind: ChatPromptKind::Permission,
+            ..close
+        };
+        let fallback = composer_note(true, Some(&rewind), false, false, Some(&other));
+        assert_eq!(
+            fallback.as_ref().map(ComposerNote::text),
+            Some("A full-screen view is open in the terminal. Close it there to send.".to_owned()),
+            "only an overlay prompt names the overlay"
+        );
+        assert!(fallback.is_some_and(|note| note.disables()));
+        assert_eq!(
+            composer_note(
+                false,
+                Some(&rewind),
+                false,
+                false,
+                Some(&close_prompt("Rewind"))
+            ),
+            Some(ComposerNote::NotConnected),
+            "no connection still wins"
         );
     }
 
@@ -3885,6 +3962,7 @@ mod strip_tests {
             Some(state),
             sends.in_flight(now),
             sends.owns_draft(now),
+            None,
         )
     }
 

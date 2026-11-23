@@ -1738,6 +1738,40 @@ fn a_model_picker_card_sends_the_picked_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_overlay_card_closes_it_and_disables_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "careful");
+    let mut close = prompt("o1", ChatPromptKind::Overlay, &[(1, "Close")]);
+    close.subject = "Rewind".to_owned();
+    close.body = String::new();
+    close.can_amend = false;
+    show_screen(
+        &mut h,
+        ComposerState::Overlay {
+            name: "rewind".to_owned(),
+        },
+        Some(close),
+    );
+    assert!(painted(&mut h, "chat-card-1"), "the Close button");
+    assert!(!painted(&mut h, "chat-card-2"), "Close is the only button");
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("Rewind is open in the terminal. Close it to send.")
+    );
+    h.sent();
+    h.click_on("chat-send");
+    h.keys("ctrl-enter");
+    assert!(
+        sends(&mut h).is_empty(),
+        "Send is disabled while the overlay is up"
+    );
+    h.click_on("chat-card-1");
+    assert_eq!(answer_kinds(&mut h), [opt(1)]);
+}
+
+#[gpui::test]
 fn the_effort_buttons_send_adjust_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);
@@ -4087,7 +4121,8 @@ fn an_overlay_composer_names_the_overlay(cx: &mut TestAppContext) {
     );
     assert_eq!(
         note(&mut h).as_deref(),
-        Some("/model is open in the terminal. Close it there to send.")
+        Some("A full-screen view is open in the terminal. Close it there to send."),
+        "an overlay with no Close prompt names no label"
     );
 }
 

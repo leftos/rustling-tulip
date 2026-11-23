@@ -406,6 +406,13 @@ fn is_notice(prompt: &ChatPrompt) -> bool {
     prompt.kind == ChatPromptKind::HeadsUp && prompt.subject != protocol::HEADS_UP_DISMISSED_SUBJECT
 }
 
+/// The prompt `chat` shows the agent asking: none for an overlay's Close
+/// prompt, which is a card for the chat only and asks nothing.
+pub(crate) fn asked_prompt(chat: Option<&ChatScreen>) -> Option<&ChatPrompt> {
+    chat.and_then(|chat| chat.prompt.as_ref())
+        .filter(|prompt| prompt.kind != ChatPromptKind::Overlay)
+}
+
 impl ViewReturn {
     /// Whether a drive is under way or a pressed key awaits its reading: the
     /// terminal is mid-switch and its keys are not free.
@@ -445,9 +452,7 @@ impl ViewReturn {
             .box_first_line
             .as_deref()
             .is_some_and(|line| line.starts_with(NOTE_PREFIX));
-        let heads_up_shown = chat
-            .and_then(|chat| chat.prompt.as_ref())
-            .is_some_and(is_notice);
+        let heads_up_shown = asked_prompt(chat).is_some_and(is_notice);
         if !heads_up_shown {
             self.handled_heads_up = None;
         }
@@ -516,7 +521,7 @@ impl ViewReturn {
         note: bool,
     ) -> Option<RestoreAfter> {
         view.agent_in_view.as_ref()?;
-        let prompt = chat.and_then(|chat| chat.prompt.as_ref());
+        let prompt = asked_prompt(chat);
         if prompt.is_some_and(|prompt| prompt.kind == ChatPromptKind::Question) {
             self.question_armed = true;
         }
@@ -640,7 +645,7 @@ impl ViewReturn {
         }
         let due = match saved.after {
             RestoreAfter::HeadsUpGone => {
-                chat.prompt.as_ref().is_none_or(|prompt| !is_notice(prompt))
+                asked_prompt(Some(chat)).is_none_or(|prompt| !is_notice(prompt))
             }
             RestoreAfter::MainWorking => chat.composer == ComposerState::Working,
         };

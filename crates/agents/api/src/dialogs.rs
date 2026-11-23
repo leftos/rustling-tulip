@@ -2,9 +2,9 @@
 //! prompt its screen reader found, in groups, each with the reading the
 //! daemon waits for before it types the next group.
 //!
-//! Keys are a closed set: there is no Esc and no general ctrl key (only the
-//! prompt stash, ctrl+s, and the line clear, ctrl+u), so no recipe can open
-//! Rewind or interrupt a turn.
+//! Keys are a closed set: there is no general ctrl key (only the prompt
+//! stash, ctrl+s, and the line clear, ctrl+u), so no recipe can open Rewind
+//! or interrupt a turn. Esc is there to close an overlay the agent drew.
 //! These types never cross the wire.
 
 use protocol::ChatPromptKind;
@@ -34,6 +34,8 @@ pub enum Key {
     Stash,
     /// ctrl+u: the line clear.
     ClearLine,
+    /// Esc, which closes an overlay.
+    Esc,
 }
 
 impl Key {
@@ -58,6 +60,7 @@ impl Key {
             Self::Text(text) => text.as_bytes().to_vec(),
             Self::Stash => vec![0x13],
             Self::ClearLine => vec![0x15],
+            Self::Esc => vec![0x1b],
         }
     }
 }
@@ -232,6 +235,11 @@ mod tests {
         for (key, bytes) in cases {
             assert_eq!(key.to_bytes(), bytes, "{key:?}");
         }
+    }
+
+    #[test]
+    fn esc_writes_the_escape_byte() {
+        assert_eq!(Key::Esc.to_bytes(), vec![0x1b]);
     }
 
     #[test]

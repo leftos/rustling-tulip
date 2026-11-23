@@ -356,6 +356,7 @@ pub fn card_buttons(prompt: &ChatPrompt, agent: &str) -> Vec<CardButton> {
             positional(prompt, &[], None)
         }
         ChatPromptKind::ModelPicker => model_picker_buttons(prompt),
+        ChatPromptKind::Overlay => positional(prompt, &[], None),
         ChatPromptKind::Unknown => Vec::new(),
     }
 }
@@ -1656,6 +1657,15 @@ mod tests {
         );
         let unknown = prompt_with(ChatPromptKind::Unknown, &[(1, "a")]);
         assert_eq!(card_buttons(&unknown, "Claude"), []);
+    }
+
+    #[test]
+    fn an_overlay_card_offers_only_close() {
+        let overlay = prompt_with(ChatPromptKind::Overlay, &[(1, "Close")]);
+        assert_eq!(
+            fixed(&card_buttons(&overlay, "Claude")),
+            [row("1", "Close", opt(1))]
+        );
     }
 
     #[test]

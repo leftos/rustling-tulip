@@ -3949,6 +3949,8 @@ pub enum ChatPromptKind {
     ModelPicker,
     /// A yes-or-no confirmation the agent asks before acting.
     Confirm,
+    /// A full-screen view the agent drew over its prompt, which the chat can only close.
+    Overlay,
     /// Forward-compat fallback: a kind the current build doesn't know.
     /// Daemon never constructs this directly.
     #[serde(other)]
@@ -20087,6 +20089,14 @@ mod tests {
             serde_json::to_string(&ChatPromptKind::ModelPicker).expect("encode"),
             r#""model_picker""#
         );
+    }
+
+    #[test]
+    fn an_overlay_prompt_kind_round_trips() {
+        let json = serde_json::to_string(&ChatPromptKind::Overlay).expect("encode");
+        assert_eq!(json, r#""overlay""#);
+        let kind: ChatPromptKind = serde_json::from_str(&json).expect("decode");
+        assert_eq!(kind, ChatPromptKind::Overlay);
     }
 
     #[test]

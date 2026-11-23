@@ -52,17 +52,167 @@ const SPINNER_ROWS: usize = 24;
 /// How many non-empty rows at the bottom are searched for an overlay's keys.
 const OVERLAY_ROWS: usize = 4;
 
-/// The key line each overlay shows, and the name the chat gives it. An
-/// `AskUserQuestion` step whose options carry previews is one: the chat
-/// recognises it but does not answer it.
-const OVERLAYS: [(&str, &str); 5] = [
-    ("Showing detailed transcript", "transcript"),
-    ("f to fork · Esc to close", "btw"),
-    ("Enter to continue · Esc to cancel", "rewind"),
-    ("· n to add notes ·", "question_preview"),
+/// How an overlay's key line is found among the bottom rows.
+enum OverlayMatch {
+    /// A row holds this text.
+    Contains(&'static str),
+    /// A row is this text and nothing else, spaces aside.
+    Exactly(&'static str),
+    /// A row is a numbered option with this label, the cursor's or not
+    /// (`❯ 3. Summarize up to here`), a hint allowed after a word break.
+    NumberedRow(&'static str),
+}
+
+impl OverlayMatch {
+    /// Whether `row` is the overlay's key line.
+    fn matches(&self, row: &str) -> bool {
+        match self {
+            Self::Contains(text) => row.contains(text),
+            Self::Exactly(text) => row.trim() == *text,
+            Self::NumberedRow(label) => numbered_row_is(row, label),
+        }
+    }
+}
+
+/// Whether `row` is a numbered option row whose label starts with `label`
+/// and ends at a word break: optional spaces, an optional cursor, digits,
+/// `. `, then the label.
+fn numbered_row_is(row: &str, label: &str) -> bool {
+    let rest = row.trim_start();
+    let rest = rest.strip_prefix(CURSOR).map_or(rest, str::trim_start);
+    let after_digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    if after_digits.len() == rest.len() {
+        return false;
+    }
+    after_digits
+        .strip_prefix(". ")
+        .and_then(|after| after.strip_prefix(label))
+        .is_some_and(|tail| {
+            !tail
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+}
+
+/// The key that closes an overlay.
+enum CloseKey {
+    /// `q`.
+    Q,
+    /// Esc.
+    Esc,
+}
+
+/// How the chat closes an overlay: its prompt's subject, the key and the
+/// reading to wait for after it.
+struct OverlayClose {
+    label: &'static str,
+    /// The prompt's body.
+    body: &'static str,
+    key: CloseKey,
+    expect: ScreenExpect,
+}
+
+/// One overlay: how its key line is found, the name the chat gives it, and
+/// its Close, when the chat offers one.
+struct OverlayRow {
+    matched: OverlayMatch,
+    name: &'static str,
+    close: Option<OverlayClose>,
+}
+
+/// The overlays, the first whose key line is among the bottom rows winning.
+/// An `AskUserQuestion` step whose options carry previews is one: the chat
+/// recognises it but does not answer it. The transcript search's Esc goes
+/// back to the transcript, whose own prompt then offers its Close; what Esc
+/// leads to on Rewind's choice screen is not known.
+static OVERLAYS: [OverlayRow; 9] = [
+    OverlayRow {
+        matched: OverlayMatch::Contains("Showing detailed transcript"),
+        name: "transcript",
+        close: Some(OverlayClose {
+            label: "Transcript",
+            body: "",
+            key: CloseKey::Q,
+            expect: ScreenExpect::DialogGone,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Contains("q/ctrl+o to exit"),
+        name: "transcript_shortcuts",
+        close: Some(OverlayClose {
+            label: "Transcript shortcuts",
+            body: "",
+            key: CloseKey::Q,
+            expect: ScreenExpect::DialogGone,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Contains("⌕ Search transcript"),
+        name: "transcript_search",
+        close: Some(OverlayClose {
+            label: "Transcript search",
+            body: "",
+            key: CloseKey::Esc,
+            expect: ScreenExpect::NextPrompt(ChatPromptKind::Overlay),
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Contains("f to fork · Esc to close"),
+        name: "btw",
+        close: Some(OverlayClose {
+            label: "Side question",
+            body: "",
+            key: CloseKey::Esc,
+            expect: ScreenExpect::DialogGone,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Exactly("Esc to close"),
+        name: "btw_pending",
+        close: Some(OverlayClose {
+            label: "Side question",
+            body: "",
+            key: CloseKey::Esc,
+            expect: ScreenExpect::DialogGone,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Contains("Enter to continue · Esc to cancel"),
+        name: "rewind",
+        close: Some(OverlayClose {
+            label: "Rewind",
+            body: "",
+            key: CloseKey::Esc,
+            expect: ScreenExpect::Any,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::NumberedRow("Summarize up to here"),
+        name: "rewind_restore",
+        close: Some(OverlayClose {
+            label: "Rewind",
+            // A body of its own, so the picker an Esc may lead back to is a new prompt.
+            body: "Choose what to restore in the terminal, or close it.",
+            key: CloseKey::Esc,
+            expect: ScreenExpect::Any,
+        }),
+    },
+    OverlayRow {
+        matched: OverlayMatch::Contains("· n to add notes ·"),
+        name: "question_preview",
+        close: None,
+    },
     // The "Background this session?" dialog older versions draw on Left Left.
-    ("1. Background anyway", "background"),
+    OverlayRow {
+        matched: OverlayMatch::Contains("1. Background anyway"),
+        name: "background",
+        close: None,
+    },
 ];
+
+/// The label of the one option an overlay's prompt offers.
+const CLOSE_LABEL: &str = "Close";
 
 /// The character the right-hand file panel's left edge is drawn with.
 const PANEL_EDGE: char = '│';
@@ -136,12 +286,12 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
             prompt: Some(prompt),
         };
     }
-    if let Some(name) = overlay(rows) {
+    if let Some(overlay) = overlay(rows) {
         return ChatScreen {
             composer: ComposerState::Overlay {
-                name: name.to_owned(),
+                name: overlay.name.to_owned(),
             },
-            prompt: None,
+            prompt: overlay.close.as_ref().map(close_prompt),
         };
     }
     let start = after_last_rule(rows);
@@ -479,18 +629,88 @@ fn suggestion(rows: &[String], dim: &[String]) -> Option<(usize, String)> {
     all_dim.then(|| (top, text.to_owned()))
 }
 
-/// The name of the overlay whose key line is among the bottom rows.
-fn overlay(rows: &[String]) -> Option<&'static str> {
-    let bottom: Vec<&String> = rows
-        .iter()
+/// The overlay whose key line is among the bottom rows; none while those
+/// rows hold the input box, whose draft may read like a key line. An
+/// overlay draws over the whole screen, the box included.
+fn overlay(rows: &[String]) -> Option<&'static OverlayRow> {
+    let bottom: Vec<usize> = (0..rows.len())
         .rev()
-        .filter(|row| !row.trim().is_empty())
+        .filter(|&index| !rows[index].trim().is_empty())
         .take(OVERLAY_ROWS)
         .collect();
-    OVERLAYS
+    if shows_input_box(rows, &bottom) {
+        return None;
+    }
+    OVERLAYS.iter().find(|overlay| {
+        bottom
+            .iter()
+            .any(|&index| overlay.matched.matches(&rows[index]))
+    })
+}
+
+/// Whether the input box is among the rows at `bottom`: its rules (the
+/// last two) with the lower one there, and a first row starting with the
+/// box's prompt, `❯` or bash mode's `!`.
+fn shows_input_box(rows: &[String], bottom: &[usize]) -> bool {
+    let Some((top, under)) = box_rules(rows) else {
+        return false;
+    };
+    let first = rows[top + 1..under]
         .iter()
-        .find(|(keys, _)| bottom.iter().any(|row| row.contains(keys)))
-        .map(|&(_, name)| name)
+        .map(|row| row.trim())
+        .find(|row| !row.is_empty());
+    bottom.contains(&under)
+        && first.is_some_and(|row| row.starts_with(CURSOR) || row.starts_with(BASH_MODE))
+}
+
+/// The prompt an overlay the chat can close shows: its label and one
+/// Close option.
+fn close_prompt(close: &OverlayClose) -> ChatPrompt {
+    ChatPrompt {
+        id: String::new(),
+        kind: ChatPromptKind::Overlay,
+        subject: close.label.to_owned(),
+        body: close.body.to_owned(),
+        options: vec![ChatOption {
+            number: 1,
+            label: CLOSE_LABEL.to_owned(),
+            description: None,
+            selected: false,
+        }],
+        questions: Vec::new(),
+        can_amend: false,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+        adjust: None,
+    }
+}
+
+/// The Close of the overlay whose prompt is `prompt`: option 1 types the
+/// key of the first overlay labelled as the prompt's subject. The two
+/// Rewind screens share a label and a Close.
+fn overlay_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    if *answer != (ChatAnswerKind::Option { number: 1 }) {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    let close = OVERLAYS
+        .iter()
+        .filter_map(|overlay| overlay.close.as_ref())
+        .find(|close| close.label == prompt.subject)
+        .ok_or(AnswerRefusal::NotThisDialog)?;
+    let key = match close.key {
+        CloseKey::Q => Key::Text("q".to_owned()),
+        CloseKey::Esc => Key::Esc,
+    };
+    Ok(AnswerRecipe {
+        steps: vec![RecipeStep {
+            keys: vec![key],
+            expect: close.expect.clone(),
+        }],
+    })
 }
 
 /// A permission dialog: the kind row under the dialog's rule, the subject,
@@ -2084,6 +2304,7 @@ pub(crate) fn recipe(
         ChatPromptKind::Question => return question_recipe(prompt, answer),
         ChatPromptKind::Review => return review_recipe(prompt, answer),
         ChatPromptKind::ModelPicker => return picker_recipe(prompt, answer),
+        ChatPromptKind::Overlay => return overlay_recipe(prompt, answer),
         ChatPromptKind::McpServer if prompt.multi => return mcp_servers_recipe(prompt, answer),
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
@@ -2873,6 +3094,291 @@ mod tests {
         read(&capture(text))
             .prompt
             .expect("the capture shows a prompt")
+    }
+
+    /// The 2.1.330 overlays the chat can close: the capture, the overlay's
+    /// name and its prompt's subject.
+    const CLOSABLE_OVERLAYS: [(&str, &str, &str); 8] = [
+        (
+            include_str!(
+                "../../../daemon/src/screen/fixtures/claude--v2330-transcript-overlay.txt"
+            ),
+            "transcript",
+            "Transcript",
+        ),
+        (
+            include_str!(
+                "../../../daemon/src/screen/fixtures/claude--v2330-transcript-overlay-search.txt"
+            ),
+            "transcript_search",
+            "Transcript search",
+        ),
+        (
+            include_str!(
+                "../../../daemon/src/screen/fixtures/claude--v2330-transcript-overlay-search-match.txt"
+            ),
+            "transcript",
+            "Transcript",
+        ),
+        (
+            include_str!(
+                "../../../daemon/src/screen/fixtures/claude--v2330-transcript-overlay-shortcuts.txt"
+            ),
+            "transcript_shortcuts",
+            "Transcript shortcuts",
+        ),
+        (
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker.txt"),
+            "rewind",
+            "Rewind",
+        ),
+        (
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-rewind-confirm.txt"),
+            "rewind_restore",
+            "Rewind",
+        ),
+        (
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-pending.txt"),
+            "btw_pending",
+            "Side question",
+        ),
+        (
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-btw-answer.txt"),
+            "btw",
+            "Side question",
+        ),
+    ];
+
+    #[test]
+    fn each_closable_overlay_reads_with_its_close_prompt() {
+        for (text, name, subject) in CLOSABLE_OVERLAYS {
+            let screen = read(&capture(text));
+            assert_eq!(
+                screen.composer,
+                ComposerState::Overlay {
+                    name: name.to_owned()
+                },
+                "{name}"
+            );
+            let prompt = screen.prompt.expect("an overlay shows its Close prompt");
+            assert_eq!(prompt.kind, ChatPromptKind::Overlay, "{name}");
+            assert_eq!(prompt.subject, subject, "{name}");
+            let body = if name == "rewind_restore" {
+                "Choose what to restore in the terminal, or close it."
+            } else {
+                ""
+            };
+            assert_eq!(prompt.body, body, "{name}");
+            assert_eq!(
+                prompt.options,
+                [ChatOption {
+                    number: 1,
+                    label: "Close".to_owned(),
+                    description: None,
+                    selected: false,
+                }],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_preview_question_overlay_has_no_close_prompt() {
+        let screen = read(&capture(include_str!(
+            "../../../daemon/src/screen/fixtures/v39-ask-q3.txt"
+        )));
+        assert_eq!(
+            screen.composer,
+            ComposerState::Overlay {
+                name: "question_preview".to_owned()
+            }
+        );
+        assert_eq!(screen.prompt, None);
+    }
+
+    /// An idle 2.1.330 screen, whose prompt box is empty.
+    const IDLE_V2330: &str = include_str!(
+        "../../../daemon/src/screen/fixtures/claude--v2330-default-mode-setting-bg-shell.txt"
+    );
+
+    #[test]
+    fn a_draft_naming_a_rewind_choice_reads_no_overlay() {
+        let lines: Vec<String> = IDLE_V2330
+            .lines()
+            .map(|line| {
+                if line.trim_end() == "❯" {
+                    "❯ Summarize up to here".to_owned()
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect();
+        assert!(
+            lines.iter().any(|line| line == "❯ Summarize up to here"),
+            "the box holds the draft"
+        );
+        let screen = read(&lines);
+        assert_eq!(screen.composer, ComposerState::Draft);
+        assert_eq!(screen.prompt, None);
+    }
+
+    #[test]
+    fn a_transcript_line_naming_a_rewind_choice_reads_no_overlay() {
+        // The row just above the box's upper rule.
+        let text = IDLE_V2330.replace(
+            "✻ Brewed for 2s · done 3:25 PM · 1 shell still running",
+            "  3. Summarize up to here",
+        );
+        assert!(text.contains("  3. Summarize up to here"));
+        let screen = read(&capture(&text));
+        assert!(
+            !matches!(screen.composer, ComposerState::Overlay { .. }),
+            "{:?}",
+            screen.composer
+        );
+    }
+
+    /// The idle 2.1.330 screen with its empty box row replaced by `box_rows`.
+    fn idle_with_box(box_rows: &[&str]) -> Vec<String> {
+        let mut rows = Vec::new();
+        for line in IDLE_V2330.lines() {
+            if line.trim_end() == "❯" {
+                rows.extend(box_rows.iter().map(|&row| row.to_owned()));
+            } else {
+                rows.push(line.to_owned());
+            }
+        }
+        assert!(
+            rows.iter().any(|row| row == box_rows[0]),
+            "the box holds the draft"
+        );
+        rows
+    }
+
+    /// `rows` read as a draft, with no overlay and no prompt.
+    fn reads_as_a_draft(rows: &[String]) {
+        let screen = read(rows);
+        assert_eq!(screen.composer, ComposerState::Draft, "{rows:?}");
+        assert_eq!(screen.prompt, None);
+    }
+
+    #[test]
+    fn a_numbered_draft_naming_a_rewind_choice_reads_no_overlay() {
+        reads_as_a_draft(&idle_with_box(&[
+            "❯ 1. Summarize up to here, then run the tests",
+        ]));
+    }
+
+    #[test]
+    fn a_multi_line_draft_row_naming_a_rewind_choice_reads_no_overlay() {
+        reads_as_a_draft(&idle_with_box(&["❯ first", "  2. Summarize up to here"]));
+    }
+
+    #[test]
+    fn a_draft_naming_the_transcript_reads_no_overlay() {
+        reads_as_a_draft(&idle_with_box(&["❯ Showing detailed transcript"]));
+        reads_as_a_draft(&idle_with_box(&["❯ q/ctrl+o to exit"]));
+    }
+
+    #[test]
+    fn a_draft_row_reading_esc_to_close_reads_no_overlay() {
+        reads_as_a_draft(&idle_with_box(&["❯ first", "  Esc to close"]));
+    }
+
+    #[test]
+    fn a_rewind_choice_with_the_cursor_on_summarize_reads_as_its_overlay() {
+        let text =
+            include_str!("../../../daemon/src/screen/fixtures/claude--v2330-rewind-confirm.txt")
+                .replace("  ❯ 1. Restore conversation", "    1. Restore conversation")
+                .replace("    3. Summarize up to here", "  ❯ 3. Summarize up to here");
+        assert!(text.contains("  ❯ 3. Summarize up to here"));
+        assert_eq!(
+            read(&capture(&text)).composer,
+            ComposerState::Overlay {
+                name: "rewind_restore".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_start_screen_reads_no_overlay() {
+        // The first screen a session draws: its folder trust prompt.
+        let screen = read(&capture(include_str!(
+            "../../../daemon/src/screen/fixtures/v01-start.txt"
+        )));
+        assert!(
+            !matches!(screen.composer, ComposerState::Overlay { .. }),
+            "{:?}",
+            screen.composer
+        );
+        assert_ne!(
+            screen.prompt.map(|prompt| prompt.kind),
+            Some(ChatPromptKind::Overlay)
+        );
+    }
+
+    /// An overlay's Close prompt with `subject`.
+    fn overlay_prompt(subject: &str) -> ChatPrompt {
+        ChatPrompt {
+            id: String::new(),
+            kind: ChatPromptKind::Overlay,
+            subject: subject.to_owned(),
+            body: String::new(),
+            options: vec![ChatOption {
+                number: 1,
+                label: "Close".to_owned(),
+                description: None,
+                selected: false,
+            }],
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+            adjust: None,
+        }
+    }
+
+    #[test]
+    fn an_overlay_close_types_its_overlays_key() {
+        let q = || Key::Text("q".to_owned());
+        let cases = [
+            ("Transcript", q(), ScreenExpect::DialogGone),
+            ("Transcript shortcuts", q(), ScreenExpect::DialogGone),
+            (
+                "Transcript search",
+                Key::Esc,
+                ScreenExpect::NextPrompt(ChatPromptKind::Overlay),
+            ),
+            ("Side question", Key::Esc, ScreenExpect::DialogGone),
+            ("Rewind", Key::Esc, ScreenExpect::Any),
+        ];
+        for (subject, key, expect) in cases {
+            let prompt = overlay_prompt(subject);
+            assert_eq!(
+                recipe(&prompt, &ChatAnswerKind::Option { number: 1 }).map(|recipe| recipe.steps),
+                Ok(vec![RecipeStep {
+                    keys: vec![key],
+                    expect,
+                }]),
+                "{subject}"
+            );
+            for answer in [ChatAnswerKind::Option { number: 2 }, ChatAnswerKind::Submit] {
+                assert_eq!(
+                    recipe(&prompt, &answer),
+                    Err(AnswerRefusal::NotThisDialog),
+                    "{subject} {answer:?}"
+                );
+            }
+        }
+        assert_eq!(
+            recipe(
+                &overlay_prompt("Elsewhere"),
+                &ChatAnswerKind::Option { number: 1 }
+            ),
+            Err(AnswerRefusal::NotThisDialog),
+            "a subject in no overlay row"
+        );
     }
 
     /// A picker option.
