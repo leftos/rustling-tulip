@@ -2413,7 +2413,7 @@ impl PendingSends {
     }
 
     /// For each user message new in `change`, take away the oldest pending
-    /// entry with its text (both trimmed), adding its id to the change's
+    /// entry its text settles (see [`settle_key`]), adding its id to the change's
     /// removals, as well as the ids dropped since the last append.
     fn clear_landed(&mut self, change: &mut Change) {
         for (entry, replaces) in change.entries.iter().zip(&change.replaces) {
@@ -2427,17 +2427,79 @@ impl PendingSends {
         change.removed.append(&mut self.dropped);
     }
 
-    /// Take away the oldest entry whose trimmed text is `text` trimmed; its
-    /// id.
+    /// Take away the oldest entry whose text settles against `text` (their
+    /// [`settle_key`]s are equal); its id.
     fn take_oldest(&mut self, text: &str) -> Option<String> {
-        let at = self.entries.iter().position(|entry| {
-            matches!(entry, ChatEntry::User { text: held, .. } if held.trim() == text.trim())
-        })?;
+        let key = settle_key(text);
+        let at = self.entries.iter().position(
+            |entry| matches!(entry, ChatEntry::User { text: held, .. } if settle_key(held) == key),
+        )?;
         match self.entries.remove(at) {
             ChatEntry::User { id, .. } => Some(id),
             _ => None,
         }
     }
+}
+
+/// The form a pending send and a transcript user message are compared in:
+/// the text trimmed, each uploaded file's path (a whitespace-delimited token
+/// through an `rt-uploads` folder) as `[Image]`, and each `[Image #<n>]`
+/// the agent records for an attachment as `[Image]` too. A pasted image's
+/// path so settles against the message the agent recorded for it.
+fn settle_key(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        out.push_str(if is_upload_path(token) {
+            "[Image]"
+        } else {
+            token
+        });
+        let gap_end = tail.len() - tail.trim_start().len();
+        let (gap, next) = tail.split_at(gap_end);
+        out.push_str(gap);
+        rest = next;
+    }
+    image_markers_as_image(&out)
+}
+
+/// Whether `token` is a path to a file in an `rt-uploads` folder: the
+/// folder name, a `\` or `/`, then a file name.
+fn is_upload_path(token: &str) -> bool {
+    const FOLDER: &str = "rt-uploads";
+    token.match_indices(FOLDER).any(|(at, _)| {
+        let after = &token[at + FOLDER.len()..];
+        after
+            .strip_prefix(['\\', '/'])
+            .is_some_and(|name| !name.is_empty() && !name.ends_with(['\\', '/']))
+    })
+}
+
+/// `text` with each `[Image #<n>]` as `[Image]`.
+fn image_markers_as_image(text: &str) -> String {
+    const OPEN: &str = "[Image #";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let after = &from[OPEN.len()..];
+        let number = after.trim_start_matches(|c: char| c.is_ascii_digit());
+        match number.strip_prefix(']') {
+            Some(next) if number.len() < after.len() => {
+                out.push_str("[Image]");
+                rest = next;
+            }
+            _ => {
+                out.push_str(OPEN);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What groups a live line's pieces: its message, else its prompt.
@@ -2569,6 +2631,57 @@ mod tests {
             1,
             "an old line with the send's text is not its record"
         );
+    }
+
+    /// Whether a pending send of `pending` is settled by a prompt Claude
+    /// recorded as `landed`.
+    fn settles(pending: &str, landed: &str) -> bool {
+        let mut chat = ChatState::starting_with(None, false);
+        let mut change = apply(&mut chat, &prompt("u-1", 1, None, landed));
+        let mut sends = PendingSends::default();
+        sends.add("pending:1", pending);
+        sends.clear_landed(&mut change);
+        change.removed.iter().any(|id| id == "pending:1")
+    }
+
+    #[test]
+    fn a_pasted_image_path_settles_against_its_image_message() {
+        assert!(settles(
+            r"X:\work\.tmp\rt-uploads\20261122-photo-1.jpg ",
+            "[Image #1]"
+        ));
+    }
+
+    #[test]
+    fn a_path_inside_a_prompt_settles_against_its_image_message() {
+        assert!(settles(
+            r"look at X:\work\.tmp\rt-uploads\a.png now",
+            "look at [Image #1] now"
+        ));
+    }
+
+    #[test]
+    fn a_unix_upload_path_settles_too() {
+        assert!(settles(
+            "/Users/me/work/.tmp/rt-uploads/b.jpg",
+            "[Image #2]"
+        ));
+    }
+
+    #[test]
+    fn two_pasted_images_settle_against_one_message() {
+        let pending = r"X:\work\.tmp\rt-uploads\a.png X:\work\.tmp\rt-uploads\b.jpg";
+        assert!(settles(pending, "[Image #1] [Image #2]"));
+    }
+
+    #[test]
+    fn an_image_message_does_not_settle_plain_text() {
+        assert!(!settles("hello", "[Image #1]"));
+    }
+
+    #[test]
+    fn a_path_outside_rt_uploads_is_compared_as_text() {
+        assert!(!settles(r"X:\work\notes\a.png", "[Image #1]"));
     }
 
     /// A question card read with a tab bar of two questions, asking
