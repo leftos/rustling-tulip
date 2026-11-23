@@ -1299,8 +1299,9 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub pending_input: Option<PendingInput>,
     /// True while the session is `Idle` but its agent's last turn ended with
-    /// background work still running: a background shell or subagent, or a
-    /// pending one-shot wakeup. Always false beside any other status.
+    /// background work still running: a background shell, subagent, monitor
+    /// or MCP task, or a pending one-shot wakeup. Always false beside any
+    /// other status.
     #[serde(default)]
     pub background: bool,
     /// The session's current or last `Working` was promoted from its screen

@@ -1783,6 +1783,103 @@ mod tests {
         );
     }
 
+    /// The `Stop` Claude Code 2.1.330 fired with a Monitor and a background
+    /// shell running, as captured: `background_tasks` lists the monitor
+    /// first, then the shell, beside an empty `session_crons`.
+    fn stop_with_monitor_and_shell() -> Value {
+        json!({
+            "session_id": "ad08a9e8-43b6-4d9a-a7fe-a8352a76fe8e",
+            "transcript_path": concat!(
+                "X:\\dev\\rustling-tulip.wt\\rt-549-cap\\.tmp\\rt549\\home330\\projects\\",
+                "X--dev-rustling-tulip-wt-rt-549-cap--tmp-rt549-proj330\\",
+                "ad08a9e8-43b6-4d9a-a7fe-a8352a76fe8e.jsonl",
+            ),
+            "cwd": "X:\\dev\\rustling-tulip.wt\\rt-549-cap\\.tmp\\rt549\\proj330",
+            "prompt_id": "418788c2-3d24-4b6c-b634-7edc52274dcc",
+            "permission_mode": "default",
+            "effort": {"level": "medium"},
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "both running",
+            "background_tasks": [
+                {
+                    "id": "bkwld1ziu",
+                    "type": "monitor",
+                    "status": "running",
+                    "description": "Mock monitor",
+                    "command": "sleep 900",
+                },
+                {
+                    "id": "bd2f891s3",
+                    "type": "shell",
+                    "status": "running",
+                    "description": "Mock command: sleep 900",
+                    "command": "sleep 900",
+                },
+            ],
+            "session_crons": [],
+        })
+    }
+
+    #[test]
+    fn a_stop_with_a_monitor_and_a_shell_reports_background_work() {
+        let report = signal(&stop_with_monitor_and_shell());
+        assert_eq!(
+            report.background,
+            Some(true),
+            "a running monitor counts beside a running shell"
+        );
+        assert_eq!(
+            report.stop_work,
+            Some(StopWork {
+                tasks: vec![
+                    StopTask {
+                        id: "bkwld1ziu".to_owned(),
+                        kind: StopTaskKind::Other {
+                            kind: "monitor".to_owned(),
+                        },
+                        description: "Mock monitor".to_owned(),
+                    },
+                    StopTask {
+                        id: "bd2f891s3".to_owned(),
+                        kind: StopTaskKind::Shell {
+                            command: Some("sleep 900".to_owned()),
+                        },
+                        description: "Mock command: sleep 900".to_owned(),
+                    },
+                ],
+                wakeups: Vec::new(),
+            }),
+            "both running tasks, in payload order"
+        );
+    }
+
+    #[test]
+    fn a_stop_with_only_a_running_monitor_reports_background_work() {
+        let mut body = stop_with_monitor_and_shell();
+        let tasks = body["background_tasks"]
+            .as_array_mut()
+            .expect("the captured payload lists its tasks");
+        tasks.retain(|task| task["type"] == "monitor");
+        let report = signal(&body);
+        assert_eq!(
+            report.background,
+            Some(true),
+            "a running monitor alone is background work"
+        );
+        assert_eq!(
+            report.stop_work.map(|work| work.tasks),
+            Some(vec![StopTask {
+                id: "bkwld1ziu".to_owned(),
+                kind: StopTaskKind::Other {
+                    kind: "monitor".to_owned(),
+                },
+                description: "Mock monitor".to_owned(),
+            }]),
+            "the monitor is the work listed beside the stop"
+        );
+    }
+
     #[test]
     fn subagent_stop_carries_no_stop_work() {
         let mut body = stop_with_work();

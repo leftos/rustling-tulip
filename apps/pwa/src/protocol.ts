@@ -1078,8 +1078,9 @@ export interface SessionSnapshot {
   pending_input?: PendingInput | null;
   /**
    * True while the session is `Idle` but its agent's last turn ended with
-   * background work still running: a background shell or subagent, or a
-   * pending one-shot wakeup. Always false beside any other status.
+   * background work still running: a background shell, subagent, monitor
+   * or MCP task, or a pending one-shot wakeup. Always false beside any
+   * other status.
    */
   background?: boolean;
   /**
