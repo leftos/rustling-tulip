@@ -43,8 +43,8 @@ use crate::chat::{
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardBoxes, CardKey, CardLinks, CardState, CardView, GiveBack,
-    KeyAction, OnPress, box_placeholder, card_answer_message, key_action, prompt_card,
-    restored_box_text, typed_option,
+    KeyAction, OnPress, box_placeholder, button_label, card_answer_message, card_buttons,
+    key_action, needs_confirm, prompt_card, restored_box_text, typed_option,
 };
 use crate::chat_full_result::{self, FullResult, FullResults};
 use crate::chat_select::{self, Selection, TextPos, UnitSource, Units};
@@ -3368,9 +3368,11 @@ impl RootView {
     /// Sends `answer` to `prompt`, the card it was drawn or keyed for, under
     /// a new request id, unless that card is busy; a card gone since is
     /// answered all the same and the daemon refuses it. A toggle leaves the
-    /// card free; any other answer makes it busy. `taken`, the card box's
-    /// text the answer carries, is cleared from the box and kept by its
-    /// request id to give back on a refusal.
+    /// card free; any other answer makes it busy. A Rewind restore choice
+    /// screen's option that restores or summarizes sends nothing on its first
+    /// press, which only arms it; any other answer arms nothing. `taken`, the
+    /// card box's text the answer carries, is cleared from the box and kept
+    /// by its request id to give back on a refusal.
     fn answer_card(
         &mut self,
         session_id: &str,
@@ -3385,6 +3387,19 @@ impl RootView {
         if chat.cards.is_busy(&prompt.id) {
             return;
         }
+        let overlay = match chat.composer_state.as_ref() {
+            Some(ComposerState::Overlay { name }) => Some(name.as_str()),
+            _ => None,
+        };
+        if needs_confirm(prompt, &answer, overlay).is_some()
+            && let ChatAnswerKind::Option { number } = &answer
+            && !chat.cards.is_armed(&prompt.id, *number)
+        {
+            chat.cards.arm(&prompt.id, *number);
+            cx.notify();
+            return;
+        }
+        chat.cards.disarm();
         let request_id = new_request_id();
         let current = chat.stack.current().map(|current| current.id.clone());
         chat.cards
@@ -3771,6 +3786,24 @@ impl RootView {
         let chat = self.chat.sessions.get(session_id)?;
         let prompt = chat.stack.current()?;
         Some((prompt.id.clone(), chat.cards.is_busy(&prompt.id)))
+    }
+
+    /// The label session `session_id`'s card draws on its button `id`, as the
+    /// card draws it: the confirm label while a Rewind row waits for a second
+    /// press, else the button's own label.
+    #[must_use]
+    pub fn chat_card_button_label(&self, session_id: &str, id: &str) -> Option<String> {
+        let chat = self.chat.sessions.get(session_id)?;
+        let prompt = chat.stack.current()?;
+        let agent = self.agent_label(session_id);
+        let button = card_buttons(prompt, &agent)
+            .into_iter()
+            .find(|button| button.id == id)?;
+        Some(button_label(
+            prompt,
+            &button,
+            chat.cards.armed_for(&prompt.id),
+        ))
     }
 
     /// The daemon's reason for refusing the last answer to session
@@ -4471,6 +4504,7 @@ impl RootView {
                 refusal: chat.cards.refusal(&prompt.id),
                 ghosts: chat.stack.ghosts().len(),
                 text_box: chat.card_box.as_ref().map(|card_box| &card_box.input),
+                armed: chat.cards.armed_for(&prompt.id),
                 links: CardLinks { session_id, route },
                 mono: SharedString::from(
                     self.sidebar

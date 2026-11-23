@@ -1772,6 +1772,135 @@ fn an_overlay_card_closes_it_and_disables_the_composer(cx: &mut TestAppContext) 
     assert_eq!(answer_kinds(&mut h), [opt(1)]);
 }
 
+/// A Rewind choice screen's card: every option, its cursor on `cursor`.
+fn rewind_choice(id: &str, cursor: u32) -> ChatPrompt {
+    let mut rewind = prompt(
+        id,
+        ChatPromptKind::Overlay,
+        &[
+            (1, "Restore code and conversation"),
+            (2, "Restore conversation"),
+            (3, "Restore code"),
+            (4, "Summarize from here"),
+            (5, "Summarize up to here"),
+            (6, "Never mind"),
+            (7, "Close"),
+        ],
+    );
+    "Rewind".clone_into(&mut rewind.subject);
+    "Restore to the point before you sent this message:\nsay ok".clone_into(&mut rewind.body);
+    rewind.cursor = Some(cursor);
+    rewind.can_amend = false;
+    rewind
+}
+
+fn rewind_state() -> ComposerState {
+    ComposerState::Overlay {
+        name: "rewind_restore".to_owned(),
+    }
+}
+
+#[gpui::test]
+fn a_rewind_restore_takes_two_clicks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, rewind_state(), Some(rewind_choice("r1", 1)));
+    h.sent();
+    h.click_on("chat-card-2");
+    assert!(
+        answer_kinds(&mut h).is_empty(),
+        "the first click only arms the row"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("s1", "2")),
+        Some("Confirm: Restore conversation".to_owned()),
+        "the armed row says what its second click does"
+    );
+    h.click_on("chat-card-2");
+    assert_eq!(answer_kinds(&mut h), [opt(2)]);
+}
+
+#[gpui::test]
+fn a_click_elsewhere_disarms_a_rewind_restore(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(&mut h, rewind_state(), Some(rewind_choice("r1", 1)));
+    h.sent();
+    h.click_on("chat-card-4");
+    assert!(
+        answer_kinds(&mut h).is_empty(),
+        "Summarize from here is only armed"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("s1", "4")),
+        Some("Confirm: Summarize from here".to_owned())
+    );
+    h.click_on("chat-card-6");
+    assert_eq!(answer_kinds(&mut h), [opt(6)], "Never mind goes at once");
+    show_screen(&mut h, rewind_state(), Some(rewind_choice("r2", 1)));
+    h.sent();
+    h.click_on("chat-card-4");
+    assert!(
+        answer_kinds(&mut h).is_empty(),
+        "a fresh card still wants its second click"
+    );
+}
+
+#[gpui::test]
+fn a_rewind_picker_row_sends_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut picker = prompt(
+        "r1",
+        ChatPromptKind::Overlay,
+        &[(1, "say ok"), (2, "(current)"), (3, "Close")],
+    );
+    "Rewind".clone_into(&mut picker.subject);
+    "Restore the code and/or conversation to the point before you sent this message:\nsay ok"
+        .clone_into(&mut picker.body);
+    picker.options[0].description = Some("No code changes".to_owned());
+    picker.cursor = Some(2);
+    picker.can_amend = false;
+    let state = ComposerState::Overlay {
+        name: "rewind_picker".to_owned(),
+    };
+    show_screen(&mut h, state, Some(picker));
+    h.sent();
+    h.click_on("chat-card-1");
+    assert_eq!(answer_kinds(&mut h), [opt(1)], "a picker row sends at once");
+}
+
+#[gpui::test]
+fn a_rewind_picker_row_starting_summarize_sends_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut picker = prompt(
+        "r1",
+        ChatPromptKind::Overlay,
+        &[
+            (1, "Summarize the diff so far"),
+            (2, "(current)"),
+            (3, "Close"),
+        ],
+    );
+    "Rewind".clone_into(&mut picker.subject);
+    "Restore the code and/or conversation to the point before you sent this message:\nsay ok"
+        .clone_into(&mut picker.body);
+    picker.cursor = Some(2);
+    picker.can_amend = false;
+    let state = ComposerState::Overlay {
+        name: "rewind".to_owned(),
+    };
+    show_screen(&mut h, state, Some(picker));
+    h.sent();
+    h.click_on("chat-card-1");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [opt(1)],
+        "a picker row sends at once however it reads"
+    );
+}
+
 /// A `/btw` side question's Close prompt with id `id` and `body`.
 fn side_question(id: &str, body: &str) -> ChatPrompt {
     let mut close = prompt(id, ChatPromptKind::Overlay, &[(1, "Close")]);

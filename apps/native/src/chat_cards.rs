@@ -76,6 +76,39 @@ pub fn deny_option(prompt: &ChatPrompt) -> Option<u32> {
     labelled(prompt, "No")
 }
 
+/// The overlay name of Rewind's restore choice screen, whose options ask for
+/// a second press; the picker's is another name.
+const REWIND_RESTORE: &str = "rewind_restore";
+
+/// The label a Rewind restore choice screen's row draws while its answer
+/// waits for a second press, as "Confirm: <label>": an option that restores
+/// or summarizes. None for any other prompt or answer, and for every row
+/// outside the choice screen (`overlay` names the overlay the composer
+/// shows, `None` when it shows none).
+#[must_use]
+pub fn needs_confirm(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+    overlay: Option<&str>,
+) -> Option<String> {
+    if prompt.kind != ChatPromptKind::Overlay
+        || prompt.subject != "Rewind"
+        || overlay != Some(REWIND_RESTORE)
+    {
+        return None;
+    }
+    let ChatAnswerKind::Option { number } = answer else {
+        return None;
+    };
+    let option = prompt
+        .options
+        .iter()
+        .find(|option| option.number == *number)?;
+    let label = option.label.as_str();
+    let restores = label.starts_with("Restore") || label.starts_with("Summarize");
+    restores.then(|| format!("Confirm: {label}"))
+}
+
 /// A key the chat reads before the composer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardKey {
@@ -580,6 +613,9 @@ pub struct CardState {
     sent: VecDeque<(String, String)>,
     /// The prompt the screen shows now.
     shown: Option<String>,
+    /// The option of the card that waits for a second press before it is
+    /// sent: the prompt id and the option number.
+    armed: Option<(String, u32)>,
 }
 
 impl CardState {
@@ -647,10 +683,41 @@ impl CardState {
             .is_some_and(|busy| busy.prompt_id == prompt_id)
     }
 
+    /// `number` of `prompt_id`'s card waits for a second press before it is
+    /// sent.
+    pub fn arm(&mut self, prompt_id: &str, number: u32) {
+        self.armed = Some((prompt_id.to_owned(), number));
+    }
+
+    /// Whether `number` of `prompt_id`'s card waits for a second press.
+    #[must_use]
+    pub fn is_armed(&self, prompt_id: &str, number: u32) -> bool {
+        self.armed
+            .as_ref()
+            .is_some_and(|(armed, armed_number)| armed == prompt_id && *armed_number == number)
+    }
+
+    /// The option `prompt_id`'s card waits a second press for, if any.
+    #[must_use]
+    pub fn armed_for(&self, prompt_id: &str) -> Option<u32> {
+        self.armed
+            .as_ref()
+            .filter(|(armed, _)| armed == prompt_id)
+            .map(|(_, number)| *number)
+    }
+
+    /// No option waits for a second press.
+    pub fn disarm(&mut self) {
+        self.armed = None;
+    }
+
     /// The screen's prompt went from `before` to `after`: a card it dropped
     /// that we submitted collapses, one we did not reads "Answered
-    /// elsewhere".
+    /// elsewhere"; an arm set on the card before goes with it.
     pub fn on_screen(&mut self, before: Option<&str>, after: Option<&str>) {
+        if before != after {
+            self.armed = None;
+        }
         self.shown = after.map(str::to_owned);
         let Some(before) = before.filter(|before| Some(*before) != after) else {
             return;
@@ -732,9 +799,10 @@ const ANSWERED_MARK: &str = "✔";
 /// What a card draws: its prompt, the agent its labels name, whether it was
 /// submitted and is still up, the daemon's reason for refusing its last
 /// answer, how many cards wait behind it, and its text box, for a card with
-/// an option that takes typed text, and the session and route its question,
-/// body and option descriptions draw their links for, and the terminal font
-/// family its preview block draws in.
+/// an option that takes typed text, the option that waits for a second press
+/// before it is sent, and the session and route its question, body and option
+/// descriptions draw their links for, and the terminal font family its
+/// preview block draws in.
 pub struct CardView<'a> {
     pub prompt: &'a ChatPrompt,
     pub agent: &'a str,
@@ -742,6 +810,7 @@ pub struct CardView<'a> {
     pub refusal: Option<&'a str>,
     pub ghosts: usize,
     pub text_box: Option<&'a Entity<TextInput>>,
+    pub(crate) armed: Option<u32>,
     pub(crate) links: CardLinks<'a>,
     pub(crate) mono: SharedString,
 }
@@ -779,7 +848,8 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// cannot answer says to open the terminal (`chat-card-terminal`). A
 /// question whose options carry previews fills its focused option's row and
 /// draws the focused option's preview in a monospace block
-/// (`chat-card-preview`) between its body and its buttons.
+/// (`chat-card-preview`) between its body and its buttons. The option armed
+/// for a second press shows [`needs_confirm`]'s label, filled.
 pub fn prompt_card(
     offset: i8,
     shift: i8,
@@ -952,16 +1022,34 @@ fn option_of<'a>(prompt: &'a ChatPrompt, button: &CardButton) -> Option<&'a Chat
 }
 
 /// Whether `option`'s row is filled: a ticked multi-select option, a model
-/// picker's highlighted model, and the focused option of a question that
-/// carries a preview.
+/// picker's highlighted model, the focused option of a question that carries
+/// a preview, and the terminal's cursor row of a Rewind overlay that offers
+/// more than Close.
 fn option_filled(prompt: &ChatPrompt, option: &ChatOption) -> bool {
     if prompt.multi || prompt.kind == ChatPromptKind::ModelPicker {
         option.selected
-    } else if prompt.preview.is_some() {
+    } else if prompt.preview.is_some()
+        || (prompt.kind == ChatPromptKind::Overlay && prompt.options.len() > 1)
+    {
         prompt.cursor == Some(option.number)
     } else {
         false
     }
+}
+
+/// The label `button` draws on `prompt`'s card: the armed option, which only
+/// [`needs_confirm`] ever arms, draws its confirm label; else the button's
+/// own label.
+#[must_use]
+pub(crate) fn button_label(prompt: &ChatPrompt, button: &CardButton, armed: Option<u32>) -> String {
+    let armed = armed.is_some_and(|number| {
+        option_of(prompt, button).is_some_and(|option| option.number == number)
+    });
+    if armed {
+        let label = button.label.as_str();
+        return format!("Confirm: {label}");
+    }
+    button.label.clone()
 }
 
 /// A question card's tabs, each tagged `chat-card-tab-<n>` from 1, the
@@ -999,8 +1087,9 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
 
 /// One button of a card; a selected multi-select option, a model picker's
 /// highlighted row (whose model the effort belongs to), and the focused
-/// option of a preview question, is filled. A button answering an option is
-/// a full-width row, the option's description
+/// option of a preview question, is filled, and so is the option armed for a
+/// second press, which shows [`needs_confirm`]'s label. A button answering an
+/// option is a full-width row, the option's description
 /// (`chat-card-option-desc-<n>`) under its label; the option that takes
 /// typed text shares its row with the card's box.
 fn card_button(
@@ -1014,7 +1103,11 @@ fn card_button(
     let (prompt, busy) = (view.prompt, view.busy);
     let selector = format!("chat-card-{}", button.id);
     let choice = option_of(prompt, button);
-    let selected = choice.is_some_and(|option| option_filled(prompt, option));
+    let armed = view
+        .armed
+        .is_some_and(|number| choice.is_some_and(|option| option.number == number));
+    let selected = armed || choice.is_some_and(|option| option_filled(prompt, option));
+    let label = button_label(prompt, button, view.armed);
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
     let text_box = view
@@ -1026,7 +1119,7 @@ fn card_button(
                 offset,
                 shift,
                 selector: &selector,
-                label: &button.label,
+                label: &label,
                 description: option.description.as_deref(),
                 description_selector: Some(format!("chat-card-option-desc-{}", option.number)),
                 selected,
@@ -1060,7 +1153,7 @@ fn card_button(
                 t,
             )
         };
-        base.child(button.label.clone())
+        base.child(label.clone())
     };
     let base = base
         .when_some(button.tip.clone(), |base, tip| {
@@ -1320,7 +1413,7 @@ mod tests {
     use super::{
         AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, adjust_buttons,
         allow_once_option, always_allow_option, card_answer_message, card_buttons, deny_option,
-        key_action, option_description_color, option_filled, tray_option_row,
+        key_action, needs_confirm, option_description_color, option_filled, tray_option_row,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
     use crate::dashboard_rows::AskOption;
@@ -2128,6 +2221,179 @@ mod tests {
         assert!(cards.answered_elsewhere());
         cards.on_new_entry();
         assert!(!cards.answered_elsewhere());
+    }
+
+    /// A Rewind choice screen's prompt.
+    fn rewind_choice() -> ChatPrompt {
+        let mut rewind = prompt_with(
+            ChatPromptKind::Overlay,
+            &[
+                (1, "Restore code and conversation"),
+                (2, "Restore conversation"),
+                (3, "Restore code"),
+                (4, "Summarize from here"),
+                (5, "Summarize up to here"),
+                (6, "Never mind"),
+                (7, "Close"),
+            ],
+        );
+        "Rewind".clone_into(&mut rewind.subject);
+        rewind
+    }
+
+    /// A Rewind picker's prompt, whose rows are the user's own messages.
+    fn rewind_picker() -> ChatPrompt {
+        let mut picker = prompt_with(
+            ChatPromptKind::Overlay,
+            &[
+                (1, "Summarize the diff so far"),
+                (2, "Restore the config"),
+                (3, "say ok"),
+                (4, "(current)"),
+                (5, "Close"),
+            ],
+        );
+        "Rewind".clone_into(&mut picker.subject);
+        picker
+    }
+
+    #[test]
+    fn a_rewind_restore_or_summarize_option_asks_for_a_second_press() {
+        let rewind = rewind_choice();
+        for (number, label) in [
+            (1, "Restore code and conversation"),
+            (2, "Restore conversation"),
+            (3, "Restore code"),
+            (4, "Summarize from here"),
+            (5, "Summarize up to here"),
+        ] {
+            assert_eq!(
+                needs_confirm(
+                    &rewind,
+                    &ChatAnswerKind::Option { number },
+                    Some("rewind_restore")
+                ),
+                Some(format!("Confirm: {label}")),
+                "option {number}"
+            );
+        }
+        for number in [6, 7] {
+            assert_eq!(
+                needs_confirm(
+                    &rewind,
+                    &ChatAnswerKind::Option { number },
+                    Some("rewind_restore")
+                ),
+                None,
+                "option {number} sends at once"
+            );
+        }
+        assert_eq!(
+            needs_confirm(
+                &rewind,
+                &ChatAnswerKind::Toggle { number: 1 },
+                Some("rewind_restore")
+            ),
+            None,
+            "a toggle is never a restore"
+        );
+        let picker = rewind_picker();
+        for name in [Some("rewind"), None] {
+            for option in &picker.options {
+                assert_eq!(
+                    needs_confirm(
+                        &picker,
+                        &ChatAnswerKind::Option {
+                            number: option.number
+                        },
+                        name
+                    ),
+                    None,
+                    "picker row {} under {name:?} sends at once",
+                    option.number
+                );
+            }
+        }
+        for name in [Some("rewind"), None] {
+            for option in &rewind.options {
+                assert_eq!(
+                    needs_confirm(
+                        &rewind,
+                        &ChatAnswerKind::Option {
+                            number: option.number
+                        },
+                        name
+                    ),
+                    None,
+                    "the choice prompt under {name:?} asks nothing"
+                );
+            }
+        }
+        let mut transcript = prompt_with(ChatPromptKind::Overlay, &[(1, "Restore x")]);
+        "Transcript".clone_into(&mut transcript.subject);
+        assert_eq!(
+            needs_confirm(
+                &transcript,
+                &ChatAnswerKind::Option { number: 1 },
+                Some("rewind_restore")
+            ),
+            None,
+            "only a Rewind card confirms"
+        );
+        let question = prompt_with(ChatPromptKind::Question, &[(1, "Restore x")]);
+        assert_eq!(
+            needs_confirm(
+                &question,
+                &ChatAnswerKind::Option { number: 1 },
+                Some("rewind_restore")
+            ),
+            None,
+            "only an overlay card confirms"
+        );
+    }
+
+    #[test]
+    fn the_arm_dies_with_the_card_it_was_set_on() {
+        let mut cards = CardState::default();
+        cards.arm("p1", 2);
+        assert!(cards.is_armed("p1", 2));
+        assert!(!cards.is_armed("p1", 1));
+        assert_eq!(cards.armed_for("p1"), Some(2));
+        assert_eq!(cards.armed_for("p2"), None, "another card is never armed");
+        cards.arm("p1", 2);
+        cards.on_screen(Some("p1"), Some("p1"));
+        assert_eq!(
+            cards.armed_for("p1"),
+            Some(2),
+            "the same card keeps its arm"
+        );
+        cards.on_screen(Some("p1"), Some("p2"));
+        assert_eq!(cards.armed_for("p1"), None, "a new card drops it");
+        cards.arm("p1", 2);
+        cards.disarm();
+        assert_eq!(cards.armed_for("p1"), None);
+    }
+
+    #[test]
+    fn a_rewind_card_fills_the_terminal_cursor_row() {
+        let mut rewind = prompt_with(
+            ChatPromptKind::Overlay,
+            &[(1, "one"), (2, "two"), (3, "three")],
+        );
+        rewind.cursor = Some(2);
+        let filled: Vec<u32> = rewind
+            .options
+            .iter()
+            .filter(|option| option_filled(&rewind, option))
+            .map(|option| option.number)
+            .collect();
+        assert_eq!(filled, [2], "only the cursor's row is filled");
+        let mut close = prompt_with(ChatPromptKind::Overlay, &[(1, "Close")]);
+        close.cursor = None;
+        assert!(
+            !option_filled(&close, &close.options[0]),
+            "Close alone fills nothing"
+        );
     }
 
     #[test]
