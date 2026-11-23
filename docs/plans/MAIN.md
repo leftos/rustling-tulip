@@ -20,9 +20,7 @@
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
 - [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
-  - [ ] RT-2188 Keep a Heads up key row that wraps to one pair on its first row (RT-1270 A2) · release vNext
-  - [ ] RT-2189 Capture a clipped Heads up offer and explanation, and what ctrl+x does (RT-1270 B) · release vNext
-  - [ ] RT-2190 Answer a clipped Heads up explanation from the chat (RT-1270 C) · release vNext
+  - [/] RT-2190 Answer a clipped Heads up explanation from the chat (RT-1270 C) · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 - [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
@@ -186,8 +184,7 @@
 
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
-  - [ ] RT-2164 Answer Rewind from the chat: pick a point, then restore or summarize · release vNext
-  - [/] RT-2165 Answer an AskUserQuestion with previews from the chat · release vNext
+  - [/] RT-2164 Answer Rewind from the chat: pick a point, then restore or summarize · release vNext
   - [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
@@ -503,11 +500,12 @@
 - [ ] RT-1774 Tidy the phone Settings › Notifications page: hint wording, offline hosts and specs
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
-- [ ] RT-1814 Keep a replayed handle tap from leaving a hover look on the phone · release vNext
 - [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
 - [ ] RT-1910 Send photos and files from the phone into a session · release vNext
+  - [ ] RT-2202 Phone: the camera and multi-select Photos in the Attach sheet · release vNext
+  - [ ] RT-2203 Phone: send what other apps share to the app into a session · release vNext
+  - [ ] RT-2204 Phone: a share extension that hands shared items to the app · release vNext
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
-- [ ] RT-1931 Pinch to zoom an image in the phone viewer · release vNext
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
@@ -812,6 +810,11 @@
 - [ ] RT-2193 Say why a tapped path failed when the connection closes before its stat answers, on the phone
 - [ ] RT-2196 Spare Claude Code older than 2.1.152 the Settings Warning about MessageDisplay
 - [ ] RT-2198 Recheck instead of showing push off when a grace re-register cannot read its keys
+- [ ] RT-2205 Phone viewer: pan a zoomed image diagonally, not along one axis
+- [ ] RT-2206 gpui fork: count an iOS pinch's first step once
+- [ ] RT-2207 Phone: check a picked file's size before reading it into memory · release vNext
+- [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy
+- [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload
 
 ## No project
 
