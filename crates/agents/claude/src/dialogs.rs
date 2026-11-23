@@ -1439,14 +1439,15 @@ enum HeadsUpAnchor {
 }
 
 /// The lowest row a Heads up notice or its dismissed step starts on, so a
-/// quoted notice higher in the transcript never beats a real one.
+/// quoted notice higher in the transcript never beats a real one. The row
+/// starts at column 0: a notice quoted inside a reply is indented, and is
+/// transcript rather than the notice.
 fn heads_up_anchor(rows: &[String]) -> Option<(usize, HeadsUpAnchor)> {
     rows.iter().enumerate().rev().find_map(|(anchor, row)| {
-        let trimmed = row.trim();
-        if trimmed.contains("✦ Heads up ·") || trimmed.contains("✦ You should know ·") {
+        if row.starts_with("✦ Heads up ·") || row.starts_with("✦ You should know ·") {
             return Some((anchor, HeadsUpAnchor::Tagged));
         }
-        let keys = key_pairs_any(trimmed.strip_prefix("✦ Dismissed.")?)?;
+        let keys = key_pairs_any(row.strip_prefix("✦ Dismissed.")?)?;
         Some((anchor, HeadsUpAnchor::Dismissed(keys)))
     })
 }
@@ -1468,7 +1469,7 @@ fn parse_heads_up(rows: &[String]) -> Option<ChatPrompt> {
         ));
     }
     let (key_row, options) = (anchor + 1..rows.len())
-        .find_map(|key_row| key_pairs(&rows[key_row]).map(|options| (key_row, options)))?;
+        .find_map(|key_row| heads_up_key_row(rows, key_row).map(|options| (key_row, options)))?;
     let (subject, index) = heads_up_subject(rows, anchor, key_row);
     Some(heads_up_prompt(rows, key_row, options, subject, index))
 }
@@ -1510,10 +1511,17 @@ fn heads_up_subject(rows: &[String], anchor: usize, end: usize) -> (String, usiz
     (subject, index)
 }
 
-/// The options a Heads up key row offers (`1: Learn more   0: Dismiss`), or
-/// `None` for a row that is not one: at least two pairs, three spaces apart.
-fn key_pairs(row: &str) -> Option<Vec<ChatOption>> {
-    key_pairs_any(row).filter(|options| options.len() >= 2)
+/// The `N: label` pairs `key_row` holds, when its row and the rows wrapping
+/// under it offer at least two pairs in all; `None` for a row that starts no
+/// key row, so a lone pair inside the notice's text is not one.
+fn heads_up_key_row(rows: &[String], key_row: usize) -> Option<Vec<ChatOption>> {
+    let options = key_pairs_any(&rows[key_row])?;
+    let wrapped: usize = rows[key_row + 1..]
+        .iter()
+        .map_while(|row| key_pairs_any(row))
+        .map(|more| more.len())
+        .sum();
+    (options.len() + wrapped >= 2).then_some(options)
 }
 
 /// The `N: label` pairs in a row (`0: Dismiss`), or `None` for a row that
@@ -4986,6 +4994,98 @@ mod tests {
                 (0, "Dismiss".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn a_heads_up_first_key_row_with_one_pair_keeps_it() {
+        let rows = over_box(&[
+            "✦ Heads up · A note says the drive gets wiped.",
+            "",
+            "  1: Understood",
+            "  2: Chat in main session   0: Dismiss",
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "Understood".to_owned()),
+                (2, "Chat in main session".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+        assert_eq!(
+            read(&rows).prompt.expect("a prompt").subject,
+            "Heads up · A note says the drive gets wiped."
+        );
+    }
+
+    #[test]
+    fn a_heads_up_one_pair_key_row_with_no_blank_above_stays_out_of_the_subject() {
+        let rows = over_box(&[
+            "✦ Heads up · A note says the drive gets wiped.",
+            "  1: Understood",
+            "  2: Chat in main session   0: Dismiss",
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "Understood".to_owned()),
+                (2, "Chat in main session".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+        assert_eq!(
+            read(&rows).prompt.expect("a prompt").subject,
+            "Heads up · A note says the drive gets wiped."
+        );
+    }
+
+    #[test]
+    fn a_heads_up_with_every_pair_on_its_own_row_reads_them_all() {
+        let rows = over_box(&[
+            "✦ Heads up · A note says the drive gets wiped.",
+            "",
+            "  1: Understood",
+            "  2: Chat in main session",
+            "  0: Dismiss",
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            [
+                (1, "Understood".to_owned()),
+                (2, "Chat in main session".to_owned()),
+                (0, "Dismiss".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lone_pair_row_inside_the_text_is_not_the_key_row() {
+        let rows = over_box(&[
+            "✦ Heads up · A note",
+            "  1: x",
+            "  more text",
+            "",
+            "  1: Understood   0: Dismiss",
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            [(1, "Understood".to_owned()), (0, "Dismiss".to_owned())]
+        );
+        assert_eq!(
+            read(&rows).prompt.expect("a prompt").subject,
+            "Heads up · A note 1: x more text"
+        );
+    }
+
+    #[test]
+    fn an_indented_notice_is_not_a_heads_up() {
+        let quoted = over_box(&[
+            "  ✦ Heads up · A quoted note",
+            "  1: Understood   0: Dismiss",
+        ]);
+        assert_eq!(read(&quoted).prompt, None);
+        let dismissed = over_box(&["  ✦ Dismissed.   1: That was helpful   0: Dismiss"]);
+        assert_eq!(read(&dismissed).prompt, None);
     }
 
     #[test]

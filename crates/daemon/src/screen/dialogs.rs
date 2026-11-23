@@ -1062,6 +1062,19 @@ mod tests {
                 },
             ),
             (
+                "v2319-heads-up-offer-w40-synthesized",
+                include_str!("fixtures/v2319-heads-up-offer-w40-synthesized.txt"),
+                Expected {
+                    composer: Ready,
+                    ..dialog(HeadsUp, EXPLAINED_SUBJECT, &explained_options, None)
+                },
+            ),
+            (
+                "v2319-heads-up-quoted-synthesized",
+                include_str!("fixtures/v2319-heads-up-quoted-synthesized.txt"),
+                no_prompt(Ready),
+            ),
+            (
                 "v2319-heads-up-one-moment",
                 include_str!("fixtures/v2319-heads-up-one-moment.txt"),
                 no_prompt(Ready),

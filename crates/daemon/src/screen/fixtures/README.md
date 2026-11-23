@@ -28,6 +28,8 @@ The spike captures (`v03-ready.txt`, `c11-turn1-end.txt`, `p98-compacted.txt` an
 
 `v2319-heads-up-quoted-synthesized.txt` is `v2319-heads-up-explained.txt` with the rows above its prompt box replaced by a reply quoting the notice's titles, its key row and `✦ One moment…`, each indented under the reply row: a quoted title is transcript, not the notice, so the idle box reads.
 
+`v2319-heads-up-offer-w40-synthesized.txt` is `v2319-heads-up-explained.txt`'s offer redrawn at 40 columns with no explanation, its key row wrapped so the first row holds one pair: every pair still reads.
+
 `v03-ready-quoting-question-footer--synthesized.txt` is `v03-ready.txt` with a user prompt and a reply quoting a question's footer (`Enter to select · ↑/↓ to navigate · Esc to cancel`) written into the blank rows above the idle box: a quoted footer is transcript, not a dialog.
 
 `v03-ready-quoting-review--synthesized.txt` is the same screen with the reply quoting the review step instead (`Ready to submit your answers?` and its `❯ 1. Submit answers` / `2. Cancel` options), and `v03-ready-draft-under-review-quote--synthesized.txt` is that screen with a draft `1. fix the test` in the box: a quoted review is transcript, not a dialog, and so is a draft under one. `v03-ready-draft-submit-under-review-quote--synthesized.txt` is that screen with a draft whose box row is `❯ 1. Submit answers`, which matches the review's option row: the input box's border under it vetoes the review rule, so it reads as a draft, not a review.
