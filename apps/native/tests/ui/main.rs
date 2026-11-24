@@ -63,6 +63,7 @@ mod ui_paste_upload;
 mod ui_perf;
 mod ui_phone_browser;
 mod ui_phone_home;
+mod ui_phone_inbox;
 mod ui_phone_keys;
 mod ui_phone_landscape;
 mod ui_phone_linear;

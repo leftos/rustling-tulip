@@ -18,9 +18,11 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::target::HostKey;
 
 /// The variable that names the inbox folder, absolute; a relative or empty
 /// value counts as unset.
@@ -47,6 +49,13 @@ pub const MANIFEST_MAX_BYTES: u64 = 1024 * 1024;
 
 /// The manifest version this build reads.
 const MANIFEST_VERSION: u32 = 1;
+
+/// How many sessions the last-used record keeps: the most recently used.
+pub const LAST_USED_MAX: usize = 50;
+
+/// The name extensions of a shared file that goes up as a pasted image,
+/// matched in any case.
+const IMAGE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "heic", "webp"];
 
 /// What a shared item is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +181,9 @@ pub struct Scan {
     pub stale: Vec<PathBuf>,
     /// The manifests that could not be read or are not valid.
     pub bad: Vec<PathBuf>,
+    /// The payloads `{id}.bin` with no `{id}.json` beside them, last
+    /// modified a day or more ago.
+    pub orphans: Vec<PathBuf>,
 }
 
 /// What one manifest file held.
@@ -200,7 +212,8 @@ pub fn scan(dir: &Path, now: SystemTime) -> Scan {
         }
     };
     let now_ms = millis(now);
-    for path in entries.flatten().map(|entry| entry.path()) {
+    let paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    for path in paths.iter().cloned() {
         if !is_manifest_file(&path) {
             continue;
         }
@@ -219,7 +232,140 @@ pub fn scan(dir: &Path, now: SystemTime) -> Scan {
     scan.ready.sort_by(|a, b| {
         (a.manifest.created, &a.manifest.id).cmp(&(b.manifest.created, &b.manifest.id))
     });
+    scan.orphans = paths
+        .into_iter()
+        .filter(|path| is_orphan(path, now))
+        .collect();
     scan
+}
+
+/// Whether `path` is a regular `*.bin` file with no manifest of its name
+/// beside it, last modified at least [`STALE_MS`] before `now`.
+fn is_orphan(path: &Path, now: SystemTime) -> bool {
+    if path.extension().is_none_or(|ext| ext != "bin")
+        || std::fs::symlink_metadata(path.with_extension("json")).is_ok()
+    {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok());
+    meta.is_file() && age.is_some_and(|age| age >= Duration::from_millis(STALE_MS.unsigned_abs()))
+}
+
+/// Whether a shared file named `name` goes up as a pasted image: its
+/// extension is one of [`IMAGE_EXTENSIONS`], in any case.
+#[must_use]
+pub fn is_image(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+}
+
+/// What a composer holding `existing` gets at its end for the text and
+/// link items among `items`: each on a line of its own, after a line break
+/// when `existing` is not empty and does not end in one; empty when no item
+/// is text or a link.
+#[must_use]
+pub fn text_addition(existing: &str, items: &[Item]) -> String {
+    let lines: Vec<&str> = items
+        .iter()
+        .filter(|item| item.manifest.kind != Kind::File)
+        .filter_map(|item| item.manifest.text.as_deref())
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let joined = lines.join("\n");
+    if existing.is_empty() || existing.ends_with('\n') {
+        joined
+    } else {
+        format!("\n{joined}")
+    }
+}
+
+/// A session the share sheet offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareRow {
+    /// The session's host.
+    pub host: HostKey,
+    /// The session's id.
+    pub session_id: String,
+    /// The session's title, as Home lists it.
+    pub label: String,
+    /// The host's name, drawn under the title, for a session on a remote
+    /// host.
+    pub host_name: Option<String>,
+}
+
+impl ShareRow {
+    /// The row's session's [`LastUsed::key`].
+    #[must_use]
+    pub fn key(&self) -> String {
+        LastUsed::key(self.host.wire(), &self.session_id)
+    }
+}
+
+/// The open share sheet: the items waiting in the inbox, which all go to
+/// the one session picked, and the sessions it offers, most recently used
+/// first.
+#[derive(Clone, Debug)]
+pub struct ShareSheet {
+    /// The items ready to send, as the scan found them.
+    pub items: Vec<Item>,
+    /// The sessions offered, in the order the sheet draws them.
+    pub rows: Vec<ShareRow>,
+}
+
+impl ShareSheet {
+    /// The sheet sending `items` to one of `rows`, ordered by
+    /// [`LastUsed::order`] on `last_used`.
+    #[must_use]
+    pub fn new(items: Vec<Item>, rows: Vec<ShareRow>, last_used: &LastUsed) -> Self {
+        let keys: Vec<String> = rows.iter().map(ShareRow::key).collect();
+        let mut rows: Vec<Option<ShareRow>> = rows.into_iter().map(Some).collect();
+        let rows = last_used
+            .order(&keys)
+            .iter()
+            .filter_map(|key| {
+                let at = keys.iter().position(|known| known == key)?;
+                rows.get_mut(at)?.take()
+            })
+            .collect();
+        Self { items, rows }
+    }
+
+    /// The item count under the title: "1 item" or "N items".
+    #[must_use]
+    pub fn count_label(&self) -> String {
+        match self.items.len() {
+            1 => "1 item".to_owned(),
+            count => format!("{count} items"),
+        }
+    }
+
+    /// The row at `index` and the items it is sent; the sheet back when it
+    /// has no such row.
+    ///
+    /// # Errors
+    ///
+    /// Gives the sheet back unchanged when `index` names no row.
+    pub fn pick(mut self, index: usize) -> Result<(ShareRow, Vec<Item>), Self> {
+        if index >= self.rows.len() {
+            return Err(self);
+        }
+        let row = self.rows.swap_remove(index);
+        Ok((row, self.items))
+    }
 }
 
 /// Whether `path` is a regular file named `*.json`, not reached through a
@@ -367,12 +513,25 @@ impl LastUsed {
         std::fs::rename(&tmp, path)
     }
 
-    /// Records the session `key` as used at `now`.
+    /// Records the session `key` as used at `now`, keeping only the
+    /// [`LAST_USED_MAX`] most recently used sessions; `key` is always kept.
     pub fn stamp(&mut self, key: &str, now: SystemTime) {
         let seconds = now
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         self.sessions.insert(key.to_owned(), seconds);
+        while self.sessions.len() > LAST_USED_MAX {
+            let oldest = self
+                .sessions
+                .iter()
+                .filter(|(known, _)| known.as_str() != key)
+                .min_by_key(|(known, at)| (**at, (*known).clone()))
+                .map(|(known, _)| known.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.sessions.remove(&oldest);
+        }
     }
 
     /// `keys` most recently used first; the ones never used follow in the
@@ -382,18 +541,6 @@ impl LastUsed {
         let mut ordered = keys.to_vec();
         ordered.sort_by_key(|key| std::cmp::Reverse(self.sessions.get(key).copied()));
         ordered
-    }
-
-    /// Stamps the session `key` at `now` in the record at `path` and saves
-    /// it.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::save`].
-    pub fn stamp_saved(path: &Path, key: &str, now: SystemTime) -> io::Result<()> {
-        let mut record = Self::load(path);
-        record.stamp(key, now);
-        record.save(path)
     }
 }
 
@@ -833,6 +980,65 @@ mod tests {
     }
 
     #[test]
+    fn scan_lists_an_orphan_payload_after_a_day() {
+        let dir = TestDir::new("orphans");
+        let day = Duration::from_millis(u64::try_from(STALE_MS).expect("a day fits"));
+        let now = at_ms(NOW_MS);
+        let aged = |name: &str, age: Duration| {
+            let path = dir.0.join(name);
+            std::fs::write(&path, b"bytes").expect("write a payload");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| {
+                    file.set_modified(now.checked_sub(age).expect("a time after the epoch"))
+                })
+                .expect("age the payload");
+        };
+        aged("old.bin", day);
+        aged("young.bin", day.saturating_sub(Duration::from_secs(1)));
+        aged("named.bin", day * 2);
+        std::fs::write(dir.0.join("named.json"), file_json("named", 1))
+            .expect("write its manifest");
+
+        let scan = scan(&dir.0, now);
+
+        assert_eq!(
+            scan.orphans,
+            [dir.0.join("old.bin")],
+            "only the day-old payload with no manifest is an orphan"
+        );
+        let ids: Vec<&str> = scan
+            .ready
+            .iter()
+            .map(|item| item.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, ["named"], "a payload with its manifest is an item");
+    }
+
+    #[test]
+    fn last_used_keeps_the_50_most_recent() {
+        let mut record = LastUsed::default();
+        for n in 0..60_u64 {
+            record.stamp(&format!("h/s{n}"), at_ms(NOW_MS + n * 1000));
+        }
+
+        assert_eq!(record.sessions.len(), LAST_USED_MAX);
+        assert!(
+            (10..60).all(|n| record.sessions.contains_key(&format!("h/s{n}"))),
+            "the 50 most recent stay"
+        );
+        assert!(!record.sessions.contains_key("h/s9"), "the older ones go");
+
+        record.stamp("h/new", at_ms(NOW_MS));
+        assert!(
+            record.sessions.contains_key("h/new"),
+            "the key just stamped stays even when it ties the oldest"
+        );
+        assert_eq!(record.sessions.len(), LAST_USED_MAX);
+    }
+
+    #[test]
     fn last_used_round_trips_and_survives_a_corrupt_file() {
         let dir = TestDir::new("last-used");
         let path = dir.0.join(LAST_USED_FILE);
@@ -842,7 +1048,9 @@ mod tests {
             "a missing file is empty"
         );
 
-        LastUsed::stamp_saved(&path, "h/a", at_ms(NOW_MS)).expect("stamp and save");
+        let mut record = LastUsed::default();
+        record.stamp("h/a", at_ms(NOW_MS));
+        record.save(&path).expect("stamp and save");
         let read = LastUsed::load(&path);
         assert_eq!(read.sessions.get("h/a"), Some(&(NOW_MS / 1000)));
         assert!(
@@ -856,7 +1064,9 @@ mod tests {
             LastUsed::default(),
             "a corrupt file is empty"
         );
-        LastUsed::stamp_saved(&path, "h/b", at_ms(NOW_MS)).expect("a corrupt file is replaced");
+        let mut record = LastUsed::load(&path);
+        record.stamp("h/b", at_ms(NOW_MS));
+        record.save(&path).expect("a corrupt file is replaced");
         assert_eq!(LastUsed::load(&path).sessions.len(), 1);
     }
 }

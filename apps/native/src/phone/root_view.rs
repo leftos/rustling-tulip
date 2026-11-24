@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,7 +12,7 @@ use gpui::{
     App, ClickEvent, Context, Div, Edges, Entity, FontWeight, IntoElement, Pixels, Render,
     Stateful, Subscription, Task, Window, WindowInsets, WindowVisibility, div, prelude::*, px,
 };
-use protocol::{ClientMessage, PathKind};
+use protocol::{ClientMessage, FEATURE_UPLOAD_FILE, PathKind, UPLOAD_MAX_BYTES};
 
 use super::browser::FolderEnd;
 use super::camera::{CAMERA_LABEL, CameraPicker, LoggingCamera};
@@ -21,7 +21,7 @@ use super::files_picker::{FILES_LABEL, FilePicker, LoggingFiles};
 use super::home::Offer;
 use super::home_view::{STATUS_TEXT_SIZE, TOUCH_TARGET};
 use super::hosts_view::phone_button;
-use super::inbox::{LAST_USED_FILE, LastUsed};
+use super::inbox::{self, LAST_USED_FILE, LastUsed};
 use super::key_bar::KeyBar;
 use super::open_tap::{self, PendingOpen};
 use super::pasteboard::{LoggingPasteboard, PhonePasteboard};
@@ -42,6 +42,7 @@ use crate::connection::State;
 use crate::device_pairing::DeviceNoun;
 use crate::driver_id::DriverId as _;
 use crate::file_fetch::{self, FetchRequest};
+use crate::notices::ToastKind;
 use crate::open::LinkAction;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
@@ -65,6 +66,68 @@ struct KeptStat {
     entry: Entry,
     /// The timeout's timer; dropping it cancels the timeout.
     timeout: Task<()>,
+}
+
+/// The toast a share whose session never loaded its chat shows; the items
+/// stay in the inbox.
+const SHARE_GAVE_UP_TITLE: &str = "Couldn't send the shared items: the session did not open.";
+
+/// The toast a share whose session's chat load was refused shows; the items
+/// stay in the inbox.
+const SHARE_REFUSED_TITLE: &str =
+    "Couldn't send the shared items: the session's chat could not load.";
+
+/// The toast a shared file that could not be read shows; it is removed.
+const SHARE_UNREADABLE_TITLE: &str = "Couldn't send the file";
+
+/// The most the share sheet's rows take before they scroll, in points.
+const SHARE_ROWS_MAX_HEIGHT: f32 = 360.0;
+
+/// The items a share sheet's pick sent to a session, until its chat has
+/// loaded and they go in, or the session is left.
+struct PendingShare {
+    host: HostKey,
+    session_id: String,
+    items: Vec<inbox::Item>,
+}
+
+/// The phone's share inbox: where it is, the sheet asking which session its
+/// items go to, the pick waiting for its session's chat, and the last-used
+/// record the sheet orders by.
+struct ShareInbox {
+    /// The inbox folder; `None` with no UI folder.
+    dir: Option<PathBuf>,
+    /// The share sheet, while it is open.
+    sheet: Option<inbox::ShareSheet>,
+    /// The pick waiting for its session's chat to load.
+    pending: Option<PendingShare>,
+    /// When each session was last opened or sent a share.
+    last_used: LastUsed,
+    /// Where the record is saved; `None` keeps it in memory only.
+    last_used_path: Option<PathBuf>,
+    /// Whether the last read found ready items but no session to offer, so
+    /// each root change reads again until a sheet opens or none are ready.
+    waiting: bool,
+}
+
+impl ShareInbox {
+    /// The inbox of a phone whose UI folder is `ui_dir`, its record read
+    /// from there.
+    fn new(ui_dir: Option<&Path>) -> Self {
+        let last_used_path = ui_dir.map(|dir| dir.join(LAST_USED_FILE));
+        let env = std::env::var(inbox::INBOX_ENV).ok();
+        Self {
+            dir: ui_dir.map(|dir| inbox::inbox_dir(env.as_deref(), super::group_container(), dir)),
+            sheet: None,
+            pending: None,
+            last_used: last_used_path
+                .as_deref()
+                .map(LastUsed::load)
+                .unwrap_or_default(),
+            last_used_path,
+            waiting: false,
+        }
+    }
 }
 
 /// The wall-clock time in milliseconds since the Unix epoch; 0 before it.
@@ -226,6 +289,8 @@ pub struct PhoneRoot {
     refetching: HashMap<(String, String), Option<i64>>,
     /// Redraws the phone whenever the root view changes.
     _root_changed: Subscription,
+    /// The share inbox, its sheet and its pick waiting to be sent.
+    share_inbox: ShareInbox,
     /// Redials the dropped saved hosts when the window comes back to the
     /// foreground.
     _visibility: Subscription,
@@ -270,7 +335,7 @@ impl PhoneRoot {
                 });
                 this.swept = None;
                 this.sweep_delivered(cx);
-                this.sweep_fetched(cx);
+                this.sweep_files(cx);
                 // Home draws its hosts' rows afresh: stale until they list.
                 cx.notify();
             }
@@ -278,6 +343,7 @@ impl PhoneRoot {
         root.update(cx, |root, _| root.set_device_noun(device_noun()));
         let fetched_path = root.read(cx).ui_dir().map(|dir| dir.join(FETCHED_FILE));
         let fetched = fetched_path.as_deref().map(Index::read).unwrap_or_default();
+        let share_inbox = ShareInbox::new(root.read(cx).ui_dir());
         let mut this = Self {
             hosts: hosts_view::PhoneHosts::new(&root, cx),
             root,
@@ -335,11 +401,19 @@ impl PhoneRoot {
             browser: None,
             kept_stats: Vec::new(),
             refetching: HashMap::new(),
+            share_inbox,
             _root_changed: root_changed,
             _visibility: visibility,
         };
-        this.sweep_fetched(cx);
+        this.sweep_files(cx);
         this
+    }
+
+    /// Deletes the fetched copies past their retention time, then reads the
+    /// share inbox.
+    fn sweep_files(&mut self, cx: &mut Context<Self>) {
+        self.sweep_fetched(cx);
+        self.read_inbox(cx);
     }
 
     /// The root view changed: the phone takes what it queued and keeps its
@@ -359,6 +433,10 @@ impl PhoneRoot {
         self.take_folder_fetches(cx);
         self.take_fetched(cx);
         self.take_phone_opens(cx);
+        self.try_deliver_share(cx);
+        if self.share_inbox.waiting {
+            self.read_inbox(cx);
+        }
         cx.notify();
     }
 
@@ -1057,18 +1135,7 @@ impl PhoneRoot {
             self.chat_mirrored(&host, session_id, cx),
         ));
         self.composer_dock = super::composer::Dock::None;
-        if let Some(dir) = self
-            .fetched_path
-            .as_deref()
-            .and_then(std::path::Path::parent)
-        {
-            let key = LastUsed::key(host.wire(), session_id);
-            if let Err(err) =
-                LastUsed::stamp_saved(&dir.join(LAST_USED_FILE), &key, SystemTime::now())
-            {
-                tracing::warn!(error = %err, "phone: saving the last-used record");
-            }
-        }
+        self.stamp_last_used(&host, session_id);
         let shown = (host, session_id.to_owned());
         self.shown = Some(shown.clone());
         self.prompt_sheet = SheetState::default();
@@ -1953,6 +2020,395 @@ impl PhoneRoot {
     }
 }
 
+impl PhoneRoot {
+    /// Reads the share inbox: stale, bad and orphaned files are removed, and
+    /// ready items open the share sheet. Nothing while the sheet is open or a
+    /// pick waits; ready items wait for the next read while Settings, the
+    /// viewer, the browser or another sheet is up. With no session to offer
+    /// it marks the inbox waiting, so the next root change reads it again.
+    fn read_inbox(&mut self, cx: &mut Context<Self>) {
+        if self.share_inbox.sheet.is_some() || self.share_inbox.pending.is_some() {
+            return;
+        }
+        let Some(dir) = self.share_inbox.dir.clone() else {
+            return;
+        };
+        let scan = inbox::scan(&dir, SystemTime::now());
+        for path in scan.stale.iter().chain(&scan.bad).chain(&scan.orphans) {
+            remove_inbox_file(path);
+        }
+        if scan.ready.is_empty() {
+            self.share_inbox.waiting = false;
+            return;
+        }
+        if self.share_sheet_blocked(cx) {
+            return;
+        }
+        let rows = self.share_rows(cx);
+        if rows.is_empty() {
+            if !self.share_inbox.waiting {
+                tracing::debug!("phone: shared items wait; no session to offer");
+            }
+            self.share_inbox.waiting = true;
+            return;
+        }
+        self.share_inbox.waiting = false;
+        tracing::info!(count = scan.ready.len(), "phone: opening the share sheet");
+        let sheet = inbox::ShareSheet::new(scan.ready, rows, &self.share_inbox.last_used);
+        self.share_inbox.sheet = Some(sheet);
+        cx.notify();
+    }
+
+    /// Whether something the share sheet waits under is up: Settings, the
+    /// viewer, the browser, Home's sheet or sort sheet, the Attach sheet, the
+    /// Linear card sheet, the prompt sheet or the pairing layer.
+    fn share_sheet_blocked(&self, cx: &App) -> bool {
+        let root = self.root.read(cx);
+        self.page_covered()
+            || self.sheet.is_some()
+            || self.sort_menu
+            || self.attach.is_some()
+            || root.phone_linear_card().is_some()
+            || root.device_pairing_open()
+            || self.prompt_sheet_up(cx)
+    }
+
+    /// The share sheet's rows: every session Home lists that can show its
+    /// chat now, in Home's order, with its host's name for a remote host.
+    fn share_rows(&self, cx: &App) -> Vec<inbox::ShareRow> {
+        let root = self.root.read(cx);
+        let home = self.home(cx);
+        home.rows()
+            .filter(|row| root.session_chat_available(&row.session_id))
+            .map(|row| inbox::ShareRow {
+                host: row.host.clone(),
+                session_id: row.session_id.clone(),
+                label: row.label.clone(),
+                host_name: (row.host != HostKey::Local).then(|| root.host_label_of(&row.host)),
+            })
+            .collect()
+    }
+
+    /// The share sheet's rows' session ids, in the order it draws them,
+    /// while it is open.
+    #[must_use]
+    pub fn share_sheet_rows(&self) -> Option<Vec<String>> {
+        let sheet = self.share_inbox.sheet.as_ref()?;
+        Some(
+            sheet
+                .rows
+                .iter()
+                .map(|row| row.session_id.clone())
+                .collect(),
+        )
+    }
+
+    /// The share sheet's item count line, while it is open.
+    #[must_use]
+    pub fn share_sheet_count(&self) -> Option<String> {
+        self.share_inbox
+            .sheet
+            .as_ref()
+            .map(inbox::ShareSheet::count_label)
+    }
+
+    /// Closes the share sheet; its items stay in the inbox.
+    fn close_share_sheet(&mut self, cx: &mut Context<Self>) {
+        tracing::debug!("phone: share sheet closed; the items stay");
+        self.share_inbox.sheet = None;
+        cx.notify();
+    }
+
+    /// A tap on the share sheet's row `index`: its session opens, unless it
+    /// is the one shown, and the items wait there for its chat. A session no
+    /// longer listed closes the sheet and keeps the items.
+    fn share_pick(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(sheet) = self.share_inbox.sheet.take() else {
+            return;
+        };
+        let (row, items) = match sheet.pick(index) {
+            Ok(picked) => picked,
+            Err(sheet) => {
+                self.share_inbox.sheet = Some(sheet);
+                return;
+            }
+        };
+        let listed = self
+            .root
+            .read(cx)
+            .sidebar
+            .session_on(&row.host, &row.session_id)
+            .is_some();
+        if !listed {
+            tracing::debug!(session = %row.session_id, "phone: the picked session is gone; the items stay");
+            cx.notify();
+            return;
+        }
+        if !self.is_shown(&row.host, &row.session_id) {
+            self.open_session(row.host.clone(), &row.session_id, cx);
+        }
+        self.share_inbox.pending = Some(PendingShare {
+            host: row.host,
+            session_id: row.session_id,
+            items,
+        });
+        self.try_deliver_share(cx);
+        cx.notify();
+    }
+
+    /// Whether `host`'s session `session_id` is the one shown.
+    fn is_shown(&self, host: &HostKey, session_id: &str) -> bool {
+        self.shown
+            .as_ref()
+            .is_some_and(|(shown_host, id)| shown_host == host && id == session_id)
+    }
+
+    /// Sends the waiting pick's items once its session's chat has loaded
+    /// with a composer on an open host; gives up with a toast, keeping
+    /// them, once the session is no longer shown or its chat load was
+    /// refused.
+    fn try_deliver_share(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.share_inbox.pending.as_ref() else {
+            return;
+        };
+        let gave_up = if !self.is_shown(&pending.host, &pending.session_id) {
+            Some(SHARE_GAVE_UP_TITLE)
+        } else if self.root.read(cx).phone_chat_note().is_some() {
+            Some(SHARE_REFUSED_TITLE)
+        } else {
+            None
+        };
+        if let Some(title) = gave_up {
+            tracing::info!(session = %pending.session_id, title, "phone: giving up on a share; the items stay");
+            self.share_inbox.pending = None;
+            self.root.update(cx, |root, cx| {
+                root.push_toast(ToastKind::Warning, title, None, cx);
+            });
+            return;
+        }
+        let ready = {
+            let root = self.root.read(cx);
+            hosts_view::host_open(root, &pending.host)
+                && root.loaded_chat_host(&pending.session_id).is_some()
+                && root.phone_composer_input(&pending.session_id).is_some()
+        };
+        if let Some(pending) = self.share_inbox.pending.take_if(|_| ready) {
+            self.deliver_share(pending, cx);
+        }
+    }
+
+    /// Sends `pending`'s items into its session: text and links into the
+    /// composer, unsent, and files up as the chat's Attach does. A host
+    /// that takes no uploads keeps the files, and its toast says so.
+    fn deliver_share(&mut self, pending: PendingShare, cx: &mut Context<Self>) {
+        let PendingShare {
+            host,
+            session_id,
+            items,
+        } = pending;
+        tracing::info!(session = %session_id, count = items.len(), "phone: sending the shared items");
+        self.insert_shared_text(&session_id, &items, cx);
+        let (files, texts): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| item.manifest.kind == inbox::Kind::File);
+        texts.iter().for_each(remove_inbox_item);
+        let uploads = self
+            .root
+            .read(cx)
+            .conn_of(&host)
+            .is_some_and(|conn| conn.supports(FEATURE_UPLOAD_FILE));
+        if uploads {
+            for item in &files {
+                self.upload_shared(&session_id, item, cx);
+            }
+        } else if let Some(first) = files.first() {
+            // The upload route refuses before it reads the bytes, with the
+            // toast a host that takes no uploads shows; the files stay.
+            let name = first.manifest.name.clone().unwrap_or_default();
+            self.root.update(cx, |root, cx| {
+                root.on_chat_upload_file(&session_id, &name, &[], cx);
+            });
+        }
+        self.stamp_last_used(&host, &session_id);
+        cx.notify();
+    }
+
+    /// Appends the text and links among `items` to session `session_id`'s
+    /// composer at its end, one per line, as a paste inserts text.
+    fn insert_shared_text(
+        &mut self,
+        session_id: &str,
+        items: &[inbox::Item],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.root.read(cx).phone_composer_input(session_id) else {
+            return;
+        };
+        input.update(cx, |input, cx| {
+            let existing = input.text().to_owned();
+            let addition = inbox::text_addition(&existing, items);
+            if addition.is_empty() {
+                return;
+            }
+            // The caret goes to the end, where the text is inserted.
+            input.set_text(existing, cx);
+            input.replace_from_app(&crate::text_input::normalize_newlines(&addition), cx);
+        });
+    }
+
+    /// Sends the shared file `item` up into session `session_id`'s chat: an
+    /// image as a pasted image, any other file as a file. One over the cap
+    /// shows the too-large toast and one that cannot be read its own; each
+    /// is removed from the inbox.
+    fn upload_shared(&mut self, session_id: &str, item: &inbox::Item, cx: &mut Context<Self>) {
+        let name = item.manifest.name.clone().unwrap_or_default();
+        let Some(path) = item.payload_path.as_deref() else {
+            return;
+        };
+        let cap = u64::try_from(UPLOAD_MAX_BYTES).unwrap_or(u64::MAX);
+        let read = std::fs::symlink_metadata(path).and_then(|meta| {
+            if meta.len() > cap {
+                Ok(None)
+            } else {
+                std::fs::read(path).map(Some)
+            }
+        });
+        self.root.update(cx, |root, cx| match read {
+            Ok(Some(bytes)) if inbox::is_image(&name) => {
+                root.on_chat_paste_image(session_id, &name, &bytes, cx);
+            }
+            Ok(Some(bytes)) => root.on_chat_upload_file(session_id, &name, &bytes, cx),
+            Ok(None) => root.on_chat_file_too_large(&name, cx),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "phone: reading a shared file");
+                let detail = format!("{name} could not be read.");
+                root.push_toast(ToastKind::Warning, SHARE_UNREADABLE_TITLE, Some(detail), cx);
+            }
+        });
+        remove_inbox_item(item);
+    }
+
+    /// Records `host`'s session `session_id` as used now and saves the
+    /// record.
+    fn stamp_last_used(&mut self, host: &HostKey, session_id: &str) {
+        let key = LastUsed::key(host.wire(), session_id);
+        self.share_inbox.last_used.stamp(&key, SystemTime::now());
+        let Some(path) = self.share_inbox.last_used_path.as_deref() else {
+            return;
+        };
+        if let Err(err) = self.share_inbox.last_used.save(path) {
+            tracing::warn!(error = %err, "phone: saving the last-used record");
+        }
+    }
+
+    /// The share sheet over a scrim: "Send to", the item count, then a row
+    /// per session, its bottom clear of `bottom`'s home indicator. A row
+    /// sends the items to its session; a tap on the scrim closes the sheet
+    /// and keeps them. `None` while it is closed.
+    fn share_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
+        let sheet = self.share_inbox.sheet.as_ref()?;
+        let t = theme(cx);
+        let scrim = div()
+            .id("phone-share-scrim")
+            .driver_id(|| "phone-share-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_share_sheet(cx)));
+        let rows: Vec<Stateful<Div>> = sheet
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(n, row)| Self::share_row(n, row, cx))
+            .collect();
+        let title = div().font_weight(FontWeight::SEMIBOLD).child(SHARE_TITLE);
+        let count = div()
+            .text_size(px(STATUS_TEXT_SIZE))
+            .text_color(gpui::rgb(t.muted))
+            .child(sheet.count_label());
+        let list = div()
+            .id("phone-share-rows")
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .max_h(px(SHARE_ROWS_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .children(rows);
+        let panel = div()
+            .id("phone-share-sheet")
+            .driver_id(|| "phone-share-sheet".to_owned())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pt(px(16.0))
+            .pb(bottom + px(16.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .child(title)
+            .child(count)
+            .child(list);
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(panel),
+        )
+    }
+
+    /// The share sheet's row `n`, `row`'s session: its title, its host's
+    /// name under it for a remote host.
+    fn share_row(n: usize, row: &inbox::ShareRow, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
+        let host = row.host_name.clone().map(|name| {
+            div()
+                .text_size(px(STATUS_TEXT_SIZE))
+                .text_color(gpui::rgb(t.muted))
+                .child(name)
+        });
+        Self::sheet_button(&format!("phone-share-row-{n}"), ButtonKind::Outlined, cx)
+            .flex_col()
+            .child(row.label.clone())
+            .children(host)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.share_pick(n, cx);
+            }))
+    }
+}
+
+/// The share sheet's title.
+const SHARE_TITLE: &str = "Send to";
+
+/// Removes `item` from the share inbox, logging a failure.
+fn remove_inbox_item(item: &inbox::Item) {
+    if let Err(err) = inbox::remove(item) {
+        tracing::warn!(id = %item.manifest.id, error = %err, "phone: removing a shared item");
+    }
+}
+
+/// Removes the share inbox's file at `path`; one already gone is no error.
+fn remove_inbox_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(path = %path.display(), error = %err, "phone: removing a share inbox file");
+        }
+        _ => {}
+    }
+}
+
 /// How far below the safe area's top the copied chip sits: under the
 /// session header.
 const CHIP_TOP: f32 = 60.0;
@@ -2011,6 +2467,8 @@ enum SheetLayer {
     AttachSheet,
     /// The Linear card sheet, over Home while no session page draws.
     CardSheet,
+    /// The share sheet, over the whole window.
+    ShareSheet,
     /// The device pairing layer, over the whole window.
     Pairing,
 }
@@ -2022,7 +2480,7 @@ impl SheetLayer {
         match self {
             Self::HomeSheet | Self::SortSheet | Self::CardSheet => Some(Pane::List),
             Self::BrowserSheet | Self::PromptSheet | Self::AttachSheet => Some(Pane::Session),
-            Self::Pairing => None,
+            Self::ShareSheet | Self::Pairing => None,
         }
     }
 }
@@ -2292,6 +2750,7 @@ impl PhoneRoot {
             (SheetLayer::PromptSheet, prompt_sheet),
             (SheetLayer::AttachSheet, attach_sheet),
             (SheetLayer::CardSheet, card_sheet),
+            (SheetLayer::ShareSheet, self.share_layer(padding.bottom, cx)),
         ];
         let covers_session = drawn
             .iter()
