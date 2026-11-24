@@ -19,8 +19,6 @@
 - [ ] RT-767 Work through the held turn end's leftover cases
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-954 Read a screen's rows once per status check instead of once per reader
-- [ ] RT-1270 Answer a Heads up explanation cut off by its band, and tighten the notice's reading · release vNext
-  - [/] RT-2190 Answer a clipped Heads up explanation from the chat (RT-1270 C) · release vNext
 - [ ] RT-2112 Read a /resume or /branch SessionEnd as the agent running on, not exiting
 - [ ] RT-2118 Move a user-hooks shell's conversation pin across /clear and /resume
 - [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
@@ -164,6 +162,7 @@
 - [ ] RT-2044 Give the nine unmapped native files rows in the test map
 - [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
 - [ ] RT-2154 Stop the dispatch-runs daemon tests leaking a child process
+- [ ] RT-2218 Map the 11 unmapped files in tools/test-map.json
 
 ## Elevated daemon and security
 
@@ -184,7 +183,6 @@
 
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
-  - [/] RT-2164 Answer Rewind from the chat: pick a point, then restore or summarize · release vNext
   - [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
@@ -502,9 +500,7 @@
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
 - [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
 - [ ] RT-1910 Send photos and files from the phone into a session · release vNext
-  - [ ] RT-2202 Phone: the camera and multi-select Photos in the Attach sheet · release vNext
-  - [ ] RT-2203 Phone: send what other apps share to the app into a session · release vNext
-  - [ ] RT-2204 Phone: a share extension that hands shared items to the app · release vNext
+  - [ ] RT-2204 Phone: a share extension that hands shared items to the app · release vNext+1
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
@@ -520,6 +516,9 @@
 - [ ] RT-2152 Size the phone's landscape Needs you card from the list pane with the keyboard up
 - [ ] RT-2153 Keep the copied chip off the terminal's top rows in the phone's landscape full-screen terminal
 - [ ] RT-2177 Give the phone's remaining buttons the narrower phone padding
+- [ ] RT-2215 Phone: show a notification tap's note while the list pane is collapsed
+- [ ] RT-2216 Phone: drop a late field paste once its field is no longer drawn
+- [ ] RT-2217 Phone: open share inbox manifests without following links
 
 ## Dashboard, Gates and Linear
 
@@ -687,6 +686,7 @@
 - [ ] RT-2145 Name every phone Settings category in docs/README.md
 - [ ] RT-2146 Check CLAUDE.md's native-shot view list against shot.rs
 - [ ] RT-2147 Name the size ruling docs/plans/mobile-app.md's Size step points at
+- [ ] RT-2210 Re-read docs/testing.md against its named files' changes since 2026-11-22, and add the Heads up capture rig
 
 ## Backlog
 
@@ -812,7 +812,6 @@
 - [ ] RT-2198 Recheck instead of showing push off when a grace re-register cannot read its keys
 - [ ] RT-2205 Phone viewer: pan a zoomed image diagonally, not along one axis
 - [ ] RT-2206 gpui fork: count an iOS pinch's first step once
-- [ ] RT-2207 Phone: check a picked file's size before reading it into memory · release vNext
 - [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy
 - [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload
 
