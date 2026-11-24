@@ -181,9 +181,8 @@
 
 ## Chat mirror
 
+- [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-293 Show a running shell command's live output beside its session
-- [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw · release vNext
-  - [ ] RT-2166 Phone: draw the overlay, /btw, Rewind and preview chat cards · release vNext+1
 - [ ] RT-1894 Clear a terminal draft fully when it ends in a blank line or the cursor is mid-draft
 - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
 - [ ] RT-556 Fix one-shot wakeup times across daylight-saving changes
@@ -476,6 +475,7 @@
 
 ## Phone app
 
+- [ ] RT-2204 Phone: a share extension that hands shared items to the app · release vNext+1
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
@@ -498,9 +498,7 @@
 - [ ] RT-1774 Tidy the phone Settings › Notifications page: hint wording, offline hosts and specs
 - [ ] RT-1783 Make the phone spec navigating_clears_a_pending_open test the add form's own clearing again
 - [ ] RT-1784 Read the phone's theme list once per Appearance visit, not on every redraw
-- [ ] RT-1909 Take a hardware keyboard and pointer on the iPad · release vNext
-- [ ] RT-1910 Send photos and files from the phone into a session · release vNext
-  - [ ] RT-2204 Phone: a share extension that hands shared items to the app · release vNext+1
+- [ ] RT-1909 Take a hardware keyboard and pointer on the iPad
 - [ ] RT-1915 Read the phone terminal's cursor row without a full screen snapshot
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
