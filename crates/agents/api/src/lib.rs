@@ -1092,6 +1092,12 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The cards for work the agent's screen shows running before its
+    /// transcript holds it; none by default.
+    fn read_live_cards(&self, _rows: &[String]) -> Vec<ChatEntry> {
+        Vec::new()
+    }
+
     /// The one key that moves the screen read as `reading` towards `goal`,
     /// [`ViewStep::Done`] once it is there, or why no key leads there.
     fn next_view_key(&self, _goal: ViewGoal, _reading: &ViewReading) -> ViewStep {
@@ -1357,6 +1363,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::read_work`].
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork>;
+
+    /// See [`Agent::read_live_cards`].
+    fn read_live_cards(&self, rows: &[String]) -> Vec<ChatEntry>;
 
     /// See [`Agent::next_view_key`].
     fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep;
@@ -1664,6 +1673,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {
         Agent::read_work(self, rows)
+    }
+
+    fn read_live_cards(&self, rows: &[String]) -> Vec<ChatEntry> {
+        Agent::read_live_cards(self, rows)
     }
 
     fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep {

@@ -44,7 +44,7 @@ const PEER_TAG: &str = "cross-session-message";
 const PEER_LEAD: &str = "Another Claude session sent a message:";
 
 /// Code Mode's tool: one call whose JavaScript runs other tools.
-const SCRIPT_TOOL: &str = "REPL";
+pub(crate) const SCRIPT_TOOL: &str = "REPL";
 /// Code Mode's tool that waits for background scripts; it draws nothing.
 const POLL_TOOL: &str = "Poll";
 /// The model a virtual record, one Claude Code wrote for a script, names.

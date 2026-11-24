@@ -15,7 +15,9 @@ use agent_api::{
     AnswerRecipe, AnswerRefusal, DraftReading, ScreenExpect, ScreenWork, ViewGoal, ViewReading,
     ViewRefusal, ViewStep,
 };
-use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
+use protocol::{
+    AgentId, ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState,
+};
 
 use super::Screen;
 use crate::osc_title::agent_title_text;
@@ -135,6 +137,21 @@ pub fn read_work(agent: &AgentId, screen: &Screen) -> Option<ScreenWork> {
         return None;
     };
     plugin.read_work(&screen.rows())
+}
+
+/// The cards for work `screen` shows running before the transcript holds
+/// it, as `agent`'s plugin reads them, in screen order; none for an agent
+/// with no registered plugin or one whose screen shows no such work.
+#[must_use]
+pub fn read_live_cards(agent: &AgentId, screen: &Screen) -> Vec<ChatEntry> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::debug!(
+            "no agent plugin `{}` is registered; its screen has no live cards",
+            agent.0
+        );
+        return Vec::new();
+    };
+    plugin.read_live_cards(&screen.rows())
 }
 
 /// The one key that moves `agent`'s screen, read as `reading`, towards

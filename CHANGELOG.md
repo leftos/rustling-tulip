@@ -38,6 +38,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - After Claude that the app started in a shell ends, a Claude you then start there by hand reports its status again.
 - On the phone, a notification tap made while Settings is open closes Settings and shows that it is waiting for its host.
 - On the phone, a file or folder fetch no longer fails when Storage's Clear runs at the moment it starts.
+- In Chat, a Code Mode script Claude is running shows as running right away, instead of appearing only once it finishes.
 - In the phone's Chat, tapping or holding on a wrapped right- or centre-aligned table cell selects the character under your finger.
 - In the phone's Chat, a tap through a selection handle no longer leaves the card under it looking hovered.
 - On the phone, leaving Settings › Hosts with the add-host form open closes it, so the keyboard no longer rises over an old half-typed form.

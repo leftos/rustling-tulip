@@ -1785,6 +1785,14 @@ impl SessionMirror {
         }
     }
 
+    /// Merge the live cards the screen shows, sending them when any
+    /// changed.
+    fn take_live_cards(&mut self, session_id: &str, cards: Vec<ChatEntry>) {
+        if self.chat.merge_cards(cards) {
+            self.flush_live(session_id);
+        }
+    }
+
     fn flush_live(&mut self, session_id: &str) {
         let entries = self.chat.take_changed_live();
         if !entries.is_empty() {
@@ -1821,6 +1829,18 @@ impl ChatTap {
         // A frame that shows no count (a dialog is up) keeps the last one.
         if let Some(counted) = dialogs::read_work(&self.agent, screen) {
             mirror.take_screen_work(&self.session_id, counted);
+        }
+        let cards = dialogs::read_live_cards(&self.agent, screen);
+        // Reading the view costs a parse: only cards the chat would take
+        // are worth it.
+        if !mirror.chat.would_take(&cards) {
+            return;
+        }
+        // A subagent's view shows its own work, not the main conversation's.
+        let subagent_in_view = dialogs::read_view(&self.agent, screen)
+            .is_some_and(|view| view.agent_in_view.is_some());
+        if !subagent_in_view {
+            mirror.take_live_cards(&self.session_id, cards);
         }
     }
 }
@@ -2100,8 +2120,10 @@ struct ChatState {
     /// Whether the loaders show a chat this one no longer extends, so the
     /// end of the read sends it whole.
     stale: bool,
-    /// The answers still arriving, in the order their first piece came.
-    live: Vec<LiveAnswer>,
+    /// The answers still arriving and the cards of work the screen shows
+    /// running before the transcript holds it, in the order each first
+    /// came.
+    live: Vec<LiveItem>,
     /// The place the next live message of each prompt's turn takes: the
     /// turn's answers already written when its first live message came, then
     /// one more per live message.
@@ -2111,8 +2133,16 @@ struct ChatState {
     /// The prompts whose turn a later prompt ended; their live pieces are
     /// dropped.
     ended_prompts: HashSet<String>,
-    /// The keys of live messages changed since they were last sent.
+    /// The keys of live messages and cards changed since they were last
+    /// sent.
     changed: HashSet<String>,
+    /// The eval number and description of each script the transcript has
+    /// carried; the screen's card of one is not taken. Both, since a new
+    /// agent process numbers its scripts anew.
+    landed_scripts: HashSet<(u32, String)>,
+    /// The eval number and description of each live card that left; the
+    /// screen's card of one is not taken again.
+    ended_cards: HashSet<(u32, String)>,
     /// What the plugin keeps between the transcript's lines (such as which
     /// script a later call belongs to); made by the plugin on the first line
     /// read, and gone with the rest of the chat when the transcript restarts
@@ -2120,27 +2150,64 @@ struct ChatState {
     context: Option<Box<dyn Any + Send>>,
 }
 
-/// One answer still arriving: its pieces by their place in the message.
-struct LiveAnswer {
+/// One answer still arriving, or one card of work the screen shows running,
+/// in its prompt's turn.
+struct LiveItem {
     key: String,
     prompt: String,
-    /// Its place among the messages of its prompt's turn.
-    ordinal: usize,
-    pieces: BTreeMap<u64, String>,
+    body: LiveBody,
 }
 
-impl LiveAnswer {
+/// What a live item holds.
+enum LiveBody {
+    /// An answer's pieces by their place in the message, and its place among
+    /// the messages of its prompt's turn.
+    Answer {
+        ordinal: usize,
+        pieces: BTreeMap<u64, String>,
+    },
+    /// A card the screen shows running, and its script's eval number.
+    Card { eval: u32, entry: Box<ChatEntry> },
+}
+
+impl LiveItem {
+    /// The id the item is sent under: `live:` and its key for an answer,
+    /// the card's own id for a card.
     fn id(&self) -> String {
-        format!("live:{}", self.key)
+        match &self.body {
+            LiveBody::Answer { .. } => format!("live:{}", self.key),
+            LiveBody::Card { .. } => self.key.clone(),
+        }
     }
 
-    /// The answer as it stands: its pieces in index order with nothing
-    /// between them, since each piece carries its own line breaks.
+    /// The item as it stands: an answer's pieces in index order with nothing
+    /// between them, since each piece carries its own line breaks; a card as
+    /// the screen showed it last.
     fn entry(&self) -> ChatEntry {
-        ChatEntry::Answer {
-            id: self.id(),
-            text: self.pieces.values().map(String::as_str).collect(),
-            live: true,
+        match &self.body {
+            LiveBody::Answer { pieces, .. } => ChatEntry::Answer {
+                id: self.id(),
+                text: pieces.values().map(String::as_str).collect(),
+                live: true,
+            },
+            LiveBody::Card { entry, .. } => entry.as_ref().clone(),
+        }
+    }
+
+    /// The eval number of a card's script; `None` for an answer.
+    fn card_eval(&self) -> Option<u32> {
+        match self.body {
+            LiveBody::Card { eval, .. } => Some(eval),
+            LiveBody::Answer { .. } => None,
+        }
+    }
+
+    /// The eval number and description of a card's script; `None` for an
+    /// answer.
+    fn card_script(&self) -> Option<(u32, String)> {
+        match &self.body {
+            LiveBody::Card { entry, .. } => card_script(entry),
+            LiveBody::Answer { .. } => None,
         }
     }
 }
@@ -2251,7 +2318,12 @@ impl ChatState {
             .retain(|prompt, _| Some(prompt) == turn.as_ref());
         self.ended_prompts
             .retain(|prompt| Some(prompt) == turn.as_ref());
-        self.live.retain(|live| Some(&live.prompt) == turn.as_ref());
+        let (kept, dropped): (Vec<LiveItem>, Vec<LiveItem>) = std::mem::take(&mut self.live)
+            .into_iter()
+            .partition(|live| Some(&live.prompt) == turn.as_ref());
+        self.live = kept;
+        self.ended_cards
+            .extend(dropped.iter().filter_map(LiveItem::card_script));
         self.live_next
             .retain(|prompt, _| Some(prompt) == turn.as_ref());
         self.finished.clear();
@@ -2316,7 +2388,11 @@ impl ChatState {
                 starts_turn = false;
                 self.turn_starts.insert(id.clone());
             }
+            let had_result = self.has_result(&id);
             let replaces = self.upsert(id, &entry, facts.timestamp, &mut change.removed);
+            change
+                .removed
+                .extend(self.script_landed(&entry, had_result));
             if replaces.is_none()
                 && matches!(entry, ChatEntry::TurnEnd { .. })
                 && let Some(prompt) = self.turn_prompt.clone()
@@ -2417,10 +2493,10 @@ impl ChatState {
         let count = self.answered.entry(prompt.clone()).or_default();
         let ordinal = *count;
         *count += 1;
-        let at = self
-            .live
-            .iter()
-            .position(|live| live.prompt == prompt && live.ordinal == ordinal)?;
+        let at = self.live.iter().position(|live| {
+            live.prompt == prompt
+                && matches!(live.body, LiveBody::Answer { ordinal: at, .. } if at == ordinal)
+        })?;
         let live = self.live.remove(at);
         Some(self.finish_live(live))
     }
@@ -2441,8 +2517,8 @@ impl ChatState {
     }
 
     /// The live answers `ends` picks leave, finished; their ids.
-    fn end_live_where(&mut self, ends: impl Fn(&LiveAnswer) -> bool) -> Vec<String> {
-        let (ended, kept): (Vec<LiveAnswer>, Vec<LiveAnswer>) =
+    fn end_live_where(&mut self, ends: impl Fn(&LiveItem) -> bool) -> Vec<String> {
+        let (ended, kept): (Vec<LiveItem>, Vec<LiveItem>) =
             std::mem::take(&mut self.live).into_iter().partition(ends);
         self.live = kept;
         ended
@@ -2453,8 +2529,11 @@ impl ChatState {
 
     /// `live` left: it is no longer sent, a later piece of it is dropped;
     /// its id.
-    fn finish_live(&mut self, live: LiveAnswer) -> String {
+    fn finish_live(&mut self, live: LiveItem) -> String {
         self.changed.remove(&live.key);
+        if let Some(script) = live.card_script() {
+            self.ended_cards.insert(script);
+        }
         let id = live.id();
         self.finished.insert(live.key);
         id
@@ -2498,7 +2577,9 @@ impl ChatState {
             return;
         }
         if let Some(live) = self.live.iter_mut().find(|live| live.key == key) {
-            live.pieces.insert(line.index, line.text);
+            if let LiveBody::Answer { pieces, .. } = &mut live.body {
+                pieces.insert(line.index, line.text);
+            }
         } else {
             let answered = &self.answered;
             let next = self
@@ -2507,11 +2588,13 @@ impl ChatState {
                 .or_insert_with(|| answered.get(&prompt).copied().unwrap_or(0));
             let ordinal = *next;
             *next += 1;
-            self.live.push(LiveAnswer {
+            self.live.push(LiveItem {
                 key: key.clone(),
                 prompt,
-                ordinal,
-                pieces: BTreeMap::from([(line.index, line.text)]),
+                body: LiveBody::Answer {
+                    ordinal,
+                    pieces: BTreeMap::from([(line.index, line.text)]),
+                },
             });
         }
         self.changed.insert(key);
@@ -2528,8 +2611,147 @@ impl ChatState {
         self.live
             .iter()
             .filter(|live| changed.contains(&live.key))
-            .map(LiveAnswer::entry)
+            .map(LiveItem::entry)
             .collect()
+    }
+
+    /// Merge the cards the screen shows running, returning whether any is
+    /// new or changed. With no turn, or while catching up, none is taken:
+    /// the next screen read offers them again.
+    fn merge_cards(&mut self, cards: Vec<ChatEntry>) -> bool {
+        let Some(prompt) = self.card_turn().cloned() else {
+            return false;
+        };
+        let mut changed = false;
+        for card in cards {
+            changed |= self.merge_card(&prompt, card);
+        }
+        changed
+    }
+
+    /// Whether merging `cards` would take any: a turn takes cards, and one
+    /// of them is new or changed.
+    fn would_take(&self, cards: &[ChatEntry]) -> bool {
+        self.card_turn().is_some() && cards.iter().any(|card| self.card_wanted(card).is_some())
+    }
+
+    /// The prompt whose turn takes live cards: the current one, once the
+    /// chat is caught up and while that turn has not ended.
+    fn card_turn(&self) -> Option<&String> {
+        if self.catching_up {
+            return None;
+        }
+        self.turn_prompt
+            .as_ref()
+            .filter(|prompt| !self.ended_prompts.contains(*prompt))
+    }
+
+    /// The key and eval number of `card` when merging it would push or
+    /// change a live card; `None` for a card with no id or script number,
+    /// one whose script the transcript carried or whose card left, and one
+    /// the live list holds as it is.
+    fn card_wanted(&self, card: &ChatEntry) -> Option<(String, u32)> {
+        let key = entry_id(card)?;
+        let script = card_script(card)?;
+        if self.landed_scripts.contains(&script) || self.ended_cards.contains(&script) {
+            return None;
+        }
+        let wanted = (key.to_owned(), script.0);
+        match self
+            .live
+            .iter()
+            .find(|live| live.key == key)
+            .map(|live| &live.body)
+        {
+            None => Some(wanted),
+            Some(LiveBody::Card { entry, .. }) if **entry != *card => Some(wanted),
+            Some(_) => None,
+        }
+    }
+
+    /// Merge one card into `prompt`'s turn, returning whether it is new or
+    /// changed. A card with no id or eval number, one that left, and one
+    /// whose script the transcript carried are not taken.
+    fn merge_card(&mut self, prompt: &str, card: ChatEntry) -> bool {
+        let Some((key, eval)) = self.card_wanted(&card) else {
+            return false;
+        };
+        if let Some(live) = self.live.iter_mut().find(|live| live.key == key) {
+            live.body = LiveBody::Card {
+                eval,
+                entry: Box::new(card),
+            };
+        } else {
+            self.live.push(LiveItem {
+                key: key.clone(),
+                prompt: prompt.to_owned(),
+                body: LiveBody::Card {
+                    eval,
+                    entry: Box::new(card),
+                },
+            });
+        }
+        self.changed.insert(key);
+        true
+    }
+
+    /// The transcript carried script `entry`, whose earlier copy `had_result`
+    /// or not; the ids of the live cards that leave, finished. A dispatched
+    /// script's eval number ends every live card of that eval, and a later
+    /// card of its eval and description is not taken. A script that ran at
+    /// once (an outcome with no eval number, landing for the first time)
+    /// ends one live card of the turn.
+    fn script_landed(&mut self, entry: &ChatEntry, had_result: bool) -> Vec<String> {
+        let ChatEntry::Tool {
+            script: Some(facts),
+            result,
+            ..
+        } = entry
+        else {
+            return Vec::new();
+        };
+        match facts.eval {
+            Some(eval) => {
+                self.landed_scripts
+                    .insert((eval, facts.description.clone()));
+                self.end_live_where(|live| live.card_eval() == Some(eval))
+            }
+            None if result.is_some() && !had_result => {
+                self.ran_at_once(&facts.description).into_iter().collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// A script running `description` ran at once: the oldest live card of
+    /// the turn showing that description leaves, else the turn's oldest
+    /// card; its id. `None` when the turn has no live card.
+    fn ran_at_once(&mut self, description: &str) -> Option<String> {
+        let prompt = self.turn_prompt.clone()?;
+        let in_turn = |live: &LiveItem| live.prompt == prompt && live.card_eval().is_some();
+        let at = self
+            .live
+            .iter()
+            .position(|live| {
+                in_turn(live)
+                    && live
+                        .card_script()
+                        .is_some_and(|(_, shown)| shown == description)
+            })
+            .or_else(|| self.live.iter().position(in_turn))?;
+        let live = self.live.remove(at);
+        Some(self.finish_live(live))
+    }
+
+    /// Whether the entry with `id` already carries an outcome.
+    fn has_result(&self, id: &str) -> bool {
+        matches!(
+            self.get(id),
+            Some(ChatEntry::Tool {
+                result: Some(_),
+                ..
+            })
+        )
     }
 
     /// [`Self::reply_with`] no pending entries.
@@ -2547,7 +2769,7 @@ impl ChatState {
             .entries
             .iter()
             .cloned()
-            .chain(self.live.iter().map(LiveAnswer::entry))
+            .chain(self.live.iter().map(LiveItem::entry))
             .chain(pending.iter().cloned())
             .skip(hidden)
             .collect();
@@ -2707,6 +2929,19 @@ fn image_markers_as_image(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The eval number and description of script card `entry`; `None` for
+/// any other entry and a script with no number yet.
+fn card_script(entry: &ChatEntry) -> Option<(u32, String)> {
+    let ChatEntry::Tool {
+        script: Some(facts),
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    Some((facts.eval?, facts.description.clone()))
 }
 
 /// What groups a live line's pieces: its message, else its prompt.
@@ -3593,6 +3828,273 @@ mod tests {
         chat.merge_live(live("P1", "m9", 0, "late, under a new key"));
         assert!(chat.take_changed_live().is_empty(), "P1's turn is over");
         assert_eq!(ids(&chat.reply().0), ["u-1", "u-2"]);
+    }
+
+    /// The card the screen shows for script `eval` running `Build it`.
+    fn live_card(eval: u32) -> ChatEntry {
+        live_card_named(eval, "Build it")
+    }
+
+    /// The card the screen shows for script `eval` running `description`.
+    fn live_card_named(eval: u32, description: &str) -> ChatEntry {
+        ChatEntry::Tool {
+            id: format!("live-script:{eval}"),
+            name: "REPL".to_owned(),
+            summary: description.to_owned(),
+            input: String::new(),
+            result: None,
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind: ToolKind::Script,
+            script: Some(protocol::ScriptFacts {
+                description: description.to_owned(),
+                eval: Some(eval),
+                ms: None,
+                error: None,
+            }),
+        }
+    }
+
+    /// A model's `REPL` call `tool_id` running `Build it`, record `uuid` at
+    /// second `n`.
+    fn repl_call(uuid: &str, n: usize, tool_id: &str) -> String {
+        repl_call_named(uuid, n, tool_id, "Build it")
+    }
+
+    /// A model's `REPL` call `tool_id` running `description`, record `uuid`
+    /// at second `n`.
+    fn repl_call_named(uuid: &str, n: usize, tool_id: &str, description: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "uuid": uuid, "timestamp": stamp(n), "madeBy": "model",
+            "message": {"role": "assistant", "type": "message", "model": "fake-model",
+                "content": [{"type": "tool_use", "id": tool_id, "name": "REPL",
+                    "input": {"code": "1", "description": description}}],
+                "stop_reason": "tool_use"},
+        })
+        .to_string()
+    }
+
+    /// The receipt of `REPL` call `tool_id`, record `uuid` at second `n`: it
+    /// runs in the background as `eval`.
+    fn repl_receipt(uuid: &str, n: usize, tool_id: &str, eval: u32) -> String {
+        let text = format!("(dispatched #{eval})");
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "toolUseResult": {"code": "1", "result": text, "stdout": "", "stderr": "",
+                "evalId": eval, "asyncDispatched": true},
+            "message": {"role": "user", "content": [{"tool_use_id": tool_id,
+                "type": "tool_result", "content": text, "is_error": false}]},
+        })
+        .to_string()
+    }
+
+    /// The result of `REPL` call `tool_id`, record `uuid` at second `n`: the
+    /// script ran at once and returned `done`, with no receipt.
+    fn repl_done(uuid: &str, n: usize, tool_id: &str) -> String {
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "toolUseResult": {"code": "1", "result": "done", "stdout": "", "stderr": ""},
+            "message": {"role": "user", "content": [{"tool_use_id": tool_id,
+                "type": "tool_result", "content": "done", "is_error": false}]},
+        })
+        .to_string()
+    }
+
+    /// P1's turn showing the live cards of script 9 (`Build it`) and script
+    /// 10 (`Test it`).
+    fn two_cards_in_turn(chat: &mut ChatState) {
+        apply(chat, &prompt("u-1", 1, Some("P1"), "go"));
+        assert!(chat.merge_cards(vec![live_card(9), live_card_named(10, "Test it")]));
+    }
+
+    /// P1's turn showing script 9's live card, sent.
+    fn card_in_turn(chat: &mut ChatState) {
+        apply(chat, &prompt("u-1", 1, Some("P1"), "go"));
+        assert!(chat.merge_cards(vec![live_card(9)]));
+        assert_eq!(ids(&chat.take_changed_live()), ["live-script:9"]);
+    }
+
+    fn has_live_card(entries: &[ChatEntry]) -> bool {
+        ids(entries).iter().any(|id| id.starts_with("live-script:"))
+    }
+
+    #[test]
+    fn a_live_card_follows_the_live_answer_before_it() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        chat.merge_live(live("P1", "m1", 0, "building"));
+        assert!(chat.merge_cards(vec![live_card(9)]));
+        assert_eq!(ids(&chat.reply().0), ["u-1", "live:m1", "live-script:9"]);
+        assert_eq!(ids(&chat.take_changed_live()), ["live:m1", "live-script:9"]);
+    }
+
+    #[test]
+    fn a_live_card_merged_again_changes_nothing() {
+        let mut chat = ChatState::default();
+        card_in_turn(&mut chat);
+        assert!(!chat.merge_cards(vec![live_card(9)]));
+        assert_eq!(chat.take_changed_live(), Vec::new());
+        assert_eq!(ids(&chat.reply().0), ["u-1", "live-script:9"]);
+    }
+
+    #[test]
+    fn the_transcripts_script_card_ends_its_live_card() {
+        let mut chat = ChatState::default();
+        card_in_turn(&mut chat);
+        let call = apply(&mut chat, &repl_call("a-2", 2, "toolu_9"));
+        assert!(call.removed.is_empty(), "the call has no eval yet");
+        let receipt = apply(&mut chat, &repl_receipt("r-3", 3, "toolu_9", 9));
+        assert_eq!(receipt.removed, ["live-script:9"]);
+        assert_eq!(ids(&receipt.entries), ["toolu_9"]);
+        assert!(!chat.merge_cards(vec![live_card(9)]), "script 9 landed");
+        assert_eq!(chat.take_changed_live(), Vec::new());
+        assert_eq!(ids(&chat.reply().0), ["u-1", "toolu_9"]);
+    }
+
+    #[test]
+    fn a_live_card_ends_with_its_turn() {
+        let interrupt = serde_json::json!({
+            "type": "user", "uuid": "i-2", "timestamp": stamp(3),
+            "message": {"role": "user", "content": "[Request interrupted by user]"},
+        })
+        .to_string();
+        let ends = [
+            turn_end("e-1", 3),
+            prompt("u-2", 3, Some("P2"), "again"),
+            interrupt,
+        ];
+        for end in ends {
+            let mut chat = ChatState::default();
+            card_in_turn(&mut chat);
+            let change = apply(&mut chat, &end);
+            assert_eq!(change.removed, ["live-script:9"], "{end}");
+            assert!(!has_live_card(&chat.reply().0), "{end}");
+            assert!(!chat.merge_cards(vec![live_card(9)]), "{end}: card 9 ended");
+        }
+    }
+
+    #[test]
+    fn a_live_card_of_a_landed_script_makes_nothing() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        apply(&mut chat, &repl_call("a-2", 2, "toolu_9"));
+        apply(&mut chat, &repl_receipt("r-3", 3, "toolu_9", 9));
+        assert!(!chat.merge_cards(vec![live_card(9)]));
+        assert_eq!(chat.take_changed_live(), Vec::new());
+        assert!(!has_live_card(&chat.reply().0));
+    }
+
+    #[test]
+    fn a_live_card_needs_a_turn_and_a_caught_up_chat() {
+        let mut chat = ChatState::default();
+        assert!(!chat.merge_cards(vec![live_card(9)]), "no turn");
+        assert_eq!(chat.take_changed_live(), Vec::new());
+        let mut chat = ChatState::starting_with(None, true);
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        assert!(!chat.merge_cards(vec![live_card(9)]), "catching up");
+        chat.catch_up();
+        assert!(!has_live_card(&chat.reply().0));
+        assert!(chat.merge_cards(vec![live_card(9)]), "offered again");
+    }
+
+    #[test]
+    fn a_live_card_takes_no_answer_ordinal() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        chat.merge_live(live("P1", "m1", 0, "one"));
+        assert!(chat.merge_cards(vec![live_card(9)]));
+        chat.merge_live(live("P1", "m2", 0, "two"));
+        let first = apply(&mut chat, &answer("a-1", 2, "one, in full"));
+        assert_eq!(first.removed, ["live:m1"]);
+        let second = apply(&mut chat, &answer("a-2", 3, "two, in full"));
+        assert_eq!(second.removed, ["live:m2"]);
+        assert_eq!(ids(&chat.reply().0), ["u-1", "a-1", "a-2", "live-script:9"]);
+    }
+
+    #[test]
+    fn a_script_that_ran_at_once_ends_its_live_card() {
+        let mut chat = ChatState::default();
+        card_in_turn(&mut chat);
+        apply(&mut chat, &repl_call("a-2", 2, "toolu_9"));
+        let done = apply(&mut chat, &repl_done("r-3", 3, "toolu_9"));
+        assert_eq!(done.removed, ["live-script:9"]);
+        assert_eq!(ids(&chat.reply().0), ["u-1", "toolu_9"]);
+        assert!(chat.merge_cards(vec![live_card_named(10, "Test it")]));
+        let again = apply(&mut chat, &repl_done("r-3", 3, "toolu_9"));
+        assert!(
+            again.removed.is_empty(),
+            "script 9's outcome already landed"
+        );
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        apply(&mut chat, &repl_call("a-2", 2, "toolu_9"));
+        let done = apply(&mut chat, &repl_done("r-3", 3, "toolu_9"));
+        assert!(done.removed.is_empty(), "the turn has no live card");
+    }
+
+    #[test]
+    fn a_script_that_ran_at_once_ends_the_live_card_of_its_description_else_the_oldest() {
+        let mut chat = ChatState::default();
+        two_cards_in_turn(&mut chat);
+        apply(&mut chat, &repl_call_named("a-2", 2, "toolu_10", "Test it"));
+        let done = apply(&mut chat, &repl_done("r-3", 3, "toolu_10"));
+        assert_eq!(done.removed, ["live-script:10"]);
+        assert_eq!(ids(&chat.reply().0), ["u-1", "toolu_10", "live-script:9"]);
+        let mut chat = ChatState::default();
+        two_cards_in_turn(&mut chat);
+        apply(&mut chat, &repl_call_named("a-2", 2, "toolu_11", "Lint it"));
+        let done = apply(&mut chat, &repl_done("r-3", 3, "toolu_11"));
+        assert_eq!(
+            done.removed,
+            ["live-script:9"],
+            "no card shows its description"
+        );
+    }
+
+    #[test]
+    fn a_live_card_is_known_by_its_eval_and_description() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        apply(&mut chat, &repl_call("a-2", 2, "toolu_9"));
+        apply(&mut chat, &repl_receipt("r-3", 3, "toolu_9", 9));
+        assert!(
+            chat.merge_cards(vec![live_card_named(9, "Other script")]),
+            "a new agent process numbers its scripts anew"
+        );
+        let mut chat = ChatState::default();
+        card_in_turn(&mut chat);
+        apply(&mut chat, &turn_end("e-1", 3));
+        assert!(
+            !chat.merge_cards(vec![live_card(9)]),
+            "card 9 ended with its turn"
+        );
+        apply(&mut chat, &prompt("u-2", 4, Some("P2"), "again"));
+        assert!(!chat.merge_cards(vec![live_card(9)]), "card 9 ended");
+        assert!(chat.merge_cards(vec![live_card_named(9, "Other script")]));
+        assert_eq!(ids(&chat.take_changed_live()), ["live-script:9"]);
+    }
+
+    #[test]
+    fn a_rewrapped_live_card_is_sent_again_and_would_take_agrees_with_merging() {
+        let mut chat = ChatState::default();
+        assert!(!chat.would_take(&[live_card(9)]), "no turn");
+        card_in_turn(&mut chat);
+        assert!(!chat.would_take(&[live_card(9)]), "unchanged");
+        assert!(
+            chat.would_take(&[live_card(9), live_card(10)]),
+            "card 10 is new"
+        );
+        let rewrapped = live_card_named(9, "Build it all");
+        assert!(chat.would_take(std::slice::from_ref(&rewrapped)));
+        assert!(chat.merge_cards(vec![rewrapped.clone()]));
+        assert_eq!(chat.take_changed_live(), std::slice::from_ref(&rewrapped));
+        assert_eq!(ids(&chat.reply().0), ["u-1", "live-script:9"]);
+        apply(
+            &mut chat,
+            &repl_call_named("a-2", 2, "toolu_9", "Build it all"),
+        );
+        apply(&mut chat, &repl_receipt("r-3", 3, "toolu_9", 9));
+        assert!(!chat.would_take(&[rewrapped]), "script 9 landed");
     }
 
     #[test]

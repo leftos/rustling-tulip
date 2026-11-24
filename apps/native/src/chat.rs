@@ -4132,7 +4132,8 @@ mod run_tests {
 
     use super::{
         ChatLog, ChatMode, DisplayRow, RowShape, RunItem, RunSummary, ScriptChip, ScriptLine,
-        ScriptRow, ScriptState, display_rows, display_rows_folding, format_ms, script_line,
+        ScriptRow, ScriptState, display_rows, display_rows_folding, entry_id, format_ms,
+        script_line,
     };
 
     /// Script call `id` with `summary`, carrying `facts`, with no result
@@ -4882,6 +4883,43 @@ mod run_tests {
             ..RunSummary::default()
         };
         assert_eq!(failed.text(), "1 ran \u{b7} 1 failed \u{b7} 1 script");
+    }
+
+    #[test]
+    fn a_live_script_card_gives_way_to_its_transcript_card() {
+        let running = || Some(facts("Build both repos", Some(9), None));
+        let live_answer = ChatEntry::Answer {
+            id: "live:m1".to_owned(),
+            text: "Building.".to_owned(),
+            live: true,
+        };
+        let mut log = ChatLog::default();
+        log.append(
+            vec![
+                live_answer,
+                script_call("live-script:9", "Build both repos", running(), None),
+            ],
+            &[],
+        );
+        let final_answer = ChatEntry::Answer {
+            id: "a-1".to_owned(),
+            text: "Building.".to_owned(),
+            live: false,
+        };
+        log.append(
+            vec![
+                final_answer,
+                script_call("toolu_9", "Build both repos", running(), None),
+            ],
+            &["live-script:9".to_owned(), "live:m1".to_owned()],
+        );
+        let ids: Vec<&str> = log.entries().filter_map(entry_id).collect();
+        assert_eq!(ids, ["a-1", "toolu_9"]);
+        let rows = display_rows(log.entries(), ChatMode::Comfortable);
+        let Some(DisplayRow::Script(row)) = rows.last() else {
+            unreachable!("the transcript card draws as a script row: {rows:?}");
+        };
+        assert_eq!(script_line(row).state, ScriptState::Running);
     }
 
     #[test]

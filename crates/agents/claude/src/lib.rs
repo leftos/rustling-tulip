@@ -755,6 +755,11 @@ impl Agent for ClaudePlugin {
         dialogs::read_work(rows)
     }
 
+    /// The cards of the Code Mode scripts Claude's screen shows running.
+    fn read_live_cards(&self, rows: &[String]) -> Vec<ChatEntry> {
+        scripts::running_scripts(rows)
+    }
+
     /// The key that brings up `goal`'s view in Claude's terminal.
     fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep {
         dialogs::next_view_key(goal, reading)

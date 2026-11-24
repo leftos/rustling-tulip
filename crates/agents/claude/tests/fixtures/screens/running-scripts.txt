@@ -1,0 +1,14 @@
+╰─────────────────────────────────────────────────────────╯
+λ ✓ Take branch changelog and inspect format #6238 · 1.4s
+[$ 1 ran] [◧ 1 read]
+λ ✓ Continue cherry-pick on yaat branch #6239 · 1m 39s
+[$ 4 ran]
+● Cherry-picks for yaat and yaat-server are done, and I
+  skipped 9e2ba457e since it only touches the changelog.
+λ … Write hotfix changelog and build both repos #6240
+✻ Nucleating… · tool use (
+Write hotfix changelog and build both repos · 5m 36s ·
+↓ 5.2k tokens)
+───────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────

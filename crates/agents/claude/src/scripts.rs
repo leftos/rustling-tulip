@@ -15,7 +15,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::chat_entries::{SUMMARY_MAX_CHARS, cap_chars};
+use protocol::{ChatEntry, ScriptFacts, ToolKind};
+
+use crate::chat_entries::{SCRIPT_TOOL, SUMMARY_MAX_CHARS, cap_chars};
 
 /// The id prefix of a call a script ran.
 const INNER_PREFIX: &str = "repl_";
@@ -401,9 +403,97 @@ fn inner_text(rest: &str, close: &str) -> String {
         .to_owned()
 }
 
+/// The mark a running script's screen row opens with: lambda, then an
+/// ellipsis where a done or failed row shows its state.
+const RUNNING_MARK: &str = "\u{3bb} \u{2026} ";
+/// What a row opens with when it cannot continue a running row's wrapped
+/// text: another script's row, the spinner, a chip row, a box, an answer, a
+/// rule or the prompt.
+const STOP_MARKS: [&str; 14] = [
+    "\u{3bb}", "\u{273b}", "\u{2736}", "\u{2733}", "\u{2722}", "\u{273d}", "\u{b7}", "*", "[",
+    "\u{256d}", "\u{2502}", "\u{25cf}", "\u{2500}", "\u{276f}",
+];
+/// The most rows one running row's text wraps over.
+const MAX_RUNNING_ROWS: usize = 3;
+/// The prefix of a running card's id, before its eval number.
+const LIVE_PREFIX: &str = "live-script:";
+/// The eval number that ends a running row's text.
+static EVAL_END: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\s#([0-9]+)$").ok());
+
+/// The cards of the scripts `rows`, a screen's rows top to bottom, show
+/// running, in screen order; a number shown twice keeps its first card.
+pub(crate) fn running_scripts(rows: &[String]) -> Vec<ChatEntry> {
+    let mut seen = HashSet::new();
+    let mut cards = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        let Some(rest) = row.strip_prefix(RUNNING_MARK) else {
+            continue;
+        };
+        let after = rows.get(at + 1..).unwrap_or_default();
+        if let Some((description, eval)) = running_text(rest, after)
+            && seen.insert(eval)
+        {
+            cards.push(running_card(description, eval));
+        }
+    }
+    cards
+}
+
+/// The description and eval number of a running row whose text after its
+/// mark is `first`, joined with the rows `after` it while the text has no
+/// number at its end; `None` when a stop row, an empty row or the row limit
+/// comes first.
+fn running_text(first: &str, after: &[String]) -> Option<(String, u32)> {
+    let mut text = first.trim().to_owned();
+    let mut next = after.iter().take(MAX_RUNNING_ROWS - 1);
+    loop {
+        if let Some(found) = eval_end(&text) {
+            return Some(found);
+        }
+        let row = next.next()?;
+        if row.trim().is_empty() || STOP_MARKS.iter().any(|mark| row.starts_with(mark)) {
+            return None;
+        }
+        text.push(' ');
+        text.push_str(row.trim());
+    }
+}
+
+/// `text` split at the ` #N` that ends it: the trimmed text before it and N.
+fn eval_end(text: &str) -> Option<(String, u32)> {
+    let found = EVAL_END.as_ref()?.captures(text)?;
+    let eval = found.get(1)?.as_str().parse().ok()?;
+    let start = found.get(0)?.start();
+    Some((text.get(..start)?.trim().to_owned(), eval))
+}
+
+/// The card of script `eval` running `description`, shaped as its
+/// transcript card is, with no result yet.
+fn running_card(description: String, eval: u32) -> ChatEntry {
+    ChatEntry::Tool {
+        id: format!("{LIVE_PREFIX}{eval}"),
+        name: SCRIPT_TOOL.to_owned(),
+        summary: cap_chars(&description, SUMMARY_MAX_CHARS),
+        input: String::new(),
+        result: None,
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind: ToolKind::Script,
+        script: Some(ScriptFacts {
+            description,
+            eval: Some(eval),
+            ms: None,
+            error: None,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ReplEvent, description_line, dispatched_eval, poll_events, queued_events};
+    use super::{
+        ReplEvent, description_line, dispatched_eval, poll_events, queued_events, running_scripts,
+    };
+    use protocol::{ChatEntry, ScriptFacts, ToolKind};
     use serde_json::json;
 
     /// An event's `(ok, error line, text)`.
@@ -587,5 +677,121 @@ mod tests {
         );
         assert_eq!(evals(&queued_events(&quoted)), [(10, true)]);
         assert_eq!(queued_events(&event(12, 100, "<note>hi</note>", None)), []);
+    }
+
+    /// No running card.
+    const NONE: [(String, u32); 0] = [];
+
+    const RUNNING_SCREEN: &str = include_str!("../tests/fixtures/screens/running-scripts.txt");
+
+    fn rows(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    /// The description and eval number of each card `rows` show running.
+    fn running(rows: &[String]) -> Vec<(String, u32)> {
+        running_scripts(rows)
+            .iter()
+            .filter_map(|card| match card {
+                ChatEntry::Tool {
+                    script: Some(facts),
+                    ..
+                } => Some((facts.description.clone(), facts.eval?)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn running_scripts_of_a_screen_are_its_running_row_alone() {
+        let description = "Write hotfix changelog and build both repos";
+        assert_eq!(
+            running_scripts(&rows(RUNNING_SCREEN)),
+            [ChatEntry::Tool {
+                id: "live-script:6240".to_owned(),
+                name: "REPL".to_owned(),
+                summary: description.to_owned(),
+                input: String::new(),
+                result: None,
+                parent_id: None,
+                tail_paths: Vec::new(),
+                kind: ToolKind::Script,
+                script: Some(ScriptFacts {
+                    description: description.to_owned(),
+                    eval: Some(6240),
+                    ms: None,
+                    error: None,
+                }),
+            }],
+            "the done rows above it make no card"
+        );
+    }
+
+    #[test]
+    fn a_running_row_wrapped_over_two_rows_is_joined() {
+        assert_eq!(
+            running(&rows(
+                "\u{3bb} \u{2026} Rebuild the native client and run the full\nsuite #6301"
+            )),
+            [(
+                "Rebuild the native client and run the full suite".to_owned(),
+                6301
+            )]
+        );
+    }
+
+    #[test]
+    fn running_scripts_skip_a_done_row() {
+        assert_eq!(running(&rows("\u{3bb} \u{2713} Built #6 \u{b7} 2s")), NONE);
+    }
+
+    #[test]
+    fn running_scripts_skip_a_failed_row() {
+        assert_eq!(running(&rows("\u{3bb} \u{2715} Broke #7 \u{b7} 1s")), NONE);
+    }
+
+    #[test]
+    fn a_running_row_with_no_number_before_a_stop_row_is_no_card() {
+        assert_eq!(
+            running(&rows(
+                "\u{3bb} \u{2026} No number here\n\u{273b} Working\u{2026}"
+            )),
+            NONE
+        );
+    }
+
+    #[test]
+    fn a_running_row_with_no_number_before_a_task_spinner_row_is_no_card() {
+        assert_eq!(
+            running(&rows(
+                "\u{3bb} \u{2026} No number\n\u{273d} Fix the build\u{2026} (5m 3s)\nhere #12"
+            )),
+            NONE
+        );
+    }
+
+    #[test]
+    fn running_scripts_keep_the_first_card_of_a_number_shown_twice() {
+        assert_eq!(
+            running(&rows(
+                "\u{3bb} \u{2026} First #5\n[$ 1 ran]\n\u{3bb} \u{2026} Again #5"
+            )),
+            [("First".to_owned(), 5)]
+        );
+    }
+
+    #[test]
+    fn running_scripts_skip_a_boxed_row() {
+        assert_eq!(running(&rows("\u{2502} \u{3bb} \u{2026} Boxed #8")), NONE);
+    }
+
+    #[test]
+    fn two_running_rows_are_two_cards_in_screen_order() {
+        assert_eq!(
+            running(&rows(
+                "\u{3bb} \u{2026} First #12\n[$ 1 ran]\n\u{3bb} \u{2026} Second #3"
+            )),
+            [("First".to_owned(), 12), ("Second".to_owned(), 3)]
+        );
     }
 }
