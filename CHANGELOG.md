@@ -4,21 +4,30 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.19.0-alpha
+
+### Highlights
+
+- In Chat, Rewind, /btw side questions and questions with previews each show a card you can answer from.
+- On the phone, Chat's Attach button takes a photo, or sends several photos or a file into the message.
+- On the phone, tapping a Linear issue opens its card, with Open in Linear.
+- Session status stays right on Claude Code 2.1.330, with its file panel, a long task list or its full-screen screens up.
+
 ### Added
 
 - A Markdown link to another file's heading, such as `notes.md#setup`, opens that file in the viewer at the heading.
-- Ctrl+clicking a path that is in two or more of a session's worktrees, and not in its current folder, shows a menu to pick which file to open.
+- Ctrl+clicking a path found in two or more of a session's worktrees, but not its current folder, shows a menu to pick which file opens.
 - Ctrl+clicking a path that ends in a GitHub-style line anchor, such as `#L4` or `#L4C2`, opens the file at that line.
-- On the phone, the Desktop tabs order heads a tab you never named with the same name the desktop's tab shows, and each row shows its repo or workspace.
-- In Chat, a tool result cut at 8 KB offers Show all, which loads the rest of it from the session's transcript, on the desktop and the phone.
-- In Chat, a message another agent session or a subagent sends shows as its own bubble naming the sender, instead of as your message with its tags.
+- On the phone, the Desktop tabs order names an unnamed tab as the desktop does, and each row shows its repo or workspace.
+- In Chat, a tool result cut at 8 KB offers Show all, which loads the rest from the transcript, on the desktop and the phone.
+- In Chat, a message from another agent session or a subagent shows as its own bubble naming the sender, not as your message.
 - In Chat, a /btw side question's card shows its question and, once it arrives, the answer.
 - In Chat, a question whose options carry previews shows a card to answer it, with the focused option's preview.
-- In Chat, an open transcript, Rewind or /btw screen in the terminal shows a card with a Close button, and the message box waits until it closes.
-- In Chat, Rewind's card lists the messages you can go back to, then its restore choices, each answered from the card; restoring or summarizing asks for a second click, and a restored conversation drops the rewound turns from the chat.
-- On the phone, tapping a Linear issue in a session's terminal, a chat answer or the title's chip in the session header or on Home shows its card in a sheet, with Open in Linear.
+- In Chat, an open transcript, Rewind or /btw screen shows a card with a Close button, and the message box waits until it closes.
+- In Chat, Rewind's card picks a message to go back to and how to restore; a second click confirms, and rewound turns leave the chat.
+- On the phone, tapping a Linear issue in the terminal, Chat or a title chip opens its card, with Open in Linear.
 - On the phone, Settings › Notifications sets how long a Finished alert waits after a session goes idle, as the desktop's setting does.
-- On the phone, an image in the viewer zooms with a pinch, pans with one finger while zoomed, and a double tap switches between fit and twice the size.
+- On the phone, the image viewer zooms with a pinch, pans with one finger while zoomed, and a double tap toggles fit and double size.
 - On the phone, Chat's Attach button takes a photo with the camera, or sends several photos or a file into the message.
 - On the iPad and the phone on its side, Hide list in a session's header gives Chat or the terminal the full width.
 - On the phone, every text field, such as Add a host's name, has a Paste button.
@@ -27,15 +36,14 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A question or permission a subagent raised no longer leaves its session waiting on you after that subagent stops.
 - Session status stays right on Claude Code 2.1.330 with its file panel open, a long task list, or Rewind, transcript, /btw and sessions screens up.
-- A Heads up notice quoted in Claude's reply no longer keeps a session's status from updating, and a notice's "One moment…" no longer reads as idle.
+- A Heads up notice quoted in Claude's reply no longer freezes the session's status, and a notice's "One moment…" no longer reads as idle.
 - In Chat, a Heads up notice in a narrow terminal offers every option, and one quoted in Claude's reply no longer raises a card.
 - A Heads up notice cut off by Claude Code's full-screen view keeps the session's status, and its Chat card's Show choices brings back its options.
 - A subagent running for over a day, or a background shell under an older Claude Code's default mode, now counts as running work.
-- When Claude started by hand in a shell is killed or crashes, the next Claude you start in that shell reports its status again.
 - On the phone, tapping a path that cannot be fetched, or whose fetch fails, now says why on the session page instead of showing nothing.
 - On the phone, the hosts screen a first run adds its first host on now scrolls, so Add stays reachable above the keyboard.
-- On the phone's Terminal page, a tap in a shell's command gutter beside its dots now raises or lowers the keyboard like the rest of the terminal.
-- After Claude that the app started in a shell ends, a Claude you then start there by hand reports its status again.
+- On the phone's Terminal page, a tap in a shell's command gutter now raises or lowers the keyboard like the rest of the terminal.
+- A Claude you start by hand in a shell reports its status again after an earlier Claude there ends, is killed or crashes.
 - On the phone, a notification tap made while Settings is open closes Settings and shows that it is waiting for its host.
 - On the phone, a file or folder fetch no longer fails when Storage's Clear runs at the moment it starts.
 - In Chat, a Code Mode script Claude is running shows as running right away, instead of appearing only once it finishes.
@@ -44,7 +52,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, leaving Settings › Hosts with the add-host form open closes it, so the keyboard no longer rises over an old half-typed form.
 - On the phone, a key-bar key pressed after a typed accent such as ´ sends the accent first instead of losing it.
 - On the phone's Needs you tray, the options of a question it cannot answer no longer flash as if pressed when tapped.
-- Answering from the phone's Needs you tray or a desktop toast reaches the host whose card you used, even when two saved hosts list the same session.
+- Answering from the phone's Needs you tray or a desktop toast reaches the right host, even when two saved hosts list the same session.
 - On the phone, opening an ended session from the Needs you tray clears its card.
 - A `/compact` with nothing else running no longer raises a Finished alert on the desktop or the phone.
 - An agent killed mid-turn no longer raises a Finished alert, and the Needs you list and pane headers stop showing it as waiting.
@@ -56,16 +64,17 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - When turning Claude's hooks on or off in Settings fails, the switch shows the error and its last state instead of vanishing or waiting forever.
 - Status hooks you start Claude with by hand keep running the current hook program, even when its copy was left read-only.
 - After a restart, a named session's permission prompt reads as its own at once, instead of as a subagent's until Claude repaints its title.
-- Claude's "Make auto mode your default permission mode?" question and its "new MCP servers found" checklist now mark the session as needing you, with a card you can answer from Chat or the phone.
-- On the phone, an offline host's card on Settings › Hosts no longer jumps on each redial, and the Appearance page's theme rows and text size label line up.
+- The "Make auto mode your default permission mode?" and "new MCP servers found" questions mark a session as needing you, with an answer card.
+- On the phone, an offline host's card on Settings › Hosts no longer jumps on each redial.
+- On the phone, the Appearance page's theme rows and text size label line up.
 - On the phone's Terminal page, copying text now reaches the clipboard and shows the copied notice.
 - With the phone on its side, the Needs you card takes at most half the height, so Home's rows show under it.
 - On the phone and the iPad, the edit bar over a selection low on the page now sits above the keyboard instead of over it.
 - On the phone, Home's Settings button and the Notifications row show an amber dot while a host's notifications need attention, such as a failed re-register.
-- On the phone's Terminal page, opening Quick or putting the prompt sheet away no longer resizes the session, and with the keyboard up the output above the prompt shows.
-- Pressing Esc to interrupt Claude now ends the session's turn at once, and an older interrupt no longer ends a later turn early or raises a false Finished.
+- On the phone's Terminal page, opening Quick or closing the prompt sheet no longer resizes the session, and the keyboard no longer hides recent output.
+- Esc ends Claude's turn at once, and an older interrupt no longer cuts a later turn short or raises a false Finished.
 - A session whose Stop was dropped while a background agent keeps its title working now turns Idle within seconds instead of a minute.
-- Installed status hooks in Claude's user settings update to the current events and matchers at the next start, and a settings file saved with a byte order mark no longer refuses them.
+- Installed status hooks update to the current events at Claude's next start, and a settings file with a byte order mark no longer refuses them.
 - A crash or power cut while turning on status hooks no longer leaves a broken backup of your Claude settings.
 - In Chat, a pasted image's message no longer leaves its file path stuck below it as unsent, on the desktop and the phone.
 - A session whose Claude hangs after finishing its turn, its spinner frozen on screen, now turns Idle a minute later instead of staying Working.
@@ -73,8 +82,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, buttons take less padding, so labels such as Photos and Quick show whole, and every button stays at least a fingertip wide.
 - On the phone, the Chat box's Return key starts a new line, with any keyboard, SwiftKey included; Send sends.
 - A burst of output no longer leaves holes in what `rustling-tulipd read` and `wait --text` show, and session status reads every line.
-- A session that finishes its turn while a subagent's question waits keeps its background marker once you answer, so keep-awake and the Finished alert wait for its running work.
-- A session's background marker clears when its background shell ends, even after an idle notice, or when an agent you typed into a shell exits, so keep-awake and the Finished alert no longer wait for your next turn.
+- Answering a subagent's question after its session's turn ended keeps the background marker, so keep-awake and the Finished alert wait for running work.
+- A background marker clears when its background shell ends or an agent typed into a shell exits, so keep-awake and the Finished alert stop waiting.
 
 ### Changed
 
