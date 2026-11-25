@@ -1299,31 +1299,31 @@ mod tests {
                         "Rewind",
                         &[
                             (
-                                1,
+                                3,
                                 "Use the AskUserQuestion tool once, with three questions: (1) single choice, header \"Next fn\": which function to add next (su…",
                             ),
                             (
-                                2,
+                                4,
                                 "Plan adding a div(a, b) function to calc.py plus one pytest test that division by zero raises ZeroDivisionError. Keep the pl…",
                             ),
                             (
-                                3,
+                                5,
                                 "when you finish, also tell me how many lines calc.py has",
                             ),
-                            (4, "and a second queued message"),
-                            (
-                                5,
-                                "Do three things in parallel in one message: (a) start a background Bash command with run_in_background: python -c \"import ti…",
-                            ),
-                            (6, "! git status --short"),
+                            (6, "and a second queued message"),
                             (
                                 7,
+                                "Do three things in parallel in one message: (a) start a background Bash command with run_in_background: python -c \"import ti…",
+                            ),
+                            (8, "! git status --short"),
+                            (
+                                9,
                                 "Without using any tools, write a numbered list of 40 short fruit facts, one line each, then one closing sentence.",
                             ),
-                            (8, "(current)"),
-                            (9, "Close"),
+                            (10, "(current)"),
+                            (11, "Close"),
                         ],
-                        Some(8),
+                        Some(10),
                     )
                 },
             ),
@@ -3430,7 +3430,7 @@ mod tests {
             (
                 "v95-rewind",
                 v95_rewind,
-                option(9),
+                option(11),
                 Ok(vec![(vec![Key::Esc], Any)]),
             ),
             (

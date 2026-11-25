@@ -759,8 +759,10 @@ const REWIND_CURRENT: &str = "(current)";
 /// body, from the rows between its title and footer: a block of an indented
 /// text row and its one sub-line is a message, its text the label and its
 /// sub-line the description; a block reading `(current)` is the
-/// conversation's end, with no sub-line. An `↑ N more` or `↓ N more` row is
-/// a scroll mark, not a message: its count goes into a second body
+/// conversation's end, with no sub-line. Messages are numbered from the top
+/// of the whole list, counting the messages the `↑ N more` mark hides, so a
+/// row keeps its number as the window scrolls. An `↑ N more` or `↓ N more`
+/// row is a scroll mark, not a message: its count goes into a second body
 /// paragraph, so the first one does not move with scrolling or the cursor.
 fn rewind_picker(rows: &[String]) -> RewindRows {
     // The title is the row directly above the heading: a message reading
@@ -788,20 +790,18 @@ fn rewind_picker(rows: &[String]) -> RewindRows {
     let mut number = 0;
     let mut options: Vec<ChatOption> = Vec::new();
     for block in blocks {
-        let mut block = block;
-        // A scroll mark heads the block of the message it sits above.
-        while let Some((up, count)) = block.first().and_then(|row| scroll_mark(cursor_row(row).1)) {
-            if up {
-                earlier = Some(count);
-            } else {
-                later = Some(count);
-            }
-            block = &block[1..];
-        }
+        let block = strip_marks(block, &mut earlier, &mut later);
         let Some(row) = block.first() else {
             continue;
         };
         let (selected, text) = cursor_row(row);
+        // The up mark heads the first message's block, so its count is known
+        // before that message is numbered.
+        if options.is_empty() {
+            number = earlier
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(0);
+        }
         number += 1;
         let description = block
             .get(1)
@@ -828,6 +828,25 @@ fn rewind_picker(rows: &[String]) -> RewindRows {
         options,
         body: cap_body(body),
     }
+}
+
+/// `block` after the scroll marks heading it, each one's count recorded in
+/// `earlier` (`↑ N more`) or `later` (`↓ N more`). A scroll mark heads the
+/// block of the message it sits above.
+fn strip_marks<'a>(
+    mut block: &'a [String],
+    earlier: &mut Option<usize>,
+    later: &mut Option<usize>,
+) -> &'a [String] {
+    while let Some((up, count)) = block.first().and_then(|row| scroll_mark(cursor_row(row).1)) {
+        if up {
+            *earlier = Some(count);
+        } else {
+            *later = Some(count);
+        }
+        block = &block[1..];
+    }
+    block
 }
 
 /// `body` with the second paragraph naming the messages a Rewind picker's
@@ -3905,6 +3924,114 @@ mod tests {
                 .iter()
                 .map(|option| option.number)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The Rewind picker's options as (number, label) pairs.
+    fn numbered(prompt: &ChatPrompt) -> Vec<(u32, &str)> {
+        prompt
+            .options
+            .iter()
+            .map(|option| (option.number, option.label.as_str()))
+            .collect()
+    }
+
+    /// The Rewind picker capture with a row drawn above its first message.
+    fn picker_with_top_row(row: &str) -> String {
+        let text = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        );
+        let first = "\n    WRITEFILE please create cats.md\n";
+        assert!(text.contains(first));
+        text.replace(first, &format!("\n{row}{first}"))
+    }
+
+    #[test]
+    fn a_scrolled_rewind_picker_numbers_messages_from_the_top_of_the_list() {
+        let picker = prompt_in(&picker_with_top_row("    ↑ 2 more"));
+        assert_eq!(
+            numbered(&picker),
+            [
+                (3, "WRITEFILE please create cats.md"),
+                (4, "say ok"),
+                (5, "(current)"),
+                (6, "Close")
+            ]
+        );
+        assert_eq!(picker.cursor, Some(5));
+        assert!(
+            picker
+                .body
+                .ends_with("\n\n2 earlier messages are in the terminal."),
+            "{}",
+            picker.body
+        );
+    }
+
+    #[test]
+    fn a_rewind_pick_keeps_its_number_when_the_picker_scrolls() {
+        let a = prompt_in(&picker_with_top_row("    ↑ 1 more"));
+        assert_eq!(
+            numbered(&a),
+            [
+                (2, "WRITEFILE please create cats.md"),
+                (3, "say ok"),
+                (4, "(current)"),
+                (5, "Close")
+            ]
+        );
+        assert_eq!(a.cursor, Some(4));
+        let steps = recipe(&a, &pick(2)).expect("a recipe").steps;
+        assert_eq!(
+            steps,
+            [
+                RecipeStep {
+                    keys: vec![Key::Up, Key::Up],
+                    expect: ScreenExpect::OptionSelected(2),
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::Any,
+                },
+            ]
+        );
+        // Claude Code scrolls the window as the cursor reaches its top row.
+        let text = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        );
+        let rows = "\n    WRITEFILE please create cats.md\n    cats.md +3\n";
+        assert!(text.contains(rows) && text.contains("\n  ❯ (current)\n"));
+        let b = text
+            .replace(
+                rows,
+                "\n    first message\n    No code changes\n\n  ❯ WRITEFILE please create cats.md\n    cats.md +3\n",
+            )
+            .replace("\n  ❯ (current)\n", "\n    ↓ 1 more\n");
+        let b = prompt_in(&b);
+        assert_eq!(b.cursor, Some(2));
+        assert_eq!(
+            b.options
+                .iter()
+                .find(|option| option.number == 2)
+                .map(|option| option.label.as_str()),
+            Some("WRITEFILE please create cats.md")
+        );
+    }
+
+    #[test]
+    fn a_picker_with_only_a_down_mark_keeps_numbering_from_one() {
+        let text = include_str!(
+            "../../../daemon/src/screen/fixtures/claude--v2330-rewind-picker-code.txt"
+        );
+        assert!(text.contains("\n  ❯ (current)\n"));
+        let picker = prompt_in(&text.replace("\n  ❯ (current)\n", "\n    ↓ 1 more\n"));
+        assert_eq!(
+            numbered(&picker),
+            [
+                (1, "WRITEFILE please create cats.md"),
+                (2, "say ok"),
+                (3, "Close")
+            ]
         );
     }
 
