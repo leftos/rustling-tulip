@@ -32,7 +32,7 @@ It is alpha software.
 - Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a list that narrows as you type, Claude's model (Fable included) and its effort level from Low to Max, and in Advanced takes your own command-line arguments, which Duplicate and Launch last repeat.
 - Pick each host's default shell for new sessions and shells, from the shells installed there (PowerShell, cmd, Git Bash, WSL, Nushell, fish, zsh or bash) or your own command. Claude sessions start inside it.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
-- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app, Ctrl+Shift+click offers the viewer, its folder or Follow in tab, a tab that tails the file live on any host, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, Ctrl+click on a file path opens it in its default app (at the line a `:42` or `#L42` names, or from a pick menu when it is in several of the session's worktrees), Ctrl+Shift+click offers the viewer, its folder or Follow in tab, a tab that tails the file live on any host, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - Linear issue identifiers such as RT-12 and linear.app issue links are underlined in the terminal: resting on one shows the issue's card, and Ctrl+click opens it in the Linear app or your browser. A session title naming an issue shows it as a chip in its state colour, on the Dashboard and on subagent and run rows too. Settings › Linear saves the Linear API key on each host (or reads `LINEAR_API_KEY`), turns the links off, and tests the key.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
@@ -46,6 +46,8 @@ It is alpha software.
 
 - A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
 - Answer Claude's questions, plans and permission prompts from cards, by click or key or in your own words in the card's text box, and send messages from a box under the chat that keeps your text when a send is refused.
+- Rewind, /btw side questions, the transcript screen and questions whose options carry previews show as cards too: pick a point to rewind to, read a /btw answer, or close a screen from the chat.
+- A tool result cut at 8 KB offers Show all, and a message from another agent session or a subagent shows as its own bubble naming the sender.
 - The message box lists the session's commands and skills as you type /, marking those that open in the terminal, and its files to mention as you type @. Paste an image, drop files on the chat or pick them with Attach, and their paths join your message.
 - Under the message box, the session's model and effort, such as Opus 5.5 · high, open a model picker in the chat that switches this session's model or steps its effort, and Quick replies such as "continue" or "yes" send in one click.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
@@ -119,7 +121,7 @@ It is alpha software.
 ### Text and Markdown viewer
 
 - Ctrl+Shift+click a file path in the terminal and pick Open in viewer, and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names. A bare file name after a full path on the same line opens from that path's folder.
-- Markdown files open rendered (headings, lists, task boxes, tables, code blocks), with a Rendered / Source toggle. Links open, and `#heading` links scroll to the heading.
+- Markdown files open rendered (headings, lists, task boxes, tables, code blocks), with a Rendered / Source toggle. Links open, and `#heading` links scroll to the heading, in the same file or another one (`notes.md#setup`).
 - Ctrl+F finds text, a click or drag selects whole lines to copy, and a tab re-reads its file when you come back to it and the file has changed.
 
 ![A rendered Markdown file in a viewer tab, with the Rendered / Source toggle and its header buttons](docs/images/markdown-viewer.png)
