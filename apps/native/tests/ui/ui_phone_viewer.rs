@@ -264,6 +264,134 @@ fn share_hands_the_open_copy_to_the_share_sheet(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "phone-viewer"), "the viewer stays open");
 }
 
+/// Fetches `rel` from [`REMOTE`]'s repo `r1` as a tap opens it, holding
+/// `body`, drains what the phone sent while it started and lets it save.
+fn fetch_tapped(h: &mut Harness<'_>, rel: &str, body: &[u8]) {
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "/repos/repo")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").worktree("r1").build()],
+    });
+    let request = FetchRequest {
+        host: HostKey::of(&saved_remote()),
+        repo_id: "r1".to_owned(),
+        repo_name: "repo".to_owned(),
+        worktree_path: Some("/wt/r1".to_owned()),
+        rel_path: rel.to_owned(),
+        host_path: false,
+        line: None,
+        column: None,
+        open_when_done: true,
+        action: LinkAction::Viewer,
+    };
+    let id = h
+        .root_update(move |root, _, cx| root.fetch_remote_file(request, cx))
+        .expect("a fetch on a remote host starts");
+    sent(h);
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FileFetchStarted {
+        id: id.clone(),
+        resolved_path: format!("/repos/repo/{rel}"),
+        size: u64::try_from(body.len()).expect("a small file"),
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: id.clone(),
+        seq: 0,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(body),
+    });
+    host.send(DaemonMessage::FileFetchDone { id });
+    h.cx.run_until_parked();
+}
+
+/// The file fetches among `sent`, by the path each asked for.
+fn file_fetches(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile { path, .. } | ClientMessage::FetchHostFile { path, .. } => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_tapped_web_page_opens_and_goes_to_the_share_sheet_without_its_media(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    let share = fake_share(&mut h);
+
+    fetch_tapped(&mut h, "docs/page.html", br#"<img src="x.png">"#);
+
+    assert_eq!(
+        file_fetches(&sent(&mut h)),
+        Vec::<String>::new(),
+        "the phone fetches no media for a page"
+    );
+    assert_eq!(
+        shown(&mut h),
+        Some((
+            "page.html".to_owned(),
+            "/repos/repo/docs/page.html".to_owned(),
+            false
+        )),
+        "the page opens in the viewer"
+    );
+    let shared = share.shared();
+    assert_eq!(
+        shared.len(),
+        1,
+        "the page goes to the share sheet: {shared:?}"
+    );
+    assert!(
+        shared[0].ends_with("docs/page.html") && shared[0].is_file(),
+        "the saved copy is shared: {shared:?}"
+    );
+}
+
+#[gpui::test]
+fn a_saved_web_page_goes_to_the_share_sheet_and_other_files_do_not(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone(cx, &dir, &copies);
+    let share = fake_share(&mut h);
+
+    save(&mut h, &copies, "notes.txt", "text\n");
+    assert_eq!(
+        share.shared(),
+        Vec::<std::path::PathBuf>::new(),
+        "a text file is not shared"
+    );
+    save(&mut h, &copies, "page.HTM", "<p>hi</p>");
+
+    assert_eq!(share.shared(), [copy_of(&copies, "page.HTM")]);
+}
+
+#[gpui::test]
+fn reopening_a_kept_web_page_goes_to_the_share_sheet_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let copies = dir.path().join("copies");
+    let mut h = open_phone_serving_paths(cx, &dir, &copies);
+    let share = fake_share(&mut h);
+    save(&mut h, &copies, "page.html", "<p>hi</p>");
+    h.click_on("phone-viewer-back");
+    sent(&mut h);
+
+    open_kept(&mut h, "/abs/page.html");
+    let ids = stats_of(&sent(&mut h), "/abs/page.html");
+    assert_eq!(ids.len(), 1, "the phone asks about the copy");
+    answer(&mut h, &ids[0], 9);
+
+    assert_eq!(
+        share.shared(),
+        [copy_of(&copies, "page.html"), copy_of(&copies, "page.html")],
+        "the page is shared on its first open and again on the reopen"
+    );
+}
+
 #[gpui::test]
 fn a_saved_markdown_file_renders(cx: &mut TestAppContext) {
     let dir = TestDir::new();

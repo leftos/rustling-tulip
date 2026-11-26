@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
+
 ## v0.19.0-alpha
 
 ### Highlights

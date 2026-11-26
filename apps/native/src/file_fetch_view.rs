@@ -1922,8 +1922,12 @@ impl RootView {
     /// Whether the saved file fetch `id` is a page that opens once its
     /// media are fetched. Open containing folder on a host that sends
     /// folders fetches the page's whole folder instead, which brings them.
-    /// A page fetched by its host path opens without its media.
+    /// A page fetched by its host path opens without its media, and so does
+    /// a page on the phone, which hands its copy to the share sheet alone.
     fn waits_on_media(&self, id: &str) -> bool {
+        if self.shape == crate::RootShape::Phone {
+            return false;
+        }
         self.fetches.get(id).is_some_and(|entry| {
             let request = entry.request();
             let folder_brings_media =

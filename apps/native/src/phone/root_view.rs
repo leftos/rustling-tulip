@@ -266,7 +266,7 @@ pub struct PhoneRoot {
     /// The viewer page, drawn over the page shown while open.
     pub(super) viewer: Option<super::viewer_view::PhoneViewer>,
     /// The platform's share sheet, which the viewer's Share hands its copy.
-    share: Arc<dyn ShareSheet>,
+    pub(super) share: Arc<dyn ShareSheet>,
     /// The platform's pasteboard, whose image the composer's Paste uploads.
     pub(super) pasteboard: Arc<dyn PhonePasteboard>,
     /// Whether the system paste control, not a GPUI tap, takes the Paste

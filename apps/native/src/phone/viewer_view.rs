@@ -24,6 +24,7 @@ use crate::PhoneFetched;
 use crate::buttons::ButtonKind;
 use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_weight};
+use crate::html_media::is_html_page;
 use crate::spawn_form::human_size;
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad};
@@ -63,7 +64,9 @@ pub(super) struct PhoneViewer {
 }
 
 impl PhoneRoot {
-    /// Opens the viewer page on the copy `saved` names, over the page shown.
+    /// Opens the viewer page on the copy `saved` names, over the page shown;
+    /// a web page, which the phone cannot render, also goes to the share
+    /// sheet.
     pub(super) fn open_viewer(&mut self, saved: PhoneFetched, cx: &mut Context<Self>) {
         let copies = match self.root.read(cx).remote_files_root() {
             Ok(copies) => copies.to_path_buf(),
@@ -82,6 +85,9 @@ impl PhoneRoot {
         let images = RetainAllImageCache::new(cx);
         self.root
             .update(cx, |root, cx| root.open_phone_viewer(path.clone(), cx));
+        if is_html_page(&path.to_string_lossy()) {
+            self.share.present(&path);
+        }
         self.viewer = Some(PhoneViewer {
             path,
             size,
