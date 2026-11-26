@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Changed
+
+- The sidebar's Tabs view no longer repeats each session's tab name in a `T:` chip; unbound sessions keep their `unbound` chip.
+
 ### Fixed
 
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.

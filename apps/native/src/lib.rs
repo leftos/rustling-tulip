@@ -3060,7 +3060,9 @@ impl RootView {
     }
 
     /// Which tabs show session `id`, as its leaf's pill tells it; `None`
-    /// until the daemon's tab list is in, when leaves show no pill.
+    /// until the daemon's tab list is in, when leaves show no pill, and in
+    /// the Tabs view for a session a tab shows
+    /// ([`sidebar_view::shown_pill`]).
     #[must_use]
     pub fn leaf_tab_pill(&self, id: &str) -> Option<TabPill> {
         self.leaf_tab_pill_on(&self.host_of_session(id), id)
@@ -3074,7 +3076,10 @@ impl RootView {
         }
         let shown = SessionRef::new(host.clone(), id);
         let pill = self.leaf_pills().remove(&shown);
-        Some(pill.unwrap_or(TabPill::Unbound))
+        sidebar_view::shown_pill(
+            pill.unwrap_or(TabPill::Unbound),
+            self.sidebar.sidebar_view(),
+        )
     }
 
     /// The tab pill of each sidebar leaf, by host and session id: the panes

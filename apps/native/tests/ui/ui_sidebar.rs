@@ -908,7 +908,7 @@ fn detached_container_shows_its_banner(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn leaf_shows_its_tab_pill_in_both_views(cx: &mut TestAppContext) {
+fn leaf_shows_its_tab_pill_only_in_the_repos_view(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let grid = split(
         SplitDirection::Horizontal,
@@ -927,31 +927,42 @@ fn leaf_shows_its_tab_pill_in_both_views(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture);
     let pill = |h: &mut Harness<'_>, id: &str| h.root(|root, _| root.leaf_tab_pill(id));
 
-    for view in ["repos", "tabs"] {
-        h.click_on(&format!("sidebar-view-{view}"));
-        assert_eq!(
-            pill(&mut h, "s1"),
-            Some(TabPill::One {
-                tab_id: "t1".to_owned(),
-                name: "t1".to_owned(),
-            }),
-            "{view}"
+    h.click_on("sidebar-view-repos");
+    assert_eq!(
+        pill(&mut h, "s1"),
+        Some(TabPill::One {
+            tab_id: "t1".to_owned(),
+            name: "t1".to_owned(),
+        })
+    );
+    assert_eq!(
+        pill(&mut h, "s2"),
+        Some(TabPill::Many(vec!["t1".to_owned(), "t2".to_owned()]))
+    );
+    assert_eq!(pill(&mut h, "s3"), Some(TabPill::Unbound));
+    for id in ["s1", "s2", "s3"] {
+        let selector = format!("leaf-pill-{id}");
+        assert!(h.in_model(&selector), "repos: {selector} is shown");
+        assert!(
+            h.bounds(&selector).origin.x >= px(0.0),
+            "repos: {selector} is painted"
         );
-        assert_eq!(
-            pill(&mut h, "s2"),
-            Some(TabPill::Many(vec!["t1".to_owned(), "t2".to_owned()])),
-            "{view}"
-        );
-        assert_eq!(pill(&mut h, "s3"), Some(TabPill::Unbound), "{view}");
-        for id in ["s1", "s2", "s3"] {
-            let selector = format!("leaf-pill-{id}");
-            assert!(h.in_model(&selector), "{view}: {selector} is shown");
-            assert!(
-                h.bounds(&selector).origin.x >= px(0.0),
-                "{view}: {selector} is painted"
-            );
-        }
     }
+
+    // A Tabs-view leaf already sits under each tab that shows it, so only
+    // the unbound pill, which opens the session in a tab, is drawn.
+    h.click_on("sidebar-view-tabs");
+    for id in ["s1", "s2"] {
+        assert_eq!(pill(&mut h, id), None, "tabs: {id}");
+        let selector = format!("leaf-pill-{id}");
+        assert!(!h.in_model(&selector), "tabs: {selector} is hidden");
+        assert!(!drawn(&mut h, &selector), "tabs: {selector} is not painted");
+    }
+    assert_eq!(pill(&mut h, "s3"), Some(TabPill::Unbound), "tabs");
+    assert!(
+        drawn(&mut h, "leaf-pill-s3"),
+        "tabs: the unbound pill stays"
+    );
 }
 
 #[gpui::test]
@@ -1025,6 +1036,7 @@ fn no_pills_before_tabs_load(cx: &mut TestAppContext) {
         tabs: vec![tab("t1", &pane("p1", Some("s1")))],
     });
     assert_eq!(tree_keys(&mut h), ["tab:t1"]);
+    h.click_on("sidebar-view-repos");
     assert!(h.in_model("leaf-pill-s1"));
 }
 

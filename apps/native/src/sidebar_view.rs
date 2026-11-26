@@ -335,6 +335,7 @@ impl RootView {
             attached: attached.as_deref(),
             accents: self.sidebar.session_accents(),
             pills: self.tabs.is_loaded().then(|| self.leaf_pills()),
+            view: self.sidebar.sidebar_view(),
             headless: self
                 .sidebar
                 .all_sessions()
@@ -2361,6 +2362,9 @@ struct LeafRows<'a> {
     /// Each shown session's pill, by host and session id; `None` until the
     /// daemon's tab list is in, when every session would look unbound.
     pills: Option<HashMap<SessionRef, TabPill>>,
+    /// The grouping drawn, which decides which pills a leaf shows
+    /// ([`shown_pill`]).
+    view: SidebarView,
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
     density: LeafDensity,
@@ -2405,9 +2409,12 @@ impl LeafRows<'_> {
     /// `host`'s session `id`'s tab pill; `None` until the tab list is in.
     fn pill(&self, host: &HostKey, id: &str) -> Option<TabPill> {
         let shown = SessionRef::new(host.clone(), id);
-        self.pills
-            .as_ref()
-            .map(|pills| pills.get(&shown).cloned().unwrap_or(TabPill::Unbound))
+        self.pills.as_ref().and_then(|pills| {
+            shown_pill(
+                pills.get(&shown).cloned().unwrap_or(TabPill::Unbound),
+                self.view,
+            )
+        })
     }
 
     /// Whether session `id` can be shown in a pane.
@@ -2505,6 +2512,13 @@ fn ellipsized_box() -> Div {
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap()
+}
+
+/// The pill a leaf draws in `view`: none in the Tabs view for a session a
+/// tab shows, since its leaf already sits under each such tab; the
+/// `unbound` pill, which opens the session in a tab, shows in both.
+pub(crate) fn shown_pill(pill: TabPill, view: SidebarView) -> Option<TabPill> {
+    (view == SidebarView::Repos || pill == TabPill::Unbound).then_some(pill)
 }
 
 /// A tab pill's lettering.
