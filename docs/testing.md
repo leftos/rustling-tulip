@@ -237,6 +237,10 @@ Recording a real Claude Code screen with its SGR (for a screen fixture) needs `F
 
 Run the CLI for a capture with `--safe-mode`, in a scratch folder inside an already-trusted tree: a fresh git root asks for folder trust, whose default is "No, exit": a bare Enter quits, so a driven run sends Down, then Enter. A capture harness that feeds the output to pyte drops `CSI > … m` and `CSI ? u` first, since pyte reads Claude Code's keyboard-mode request `CSI > 4 m` as underline.
 
+A change to a Claude screen reader (the rule table in `crates/agents/claude/src/rules.rs`, the readers in its `dialogs.rs` and `scripts.rs`, or the client's link stitching in `apps/native/src/links.rs`) is proven against captures of both looks: vanilla `claude`, and `claude --plugin-dir X:\dev\ui-themes`, the owner's themed setup (`cui`). The themed setup redraws user rows, answers, tool rows, the spinner, the turn end and the question card (`docs/spikes/chat-mirror-tui.md` "cui versus vanilla").
+
+A vanilla capture is named `v…` or `claude--…` and a themed one `c…` (`crates/daemon/src/screen/fixtures/README.md`). A reader that keys on Claude Code's own dialog, footer or mode-line text still gets one themed capture, because ui-themes indents cards and wraps rules. A reader that keys on a mark only one look draws (`●` answers, `❯` user rows, `λ` script rows) needs a capture and a test for each look.
+
 ## iPhone Simulator on the Mac mini
 
 `tools/sim/sim.ps1` drives Xcode's iPhone Simulator on the Mac mini builder from this PC, for a run that needs the phone app on a real simulator: `setup` installs idb 1.7.8 into `~/.local` with no admin rights, `boot` starts a device, `open`, `shot`, `describe`, `tap`, `text`, `swipe` and `key` drive it, and `shutdown` stops it. Screenshots come back to this PC over scp, and no Simulator window opens on the Mac. See [tools/sim/README.md](../tools/sim/README.md).
