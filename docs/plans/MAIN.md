@@ -20,6 +20,7 @@
 - [ ] RT-2142 Keep a /resume's SessionEnd from ending the agent in its shell
 - [ ] RT-2178 Feed the OSC title watcher and the login screen from the lossless output tap
 - [ ] RT-2179 Keep a session's background flag across a subagent prompt that follows its Idle
+- [ ] RT-2232 Recapture cui screen fixtures for every surface since 2.1.307
 
 ## Updates and installer
 
@@ -91,7 +92,7 @@
 
 ## Build, test and driver tooling
 
-- [ ] RT-2197 Route the iOS check on builder@mac-mini through the gate and preinstall the pinned toolchain
+- [ ] RT-2197 Route the iOS check on builder@mac-mini through the gate and preinstall the pinned toolchain · release vNext
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
 - [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 - [ ] RT-128 Run fmt, clippy and the full suite in a Windows CI workflow
@@ -159,7 +160,8 @@
 - [ ] RT-2044 Give the nine unmapped native files rows in the test map
 - [ ] RT-2050 Make tools/ios/sim-run.ps1 survive a slow first launch and an app that already exited
 - [ ] RT-2154 Stop the dispatch-runs daemon tests leaking a child process
-- [ ] RT-2218 Map the 11 unmapped files in tools/test-map.json
+- [ ] RT-2218 Map the 11 unmapped files in tools/test-map.json · release vNext
+- [ ] RT-2233 Let rt-driver launch real Claude with named plugin dirs
 
 ## Elevated daemon and security
 
@@ -214,10 +216,11 @@
 - [ ] RT-2176 Leave no Answered elsewhere line when an overlay card closes in the terminal
 - [ ] RT-2199 Read a preview question's wrapped option label whole
 - [ ] RT-2220 Read a running script row whose wrapped description breaks after a #number
-- [ ] RT-2225 Chat polish from the v0.19.0-alpha release smoke
-  - [ ] RT-2226 Draw Chat's Show all as a compact button, not the card's full width
-  - [ ] RT-2227 Draw box-drawing characters in a Chat user bubble at the text's size and alignment
-  - [ ] RT-2228 Leave no Answered elsewhere line under a Rewind card answered from the chat
+- [ ] RT-2225 Chat polish from the v0.19.0-alpha release smoke · release vNext
+  - [ ] RT-2226 Draw Chat's Show all as a compact button, not the card's full width · release vNext
+  - [ ] RT-2227 Draw box-drawing characters in a Chat user bubble at the text's size and alignment · release vNext
+  - [ ] RT-2228 Leave no Answered elsewhere line under a Rewind card answered from the chat · release vNext
+- [ ] RT-2231 Read live script cards under bare claude, not only ui-themes
 
 ## Settings and themes
 
@@ -449,7 +452,7 @@
   - [ ] RT-395 Show a remote session's mock locally with its files fetched on demand, discarded when the pane closes
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
-- [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits
+- [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits · release vNext
 - [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more
 - [ ] RT-698 Share one file watcher per folder across the daemon's file follows
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
@@ -505,20 +508,20 @@
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
-- [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane
-- [ ] RT-2136 Let a tap through right after a fast swipe on the phone's Needs you tray
-- [ ] RT-2141 Show a shell command dot's menu when tapped on the phone's Terminal page
-- [ ] RT-2144 Keep the edit bar inside the window when its selection is scrolled above it
-- [ ] RT-2148 Seed the phone terminal's rest height without the overflow when its clip box is squeezed to zero
-- [ ] RT-2149 Draw no blank band at the top of the phone terminal for a frame after the keyboard falls
-- [ ] RT-2150 Re-measure the phone terminal's rest height on an iPad with a hardware keyboard
-- [ ] RT-2151 Keep an errored host's card on Settings › Hosts from jumping on each redial
-- [ ] RT-2152 Size the phone's landscape Needs you card from the list pane with the keyboard up
-- [ ] RT-2153 Keep the copied chip off the terminal's top rows in the phone's landscape full-screen terminal
+- [ ] RT-2120 Phone: show a Home chip's card in two panes while the viewer fills the session pane · release vNext
+- [ ] RT-2136 Let a tap through right after a fast swipe on the phone's Needs you tray · release vNext
+- [ ] RT-2141 Show a shell command dot's menu when tapped on the phone's Terminal page · release vNext
+- [ ] RT-2144 Keep the edit bar inside the window when its selection is scrolled above it · release vNext
+- [ ] RT-2148 Seed the phone terminal's rest height without the overflow when its clip box is squeezed to zero · release vNext
+- [ ] RT-2149 Draw no blank band at the top of the phone terminal for a frame after the keyboard falls · release vNext
+- [ ] RT-2150 Re-measure the phone terminal's rest height on an iPad with a hardware keyboard · release vNext
+- [ ] RT-2151 Keep an errored host's card on Settings › Hosts from jumping on each redial · release vNext
+- [ ] RT-2152 Size the phone's landscape Needs you card from the list pane with the keyboard up · release vNext
+- [ ] RT-2153 Keep the copied chip off the terminal's top rows in the phone's landscape full-screen terminal · release vNext
 - [ ] RT-2177 Give the phone's remaining buttons the narrower phone padding
-- [ ] RT-2215 Phone: show a notification tap's note while the list pane is collapsed
-- [ ] RT-2216 Phone: drop a late field paste once its field is no longer drawn
-- [ ] RT-2217 Phone: open share inbox manifests without following links
+- [ ] RT-2215 Phone: show a notification tap's note while the list pane is collapsed · release vNext
+- [ ] RT-2216 Phone: drop a late field paste once its field is no longer drawn · release vNext
+- [ ] RT-2217 Phone: open share inbox manifests without following links · release vNext
 
 ## Dashboard, Gates and Linear
 
@@ -686,7 +689,7 @@
 - [ ] RT-2145 Name every phone Settings category in docs/README.md
 - [ ] RT-2146 Check CLAUDE.md's native-shot view list against shot.rs
 - [ ] RT-2147 Name the size ruling docs/plans/mobile-app.md's Size step points at
-- [ ] RT-2210 Re-read docs/testing.md against its named files' changes since 2026-11-22, and add the Heads up capture rig
+- [ ] RT-2210 Re-read docs/testing.md against its named files' changes since 2026-11-22, and add the Heads up capture rig · release vNext
 
 ## Backlog
 
@@ -711,7 +714,7 @@
 - [ ] RT-1615 Read every processor group's CPU times on Windows hosts with more than 64 logical processors
 - [ ] RT-1616 Raise a popped-out destination instead of showing its card after a move empties the active tab
 - [ ] RT-1617 Consume a Replace move's follow only on the update that shows the moved session
-- [ ] RT-2221 Let a .cmd agent take a workspace session's multi-line prelude argument
+- [ ] RT-2221 Let a .cmd agent take a workspace session's multi-line prelude argument · release vNext
 - [ ] RT-1618 Focus the moved session after a drag drops it into an empty pane of another tab
 - [ ] RT-1619 Show a tracked duplicate host's CPU and RAM from the connection that kept it
 - [ ] RT-1621 Close an open footer menu when a shortcut opens a dialog
@@ -815,8 +818,14 @@
 - [ ] RT-2206 gpui fork: count an iOS pinch's first step once
 - [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy
 - [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload
-- [ ] RT-2223 Offer Show all on a cut result under Code Mode's script cards
-- [ ] RT-2224 Keep a Rewind's dropped turns out of the chat after a daemon restart
+- [ ] RT-2223 Offer Show all on a cut result under Code Mode's script cards · release vNext
+- [ ] RT-2224 Keep a Rewind's dropped turns out of the chat after a daemon restart · release vNext
+- [ ] RT-2235 Trust the git root Claude reads for a workspace member registered below it
+- [ ] RT-2236 Find Claude Code's global config the way Claude Code does (.config.json, custom OAuth name)
+
+## No project
+
+- [ ] RT-2229 Rename the ship skill to ship-to-main in the nextup profile
 
 ## Design files
 
