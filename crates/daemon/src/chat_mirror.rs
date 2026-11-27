@@ -1429,21 +1429,13 @@ impl SessionMirror {
         }
     }
 
-    /// The transcript's record confirmed the pending Restore: drop the turns
-    /// the restore went back past, and send the loaders the chat whole, since
+    /// The transcript recorded a rewind: drop the turns it went back past, and send the loaders the chat whole, since
     /// it is no longer the one they hold. A read still catching up sends it at
     /// its end, as a restart does.
     fn apply_rewind(&mut self, session_id: &str) {
-        let Some(message) = self.pending_rewind.take() else {
-            return;
-        };
-        if !self.chat.rewind(&message) {
+        if !self.rewind_chat(session_id) {
             return;
         }
-        debug!(
-            session_id,
-            message, "chat mirror: the chat goes back to the restored turn"
-        );
         // The loaders are sent the kept stretch lines again with the whole
         // chat; the writer keeps the lines it already wrote for them, so only
         // the stretches a dropped turn touched are asked for again.
@@ -1453,6 +1445,32 @@ impl SessionMirror {
         }
         self.chat.stale = false;
         self.reset(session_id);
+    }
+
+    /// Drop the turns a rewind's record threw away: by the fork the
+    /// transcript records when it names one, which also settles any pending
+    /// Restore, and else by the pending Restore's message. Whether anything
+    /// went.
+    fn rewind_chat(&mut self, session_id: &str) -> bool {
+        if self.chat.rewind_at_fork() {
+            self.pending_rewind.clear();
+            debug!(
+                session_id,
+                "chat mirror: the chat goes back to the rewind's fork"
+            );
+            return true;
+        }
+        let Some(message) = self.pending_rewind.take() else {
+            return false;
+        };
+        if !self.chat.rewind(&message) {
+            return false;
+        }
+        debug!(
+            session_id,
+            message, "chat mirror: the chat goes back to the restored turn"
+        );
+        true
     }
 
     /// Take the model facts `facts` carries: a main-thread reply names its
@@ -2106,6 +2124,17 @@ struct ChatState {
     /// The ids of the entries that began a turn: each prompt line's first
     /// entry, a user message or a row such as a `!` command's.
     turn_starts: HashSet<String>,
+    /// How many transcript lines this read has applied: the place of the
+    /// newest one in file order.
+    lines_read: usize,
+    /// The place in file order of each record this read has seen whose line
+    /// carried a record id, by that id: the fork a rewind goes back to is
+    /// found here.
+    record_at: HashMap<String, usize>,
+    /// The record that first wrote each entry, by entry id, for the entries
+    /// a line with a record id wrote; the others have no place and a rewind's
+    /// fork never drops them.
+    produced: HashMap<String, Producer>,
     /// The id of the prompt whose turn the transcript is in.
     turn_prompt: Option<String>,
     /// How many answers the transcript wrote in each prompt's turn.
@@ -2212,6 +2241,14 @@ impl LiveItem {
     }
 }
 
+/// The transcript record that first wrote an entry: its place in file order,
+/// and the record it follows.
+#[derive(Debug, Clone)]
+struct Producer {
+    at: usize,
+    parent: Option<String>,
+}
+
 /// What one transcript line changed: the entries to send, new or replacing,
 /// and the live entries that left.
 #[derive(Default)]
@@ -2271,6 +2308,45 @@ impl ChatState {
         true
     }
 
+    /// The transcript's record says the conversation was rewound, and the
+    /// newest turn's record follows an earlier record, the fork: every entry a
+    /// record after the fork and before the newest turn wrote goes, as
+    /// [`ChatState::rewind`] drops them. Entries with no place stay. Whether
+    /// anything went; a newest turn with no parent, a parent this read has not
+    /// seen, or nothing between the two changes nothing.
+    fn rewind_at_fork(&mut self) -> bool {
+        let Some((fork, newest)) = self.fork_span() else {
+            return false;
+        };
+        let before = self.entries.len();
+        let produced = &self.produced;
+        self.entries.retain(|entry| {
+            !entry_id(entry)
+                .and_then(|id| produced.get(id))
+                .is_some_and(|producer| fork < producer.at && producer.at < newest)
+        });
+        if self.entries.len() == before {
+            debug!(
+                fork,
+                newest, "chat mirror: nothing lies between the fork and the newest turn"
+            );
+            return false;
+        }
+        self.prune_turns();
+        self.context = None;
+        self.stale = true;
+        true
+    }
+
+    /// The places in file order of the fork the newest turn's record follows
+    /// and of that record, when both are known.
+    fn fork_span(&self) -> Option<(usize, usize)> {
+        let keep = self.newest_turn()?;
+        let producer = self.produced.get(entry_id(&self.entries[keep])?)?;
+        let fork = *self.record_at.get(producer.parent.as_deref()?)?;
+        Some((fork, producer.at))
+    }
+
     /// The place of the newest entry that began a turn: the turn the rewind
     /// keeps. The user usually re-sends the restored message, so the newest
     /// turn holds the target's own words too.
@@ -2313,6 +2389,7 @@ impl ChatState {
             .collect();
         self.times.retain(|id, _| self.index.contains_key(id));
         self.turn_starts.retain(|id| self.index.contains_key(id));
+        self.forget_dropped_producers();
         let turn = self.turn_prompt.clone();
         self.answered
             .retain(|prompt, _| Some(prompt) == turn.as_ref());
@@ -2328,6 +2405,37 @@ impl ChatState {
             .retain(|prompt, _| Some(prompt) == turn.as_ref());
         self.finished.clear();
         self.changed.clear();
+    }
+
+    /// Forget the producers of entries that went. The places of records stay
+    /// until the transcript restarts or the session switches conversation: a
+    /// rewind's fork is often a record that wrote no entry, placed before
+    /// every entry.
+    fn forget_dropped_producers(&mut self) {
+        self.produced.retain(|id, _| self.index.contains_key(id));
+    }
+
+    /// Note the place of one transcript line in file order, and of its
+    /// record when it carries an id; the line's place when it does.
+    fn note_record(&mut self, facts: &TranscriptLineFacts) -> Option<usize> {
+        self.lines_read += 1;
+        let uuid = facts.uuid.clone()?;
+        self.record_at.entry(uuid).or_insert(self.lines_read);
+        Some(self.lines_read)
+    }
+
+    /// Note that the record at `at` in file order wrote entry `id`, unless a
+    /// record wrote it before; nothing for a line with no record id.
+    fn note_producer(&mut self, id: &str, at: Option<usize>, facts: &TranscriptLineFacts) {
+        let Some(at) = at else {
+            return;
+        };
+        self.produced
+            .entry(id.to_owned())
+            .or_insert_with(|| Producer {
+                at,
+                parent: facts.parent_uuid.clone(),
+            });
     }
 
     /// The read being caught up with ended: the held live lines take their
@@ -2363,6 +2471,7 @@ impl ChatState {
         facts: &TranscriptLineFacts,
     ) -> Change {
         let mut change = Change::default();
+        let at = self.note_record(facts);
         if facts.is_user_prompt || facts.is_interrupt {
             if let Some(previous) = self.turn_prompt.take()
                 && facts.prompt_id.as_ref() != Some(&previous)
@@ -2384,6 +2493,7 @@ impl ChatState {
                 continue;
             };
             self.time_script(&id, &mut entry, facts.timestamp);
+            self.note_producer(&id, at, facts);
             if starts_turn {
                 starts_turn = false;
                 self.turn_starts.insert(id.clone());
@@ -4300,6 +4410,183 @@ mod tests {
             ["u-1", "m-1", "u-2", "m-2", "u-3", "m-3", "u-4"]
         );
         assert!(!chat.stale, "nothing is owed a send");
+    }
+
+    /// A rewind's record read with no pending Restore, as a restart's re-read
+    /// or a rewind typed in the terminal gives it: the dropped turns are
+    /// found by the record the re-sent prompt hangs from. In a module of its
+    /// own so the `rewind` filter reaches every test of it.
+    mod rewind_at_fork {
+        use super::*;
+
+        /// `line` with `parentUuid` set to `parent`.
+        fn linked(line: &str, parent: Option<&str>) -> String {
+            let mut record: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+            record["parentUuid"] =
+                parent.map_or(serde_json::Value::Null, |parent| serde_json::json!(parent));
+            record.to_string()
+        }
+
+        /// A prompt `uuid` at second `n` following `parent`.
+        fn user(uuid: &str, n: usize, parent: Option<&str>, text: &str) -> String {
+            linked(&prompt(uuid, n, Some(&format!("P-{uuid}")), text), parent)
+        }
+
+        /// An answer `uuid` at second `n` following `parent`.
+        fn reply(uuid: &str, n: usize, parent: &str, text: &str) -> String {
+            linked(&answer(uuid, n, text), Some(parent))
+        }
+
+        /// The turns `a`, `b` and `c`, each record following the one
+        /// before it.
+        fn three_linked_turns() -> Vec<String> {
+            vec![
+                user("u1", 1, None, "a"),
+                reply("a1", 2, "u1", "one"),
+                user("u2", 3, Some("a1"), "b"),
+                reply("a2", 4, "u2", "two"),
+                user("u3", 5, Some("a2"), "c"),
+                reply("a3", 6, "u3", "three"),
+            ]
+        }
+
+        fn tail_all(mirror: &mut SessionMirror, lines: &[String]) {
+            for line in lines {
+                tail(mirror, line);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_rewind_replayed_after_a_restart_drops_the_turns_after_the_fork() {
+            let (mut mirror, _sent) = loaded_mirror();
+            tail_all(&mut mirror, &three_linked_turns());
+            tail(&mut mirror, &user("u2b", 7, Some("a1"), "b"));
+            tail(&mut mirror, &rewound());
+            tail(&mut mirror, &reply("a2b", 8, "u2b", "two again"));
+            assert_eq!(ids(&mirror.chat.entries), ["u1", "a1", "u2b", "a2b"]);
+        }
+
+        #[tokio::test]
+        async fn a_rewind_whose_resent_message_differs_drops_by_the_fork() {
+            let (mut mirror, _sent) = loaded_mirror();
+            tail_all(&mut mirror, &three_linked_turns());
+            tail(&mut mirror, &user("u2b", 7, Some("a1"), "b edited"));
+            tail(&mut mirror, &rewound());
+            tail(&mut mirror, &reply("a2b", 8, "u2b", "two again"));
+            assert_eq!(ids(&mirror.chat.entries), ["u1", "a1", "u2b", "a2b"]);
+        }
+
+        #[tokio::test]
+        async fn two_rewinds_replayed_both_apply() {
+            let (mut mirror, _sent) = loaded_mirror();
+            tail_all(&mut mirror, &three_linked_turns());
+            for line in [
+                user("u2b", 7, Some("a1"), "b"),
+                rewound(),
+                reply("a2b", 8, "u2b", "two again"),
+                user("u3x", 9, Some("a2b"), "x"),
+                reply("a3x", 10, "u3x", "ex"),
+                user("u3c", 11, Some("a2b"), "c"),
+                rewound(),
+            ] {
+                tail(&mut mirror, &line);
+            }
+            assert_eq!(ids(&mirror.chat.entries), ["u1", "a1", "u2b", "a2b", "u3c"]);
+        }
+
+        #[tokio::test]
+        async fn a_second_rewind_back_to_the_first_prompt_drops_everything_after_its_fork() {
+            let (mut mirror, _sent) = loaded_mirror();
+            // A record that draws no entry, placed before every entry: the
+            // fork of a rewind back to the first prompt.
+            let hook = serde_json::json!({
+                "type": "attachment", "uuid": "h0", "parentUuid": null,
+                "attachment": {"type": "file-history-snapshot"},
+            })
+            .to_string();
+            let mut lines = vec![hook];
+            lines.extend(three_linked_turns());
+            lines[1] = user("u1", 1, Some("h0"), "a");
+            lines.extend([
+                user("u3b", 7, Some("a2"), "c"),
+                rewound(),
+                reply("a3b", 8, "u3b", "three again"),
+                user("u1b", 9, Some("h0"), "a"),
+                rewound(),
+            ]);
+            tail_all(&mut mirror, &lines);
+            assert_eq!(ids(&mirror.chat.entries), ["u1b"]);
+        }
+
+        #[tokio::test]
+        async fn a_rewind_marker_with_no_fork_changes_nothing() {
+            let (mut mirror, mut sent) = loaded_mirror();
+            tail(&mut mirror, &user("u1", 1, None, "a"));
+            tail(&mut mirror, &reply("a1", 2, "u1", "one"));
+            tail(&mut mirror, &user("u2", 3, Some("a1"), "b"));
+            tail(&mut mirror, &rewound());
+            assert_eq!(ids(&mirror.chat.entries), ["u1", "a1", "u2"]);
+            assert!(!mirror.chat.stale);
+            assert_eq!(whole_chat(&mut sent), None, "no whole chat is sent");
+        }
+
+        #[tokio::test]
+        async fn a_rewind_with_an_unseen_parent_falls_back_to_the_pending_restore() {
+            let (mut mirror, _sent) = loaded_mirror();
+            tail_all(&mut mirror, &three_linked_turns());
+            mirror.pending_rewind.note("b".to_owned());
+            tail(&mut mirror, &user("u4", 7, Some("never-read"), "new"));
+            tail(&mut mirror, &rewound());
+            assert_eq!(
+                ids(&mirror.chat.entries),
+                ["u1", "a1", "u4"],
+                "the restored message names the turn"
+            );
+            assert!(mirror.pending_rewind.message.is_none());
+        }
+
+        #[tokio::test]
+        async fn a_live_rewind_with_uuids_drops_by_the_fork_and_clears_the_pending_restore() {
+            let (mut mirror, mut sent) = loaded_mirror();
+            tail_all(&mut mirror, &three_linked_turns());
+            mirror.pending_rewind.note("b".to_owned());
+            tail(&mut mirror, &user("u2b", 7, Some("a1"), "b"));
+            tail(&mut mirror, &rewound());
+            assert_eq!(
+                whole_chat(&mut sent),
+                Some(vec!["u1".to_owned(), "a1".to_owned(), "u2b".to_owned()]),
+                "the chat goes back to the fork, and is sent whole"
+            );
+            assert!(
+                mirror.pending_rewind.message.is_none(),
+                "the fork applied the pending restore"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_sidechain_record_never_counts_as_the_fork() {
+            let (mut mirror, _sent) = loaded_mirror();
+            let mut side: serde_json::Value =
+                serde_json::from_str(&reply("s1", 3, "a1", "side")).unwrap_or_default();
+            side["isSidechain"] = serde_json::json!(true);
+            let mut lines = three_linked_turns();
+            lines.insert(2, side.to_string());
+            tail_all(&mut mirror, &lines);
+            tail(&mut mirror, &user("u2b", 7, Some("s1"), "b"));
+            tail(&mut mirror, &rewound());
+            assert_eq!(
+                ids(&mirror.chat.entries),
+                ["u1", "a1", "s1", "u2", "a2", "u3", "a3", "u2b"],
+                "a sidechain's id is no fork"
+            );
+            tail(&mut mirror, &user("u2c", 8, Some("a1"), "b"));
+            tail(&mut mirror, &rewound());
+            assert_eq!(
+                ids(&mirror.chat.entries),
+                ["u1", "a1", "s1", "u2c"],
+                "a sidechain's entry has no place to drop by"
+            );
+        }
     }
 
     /// A mirror of `s1` with one chat loader, and what the loader is sent.

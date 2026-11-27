@@ -130,7 +130,20 @@ pub(crate) fn record_facts(record: &Value) -> TranscriptLineFacts {
         effort: reply_effort(record),
         model_switch: model_switch(record),
         rewound: rewound_marker(record),
+        uuid: main_thread_id(record, "uuid"),
+        parent_uuid: main_thread_id(record, "parentUuid"),
     }
+}
+
+/// The record id at `key` of a main-thread record: none for a subagent's
+/// record (`isSidechain`), or when the id is missing or empty.
+fn main_thread_id(record: &Value, key: &str) -> Option<String> {
+    if flag(record, "isSidechain") {
+        return None;
+    }
+    str_at(record, key)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 /// Whether `record` is Claude Code's record that the conversation was rewound
@@ -1890,8 +1903,44 @@ mod tests {
                 effort: None,
                 model_switch: None,
                 rewound: false,
+                uuid: Some(uid("01")),
+                parent_uuid: None,
             }
         );
+    }
+
+    /// The record ids a line's facts carry; in a module of their own so the
+    /// `line_facts` filter reaches every test of them.
+    mod line_facts_uuid {
+        use super::*;
+
+        #[test]
+        fn line_facts_carry_the_record_uuid_and_its_parent() {
+            let line = json!({
+                "type": "user", "uuid": "u2", "parentUuid": "a1",
+                "message": {"role": "user", "content": "b"},
+            })
+            .to_string();
+            let facts = line_facts(&line);
+            assert_eq!(facts.uuid.as_deref(), Some("u2"));
+            assert_eq!(facts.parent_uuid.as_deref(), Some("a1"));
+        }
+
+        #[test]
+        fn a_sidechain_record_carries_no_uuid() {
+            let line = json!({
+                "type": "assistant", "uuid": "s1", "parentUuid": "a1", "isSidechain": true,
+                "message": {"id": "msg-s1", "role": "assistant", "type": "message",
+                    "content": [{"type": "text", "text": "side"}]},
+            })
+            .to_string();
+            let facts = line_facts(&line);
+            assert_eq!(
+                facts.uuid, None,
+                "a subagent's record is not the main thread's"
+            );
+            assert_eq!(facts.parent_uuid, None);
+        }
     }
 
     /// A `last-prompt` record as the turn's end writes it: the prompt's text

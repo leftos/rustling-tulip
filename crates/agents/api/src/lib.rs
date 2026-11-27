@@ -283,6 +283,15 @@ pub struct TranscriptLineFacts {
     /// rewound (a Restore) to an earlier point, which drops the turns after
     /// that point: the chat mirror then goes back to the restored turn.
     pub rewound: bool,
+    /// The id of the transcript record the line is, when the agent writes
+    /// one on the main thread's records: none for a subagent's record or a
+    /// line with no id.
+    pub uuid: Option<String>,
+    /// The id of the record this one follows in the conversation: after a
+    /// rewind, the re-sent prompt follows the record the dropped turns hung
+    /// from. None where `uuid` is none, or for the conversation's first
+    /// record.
+    pub parent_uuid: Option<String>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the

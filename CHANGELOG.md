@@ -33,6 +33,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
 - A workspace session starts when the agent's command is a `.cmd` shim, such as npm's `claude.cmd`, instead of failing on the workspace note.
 - On the phone, a tap on the Needs you tray right after a fast swipe reaches the card instead of being ignored for a moment.
+- In Chat, the turns a Rewind dropped stay gone after the daemon restarts, and a Rewind typed in the terminal drops them too.
 
 ## v0.19.0-alpha
 
