@@ -893,6 +893,54 @@ pub(crate) struct SpawnExtras {
 /// resume command; it types sooner once the prompt has printed.
 const SHELL_RESUME_DELAY_MS: u32 = 2000;
 
+/// The registered folders of a workspace spawn's members after the first,
+/// which the agent opens as extra folders beside its start folder: each
+/// member's repo path from `repos` (never its worktree), a member whose repo
+/// is not registered skipped. Empty for any other kind of spawn and for a
+/// plain shell.
+fn extra_trust_folders(
+    repos: &[RepoEntry],
+    kind: &SessionKind,
+    mode: SessionMode,
+    members: &[SessionMember],
+) -> Vec<PathBuf> {
+    if *kind != SessionKind::Workspace
+        || !matches!(mode, SessionMode::Interactive | SessionMode::Headless)
+    {
+        return Vec::new();
+    }
+    members
+        .iter()
+        .skip(1)
+        .filter_map(|member| repos.iter().find(|repo| repo.id == member.repo_id))
+        .map(|repo| PathBuf::from(&repo.path))
+        .collect()
+}
+
+/// Lets `backend` prepare for a spawn that opens `folders` as extra
+/// folders, off the async runtime since it may wait on a lock. A failure is
+/// logged and the spawn goes on.
+async fn prepare_trust_folders(
+    backend: &'static dyn AgentPlugin,
+    options: &OptionValues,
+    rows: &ResolvedRows,
+    folders: Vec<PathBuf>,
+) {
+    if folders.is_empty() {
+        return;
+    }
+    let (options, rows, task_folders) = (options.clone(), rows.clone(), folders.clone());
+    let prepared = tokio::task::spawn_blocking(move || {
+        backend.prepare_extra_folders(&options, &rows, &task_folders)
+    })
+    .await;
+    match prepared {
+        Ok(Ok(())) => info!(count = folders.len(), "extra folder trust ensured"),
+        Ok(Err(err)) => warn!(folders = ?folders, error = %err, "extra folder trust not recorded"),
+        Err(err) => warn!(folders = ?folders, error = %err, "extra folder trust not recorded"),
+    }
+}
+
 /// [`spawn_session_with_extras`] with the variable lookup `resolve` in place
 /// of [`user_env::resolve`]: it resolves the rows' env references and the
 /// provider's key.
@@ -1129,6 +1177,9 @@ where
         let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
     }
 
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
+    let folders = extra_trust_folders(&repos, &kind, mode, &members);
+    prepare_trust_folders(cfg.backend, &cfg.options, &rows, folders).await;
     let t_child = std::time::Instant::now();
     let result = match mode {
         SessionMode::Headless => {
@@ -8012,4 +8063,100 @@ mod tests {
     // --- Boot wiring and the remote switch ---
 
     // --- ConfigureRemote and RemoteStatus ---
+
+    // --- Extra folder trust for a workspace's later members ---
+
+    fn trust_repo(id: &str, path: &str) -> RepoEntry {
+        RepoEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_string(),
+            default_branch: None,
+            default_use_worktree: true,
+            is_git: true,
+            appearance: AppearanceOverrides::default(),
+            last_agent: None,
+            last_spawn_config: None,
+        }
+    }
+
+    fn trust_member(repo_id: &str, worktree_path: &str) -> SessionMember {
+        SessionMember {
+            repo_id: repo_id.to_string(),
+            repo_name: repo_id.to_string(),
+            branch: "feat".to_string(),
+            worktree_path: worktree_path.to_string(),
+        }
+    }
+
+    fn trust_repos() -> Vec<RepoEntry> {
+        vec![
+            trust_repo("app", r"X:\dev\app"),
+            trust_repo("server", r"X:\dev\server"),
+        ]
+    }
+
+    fn trust_members() -> Vec<SessionMember> {
+        vec![
+            trust_member("app", r"X:\wt\feat\0"),
+            trust_member("server", r"X:\wt\feat\1"),
+        ]
+    }
+
+    #[test]
+    fn extra_trust_folders_name_the_registered_path_of_members_after_the_first() {
+        let folders = extra_trust_folders(
+            &trust_repos(),
+            &SessionKind::Workspace,
+            SessionMode::Interactive,
+            &trust_members(),
+        );
+        assert_eq!(folders, [PathBuf::from(r"X:\dev\server")]);
+    }
+
+    #[test]
+    fn extra_trust_folders_cover_a_headless_workspace_spawn() {
+        let folders = extra_trust_folders(
+            &trust_repos(),
+            &SessionKind::Workspace,
+            SessionMode::Headless,
+            &trust_members(),
+        );
+        assert_eq!(folders, [PathBuf::from(r"X:\dev\server")]);
+    }
+
+    #[test]
+    fn extra_trust_folders_skip_a_plain_shell_spawn() {
+        let folders = extra_trust_folders(
+            &trust_repos(),
+            &SessionKind::Workspace,
+            SessionMode::PlainShell,
+            &trust_members(),
+        );
+        assert_eq!(folders, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn extra_trust_folders_skip_a_single_repo_spawn() {
+        let folders = extra_trust_folders(
+            &trust_repos(),
+            &SessionKind::Single,
+            SessionMode::Interactive,
+            &[trust_member("server", r"X:\wt\feat\1")],
+        );
+        assert_eq!(folders, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn extra_trust_folders_skip_an_unregistered_member() {
+        let mut members = trust_members();
+        members.push(trust_member("gone", r"X:\wt\feat\2"));
+        let folders = extra_trust_folders(
+            &trust_repos(),
+            &SessionKind::Workspace,
+            SessionMode::Interactive,
+            &members,
+        );
+        assert_eq!(folders, [PathBuf::from(r"X:\dev\server")]);
+    }
 }

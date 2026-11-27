@@ -259,7 +259,7 @@ Actors: the agent process (appends the transcript and sidecar files), the list s
 
 ## Multi-repo workspace sessions
 
-Multi-repo workspace sessions spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<workspace-slug>/` directory (see [on-disk.md](on-disk.md) — the layout preserves inter-member relative paths within a workspace).
+Multi-repo workspace sessions spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<workspace-slug>/` directory (see [on-disk.md](on-disk.md) — the layout preserves inter-member relative paths within a workspace). Before the spawn the daemon records Claude's folder trust for each `--add-dir` member (`prepare_extra_folders`), keyed on the member's registered repo path, since registering a repo counts as trusting it; the first member keeps Claude's own prompt. A failure to record is logged "extra folder trust not recorded" and the spawn goes on; success logs "extra folder trust ensured".
 
 A member that is not a git repository (`RepoEntry.is_git` false) runs in its own folder with an empty branch, gets no worktree, and is left out of the spawn preview rows; `daemon.log` notes it as "resolve_workspace: plain member runs in its own folder".
 
@@ -289,7 +289,7 @@ The first prompt of an interactive session reads the record's screen three ways:
 
 A held prompt is dropped when the shell prompt returns or the session is removed, stopped or errored (the warn above, with `agent_exited=true`), or after 10 minutes held, with the warn "the first prompt waited 10 minutes behind a dialog; it was not typed". A chat send while the first prompt is held is refused `busy` with "This session's first prompt is still waiting to be typed."
 
-Claude shows its trust dialog in any folder it has not trusted, a fresh worktree and a bypass-permissions session included. It keys trust on the main repo root, so every worktree of a trusted repo is trusted afterwards.
+Claude shows its trust dialog in any folder it has not trusted, a fresh worktree and a bypass-permissions session included, except the `--add-dir` members of a workspace session, whose trust the daemon records first. It keys trust on the main repo root, so every worktree of a trusted repo is trusted afterwards.
 
 A shell outside pwsh, powershell, cmd, nu, fish, sh, bash, zsh, dash and ksh (WSL, including its bash, stays on the direct spawn until RT-956), a cmd line carrying `%` or `!`, and legacy PowerShell's argument passing host no agent: Claude is then the PTY child, as it is for a plugin without `shell_resume`.
 

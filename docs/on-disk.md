@@ -282,6 +282,8 @@ Every write is a compare-and-swap (read, compute, re-read, recompute once, else 
 
 An isolated daemon (config dir overridden) edits only a settings file under a `.tmp` folder (`daemon_client::isolation::under_tmp`), and an elevated daemon answers unsupported and writes nothing. At start a non-elevated daemon repoints stale entries through the same guarded path.
 
+Claude's global config is also edited, outside the app's folders: before a workspace spawn the daemon sets `projects["<repo path with / separators>"].hasTrustDialogAccepted` to true in Claude's global config (`.claude.json` under `CLAUDE_CONFIG_DIR` when set, else `~/.claude.json`) for each `--add-dir` member, under Claude Code's own config lock (`update_global_config`). The entry's other fields are kept, and nothing is written when every folder is already trusted.
+
 The profile starts empty: presets, history, devices and sessions of the ordinary profile are not imported, because importing files an ordinary process can write is the write-up the root removes. The ordinary profile's data stays where it is.
 
 An elevated daemon refuses to start when the root, or a set `RUSTLING_TULIP_CONFIG_DIR` or `RUSTLING_TULIP_BINARIES_DIR` folder, fails the check. The error reads `protected root <path> is unsafe: <reason>; delete it from an elevated terminal and start again`, or `protected root <path> is not a plain folder; delete it from an elevated terminal and start again`. The reasons:

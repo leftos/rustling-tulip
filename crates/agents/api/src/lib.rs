@@ -763,6 +763,22 @@ pub trait Agent: Send + Sync + 'static {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal>;
 
+    /// Prepare the agent for a spawn that opens `folders` (folders the user
+    /// registered with the app) as extra folders beside its start folder,
+    /// with resolved rows `rows`. An agent that needs nothing does nothing.
+    ///
+    /// # Errors
+    ///
+    /// What could not be prepared; the spawn goes on without it.
+    fn prepare_extra_folders(
+        &self,
+        _opts: &Self::Options,
+        _rows: &ResolvedRows,
+        _folders: &[PathBuf],
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     /// How an interactive spawn's conversation id is decided; `resume` is the
     /// conversation the spawn continues, when it continues one.
     fn conversation_plan(&self, opts: &Self::Options, resume: Option<&str>) -> ConversationPlan;
@@ -1173,6 +1189,18 @@ pub trait AgentPlugin: Send + Sync {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal>;
 
+    /// [`Agent::prepare_extra_folders`] over `opts` decoded.
+    ///
+    /// # Errors
+    ///
+    /// The agent's error, or one naming the agent when `opts` do not decode.
+    fn prepare_extra_folders(
+        &self,
+        opts: &OptionValues,
+        rows: &ResolvedRows,
+        folders: &[PathBuf],
+    ) -> Result<(), AgentError>;
+
     /// [`Agent::conversation_plan`] over `opts` decoded; when they do not
     /// decode, an error is logged and the spawn records no conversation.
     fn conversation_plan(&self, opts: &OptionValues, resume: Option<&str>) -> ConversationPlan;
@@ -1450,6 +1478,16 @@ impl<A: Agent> AgentPlugin for A {
     ) -> Result<EnvPlan, Refusal> {
         let opts = decode_for_spawn(self, opts)?;
         Agent::spawn_env(self, &opts, rows, keys)
+    }
+
+    fn prepare_extra_folders(
+        &self,
+        opts: &OptionValues,
+        rows: &ResolvedRows,
+        folders: &[PathBuf],
+    ) -> Result<(), AgentError> {
+        let opts = decode_options(self, opts)?;
+        Agent::prepare_extra_folders(self, &opts, rows, folders)
     }
 
     fn conversation_plan(&self, opts: &OptionValues, resume: Option<&str>) -> ConversationPlan {
@@ -2044,6 +2082,16 @@ mod tests {
             rows: &rows,
         };
         assert_eq!(plugin.find_conversations(&query), []);
+    }
+
+    #[test]
+    fn prepare_extra_folders_defaults_to_nothing() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let rows = ResolvedRows::default();
+        let folders = [PathBuf::from(r"D:\proj"), PathBuf::from(r"D:\other")];
+        let opts = encode_options(&Bare, &crate::test_agent::TestOptions::default())
+            .expect("the test agent's default options encode");
+        assert_eq!(plugin.prepare_extra_folders(&opts, &rows, &folders), Ok(()));
     }
 
     #[test]

@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- A workspace session no longer stops at Claude's trust prompt for its other repos on every start; registering a repo counts as trusting it.
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
 
 ## v0.19.0-alpha

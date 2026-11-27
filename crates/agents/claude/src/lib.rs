@@ -24,6 +24,7 @@ mod subagents;
 mod summarize;
 mod tail_paths;
 mod transcripts;
+mod trust;
 
 pub use providers::{display_name, provider_for_model};
 pub use scripts::ScriptBook;
@@ -424,6 +425,18 @@ impl Agent for ClaudePlugin {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal> {
         providers::spawn_env(opts.provider, rows, keys)
+    }
+
+    /// Records Claude Code's folder trust for each of `folders`, which it
+    /// would otherwise ask about on every spawn that opens them with
+    /// `--add-dir`.
+    fn prepare_extra_folders(
+        &self,
+        _opts: &ClaudeOptions,
+        rows: &ResolvedRows,
+        folders: &[PathBuf],
+    ) -> Result<(), AgentError> {
+        trust::record_trust(rows, folders)
     }
 
     /// A fresh session starts under an id Claude is handed with
