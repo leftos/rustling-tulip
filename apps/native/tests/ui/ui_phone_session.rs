@@ -747,15 +747,7 @@ fn permission_prompt(id: &str) -> ChatPrompt {
 
 /// Session `a`'s screen now shows `prompt`, or none.
 fn screen_shows(h: &mut Harness<'_>, prompt: Option<ChatPrompt>) {
-    h.host(&saved_remote())
-        .send(DaemonMessage::ChatScreenChanged {
-            session_id: "a".to_owned(),
-            screen: ChatScreen {
-                composer: ComposerState::Dialog,
-                prompt,
-            },
-        });
-    h.cx.run_until_parked();
+    screen_shows_in(h, ComposerState::Dialog, prompt);
 }
 
 /// Session `a`'s page with its chat loaded and `prompt` pending, everything
@@ -818,6 +810,56 @@ fn drag_sheet(h: &mut Harness<'_>, dy: Pixels, steps: usize) {
 fn in_sheet(h: &mut Harness<'_>, selector: &str) -> bool {
     let sheet = h.bounds("phone-prompt-sheet");
     drawn(h, selector) && sheet.contains(&h.bounds(selector).center())
+}
+
+/// Session `a`'s screen now shows `prompt`, or none, its composer
+/// `composer`.
+fn screen_shows_in(h: &mut Harness<'_>, composer: ComposerState, prompt: Option<ChatPrompt>) {
+    h.host(&saved_remote())
+        .send(DaemonMessage::ChatScreenChanged {
+            session_id: "a".to_owned(),
+            screen: ChatScreen { composer, prompt },
+        });
+    h.cx.run_until_parked();
+}
+
+/// The composer state of a full-screen overlay named `name`.
+fn overlay(name: &str) -> ComposerState {
+    ComposerState::Overlay {
+        name: name.to_owned(),
+    }
+}
+
+/// An overlay prompt `id` titled `subject` with `body`, offering `list`.
+fn overlay_prompt(id: &str, subject: &str, body: &str, list: &[(u32, &str)]) -> ChatPrompt {
+    let mut prompt = sheet_prompt(id, ChatPromptKind::Overlay, list);
+    subject.clone_into(&mut prompt.subject);
+    body.clone_into(&mut prompt.body);
+    prompt.can_amend = false;
+    prompt
+}
+
+/// Session `a`'s page with its chat loaded and the overlay `name`'s
+/// `prompt` pending, everything sent so far drained.
+fn overlay_up<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    name: &str,
+    prompt: ChatPrompt,
+) -> Harness<'a> {
+    let mut h = chat_loaded(cx, dir, vec![user("u1")]);
+    screen_shows_in(&mut h, overlay(name), Some(prompt));
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// The answers alone of the `ChatAnswer`s sent for session `a` since the
+/// last drain.
+fn sheet_answer_kinds(h: &mut Harness<'_>) -> Vec<ChatAnswerKind> {
+    sheet_answers(h)
+        .into_iter()
+        .map(|(_, answer, _)| answer)
+        .collect()
 }
 
 #[gpui::test]
@@ -1007,6 +1049,238 @@ fn a_different_prompt_raises_it_again(cx: &mut TestAppContext) {
         "the new prompt's card"
     );
     assert!(!drawn(&mut h, "phone-prompt-show"));
+}
+
+#[gpui::test]
+fn a_transcript_overlay_shows_its_subject_and_one_close_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let close = overlay_prompt("o1", "Transcript", "", &[(1, "Close")]);
+    let mut h = overlay_up(cx, &dir, "transcript", close);
+
+    assert!(
+        drawn(&mut h, "phone-prompt-sheet"),
+        "an overlay raises the sheet"
+    );
+    assert!(in_sheet(&mut h, "chat-card-subject"), "the overlay's name");
+    assert!(
+        !drawn(&mut h, "chat-card-body"),
+        "an empty body draws nothing"
+    );
+    assert!(in_sheet(&mut h, "chat-card-1"), "the Close button");
+    assert!(!drawn(&mut h, "chat-card-2"), "Close is the only button");
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("a", "1")),
+        Some("Close".to_owned())
+    );
+
+    h.click_on("chat-card-1");
+
+    let answers = sheet_answers(&mut h);
+    assert_eq!(answers.len(), 1, "one answer: {answers:?}");
+    assert_eq!(answers[0].0, "o1");
+    assert_eq!(answers[0].1, ChatAnswerKind::Option { number: 1 });
+    assert!(answers[0].2.is_some(), "under a request id");
+}
+
+#[gpui::test]
+fn the_sheet_types_escape_over_an_open_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let pending = overlay_prompt(
+        "b1",
+        "Side question",
+        "what is 2+2? one word",
+        &[(1, "Close")],
+    );
+    let mut h = overlay_up(cx, &dir, "btw_pending", pending);
+
+    assert!(in_sheet(&mut h, "phone-prompt-esc"), "Esc is in the sheet");
+    h.click_on("phone-prompt-esc");
+
+    let sent = h.host(&saved_remote()).sent();
+    let typed: Vec<Vec<u8>> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SendInput {
+                session_id,
+                data_b64,
+                automatic: false,
+            } if session_id == "a" => Some(B64.decode(data_b64).expect("base64 input")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed, [b"\x1b".to_vec()], "{sent:?}");
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ChatAnswer { .. })),
+        "Esc types its key and answers nothing"
+    );
+}
+
+#[gpui::test]
+fn a_rewind_picker_offers_one_button_per_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut picker = overlay_prompt(
+        "r1",
+        "Rewind",
+        "Restore the code and/or conversation to the point before you sent this message:\nsay ok",
+        &[
+            (1, "first message"),
+            (2, "second message"),
+            (3, "(current)"),
+            (4, "Close"),
+        ],
+    );
+    picker.cursor = Some(2);
+    let mut h = overlay_up(cx, &dir, "rewind", picker);
+
+    for selector in ["chat-card-1", "chat-card-2", "chat-card-3", "chat-card-4"] {
+        assert!(in_sheet(&mut h, selector), "{selector} is in the sheet");
+    }
+    assert!(!drawn(&mut h, "chat-card-5"), "one button per row");
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("a", "2")),
+        Some("second message".to_owned()),
+        "the cursor row keeps its own label"
+    );
+
+    h.click_on("chat-card-2");
+
+    assert_eq!(
+        sheet_answer_kinds(&mut h),
+        [ChatAnswerKind::Option { number: 2 }],
+        "a picker row sends at once"
+    );
+}
+
+#[gpui::test]
+fn a_rewind_restore_row_takes_two_presses_on_the_phone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let choice = |id: &str| {
+        let mut rewind = overlay_prompt(
+            id,
+            "Rewind",
+            "Restore to the point before you sent this message:\nsay ok",
+            &[
+                (1, "Restore code and conversation"),
+                (2, "Restore conversation"),
+                (3, "Restore code"),
+                (4, "Summarize from here"),
+                (5, "Summarize up to here"),
+                (6, "Never mind"),
+                (7, "Close"),
+            ],
+        );
+        rewind.cursor = Some(1);
+        rewind
+    };
+    let mut h = overlay_up(cx, &dir, "rewind_restore", choice("r1"));
+
+    h.click_on("chat-card-1");
+    assert!(
+        sheet_answer_kinds(&mut h).is_empty(),
+        "the first tap only arms the row"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("a", "1")),
+        Some("Confirm: Restore code and conversation".to_owned()),
+        "the armed row says what its second tap does"
+    );
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet stays up");
+    h.click_on("chat-card-1");
+    assert_eq!(
+        sheet_answer_kinds(&mut h),
+        [ChatAnswerKind::Option { number: 1 }]
+    );
+
+    screen_shows_in(&mut h, overlay("rewind_restore"), Some(choice("r2")));
+    h.host(&saved_remote()).sent();
+    h.click_on("chat-card-6");
+    assert_eq!(
+        sheet_answer_kinds(&mut h),
+        [ChatAnswerKind::Option { number: 6 }],
+        "Never mind goes at once"
+    );
+}
+
+#[gpui::test]
+fn a_btw_side_question_keeps_the_sheet_up_when_its_answer_arrives(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let question = "what is 2+2? one word";
+    let side = |body: &str| overlay_prompt("b1", "Side question", body, &[(1, "Close")]);
+    let mut h = overlay_up(cx, &dir, "btw_pending", side(question));
+    assert!(in_sheet(&mut h, "chat-card-body"), "the question");
+    let asked = h.bounds("chat-card-body").size.height;
+
+    // The daemon keeps a side question's id as its answer arrives.
+    screen_shows_in(
+        &mut h,
+        overlay("btw"),
+        Some(side(&format!("{question}\n\nFour"))),
+    );
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"), "the sheet stays up");
+    assert!(!drawn(&mut h, "phone-prompt-show"));
+    assert_eq!(
+        h.root(|root, _| root.chat_card("a"))
+            .map(|(id, _)| id)
+            .as_deref(),
+        Some("b1")
+    );
+    assert!(in_sheet(&mut h, "chat-card-body"));
+    let answered = h.bounds("chat-card-body").size.height;
+    assert!(
+        answered > asked,
+        "the answer draws under the question: {answered:?} vs {asked:?}"
+    );
+    assert!(in_sheet(&mut h, "chat-card-1"), "the Close button");
+    assert!(!drawn(&mut h, "chat-card-2"), "Close is the only button");
+    h.host(&saved_remote()).sent();
+    h.click_on("chat-card-1");
+    assert_eq!(
+        sheet_answer_kinds(&mut h),
+        [ChatAnswerKind::Option { number: 1 }]
+    );
+}
+
+#[gpui::test]
+fn a_preview_question_shows_its_preview_block_in_the_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut previewed = sheet_prompt("p1", ChatPromptKind::Question, &[(1, "Grid"), (2, "List")]);
+    previewed.cursor = Some(1);
+    previewed.preview = Some("+--+\n| A|\n+--+".to_owned());
+    let mut h = prompted(cx, &dir, previewed);
+
+    assert!(
+        in_sheet(&mut h, "chat-card-preview"),
+        "the focused option's preview"
+    );
+    assert!(in_sheet(&mut h, "chat-card-1"));
+    assert!(in_sheet(&mut h, "chat-card-2"));
+    assert!(
+        h.bounds("chat-card-preview").origin.y < h.bounds("chat-card-1").origin.y,
+        "the preview sits above the options"
+    );
+}
+
+#[gpui::test]
+fn an_unknown_prompt_kind_points_to_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = prompted(
+        cx,
+        &dir,
+        sheet_prompt("u1", ChatPromptKind::Unknown, &[(1, "a")]),
+    );
+
+    assert!(drawn(&mut h, "phone-prompt-sheet"));
+    assert!(
+        in_sheet(&mut h, "chat-card-terminal"),
+        "Open the terminal to answer this"
+    );
+    assert!(
+        !drawn(&mut h, "chat-card-1"),
+        "no buttons to answer it with"
+    );
 }
 
 #[gpui::test]
