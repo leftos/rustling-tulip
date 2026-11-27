@@ -56,6 +56,8 @@ mod settings;
 mod settings_view;
 pub mod share;
 #[cfg(target_os = "ios")]
+mod share_inbox_selftest;
+#[cfg(target_os = "ios")]
 mod share_ios;
 pub(crate) mod sheet;
 mod sweep;
@@ -131,6 +133,8 @@ pub fn run(register_delegates: impl FnOnce(), on_start: impl FnOnce(&mut App) + 
             open_selftest(cx);
             #[cfg(target_os = "ios")]
             keychain_selftest();
+            #[cfg(target_os = "ios")]
+            share_inbox_selftest();
         });
 }
 
@@ -294,6 +298,16 @@ fn open_selftest(cx: &mut App) {
 fn keychain_selftest() {
     if std::env::args().any(|arg| arg == keychain_selftest::KEYCHAIN_SELFTEST_ARG) {
         keychain_selftest::start();
+    }
+}
+
+/// Launched with [`share_inbox_selftest::SHARE_INBOX_SELFTEST_ARG`], writes,
+/// reads back and removes a text item in the App Group's share inbox, off the
+/// main thread.
+#[cfg(target_os = "ios")]
+fn share_inbox_selftest() {
+    if std::env::args().any(|arg| arg == share_inbox_selftest::SHARE_INBOX_SELFTEST_ARG) {
+        share_inbox_selftest::start();
     }
 }
 

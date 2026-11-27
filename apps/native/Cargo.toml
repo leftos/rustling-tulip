@@ -232,6 +232,9 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
 ] }
 security-framework = { version = "3.7", default-features = false }
+# The share inbox self-test (src/phone/share_inbox_selftest.rs) writes its
+# item with the share extension's own inbox writer (its library only).
+rustling-tulip-ios-share = { path = "../ios-share" }
 # The background clear sets the badge and calls its completion on the main
 # queue, where iOS 15's badge setter must run.
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }

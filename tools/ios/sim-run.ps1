@@ -7,11 +7,14 @@
 # a pass and .tmp/ios/* on a failure. On the Mac (-OnMac) it builds the
 # simulator bundle (tools/ios/build.ps1), boots the simulator -Device names on
 # iOS 27.0 unless it is already booted, installs and launches the app with
-# --keychain-selftest, waits for its "phone app started" log line with the
-# background-wake method's line before it, then for the self-test's
-# "phone: keychain self-test passed" line (failing on its "failed" line or after
-# 60 s), takes .tmp/ios/sim-first.png, then stops the app and shuts the
-# simulator down again if this run booted it.
+# --keychain-selftest and --share-inbox-selftest, waits for its "phone app
+# started" log line with the background-wake method's line before it, then for
+# the Keychain self-test's "phone: keychain self-test passed" line and then the
+# share inbox self-test's "phone: share inbox self-test passed" line (each
+# failing on its "failed" line or after 60 s), checks that pluginkit lists the
+# share extension (dev.leftos.rustling-tulip.phone.share), takes
+# .tmp/ios/sim-first.png, then stops the app and shuts the simulator down again
+# if this run booted it.
 #
 #   pwsh -NoProfile -File tools/ios/sim-run.ps1 [-Device <name>]
 #
@@ -43,6 +46,12 @@ $WakeLateLine = 'phone: the app delegate class is not registered yet'
 $KeychainArg = '--keychain-selftest'
 $KeychainPassLine = 'phone: keychain self-test passed'
 $KeychainFailLine = 'phone: keychain self-test failed'
+# The app's write and read of one item in the App Group container's share inbox.
+$ShareInboxArg = '--share-inbox-selftest'
+$ShareInboxPassLine = 'phone: share inbox self-test passed'
+$ShareInboxFailLine = 'phone: share inbox self-test failed'
+# The share extension the installed bundle must register with the system.
+$ShareId = 'dev.leftos.rustling-tulip.phone.share'
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
 $Shot = Join-Path $OutDir 'sim-first.png'
 
@@ -140,20 +149,32 @@ function Get-LogLine([string[]] $Logs, [string] $Line) {
     }
 }
 
-# Waits up to 60 s for the Keychain self-test's pass line; its fail line, or none in time, throws.
-function Wait-ForKeychainSelfTest([string[]] $Logs, [Diagnostics.Process] $Launch) {
+# Waits up to 60 s for a self-test's pass line; its fail line, or none in time, throws.
+function Wait-ForSelfTest([string[]] $Logs, [Diagnostics.Process] $Launch, [string] $Name, [string] $PassLine,
+    [string] $FailLine) {
     for ($second = 0; $second -lt 60; $second++) {
-        $failed = @(Get-LogLine $Logs $KeychainFailLine)
-        if ($failed.Count -gt 0) { throw "the app's Keychain self-test failed:`n$($failed -join "`n")" }
-        $passed = @(Get-LogLine $Logs $KeychainPassLine)
+        $failed = @(Get-LogLine $Logs $FailLine)
+        if ($failed.Count -gt 0) { throw "the app's $Name self-test failed:`n$($failed -join "`n")" }
+        $passed = @(Get-LogLine $Logs $PassLine)
         if ($passed.Count -gt 0) { $passed | Out-Host; return }
         if ($Launch.HasExited) { break }
         Start-Sleep -Seconds 1
     }
-    $failed = @(Get-LogLine $Logs $KeychainFailLine)
-    if ($failed.Count -gt 0) { throw "the app's Keychain self-test failed:`n$($failed -join "`n")" }
+    $failed = @(Get-LogLine $Logs $FailLine)
+    if ($failed.Count -gt 0) { throw "the app's $Name self-test failed:`n$($failed -join "`n")" }
     $tail = foreach ($log in $Logs) { if (Test-Path $log) { Get-Content -LiteralPath $log -Tail 30 } }
-    throw "no '$KeychainPassLine' line from the app within 60 s; log tail:`n$($tail -join "`n")"
+    throw "no '$PassLine' line from the app within 60 s; log tail:`n$($tail -join "`n")"
+}
+
+# The system's plug-in list for the share extension must name it; its line is printed.
+function Test-ShareExtension([string] $Udid) {
+    $out = @(& xcrun simctl spawn $Udid pluginkit -m -i $ShareId 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $out | Out-Host
+    if ($code -ne 0) { throw "pluginkit -m -i $ShareId failed (exit $code): $($out -join "`n")" }
+    if (-not ($out -match [regex]::Escape($ShareId))) {
+        throw "pluginkit does not list the share extension $ShareId; the installed bundle did not register it"
+    }
 }
 
 function Stop-Run([string] $Udid, [Diagnostics.Process] $Launch, [bool] $Booted) {
@@ -189,10 +210,13 @@ function Invoke-OnMac {
         Assert-LastExit "xcrun simctl install $udid"
         $logs = @((Join-Path $OutDir 'app.log'), (Join-Path $OutDir 'app-err.log'))
         $launch = Start-Process -FilePath 'xcrun' -PassThru -RedirectStandardOutput $logs[0] -RedirectStandardError $logs[1] `
-            -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId, $KeychainArg)
+            -ArgumentList @('simctl', 'launch', '--console-pty', '--terminate-running-process', $udid, $BundleId, $KeychainArg,
+            $ShareInboxArg)
         Wait-ForReadyLine $logs $launch
         Assert-WakeLineBeforeReady $logs
-        Wait-ForKeychainSelfTest $logs $launch
+        Wait-ForSelfTest $logs $launch 'Keychain' $KeychainPassLine $KeychainFailLine
+        Wait-ForSelfTest $logs $launch 'share inbox' $ShareInboxPassLine $ShareInboxFailLine
+        Test-ShareExtension $udid
         & xcrun simctl io $udid screenshot $Shot
         Assert-LastExit "xcrun simctl io $udid screenshot"
     }
