@@ -605,6 +605,44 @@ pub(crate) fn card_answer_message(
     }
 }
 
+/// The part of `prompt`'s body that names its dialog, the rule the daemon's
+/// `prompt_identity` keys a prompt id on: an overlay's first paragraph (up
+/// to its first blank line), since a scrolled Rewind picker rewrites the
+/// second one with the messages its window hides; any other prompt's whole
+/// body.
+fn identity_body(prompt: &ChatPrompt) -> &str {
+    if prompt.kind == ChatPromptKind::Overlay {
+        prompt
+            .body
+            .split_once("\n\n")
+            .map_or(prompt.body.as_str(), |(first, _)| first)
+    } else {
+        prompt.body.as_str()
+    }
+}
+
+/// Whether `after` is the dialog `before` showed, scrolled under a new id:
+/// the same kind, subject and body (see [`identity_body`]), both drawn with a cursor, and the
+/// screen moved (the cursor, or the visible options of a long picker). A
+/// fresh prompt identical to the last, or one without a cursor, is not.
+#[must_use]
+pub fn same_dialog(before: &ChatPrompt, after: &ChatPrompt) -> bool {
+    let labels = |prompt: &ChatPrompt| {
+        prompt
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect::<Vec<_>>()
+    };
+    let moved = before.cursor != after.cursor || labels(before) != labels(after);
+    before.kind == after.kind
+        && before.subject == after.subject
+        && identity_body(before) == identity_body(after)
+        && before.cursor.is_some()
+        && after.cursor.is_some()
+        && moved
+}
+
 /// A submitted answer the screen has not yet dropped the card of.
 #[derive(Debug, Clone)]
 struct Busy {
@@ -724,8 +762,10 @@ impl CardState {
 
     /// The screen's prompt went from `before` to `after`: a card it dropped
     /// that we submitted collapses, one we did not reads "Answered
-    /// elsewhere"; an arm set on the card before goes with it.
-    pub fn on_screen(&mut self, before: Option<&str>, after: Option<&str>) {
+    /// elsewhere"; an arm set on the card before goes with it. When
+    /// `same_dialog` (see [`same_dialog`]), a submitted card's busy mark
+    /// moves to `after`, since a scroll gives the same dialog a new id.
+    pub fn on_screen(&mut self, before: Option<&str>, after: Option<&str>, same_dialog: bool) {
         if before != after {
             self.armed = None;
         }
@@ -734,7 +774,15 @@ impl CardState {
             return;
         };
         if self.is_busy(before) {
-            self.busy = None;
+            self.busy = self
+                .busy
+                .take()
+                .filter(|_| same_dialog)
+                .zip(after)
+                .map(|(busy, after)| Busy {
+                    prompt_id: after.to_owned(),
+                    ..busy
+                });
         } else {
             self.elsewhere = true;
         }
@@ -747,7 +795,8 @@ impl CardState {
         }
     }
 
-    /// A new chat entry arrived: the "Answered elsewhere" line goes.
+    /// A new chat entry arrived, or the chat started over: the "Answered
+    /// elsewhere" line goes.
     pub fn on_new_entry(&mut self) {
         self.elsewhere = false;
     }
@@ -768,15 +817,15 @@ impl CardState {
             .iter()
             .find(|(sent, _)| sent == request_id)
             .map(|(_, prompt_id)| prompt_id.clone())?;
-        let current = match self.busy.as_ref() {
-            Some(busy) => busy.request_id == request_id,
-            None => self.shown.as_deref() == Some(prompt_id.as_str()),
+        // A busy mark handed on to a scrolled dialog names the card on
+        // screen, which the reason belongs on.
+        let on_screen = match self.busy.as_ref() {
+            Some(busy) if busy.request_id == request_id => busy.prompt_id.clone(),
+            None if self.shown.as_deref() == Some(prompt_id.as_str()) => prompt_id,
+            _ => return Some(AnswerRefusal::Late),
         };
-        if !current {
-            return Some(AnswerRefusal::Late);
-        }
         self.busy = None;
-        self.refusal = Some((prompt_id, message.to_owned()));
+        self.refusal = Some((on_screen, message.to_owned()));
         Some(AnswerRefusal::Freed)
     }
 
@@ -1424,7 +1473,8 @@ mod tests {
     use super::{
         AnswerRefusal, ButtonAnswer, CardKey, CardState, KeyAction, adjust_buttons,
         allow_once_option, always_allow_option, card_answer_message, card_buttons, deny_option,
-        key_action, needs_confirm, option_description_color, option_filled, tray_option_row,
+        key_action, needs_confirm, option_description_color, option_filled, same_dialog,
+        tray_option_row,
     };
     use crate::chat::{DIGIT_GRACE, PromptStack};
     use crate::dashboard_rows::AskOption;
@@ -2239,9 +2289,9 @@ mod tests {
         let mut cards = CardState::default();
         cards.answered("p1", "r1".to_owned());
         assert!(cards.is_busy("p1"));
-        cards.on_screen(Some("p1"), Some("p1"));
+        cards.on_screen(Some("p1"), Some("p1"), false);
         assert!(cards.is_busy("p1"), "the same prompt keeps it busy");
-        cards.on_screen(Some("p1"), None);
+        cards.on_screen(Some("p1"), None, false);
         assert!(!cards.is_busy("p1"));
         assert!(!cards.answered_elsewhere(), "our own answer closed it");
     }
@@ -2249,12 +2299,155 @@ mod tests {
     #[test]
     fn a_card_gone_without_our_answer_reads_answered_elsewhere_until_the_next_entry() {
         let mut cards = CardState::default();
-        cards.on_screen(None, Some("p1"));
+        cards.on_screen(None, Some("p1"), false);
         assert!(!cards.answered_elsewhere());
-        cards.on_screen(Some("p1"), Some("p2"));
+        cards.on_screen(Some("p1"), Some("p2"), false);
         assert!(cards.answered_elsewhere());
         cards.on_new_entry();
         assert!(!cards.answered_elsewhere());
+    }
+
+    #[test]
+    fn a_scrolled_dialog_keeps_our_answer_busy() {
+        let mut cards = CardState::default();
+        cards.on_screen(None, Some("p"), false);
+        cards.answered("p", "r1".to_owned());
+        cards.on_screen(Some("p"), Some("p2"), true);
+        assert!(cards.is_busy("p2"), "the scrolled dialog is still ours");
+        assert!(!cards.answered_elsewhere());
+        cards.on_screen(Some("p2"), Some("q"), false);
+        assert!(!cards.answered_elsewhere(), "our answer moved it on");
+        assert!(!cards.is_busy("q"), "the next dialog is not ours yet");
+    }
+
+    #[test]
+    fn a_different_dialog_after_an_unanswered_prompt_still_reads_elsewhere() {
+        let mut cards = CardState::default();
+        cards.on_screen(None, Some("p"), false);
+        cards.on_screen(Some("p"), Some("p2"), true);
+        assert!(cards.answered_elsewhere());
+    }
+
+    /// The Rewind picker heading the parser keeps as a picker's first body
+    /// paragraph.
+    const PICKER_HEADING: &str = "Restore the code and/or conversation to the point before\u{2026}";
+
+    /// A Rewind picker `id` scrolled down one message, as the parser reads
+    /// it: one earlier message hidden, its cursor on `cursor`.
+    fn picker_at(id: &str, cursor: Option<u32>) -> ChatPrompt {
+        let mut picker = prompt_with(
+            ChatPromptKind::Overlay,
+            &[
+                (2, "WRITEFILE please create cats.md"),
+                (3, "say ok"),
+                (4, "(current)"),
+                (5, "Close"),
+            ],
+        );
+        id.clone_into(&mut picker.id);
+        "Rewind".clone_into(&mut picker.subject);
+        picker.body = format!("{PICKER_HEADING}\n\n1 earlier message is in the terminal.");
+        picker.cursor = cursor;
+        picker
+    }
+
+    /// The same picker after a row press scrolled it back to the top: the
+    /// earlier message in view, `(current)` hidden below, the cursor on 2.
+    fn picker_scrolled_up(id: &str) -> ChatPrompt {
+        let mut picker = prompt_with(
+            ChatPromptKind::Overlay,
+            &[
+                (1, "first message"),
+                (2, "WRITEFILE please create cats.md"),
+                (3, "say ok"),
+                (4, "Close"),
+            ],
+        );
+        id.clone_into(&mut picker.id);
+        "Rewind".clone_into(&mut picker.subject);
+        picker.body = format!("{PICKER_HEADING}\n\n1 later message is in the terminal.");
+        picker.cursor = Some(2);
+        picker
+    }
+
+    #[test]
+    fn a_scrolled_picker_with_a_new_hidden_count_is_the_same_dialog() {
+        assert!(same_dialog(
+            &picker_at("p1", Some(4)),
+            &picker_scrolled_up("p2")
+        ));
+    }
+
+    #[test]
+    fn a_refusal_after_a_hand_off_lands_on_the_card_on_screen() {
+        let mut cards = CardState::default();
+        cards.on_screen(None, Some("p1"), false);
+        cards.answered("p1", "r1".to_owned());
+        cards.on_screen(Some("p1"), Some("p2"), true);
+        assert_eq!(
+            cards.refused("r1", "the terminal did not respond"),
+            Some(AnswerRefusal::Freed)
+        );
+        assert_eq!(cards.refusal("p2"), Some("the terminal did not respond"));
+        assert!(!cards.is_busy("p2"));
+    }
+
+    #[test]
+    fn a_moved_cursor_with_the_same_labels_is_the_same_dialog() {
+        assert!(same_dialog(
+            &picker_at("p1", Some(2)),
+            &picker_at("p2", Some(1))
+        ));
+    }
+
+    #[test]
+    fn the_same_cursor_with_shifted_labels_is_the_same_dialog() {
+        let mut shifted = picker_at("p2", Some(1));
+        "earlier message".clone_into(&mut shifted.options[0].label);
+        assert!(same_dialog(&picker_at("p1", Some(1)), &shifted));
+    }
+
+    #[test]
+    fn the_same_cursor_with_the_same_labels_is_a_fresh_dialog() {
+        assert!(!same_dialog(
+            &picker_at("p1", Some(1)),
+            &picker_at("p2", Some(1))
+        ));
+    }
+
+    #[test]
+    fn a_cursorless_pair_is_never_the_same_dialog() {
+        assert!(!same_dialog(&picker_at("p1", None), &picker_at("p2", None)));
+        let mut moved = picker_at("p2", None);
+        "earlier message".clone_into(&mut moved.options[0].label);
+        assert!(!same_dialog(&picker_at("p1", None), &moved));
+    }
+
+    #[test]
+    fn a_prompt_with_another_body_is_another_dialog() {
+        let picker = picker_at("p1", Some(2));
+        let scrolled = picker_at("p2", Some(1));
+        assert!(same_dialog(&picker, &scrolled), "a scroll keeps the dialog");
+        let mut choice = picker.clone();
+        "q".clone_into(&mut choice.id);
+        "Restore to the point before you sent this message".clone_into(&mut choice.body);
+        assert!(
+            !same_dialog(&picker, &choice),
+            "another body is another dialog"
+        );
+        let mut other = picker.clone();
+        "Side question".clone_into(&mut other.subject);
+        assert!(
+            !same_dialog(&picker, &other),
+            "another subject is another dialog"
+        );
+        let mut cards = CardState::default();
+        cards.on_screen(None, Some("p1"), false);
+        cards.answered("p1", "r1".to_owned());
+        cards.on_screen(Some("p1"), Some("q"), same_dialog(&picker, &choice));
+        assert!(!cards.is_busy("p1"));
+        assert!(!cards.is_busy("q"), "the new prompt is not ours");
+        assert!(!cards.answered_elsewhere(), "our answer moved it on");
     }
 
     /// A Rewind choice screen's prompt.
@@ -2395,13 +2588,13 @@ mod tests {
         assert_eq!(cards.armed_for("p1"), Some(2));
         assert_eq!(cards.armed_for("p2"), None, "another card is never armed");
         cards.arm("p1", 2);
-        cards.on_screen(Some("p1"), Some("p1"));
+        cards.on_screen(Some("p1"), Some("p1"), false);
         assert_eq!(
             cards.armed_for("p1"),
             Some(2),
             "the same card keeps its arm"
         );
-        cards.on_screen(Some("p1"), Some("p2"));
+        cards.on_screen(Some("p1"), Some("p2"), false);
         assert_eq!(cards.armed_for("p1"), None, "a new card drops it");
         cards.arm("p1", 2);
         cards.disarm();
@@ -2450,7 +2643,7 @@ mod tests {
     fn a_late_refusal_for_a_prompt_that_left_changes_nothing() {
         let mut cards = CardState::default();
         cards.answered("p1", "r1".to_owned());
-        cards.on_screen(Some("p1"), Some("p2"));
+        cards.on_screen(Some("p1"), Some("p2"), false);
         cards.answered("p2", "r2".to_owned());
         assert_eq!(
             cards.refused("r1", "late"),
@@ -2465,7 +2658,7 @@ mod tests {
     #[test]
     fn a_toggle_never_holds_the_card_busy() {
         let mut cards = CardState::default();
-        cards.on_screen(None, Some("p1"));
+        cards.on_screen(None, Some("p1"), false);
         cards.toggled("p1", "r1");
         assert!(!cards.is_busy("p1"));
         assert_eq!(cards.refused("r1", "no"), Some(AnswerRefusal::Freed));
@@ -2496,7 +2689,7 @@ mod tests {
     #[test]
     fn a_click_on_a_gone_card_leaves_the_current_cards_busy_mark() {
         let mut cards = CardState::default();
-        cards.on_screen(None, Some("p2"));
+        cards.on_screen(None, Some("p2"), false);
         cards.answered("p2", "r1".to_owned());
         cards.clicked(
             "p1",

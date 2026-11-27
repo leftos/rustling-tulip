@@ -478,9 +478,14 @@ impl SessionChat {
             self.clear_armed = false;
         }
         let before = self.stack.current().map(|prompt| prompt.id.clone());
+        let same = self
+            .stack
+            .current()
+            .zip(screen.prompt.as_ref())
+            .is_some_and(|(before, after)| crate::chat_cards::same_dialog(before, after));
         self.stack.on_screen(screen, now);
         let after = screen.prompt.as_ref().map(|prompt| prompt.id.as_str());
-        self.cards.on_screen(before.as_deref(), after);
+        self.cards.on_screen(before.as_deref(), after, same);
         self.sends.on_composer(&screen.composer);
         self.composer_state = Some(screen.composer.clone());
         self.interrupt_sent = false;
@@ -507,10 +512,11 @@ impl SessionChat {
                 request_id,
                 ..
             } => {
-                match request_id {
+                let reset = match request_id {
                     Some(id) if self.request.as_deref() == Some(id.as_str()) => {
                         self.request = None;
                         self.log.load(entries, hidden);
+                        false
                     }
                     Some(_) => return false,
                     None => {
@@ -520,9 +526,15 @@ impl SessionChat {
                         if let Some(composer) = self.composer.as_mut() {
                             composer.commands.forget();
                         }
+                        true
                     }
-                }
+                };
                 self.take_screen(&screen, now);
+                if reset {
+                    // After the screen, whose dropped prompt would
+                    // otherwise read as answered elsewhere again.
+                    self.cards.on_new_entry();
+                }
                 self.refresh_docs();
             }
             DaemonMessage::ChatAppend {
@@ -5440,6 +5452,14 @@ fn hidden_row(look: &RowLook<'_>, hidden: u32) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether a bubble holding `text` draws in the terminal font: any box
+/// drawing or block element character (U+2500 to U+259F) does, since the
+/// interface font has none and a fallback draws them small and off the
+/// baseline.
+fn wants_terminal_font(text: &str) -> bool {
+    text.chars().any(|c| ('\u{2500}'..='\u{259f}').contains(&c))
+}
+
 /// A message the user sent: a bubble on the right, dimmed until the
 /// transcript has it.
 fn user_row(look: &RowLook<'_>, id: &str, text: &str, pending: bool) -> Div {
@@ -5450,6 +5470,9 @@ fn user_row(look: &RowLook<'_>, id: &str, text: &str, pending: bool) -> Div {
             .py(px(BUBBLE_PAD_Y))
             .rounded(px(BUBBLE_RADIUS))
             .bg(gpui::rgb(look.theme.chip))
+            .when(wants_terminal_font(text), |bubble| {
+                bubble.font_family(look.mono.clone())
+            })
             .when(pending, |bubble| bubble.opacity(PENDING_OPACITY))
             .child(select_text(
                 look.select,
@@ -5475,6 +5498,9 @@ fn agent_row(look: &RowLook<'_>, id: &str, from: &str, text: &str) -> Div {
             .py(px(BUBBLE_PAD_Y))
             .rounded(px(BUBBLE_RADIUS))
             .bg(gpui::rgb(look.theme.chip))
+            .when(wants_terminal_font(text), |bubble| {
+                bubble.font_family(look.mono.clone())
+            })
             .child(
                 div()
                     .driver_id(|| sender)
@@ -5723,6 +5749,7 @@ fn show_all_button(
         Layer::Base,
         &look.theme,
     )
+    .self_start()
     .child(if enabled { "Show all" } else { "Loading…" });
     let button = if enabled {
         button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -6032,6 +6059,20 @@ fn span(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_drawing_text_wants_the_terminal_font() {
+        for text in ["╔══╗\n║ok║\n╚══╝", "a ─ b", "▀"] {
+            assert!(wants_terminal_font(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn plain_text_keeps_the_interface_font() {
+        for text in ["hello", "naïve — dash", "→ arrow", ""] {
+            assert!(!wants_terminal_font(text), "{text:?}");
+        }
+    }
 
     #[test]
     fn an_answer_reparses_when_the_issue_context_arrives() {

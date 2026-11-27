@@ -1901,6 +1901,98 @@ fn a_rewind_picker_row_starting_summarize_sends_at_once(cx: &mut TestAppContext)
     );
 }
 
+/// A Rewind picker screen's card with id `id` as the parser reads it:
+/// `rows` in view, `hidden` naming the messages its scroll marks hide, its
+/// cursor on `cursor`.
+fn rewind_picker(id: &str, rows: &[(u32, &str)], hidden: &str, cursor: u32) -> ChatPrompt {
+    let mut picker = prompt(id, ChatPromptKind::Overlay, rows);
+    "Rewind".clone_into(&mut picker.subject);
+    picker.body =
+        format!("Restore the code and/or conversation to the point before\u{2026}\n\n{hidden}");
+    picker.cursor = Some(cursor);
+    picker.can_amend = false;
+    picker
+}
+
+#[gpui::test]
+fn a_rewind_row_answered_here_leaves_no_answered_elsewhere_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let state = || ComposerState::Overlay {
+        name: "rewind_picker".to_owned(),
+    };
+    let scrolled_down = rewind_picker(
+        "r1",
+        &[
+            (2, "WRITEFILE please create cats.md"),
+            (3, "say ok"),
+            (4, "(current)"),
+            (5, "Close"),
+        ],
+        "1 earlier message is in the terminal.",
+        4,
+    );
+    show_screen(&mut h, state(), Some(scrolled_down));
+    h.sent();
+    h.click_on("chat-card-2");
+    assert_eq!(answer_kinds(&mut h), [opt(2)]);
+    // The row press scrolls the picker, which gives its prompt a new id.
+    let scrolled_up = rewind_picker(
+        "r1b",
+        &[
+            (1, "first message"),
+            (2, "WRITEFILE please create cats.md"),
+            (3, "say ok"),
+            (4, "Close"),
+        ],
+        "1 later message is in the terminal.",
+        2,
+    );
+    show_screen(&mut h, state(), Some(scrolled_up));
+    assert_eq!(
+        card(&mut h),
+        Some(("r1b".to_owned(), true)),
+        "the scrolled picker is still ours"
+    );
+    show_screen(&mut h, rewind_state(), Some(rewind_choice("r2", 1)));
+    assert!(
+        !h.root(|root, _| root.chat_answered_elsewhere("s1")),
+        "our own row press moved the picker on"
+    );
+    assert!(!painted(&mut h, "chat-answered-elsewhere"));
+    assert_eq!(
+        card(&mut h),
+        Some(("r2".to_owned(), false)),
+        "the restore choice is not busy"
+    );
+    h.click_on("chat-card-2");
+    assert!(
+        answer_kinds(&mut h).is_empty(),
+        "the first click only arms the row"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_card_button_label("s1", "2")),
+        Some("Confirm: Restore conversation".to_owned()),
+        "the restore choice takes presses"
+    );
+}
+
+#[gpui::test]
+fn a_chat_reset_clears_the_answered_elsewhere_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let list = [(1, "Yes"), (2, "No")];
+    show(&mut h, prompt("q1", ChatPromptKind::Question, &list));
+    show(&mut h, prompt("q2", ChatPromptKind::Question, &list));
+    assert!(h.root(|root, _| root.chat_answered_elsewhere("s1")));
+    h.send(reply(None, vec![]));
+    assert!(
+        !h.root(|root, _| root.chat_answered_elsewhere("s1")),
+        "the chat started over"
+    );
+    assert!(!painted(&mut h, "chat-answered-elsewhere"));
+}
+
 /// A `/btw` side question's Close prompt with id `id` and `body`.
 fn side_question(id: &str, body: &str) -> ChatPrompt {
     let mut close = prompt(id, ChatPromptKind::Overlay, &[(1, "Close")]);
@@ -5723,6 +5815,19 @@ fn show_all_appears_on_a_cut_result_and_swaps_in_the_full_text(cx: &mut TestAppC
     assert!(
         !drawn_now(&mut h, SHOW_ALL),
         "nothing more is left to fetch"
+    );
+}
+
+#[gpui::test]
+fn show_all_is_only_as_wide_as_its_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = cut_result(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    assert!(painted(&mut h, SHOW_ALL), "the cut result offers the rest");
+    let button = h.bounds(SHOW_ALL).size.width;
+    let card = h.bounds("chat-row-p1-t1").size.width;
+    assert!(
+        button * 2.0 < card,
+        "Show all is a compact button, not the card's width: {button:?} vs {card:?}"
     );
 }
 
