@@ -74,13 +74,28 @@ const TRAY_CARD_HEIGHT: f32 = 356.0;
 /// The most of the landscape list pane's usable height the card takes: half,
 /// so Home still shows under it.
 const TRAY_CARD_MAX_SHARE: f32 = 0.5;
+/// The card's padding, in points, on every side.
+const TRAY_CARD_PAD: f32 = 12.0;
+/// The gap, in points, between the card's header, its body and `Open`.
+const TRAY_CARD_GAP: f32 = 6.0;
+/// A line at the card's text size, in points: the height its header takes.
+const TRAY_CARD_LINE: f32 = 18.0;
+/// The shortest the landscape card draws, in points: its padding, its
+/// header, the gaps above and below its body and `Open` whole, so a pane the
+/// keyboard squeezes scrolls the body rather than clipping the button.
+const TRAY_CARD_MIN: f32 =
+    TRAY_CARD_PAD * 2.0 + TRAY_CARD_LINE + TRAY_CARD_GAP * 2.0 + TOUCH_TARGET;
 
-/// The Needs you card's height in `layout` on a window `usable_height` points
-/// tall: `TRAY_CARD_HEIGHT` beside the list, and no more than
-/// `TRAY_CARD_MAX_SHARE` of it in the landscape list pane.
-fn tray_card_height(layout: PhoneLayout, usable_height: f32) -> f32 {
+/// The Needs you card's height in `layout` on a list pane `pane_height` points
+/// tall, the pane the content padding leaves so the composer's keyboard
+/// shortens it: `TRAY_CARD_HEIGHT` beside the list, and no more than
+/// `TRAY_CARD_MAX_SHARE` of it in the landscape list pane, [`TRAY_CARD_MIN`]
+/// once half of the pane would clip `Open`, and never the whole pane.
+fn tray_card_height(layout: PhoneLayout, pane_height: f32) -> f32 {
     if layout == PhoneLayout::TerminalFull {
-        (usable_height * TRAY_CARD_MAX_SHARE).min(TRAY_CARD_HEIGHT)
+        (pane_height * TRAY_CARD_MAX_SHARE)
+            .clamp(TRAY_CARD_MIN, TRAY_CARD_HEIGHT)
+            .min(pane_height)
     } else {
         TRAY_CARD_HEIGHT
     }
@@ -693,12 +708,12 @@ impl PhoneRoot {
             .driver_id(|| "phone-tray-card".to_owned())
             .relative()
             .left(px(self.tray.offset()))
-            .h(px(tray_card_height(self.layout, self.usable_height)))
+            .h(px(tray_card_height(self.layout, self.pane_height)))
             .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(px(6.0))
-            .p(px(12.0))
+            .gap(px(TRAY_CARD_GAP))
+            .p(px(TRAY_CARD_PAD))
             .rounded(px(10.0))
             .border_1()
             .border_color(gpui::rgb(t.asking))
@@ -1330,8 +1345,9 @@ impl PhoneRoot {
 
 #[cfg(test)]
 mod tests {
-    use super::tray_card_height;
-    use crate::phone::PhoneLayout;
+    use super::{TRAY_CARD_MIN, tray_card_height};
+    use crate::phone::{PhoneLayout, content_padding};
+    use gpui::{Edges, Size, WindowInsets, px};
 
     /// The landscape list pane gives the card half its height, and every
     /// other layout keeps the card's own.
@@ -1341,5 +1357,63 @@ mod tests {
         assert_eq!(tray_card_height(PhoneLayout::TerminalFull, 800.0), 356.0);
         assert_eq!(tray_card_height(PhoneLayout::TwoPane, 402.0), 356.0);
         assert_eq!(tray_card_height(PhoneLayout::Single, 402.0), 356.0);
+    }
+
+    /// On its side the card takes half the pane the keyboard leaves Home's
+    /// list, its floor once half would clip `Open`, and its own height in a
+    /// tall pane, never more than the pane itself; with the keyboard down it
+    /// keeps the height it had.
+    #[test]
+    fn tray_card_height_leaves_half_the_pane_under_the_keyboard() {
+        let viewport = Size {
+            width: px(874.0),
+            height: px(402.0),
+        };
+        let up = WindowInsets {
+            safe_area: Edges {
+                bottom: px(21.0),
+                ..Edges::default()
+            },
+            ime: Edges {
+                bottom: px(300.0),
+                ..Edges::default()
+            },
+            ..WindowInsets::default()
+        };
+        let padding = content_padding(&up);
+        let pane = f32::from(viewport.height) - f32::from(padding.top) - f32::from(padding.bottom);
+        assert_eq!(pane, 102.0, "the keyboard leaves the pane 102 pt");
+        assert_eq!(
+            tray_card_height(PhoneLayout::TerminalFull, pane),
+            TRAY_CARD_MIN,
+            "half of the squeezed pane would clip Open"
+        );
+        assert_eq!(
+            tray_card_height(PhoneLayout::TerminalFull, 300.0),
+            150.0,
+            "a pane that holds half keeps half"
+        );
+        assert_eq!(
+            tray_card_height(PhoneLayout::TerminalFull, 800.0),
+            356.0,
+            "a tall pane keeps the card's own height"
+        );
+        assert_eq!(
+            tray_card_height(PhoneLayout::TerminalFull, 60.0),
+            60.0,
+            "the card is never taller than its pane"
+        );
+
+        let down = WindowInsets {
+            safe_area: up.safe_area,
+            ..WindowInsets::default()
+        };
+        let padding = content_padding(&down);
+        let pane = f32::from(viewport.height) - f32::from(padding.top) - f32::from(padding.bottom);
+        assert_eq!(
+            tray_card_height(PhoneLayout::TerminalFull, pane),
+            190.5,
+            "with the keyboard down the card keeps its place"
+        );
     }
 }

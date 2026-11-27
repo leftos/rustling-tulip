@@ -228,10 +228,11 @@ pub struct PhoneRoot {
     /// The layout the last frame picked from the window's usable size, which
     /// the views draw their panes by.
     pub(super) layout: PhoneLayout,
-    /// The usable height the last frame read ([`PhoneLayout::usable_height`]),
-    /// which the tray sizes its card by. Unbounded until the first frame, so
-    /// the card never draws smaller than its full height.
-    pub(super) usable_height: f32,
+    /// The height, in points, of the pane Home's list draws in the last
+    /// frame: the window less [`content_padding`], so the composer's keyboard
+    /// shortens it. The tray sizes its card by it. Unbounded until the first
+    /// frame, so the card never draws smaller than its full height.
+    pub(super) pane_height: f32,
     /// The page the shown session returns to when the iPhone turns upright:
     /// recorded when turning it on its side moved the session off it, and
     /// forgotten once the user picks a page or another session shows.
@@ -379,7 +380,7 @@ impl PhoneRoot {
             resumes: Vec::new(),
             insets_override: None,
             layout: PhoneLayout::Single,
-            usable_height: f32::INFINITY,
+            pane_height: f32::INFINITY,
             landscape_return: None,
             logged_ready: false,
             in_front: window.visibility() == WindowVisibility::Visible,
@@ -2415,24 +2416,29 @@ fn remove_inbox_file(path: &Path) {
 /// session header.
 const CHIP_TOP: f32 = 60.0;
 
+/// How far above the safe area's bottom the copied chip sits where no
+/// session header draws over its page: within the key bar row at the
+/// terminal's foot, clear of the terminal's text.
+const CHIP_BAR_LIFT: f32 = 12.0;
+
 impl PhoneRoot {
-    /// The "copied" chip, centred across the screen `top` (the safe area's
-    /// top inset) plus [`CHIP_TOP`] down, while a copy is recent; it takes
-    /// no input.
-    fn copied_chip_layer(&self, top: Pixels, cx: &App) -> Option<Div> {
+    /// The "copied" chip, centred across the screen while a copy is recent:
+    /// [`CHIP_TOP`] under the safe area's top, beneath a session's header,
+    /// or, where the landscape full-screen terminal draws its text with no
+    /// header and nothing over it, over its key bar row at the bottom so it
+    /// covers no text. It takes no input.
+    fn copied_chip_layer(&self, padding: Edges<Pixels>, cx: &App) -> Option<Div> {
         let t = crate::ui_theme::theme(cx);
         let offset = crate::fonts::ui_text_size(cx);
         let chip = self.root.read(cx).copied_chip_element(offset, &t)?;
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(top + px(CHIP_TOP))
-                .flex()
-                .justify_center()
-                .child(chip),
-        )
+        let layer = div().absolute().left_0().right_0().flex().justify_center();
+        let over_text = self.terminal_full(cx) && !self.page_covered();
+        let layer = if over_text {
+            layer.bottom(padding.bottom + px(CHIP_BAR_LIFT))
+        } else {
+            layer.top(padding.top + px(CHIP_TOP))
+        };
+        Some(layer.child(chip))
     }
 }
 
@@ -2467,7 +2473,8 @@ enum SheetLayer {
     PromptSheet,
     /// The composer's Attach sheet.
     AttachSheet,
-    /// The Linear card sheet, over Home while no session page draws.
+    /// The Linear card sheet Home raised, over Home while no session page
+    /// draws beside it to carry the card itself.
     CardSheet,
     /// The share sheet, over the whole window.
     ShareSheet,
@@ -2714,8 +2721,10 @@ impl PhoneRoot {
     /// The sheets over the page, in order: Home's long-press sheet, the
     /// browser's folder sheet, the prompt sheet, the composer's Attach sheet,
     /// then the Linear card sheet Home raised; in two panes each covers its
-    /// own pane only, and spans the window while the list is collapsed. With
-    /// them, whether any covers the session pane ([`layer_covers_session`]).
+    /// own pane only, the card the pane the viewer or the browser fills
+    /// ([`Self::card_pane`]), and spans the window while the list is
+    /// collapsed. With them, whether any covers the session pane
+    /// ([`layer_covers_session`]).
     fn sheet_layers(
         &mut self,
         host_open: bool,
@@ -2763,10 +2772,17 @@ impl PhoneRoot {
         let covers_session = drawn
             .iter()
             .any(|(layer, div)| div.is_some() && layer_covers_session(split, *layer));
+        let card_pane = self.card_pane();
         let layers = drawn
             .into_iter()
             .filter_map(|(layer, div)| {
-                let pane = if split { layer.pane() } else { None };
+                let pane = if !split {
+                    None
+                } else if matches!(layer, SheetLayer::CardSheet) {
+                    Some(card_pane)
+                } else {
+                    layer.pane()
+                };
                 div.map(|div| Self::boxed(div, pane, &padding))
             })
             .collect();
@@ -2788,13 +2804,25 @@ impl PhoneRoot {
         host_open && !page_over_home
     }
 
-    /// Whether the Linear card sheet draws over Home: a card is up, Home is
-    /// the page on screen, and no session page draws beside it to carry the
-    /// card itself.
+    /// Whether the Linear card sheet draws over the page: a card Home's list
+    /// raised is up, Home is on screen, and no session page draws beside it
+    /// to carry the card itself: none is shown, or the viewer or the browser
+    /// fills its pane.
     fn home_card_over(&self, host_open: bool, cx: &App) -> bool {
-        self.shown.is_none()
+        (self.shown.is_none() || self.page_covered())
             && self.home_sheet_over(host_open, cx)
             && self.root.read(cx).phone_linear_card().is_some()
+    }
+
+    /// The pane a Home row chip's card draws over in two panes: the session
+    /// pane while the viewer or the browser fills it, since no session page
+    /// draws there to carry the card, else the list pane it was raised from.
+    fn card_pane(&self) -> Pane {
+        if self.shown.is_some() && self.page_covered() {
+            Pane::Session
+        } else {
+            Pane::List
+        }
     }
 
     /// Whether the browser's folder sheet may draw: the browser is the page
@@ -2876,9 +2904,11 @@ impl Render for PhoneRoot {
             .unwrap_or_else(|| window.insets());
         let previous = self.layout;
         self.layout = PhoneLayout::of(window.viewport_size(), &insets);
-        self.usable_height = PhoneLayout::usable_height(window.viewport_size(), &insets);
         self.turn_terminal(previous, cx);
         let padding = content_padding(&insets);
+        self.pane_height = f32::from(window.viewport_size().height)
+            - f32::from(padding.top)
+            - f32::from(padding.bottom);
         let keyboard_up = crate::keyboard::is_up(&insets);
         let cover = super::terminal_fit::hidden_height(
             f32::from(insets.safe_area.bottom),
@@ -2925,7 +2955,7 @@ impl Render for PhoneRoot {
             // layer's in the body.
             .child(Self::pan_guard(cx))
             .child(padded().size_full().child(body))
-            .children(self.copied_chip_layer(padding.top, cx))
+            .children(self.copied_chip_layer(padding, cx))
             .children(layers)
             // The pairing scrim dims the whole window, the status bar and the
             // bottom strip too; its panel stays inside the padding, so it

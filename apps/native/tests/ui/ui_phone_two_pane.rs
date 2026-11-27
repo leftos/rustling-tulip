@@ -1006,3 +1006,129 @@ fn the_header_offers_no_list_toggle_in_one_pane(cx: &mut TestAppContext) {
     assert!(!drawn(&mut h, "phone-list-toggle"), "no list to hide");
     assert_eq!(list_toggle(&mut h), None);
 }
+
+/// The Linear context of a host whose workspace `acme` has the team `RT`
+/// and a key.
+fn linear() -> DaemonMessage {
+    DaemonMessage::LinearContext {
+        team_keys: vec!["RT".to_owned()],
+        workspace: Some("acme".to_owned()),
+        key_configured: true,
+    }
+}
+
+/// An iPad in two panes, the saved host listing one session `n` titled
+/// `RT-12 Fix the login loop`, its Linear context sent, the window's insets
+/// drawing a status band above the pages and a home indicator below them;
+/// everything sent so far is drained.
+fn titled_ipad<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::phone(cx, dir);
+    h.tokens().set(REMOTE, "t1").expect("seed a token");
+    let mut host = h.host(&saved_remote());
+    host.connect_with_features(&[protocol::FEATURE_LINEAR_LINKS]);
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("n")
+                .label("RT-12 Fix the login loop")
+                .in_repo("r1")
+                .status("working")
+                .build(),
+        ],
+    });
+    host.send(linear());
+    h.host(&saved_remote()).sent();
+    resize(&mut h, 1180.0, 820.0);
+    set_insets(&mut h, 24.0, 0.0, 20.0, 0.0);
+    h
+}
+
+/// Opens the viewer over the session pane on a kept copy of a fetched file,
+/// as a fetch that has just landed does.
+fn open_viewer(h: &mut Harness<'_>, dir: &TestDir) {
+    let copies = dir.path().join("copies");
+    let root = copies.clone();
+    h.root_update(move |root_view, _, _| root_view.set_remote_files_root(root));
+    let saved = PhoneFetched {
+        host: REMOTE.to_owned(),
+        host_path: "/abs/notes.txt".to_owned(),
+        local_path: format!("{REMOTE}/root/abs/notes.txt"),
+        size: 5,
+        host_label: "box".to_owned(),
+    };
+    let path = copies.join(&saved.local_path);
+    std::fs::create_dir_all(path.parent().expect("a copy has a folder"))
+        .expect("make the copy's folder");
+    std::fs::write(&path, "text\n").expect("write the copy");
+    h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_back_gesture_takes_the_card_over_the_viewer_down_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_ipad(cx, &dir);
+    h.click_on(&row("n"));
+    open_viewer(&mut h, &dir);
+    h.tap_on("phone-home-row-chip-n");
+    assert!(
+        drawn(&mut h, "phone-linear-sheet"),
+        "the card draws over the viewer"
+    );
+
+    back_gesture(&mut h);
+
+    assert!(
+        !drawn(&mut h, "phone-linear-sheet"),
+        "the card goes down first"
+    );
+    assert!(
+        drawn(&mut h, "phone-viewer-back"),
+        "and the viewer stays open"
+    );
+}
+
+#[gpui::test]
+fn a_row_chips_card_draws_over_the_pane_the_viewer_fills(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = titled_ipad(cx, &dir);
+    h.click_on(&row("n"));
+    open_viewer(&mut h, &dir);
+    assert!(drawn(&mut h, "phone-viewer-back"), "the viewer shows");
+    assert!(
+        !drawn(&mut h, "phone-session"),
+        "in place of the session page"
+    );
+
+    h.tap_on("phone-home-row-chip-n");
+
+    assert!(drawn(&mut h, "phone-linear-sheet"), "the chip's card draws");
+    let scrim = h.bounds("phone-linear-scrim");
+    assert!(
+        within(scrim, session_pane(&mut h)),
+        "the card draws over the pane the viewer fills: {scrim:?}"
+    );
+
+    // The session page carries the card itself once it draws again, so Home's
+    // layer stands down: the card is drawn once, inside the window's insets.
+    h.root_update(|root, _, cx| root.dismiss_linear_card(cx));
+    h.click_on("phone-viewer-back");
+    assert!(drawn(&mut h, "phone-session"), "the page shows again");
+    let page = h.bounds("phone-session");
+    assert!(page.origin.y > px(0.0), "inside the status band: {page:?}");
+
+    h.tap_on("phone-home-row-chip-n");
+
+    assert!(drawn(&mut h, "phone-linear-sheet"), "the card draws again");
+    assert_eq!(
+        h.bounds("phone-linear-scrim").origin.y,
+        page.origin.y,
+        "the session page's own card, not Home's layer over it"
+    );
+}

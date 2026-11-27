@@ -204,11 +204,28 @@ impl PhoneRoot {
         // panes left open beside or under it.
         if self.settings.is_some() {
             self.settings_back(window, cx);
-        } else if self.viewer.is_some() {
+            return;
+        }
+        // Home's card goes down before the page under it turns.
+        if self.dismiss_home_card(cx) {
+            return;
+        }
+        if self.viewer.is_some() {
             self.viewer_back(cx);
         } else if self.shown.is_some() {
             self.session_back(cx);
         }
+    }
+
+    /// Takes Home's Linear card down if one is up: a back gesture goes to
+    /// the card before the page under it, saying whether it took it down.
+    pub(super) fn dismiss_home_card(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.root.read(cx).phone_linear_card().is_none() {
+            return false;
+        }
+        self.root.update(cx, crate::RootView::dismiss_linear_card);
+        cx.notify();
+        true
     }
 
     /// The header over Home and the hosts screen: the `Settings` button at

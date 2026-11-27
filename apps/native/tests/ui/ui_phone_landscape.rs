@@ -11,11 +11,15 @@ use std::sync::Arc;
 use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
-use gpui::{BackGesturePhase, Bounds, Edges, Pixels, TestAppContext, WindowInsets, point, px};
+use gpui::{
+    BackGesturePhase, Bounds, Edges, Modifiers, Pixels, Point, TestAppContext, WindowInsets, point,
+    px,
+};
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
     DaemonMessage, SessionSnapshot,
 };
+use rustling_tulip_native::PhoneFetched;
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use rustling_tulip_native::phone::{PhoneLayout, PhoneRoot};
 use rustling_tulip_native::target::HostKey;
@@ -573,6 +577,163 @@ fn the_tray_card_leaves_room_for_home_in_landscape(cx: &mut TestAppContext) {
     assert!(
         card.size.height <= pane.size.height * 0.55,
         "the card {card:?} leaves the landscape list pane {pane:?} room"
+    );
+}
+
+/// The copied chip's driver id, its label (`copied::CHIP_LABEL`).
+const COPIED_CHIP: &str = "\u{2713} copied";
+
+/// The shortest the landscape tray card draws: `TRAY_CARD_MIN` in
+/// `phone/home_view.rs`, its padding, header, gaps and `Open` whole.
+const TRAY_CARD_FLOOR: f32 = 98.0;
+
+/// The insets on its side with a `keyboard`-tall on-screen keyboard up, the
+/// keyboard standing over the home indicator's band.
+fn keyboard_insets(keyboard: f32) -> WindowInsets {
+    WindowInsets {
+        ime: Edges {
+            bottom: px(keyboard),
+            ..Edges::default()
+        },
+        ..side_insets()
+    }
+}
+
+/// Opens the viewer over the session pane on a kept copy of a fetched file,
+/// as a fetch that has just landed does.
+fn open_viewer(h: &mut Harness<'_>, dir: &TestDir) {
+    let copies = dir.path().join("copies");
+    let root = copies.clone();
+    h.root_update(move |root_view, _, _| root_view.set_remote_files_root(root));
+    let saved = PhoneFetched {
+        host: REMOTE.to_owned(),
+        host_path: "/abs/notes.txt".to_owned(),
+        local_path: format!("{REMOTE}/root/abs/notes.txt"),
+        size: 5,
+        host_label: "box".to_owned(),
+    };
+    let path = copies.join(&saved.local_path);
+    std::fs::create_dir_all(path.parent().expect("a copy has a folder"))
+        .expect("make the copy's folder");
+    std::fs::write(&path, "text\n").expect("write the copy");
+    h.root_update(|root, _, cx| root.phone_file_saved(saved, cx));
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_squeezed_landscape_card_keeps_open_whole(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_side(cx, &dir);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: waiting(),
+    });
+    h.cx.run_until_parked();
+    set_insets(&mut h, Some(keyboard_insets(300.0)));
+
+    let pane = h.bounds("phone-list-pane");
+    assert!(
+        pane.size.height <= px(110.0),
+        "the keyboard squeezes the pane: {pane:?}"
+    );
+    assert!(drawn(&mut h, "phone-tray-card"), "the card shows");
+    let card = h.bounds("phone-tray-card");
+    assert!(
+        card.size.height <= pane.size.height * 0.5 || card.size.height == px(TRAY_CARD_FLOOR),
+        "the card {card:?} takes at most half the pane {pane:?}, or its floor"
+    );
+    let open = h.bounds("phone-tray-open");
+    assert!(
+        within(open, card),
+        "Open {open:?} sits inside the card {card:?}"
+    );
+}
+
+/// The terminal slot of the saved host's session `id`.
+fn slot(id: &str) -> String {
+    let wire = HostKey::of(&saved_remote())
+        .wire()
+        .expect("a tailnet host has a wire key")
+        .to_owned();
+    format!("popout:{wire}:{id}")
+}
+
+/// Where the terminal's cell at `col` of its first row lies, `dx` right of
+/// its centre.
+fn cell_edge(h: &mut Harness<'_>, pane: &str, col: usize, dx: f32) -> Point<Pixels> {
+    let at = h
+        .root(|root, cx| root.pane_cell_center(pane, col, 0, cx))
+        .expect("the terminal's grid is laid out");
+    point(at.x + px(dx), at.y)
+}
+
+#[gpui::test]
+fn the_copied_chip_clears_the_landscape_terminals_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_side(cx, &dir);
+    h.click_on(&row("a"));
+    h.click_on("phone-session-toggle");
+    assert_full(&mut h);
+    h.host(&saved_remote()).pty("a", b"hello world");
+    h.cx.run_until_parked();
+    let pane = slot("a");
+    let (from, to) = (
+        cell_edge(&mut h, &pane, 0, -2.0),
+        cell_edge(&mut h, &pane, 4, 2.0),
+    );
+    h.drag(from, to, [Modifiers::none(); 2]);
+
+    assert!(drawn(&mut h, COPIED_CHIP), "the copy raises the chip");
+    let chip = h.bounds(COPIED_CHIP);
+    // The screen's box is the terminal's text: the key bar sits under it and
+    // no header draws over it.
+    let text = h.bounds("phone-session-terminal");
+    assert!(
+        text.size.height > px(0.0),
+        "the terminal's text area: {text:?}"
+    );
+    assert!(
+        chip.top() >= text.bottom(),
+        "the chip {chip:?} sits clear of the terminal's text {text:?}"
+    );
+
+    turn_upright(&mut h);
+
+    assert!(drawn(&mut h, COPIED_CHIP), "the chip stays");
+    let page = h.bounds("phone-session");
+    assert_eq!(
+        h.bounds(COPIED_CHIP).origin.y,
+        page.origin.y + px(60.0),
+        "and keeps its place under the page's header"
+    );
+}
+
+#[gpui::test]
+fn the_copied_chip_keeps_its_place_under_a_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_side(cx, &dir);
+    h.click_on(&row("a"));
+    h.click_on("phone-session-toggle");
+    assert_full(&mut h);
+    h.host(&saved_remote()).pty("a", b"hello world");
+    h.cx.run_until_parked();
+    let pane = slot("a");
+    let (from, to) = (
+        cell_edge(&mut h, &pane, 0, -2.0),
+        cell_edge(&mut h, &pane, 4, 2.0),
+    );
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert!(drawn(&mut h, COPIED_CHIP), "the copy raises the chip");
+
+    open_viewer(&mut h, &dir);
+
+    assert!(
+        drawn(&mut h, "phone-viewer-back"),
+        "the viewer fills the screen"
+    );
+    assert_eq!(
+        h.bounds(COPIED_CHIP).origin.y,
+        px(60.0),
+        "the chip keeps its place under the header, the viewer covering the text"
     );
 }
 

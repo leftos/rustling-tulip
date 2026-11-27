@@ -289,7 +289,7 @@ impl PhoneRoot {
         cx: &mut Context<Self>,
     ) {
         if self.settings.is_none() && self.viewer.is_none() && self.browser.is_some() {
-            if super::session::back_on(event.phase) {
+            if super::session::back_on(event.phase) && !self.dismiss_home_card(cx) {
                 self.browser_back(cx);
             }
             return;

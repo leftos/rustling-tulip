@@ -31,8 +31,8 @@ pub enum PhoneLayout {
 
 impl PhoneLayout {
     /// The height, in points, of `viewport` less the safe area's top and
-    /// bottom bands: the height the layout reads, and the one the tray sizes
-    /// a card by. The keyboard is not counted.
+    /// bottom bands: the height the layout reads. The keyboard is not
+    /// counted.
     #[must_use]
     pub fn usable_height(viewport: Size<Pixels>, insets: &WindowInsets) -> f32 {
         let safe = insets.safe_area;
