@@ -1,0 +1,58 @@
+[package]
+name = "rustling-tulip-ios-share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "rustling-tulip phone app's share extension: writes shared files, text and links into the app's share inbox"
+publish = false
+
+[lib]
+name = "rustling_tulip_ios_share"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustling-tulip-ios-share"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+# The request completes on the main thread, whichever provider answers last.
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2 = "0.6"
+# The extension context's input items, their item providers and the App
+# Group container the inbox lives in.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSData",
+    "NSError",
+    "NSExtensionContext",
+    "NSExtensionItem",
+    "NSFileManager",
+    "NSItemProvider",
+    "NSObject",
+    "NSProgress",
+    "NSString",
+    "NSURL",
+] }
+# The principal class is a `UIViewController`, whose extension context
+# brings the shared items.
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIResponder",
+    "UIViewController",
+] }
+tracing = { workspace = true }

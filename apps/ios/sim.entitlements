@@ -4,6 +4,10 @@
 <dict>
 	<key>application-identifier</key>
 	<string>SIMULATOR0.dev.leftos.rustling-tulip.phone</string>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.dev.leftos.rustling-tulip.phone</string>
+	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>SIMULATOR0.dev.leftos.rustling-tulip</string>

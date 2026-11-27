@@ -344,6 +344,9 @@ png = "0.18"
 tokio = { workspace = true, features = ["test-util"] }
 # The fake TLS daemon in net.rs's tests: a test CA and a leaf signed by it.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# The share extension's inbox writer (its library only), whose items the
+# share inbox's round-trip test reads back with the app's own reader.
+rustling-tulip-ios-share = { path = "../ios-share" }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.61", features = [

@@ -18,6 +18,7 @@ members = [
     "apps/native",
     "apps/ios",
     "apps/ios-notify",
+    "apps/ios-share",
     "tools/rt-driver-mcp",
     "tools/folder-bench",
     "tools/protocol-ts",

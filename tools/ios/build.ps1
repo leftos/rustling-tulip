@@ -5,9 +5,11 @@
 # Runs on the Mac (pwsh). The bundle holds the binary and apps/ios/Info.plist,
 # its version keys set from the workspace version, and the notification service
 # extension (apps/ios-notify) as PlugIns/RustlingTulipNotify.appex with the same
-# version keys, and the fallback alert texts as en.lproj/Localizable.strings. A
-# simulator bundle is signed ad hoc, the extension first; a device bundle is
-# left unsigned unless -Sign is given.
+# version keys, the share extension (apps/ios-share) as
+# PlugIns/RustlingTulipShare.appex likewise, and the fallback alert texts as
+# en.lproj/Localizable.strings. A simulator bundle is signed ad hoc, the
+# extensions first; a device bundle is left unsigned unless -Sign is given.
+# A -Sign build leaves the share extension out.
 #
 #   pwsh -NoProfile -File tools/ios/build.ps1 [-Target sim|device] [-Release]
 #   pwsh -NoProfile -File tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>
@@ -45,6 +47,9 @@ $NotifyBinaryName = 'rustling-tulip-ios-notify'
 $NotifyBundle = 'PlugIns/RustlingTulipNotify.appex'
 # App Store Connect refuses an extension whose executable is not named after its bundle folder.
 $NotifyExecutable = 'RustlingTulipNotify'
+$ShareBinaryName = 'rustling-tulip-ios-share'
+$ShareBundle = 'PlugIns/RustlingTulipShare.appex'
+$ShareExecutable = 'RustlingTulipShare'
 $PlistBuddy = '/usr/libexec/PlistBuddy'
 $AppId = 'dev.leftos.rustling-tulip.phone'
 $SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64',
@@ -71,6 +76,7 @@ function Invoke-CargoBuild([string] $Triple) {
     & rustup target add $Triple
     Assert-LastExit "rustup target add $Triple"
     $cargoArgs = @('build', '-p', $BinaryName, '-p', $NotifyBinaryName, '--target', $Triple)
+    if ($EmbedShare) { $cargoArgs += '-p', $ShareBinaryName }
     if ($Release) { $cargoArgs += '--release' }
     $env:IPHONEOS_DEPLOYMENT_TARGET = '15.0'
     & cargo @cargoArgs
@@ -82,7 +88,8 @@ function Invoke-CargoBuild([string] $Triple) {
 function Write-SimEntitlement {
     $dir = Join-Path $RepoRoot 'target/ios/sim-entitlements'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    foreach ($pair in @(@('app', 'apps/ios/sim.entitlements'), @('notify', 'apps/ios-notify/sim.entitlements'))) {
+    foreach ($pair in @(@('app', 'apps/ios/sim.entitlements'), @('notify', 'apps/ios-notify/sim.entitlements'),
+            @('share', 'apps/ios-share/sim.entitlements'))) {
         $xml = Join-Path $dir "$($pair[0]).xml"
         $der = Join-Path $dir "$($pair[0]).der"
         & plutil -convert xml1 -o $xml (Join-Path $RepoRoot $pair[1]) | Out-Host
@@ -120,6 +127,7 @@ function Build-AppBundle([string] $Triple) {
     Write-PlistValue $plist 'CFBundleShortVersionString' $numeric
     Write-PlistValue $plist 'CFBundleVersion' $numeric
     Build-NotifyExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$NotifyBinaryName") $numeric
+    if ($EmbedShare) { Build-ShareExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$ShareBinaryName") $numeric }
     return $app
 }
 
@@ -132,6 +140,19 @@ function Build-NotifyExtension([string] $App, [string] $Binary, [string] $Versio
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $appex $NotifyExecutable)
     $plist = Join-Path $appex 'Info.plist'
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios-notify/Info.plist') -Destination $plist
+    Write-PlistValue $plist 'CFBundleShortVersionString' $Version
+    Write-PlistValue $plist 'CFBundleVersion' $Version
+}
+
+# The share extension, PlugIns/RustlingTulipShare.appex: its binary and
+# apps/ios-share/Info.plist, carrying the app's version keys.
+function Build-ShareExtension([string] $App, [string] $Binary, [string] $Version) {
+    if (-not (Test-Path $Binary)) { throw "no share extension binary at $Binary after the build" }
+    $appex = Join-Path $App $ShareBundle
+    New-Item -ItemType Directory -Force -Path $appex | Out-Null
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $appex $ShareExecutable)
+    $plist = Join-Path $appex 'Info.plist'
+    Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps/ios-share/Info.plist') -Destination $plist
     Write-PlistValue $plist 'CFBundleShortVersionString' $Version
     Write-PlistValue $plist 'CFBundleVersion' $Version
 }
@@ -416,6 +437,8 @@ if ($Sign) {
     }
 }
 
+# A -Sign build does not sign the share extension yet, so it leaves it out.
+$EmbedShare = -not $Sign
 $triple = if ($Target -eq 'sim') { 'aarch64-apple-ios-sim' } else { 'aarch64-apple-ios' }
 # Only a simulator build links entitlements into its binaries; a device build is signed with them.
 $env:RUSTLING_TULIP_IOS_SIM_ENTITLEMENTS = if ($Target -eq 'sim') { Write-SimEntitlement } else { $null }
@@ -427,7 +450,9 @@ finally {
 }
 $app = Build-AppBundle $triple
 if ($Target -eq 'sim') {
-    # Inside out: the extension first, then the app that holds it.
+    # Inside out: the extensions first, then the app that holds them.
+    & codesign --force --sign - (Join-Path $app $ShareBundle)
+    Assert-LastExit 'codesign RustlingTulipShare.appex'
     & codesign --force --sign - (Join-Path $app $NotifyBundle)
     Assert-LastExit 'codesign RustlingTulipNotify.appex'
     & codesign --force --sign - $app

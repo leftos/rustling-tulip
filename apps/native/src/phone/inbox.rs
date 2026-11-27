@@ -635,6 +635,61 @@ mod tests {
     }
 
     #[test]
+    fn items_the_share_extension_writes_read_back_ready() {
+        use rustling_tulip_ios_share::{Inbox, TextKind};
+
+        let dir = TestDir::new("extension");
+        let source = TestDir::new("extension-source");
+        std::fs::write(source.0.join("IMG_7.heic"), b"image bytes").expect("write the shared file");
+        let inbox = Inbox::new(dir.0.clone());
+        let file_id = inbox
+            .write_file(&source.0.join("IMG_7.heic"), "IMG_7.heic", 10)
+            .expect("write a file item");
+        let text_id = inbox
+            .write_text(TextKind::Text, "hello there", 20)
+            .expect("write a text item");
+        let url_id = inbox
+            .write_text(TextKind::Url, "https://example.com/a?b=c", 30)
+            .expect("write a link item");
+
+        for id in [&file_id, &text_id, &url_id] {
+            let bytes =
+                read_manifest(&dir.0.join(format!("{id}.json"))).expect("the manifest reads");
+            Manifest::parse(&bytes).expect("the manifest is valid");
+        }
+        let scan = scan(&dir.0, at_ms(NOW_MS));
+
+        assert!(scan.bad.is_empty(), "{:?}", scan.bad);
+        assert!(scan.stale.is_empty(), "{:?}", scan.stale);
+        assert!(scan.orphans.is_empty(), "{:?}", scan.orphans);
+        assert_eq!(scan.ready.len(), 3, "{:?}", scan.ready);
+        let (file, text, url) = (&scan.ready[0], &scan.ready[1], &scan.ready[2]);
+        assert_eq!(file.manifest.id, file_id);
+        assert_eq!(file.manifest.kind, Kind::File);
+        assert_eq!(file.manifest.name.as_deref(), Some("IMG_7.heic"));
+        assert_eq!(file.manifest.created, 10);
+        let payload = file
+            .payload_path
+            .as_deref()
+            .expect("a file item names its payload");
+        assert_eq!(
+            std::fs::read(payload).expect("read the payload"),
+            b"image bytes"
+        );
+        assert_eq!(text.manifest.id, text_id);
+        assert_eq!(text.manifest.kind, Kind::Text);
+        assert_eq!(text.manifest.text.as_deref(), Some("hello there"));
+        assert_eq!(text.payload_path, None);
+        assert_eq!(url.manifest.id, url_id);
+        assert_eq!(url.manifest.kind, Kind::Url);
+        assert_eq!(
+            url.manifest.text.as_deref(),
+            Some("https://example.com/a?b=c")
+        );
+        assert_eq!(url.payload_path, None);
+    }
+
+    #[test]
     fn manifest_refuses_unknown_kind_wrong_version_and_missing_fields() {
         let refused: [&[u8]; 7] = [
             br#"{"v":1,"id":"a","kind":"image","text":"x","created":1}"#,

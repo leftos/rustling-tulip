@@ -6909,6 +6909,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustling-tulip-ios-share"
+version = "0.19.0-alpha"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rustling-tulip-native"
 version = "0.19.0-alpha"
 dependencies = [
@@ -6951,6 +6967,7 @@ dependencies = [
  "rodio",
  "russh",
  "rustling-tulip-ios-notify",
+ "rustling-tulip-ios-share",
  "rustls",
  "rustls-native-certs",
  "rustls-platform-verifier",

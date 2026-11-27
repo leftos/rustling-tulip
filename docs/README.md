@@ -46,6 +46,7 @@ apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
   ios/          - the native phone app for the iOS simulator and device (binary `rustling-tulip-ios`); its screens live in `apps/native/src/phone/`
   ios-notify/   - the phone app's notification service extension (package `rustling-tulip-ios-notify`; embedded in the app by `tools/ios/build.ps1`)
+  ios-share/    - the phone app's Share Extension (package `rustling-tulip-ios-share`; writes shared items into the app's `ShareInbox`; embedded in the app by `tools/ios/build.ps1`)
   pwa/          - the iPhone PWA shell (Vite + TypeScript, pnpm) that the daemon's tailnet listener serves; see its README.md
 tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs and a driven run's `remote_host`
