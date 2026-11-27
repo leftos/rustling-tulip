@@ -5879,7 +5879,7 @@ fn script_tool(id: &str, result: &str) -> ChatEntry {
 }
 
 #[gpui::test]
-fn show_all_is_not_offered_on_a_script_card(cx: &mut TestAppContext) {
+fn show_all_is_offered_on_a_cut_script_card(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded_listing(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
     h.send(append(vec![user("u1"), script_tool("t1", CUT_RESULT)], &[]));
@@ -5890,8 +5890,57 @@ fn show_all_is_not_offered_on_a_script_card(cx: &mut TestAppContext) {
     );
     h.click_on("chat-script-done-p1-t1");
     assert!(
-        !painted(&mut h, SHOW_ALL),
-        "a script's result comes from a poll event, not the call's own"
+        painted(&mut h, SHOW_ALL),
+        "a script's cut result offers the rest like any tool card"
+    );
+}
+
+#[gpui::test]
+fn an_inner_card_with_an_empty_result_draws_no_result_section(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded_listing(cx, &dir, &[FEATURE_CHAT_TOOL_RESULT]);
+    let inner = |id: &str, text: &str, is_error: bool| {
+        let mut entry = scripted(kinded(id, "Bash", ToolKind::Run, true), None, Some("t1"));
+        if let ChatEntry::Tool {
+            result: Some(outcome),
+            ..
+        } = &mut entry
+        {
+            outcome.text = text.to_owned();
+            outcome.is_error = is_error;
+        }
+        entry
+    };
+    h.send(append(
+        vec![
+            user("u1"),
+            script_tool("t1", "done"),
+            inner("i1", "", false),
+            inner("i2", "", true),
+            inner("i3", "ok", false),
+        ],
+        &[],
+    ));
+    h.sent();
+    h.click_on("chat-script-done-p1-t1");
+    for mark in ["done-p1-i1", "error-p1-i2", "done-p1-i3"] {
+        h.click_on(&format!("chat-tool-{mark}"));
+    }
+    assert!(
+        painted(&mut h, "chat-tool-done-p1-i1"),
+        "the empty call's card is drawn"
+    );
+    assert!(
+        !painted(&mut h, "chat-tool-result-section-i1"),
+        "an empty result draws no Result section"
+    );
+    assert!(
+        painted(&mut h, "chat-tool-result-section-i2"),
+        "an empty error still draws its Error section"
+    );
+    assert!(
+        painted(&mut h, "chat-tool-result-section-i3"),
+        "a result with text draws its section"
     );
 }
 

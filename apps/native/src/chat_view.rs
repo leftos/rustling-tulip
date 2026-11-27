@@ -1352,9 +1352,6 @@ struct ToolRow<'a> {
     result: Option<&'a ToolOutcome>,
     /// The files it offers a Tail of; none where its card draws no Tail.
     tail_paths: &'a [String],
-    /// Whether the call ran a script, whose result comes from a poll event
-    /// rather than the call's own tool result.
-    script: bool,
 }
 
 impl RootView {
@@ -5390,7 +5387,6 @@ pub(crate) fn chat_row(
             input,
             result,
             tail_paths,
-            script,
             ..
         } => {
             let tool = ToolRow {
@@ -5400,7 +5396,6 @@ pub(crate) fn chat_row(
                 input,
                 result: result.as_ref(),
                 tail_paths: if prefix == CHAT_ROW { tail_paths } else { &[] },
-                script: script.is_some(),
             };
             tool_card(look, &tool, chat.log.is_expanded(id), cx)
         }
@@ -5647,16 +5642,15 @@ fn tool_card(
                 tool.input,
                 (tool.id, UnitSource::ToolInput),
             ))
-            .when_some(tool.result, |card, outcome| {
+            .when_some(drawn_outcome(tool.result), |card, outcome| {
                 let label = if outcome.is_error { "Error" } else { "Result" };
                 let text =
                     drawn_tool_result(look.full_results.get(look.session_id, tool.id), outcome);
-                card.child(tool_detail(
-                    look,
-                    label,
-                    text,
-                    (tool.id, UnitSource::ToolResult),
-                ))
+                let selector = format!("chat-tool-result-section-{}", tool.id);
+                card.child(
+                    tool_detail(look, label, text, (tool.id, UnitSource::ToolResult))
+                        .debug_selector(|| selector),
+                )
                 .children(show_all_control(look, tool, outcome, cx))
             })
         });
@@ -5689,6 +5683,13 @@ fn tool_card(
         .children(boxes)
 }
 
+/// The outcome a tool card draws a Result or Error section for (tagged
+/// `chat-tool-result-section-<id>`): none for a result with no text, unless
+/// it is an error.
+fn drawn_outcome(result: Option<&ToolOutcome>) -> Option<&ToolOutcome> {
+    result.filter(|outcome| outcome.is_error || !outcome.text.is_empty())
+}
+
 /// What a cut tool result's card says when the transcript holds no whole
 /// text for it.
 const MISSING_RESULT: &str = "The rest is not in the transcript";
@@ -5713,11 +5714,7 @@ fn show_all_control(
     outcome: &ToolOutcome,
     cx: &mut Context<RootView>,
 ) -> Option<AnyElement> {
-    if !look.session_chat
-        || !look.can_show_all
-        || tool.script
-        || !chat_full_result::is_cut(&outcome.text)
-    {
+    if !look.session_chat || !look.can_show_all || !chat_full_result::is_cut(&outcome.text) {
         return None;
     }
     match look.full_results.get(look.session_id, tool.id) {

@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- In Chat, a Code Mode script card's cut result offers Show all, and a script's inner shell call shows its output instead of an empty Result.
 - On the phone, a host that failed to connect keeps its reason while it redials, so its card no longer jumps on every retry.
 - On the phone in two panes, a Linear chip tapped on Home shows its card at once while the viewer is open.
 - On a phone on its side, the Needs you card leaves Home's rows visible with the keyboard up, and the copied chip no longer covers the terminal.

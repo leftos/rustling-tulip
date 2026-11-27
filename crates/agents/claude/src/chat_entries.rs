@@ -576,10 +576,7 @@ fn tool_result_entries(
     let Some(tool_use_id) = str_at(block, "tool_use_id") else {
         return Vec::new();
     };
-    let text = block
-        .get("content")
-        .and_then(content_text)
-        .unwrap_or_default();
+    let text = result_text(record, block).unwrap_or_default();
     let mut entries = Vec::new();
     if book.is_script(tool_use_id) {
         if let Some(eval) = scripts::dispatched_eval(&text) {
@@ -803,22 +800,21 @@ fn answer_text(answer: &Value) -> String {
 /// The text of the result of tool call `tool_use_id` in the transcript at
 /// `path`, as the chat shows a tool result before its cut, and whether the
 /// cut at [`protocol::TOOL_RESULT_FULL_CAP`] left any of it out; the last
-/// matching block wins. `None` for a missing or unreadable file, for an id
-/// the file holds no result for, and for a background script's dispatch
-/// receipt, which carries no result of its own.
+/// matching block wins. A background script's dispatch receipt answers with
+/// the text of the event that settled it, as its card shows it. `None` for
+/// a missing or unreadable file, for an id the file holds no result for, and
+/// for a receipt whose script has not settled.
 pub(crate) fn tool_result_text(path: &Path, tool_use_id: &str) -> Option<(String, bool)> {
     let text = read_transcript(path, tool_use_id)?;
-    if scripts::dispatched_eval(&text).is_some() {
-        return None;
-    }
     let truncated = text.len() > protocol::TOOL_RESULT_FULL_CAP;
     Some((cap_output(&text, protocol::TOOL_RESULT_FULL_CAP), truncated))
 }
 
 /// The uncut text of `tool_use_id`'s last result in the transcript at `path`,
-/// a line that names another id or is not a record skipped, and a line that
-/// is not valid UTF-8 read with its invalid bytes replaced. `None` for a
-/// missing or unreadable file, and for an id the file holds no result for.
+/// or, for a receipt, of the first later event for its eval; a line that is
+/// not a record skipped, and a line that is not valid UTF-8 read with its
+/// invalid bytes replaced. `None` for a missing or unreadable file, for an
+/// id the file holds no result for, and for a receipt with no event yet.
 fn read_transcript(path: &Path, tool_use_id: &str) -> Option<String> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -831,7 +827,7 @@ fn read_transcript(path: &Path, tool_use_id: &str) -> Option<String> {
             return None;
         }
     };
-    let mut found = None;
+    let mut found = Found::default();
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     loop {
@@ -848,18 +844,128 @@ fn read_transcript(path: &Path, tool_use_id: &str) -> Option<String> {
                 break;
             }
         }
-        let text = String::from_utf8_lossy(&line);
-        if !text.contains(tool_use_id) {
-            continue;
+        found.read(&String::from_utf8_lossy(&line), tool_use_id);
+    }
+    found.resolved()
+}
+
+/// What a transcript read has found for one tool call: its last result's
+/// text and, while that is a background script's receipt, the text of the
+/// first event after it that settled the receipt's eval.
+#[derive(Default)]
+struct Found {
+    text: Option<String>,
+    event: Option<String>,
+}
+
+impl Found {
+    /// Transcript line `line` read: a result for `tool_use_id` replaces
+    /// what was found, and an event settling the awaited eval is kept.
+    fn read(&mut self, line: &str, tool_use_id: &str) {
+        let awaited = self.awaited_eval();
+        if !line.contains(tool_use_id) && (awaited.is_none() || !line.contains("repl-eval")) {
+            return;
         }
-        let Ok(record) = serde_json::from_str::<Value>(&text) else {
-            continue;
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            return;
         };
+        if !is_chat_record(&record) {
+            return;
+        }
         if let Some(block) = result_block(&record, tool_use_id) {
-            found = block.get("content").and_then(content_text);
+            self.text = result_text(&record, block);
+            self.event = None;
+        } else if let Some(eval) = awaited {
+            self.event = record_events(&record)
+                .into_iter()
+                .find(|event| event.eval == eval)
+                .map(|event| event.text);
         }
     }
-    found
+
+    /// The eval a receipt found waits on while no event has settled it.
+    fn awaited_eval(&self) -> Option<u32> {
+        if self.event.is_some() {
+            return None;
+        }
+        self.text.as_deref().and_then(scripts::dispatched_eval)
+    }
+
+    /// The result's text, or for a receipt its event's.
+    fn resolved(self) -> Option<String> {
+        match self.text.as_deref().and_then(scripts::dispatched_eval) {
+            Some(_) => self.event,
+            None => self.text,
+        }
+    }
+}
+
+/// Whether `record` is one the chat reads, as [`chat_entries`] does: one
+/// with a `uuid` whose type is a message's. Any other, such as the
+/// `api-request-blob` copy of a request, repeats older results.
+fn is_chat_record(record: &Value) -> bool {
+    str_at(record, "uuid").is_some_and(|uuid| !uuid.is_empty())
+        && matches!(
+            str_at(record, "type"),
+            Some("user" | "assistant" | "attachment" | "system")
+        )
+}
+
+/// The settled events `record` delivers: those its tool results carry (a
+/// `Poll` result) and those its attachment's envelopes carry.
+fn record_events(record: &Value) -> Vec<ReplEvent> {
+    record
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| str_at(block, "type") == Some("tool_result"))
+        .filter_map(|block| block.get("content").and_then(content_text))
+        .flat_map(|text| scripts::poll_events(&text))
+        .chain(envelope_events(record))
+        .collect()
+}
+
+/// A tool result `block`'s text: its content's, or, when that is empty, the
+/// command output `record`'s `toolUseResult` carries. `None` when the
+/// block has no content and the record no output.
+fn result_text(record: &Value, block: &Value) -> Option<String> {
+    let text = block.get("content").and_then(content_text);
+    if text.as_deref().is_some_and(|text| !text.is_empty()) {
+        return text;
+    }
+    command_output(record.get("toolUseResult")).or(text)
+}
+
+/// A shell call's output as its `toolUseResult` gives it: stdout, then
+/// stderr on its own line, then, when Claude Code saved the whole output to
+/// a file and kept only a preview, a cut line saying how much the preview
+/// left out. None for a result with no `stdout`, as another tool's is, and
+/// for one whose stdout and stderr are both empty.
+fn command_output(result: Option<&Value>) -> Option<String> {
+    let result = result?;
+    let stdout = str_at(result, "stdout")?;
+    let stderr = str_at(result, "stderr").unwrap_or("");
+    let text = match (stdout.is_empty(), stderr.is_empty()) {
+        (_, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(match preview_left_out(result, stdout) {
+        Some(left) => format!("{text}\n{CUT_MARKER} {left} more characters"),
+        None => text,
+    })
+}
+
+/// How much of a saved output its `stdout` preview leaves out, counted as
+/// Claude Code counts `persistedOutputSize`, in bytes; none when nothing.
+fn preview_left_out(result: &Value, stdout: &str) -> Option<u64> {
+    let size = result.get("persistedOutputSize").and_then(Value::as_u64)?;
+    let shown = u64::try_from(stdout.len()).ok()?;
+    size.checked_sub(shown).filter(|left| *left > 0)
 }
 
 /// The last of `record`'s message blocks that is `tool_use_id`'s tool result.
@@ -1075,21 +1181,25 @@ fn attachment_entries(
     known: Known<'_>,
     book: &mut ScriptBook,
 ) -> Vec<ChatEntry> {
+    let mut entries = settled_entries(book, envelope_events(record), known);
+    entries.extend(queued_entry(record, uuid));
+    entries
+}
+
+/// The settled events a `poll_events` attachment record's envelopes carry.
+fn envelope_events(record: &Value) -> Vec<ReplEvent> {
     let envelopes = record
         .pointer("/attachment/envelopes")
         .and_then(Value::as_array)
         .filter(|_| {
             record.pointer("/attachment/type").and_then(Value::as_str) == Some("poll_events")
         });
-    let events: Vec<ReplEvent> = envelopes
+    envelopes
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .flat_map(scripts::queued_events)
-        .collect();
-    let mut entries = settled_entries(book, events, known);
-    entries.extend(queued_entry(record, uuid));
-    entries
+        .collect()
 }
 
 /// A mid-turn message the user typed (`queued_command`), or one another
@@ -1499,6 +1609,235 @@ mod tests {
             &transcript_with_result("toolu_receipt", "(dispatched #7)"),
         );
         assert_eq!(tool_result_text(&path, "toolu_receipt"), None);
+    }
+
+    /// The result text the chat's card `id` holds in `chat`.
+    fn card_text(chat: &[ChatEntry], id: &str) -> String {
+        match tool_in(chat, id) {
+            ChatEntry::Tool {
+                result: Some(outcome),
+                ..
+            } => outcome.text.clone(),
+            other => unreachable!("{id} holds no result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_text_reads_a_receipts_result_from_the_event_that_settled_it() {
+        let scratch = Scratch::new("repl-receipt");
+        let path = scratch.transcript("repl.jsonl", fixture("repl"));
+        let (_, chat) = replay(fixture("repl"));
+        for (id, whole) in [
+            ("toolu_r3", "status:\n## main\n\nplan:\nfive lines"),
+            ("toolu_r6", "## main"),
+        ] {
+            assert_eq!(
+                tool_result_text(&path, id),
+                Some((whole.to_owned(), false)),
+                "{id}: the event's text, its wrapper taken off"
+            );
+            assert_eq!(card_text(&chat, id), whole, "{id}: the card's own text");
+        }
+    }
+
+    #[test]
+    fn tool_result_text_ignores_an_event_for_another_eval() {
+        let attachment = |eval: u32, text: &str| {
+            let envelope = format!(
+                "<event nonce=\"n{eval}\" kind=\"repl-eval\" eval=\"{eval}\" ms=\"5\" \
+                 status=\"settled\">\n<result>{text}</result>\n</event>"
+            );
+            let record = json!({
+                "type": "attachment", "uuid": uid("64"),
+                "attachment": {"type": "poll_events", "envelopes": [envelope]},
+            });
+            format!("{record}\n")
+        };
+        let receipt = transcript_with_result("toolu_receipt", "(dispatched #7)");
+        let scratch = Scratch::new("other-eval");
+        let other = format!("{receipt}{}", attachment(8, "eight"));
+        let path = scratch.transcript("other.jsonl", &other);
+        assert_eq!(tool_result_text(&path, "toolu_receipt"), None);
+        let path = scratch.transcript(
+            "settled.jsonl",
+            &format!("{other}{}", attachment(7, "seven")),
+        );
+        assert_eq!(
+            tool_result_text(&path, "toolu_receipt"),
+            Some(("seven".to_owned(), false))
+        );
+    }
+
+    /// A record of `kind` under `uuid` (none when `None`) whose message
+    /// carries `text` as `toolu_receipt`'s tool result.
+    fn result_record(kind: &str, uuid: Option<&str>, text: &str) -> String {
+        let mut record = json!({
+            "type": kind, "sessionId": uid("00"), "hash": "h1",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_receipt", "content": text}]},
+        });
+        if let (Some(uuid), Some(fields)) = (uuid, record.as_object_mut()) {
+            fields.insert("uuid".to_owned(), json!(uuid));
+        }
+        format!("{record}\n")
+    }
+
+    #[test]
+    fn tool_result_text_reads_only_the_records_the_chat_reads() {
+        let envelope = "<event nonce=\"n7\" kind=\"repl-eval\" eval=\"7\" ms=\"5\" \
+                        status=\"settled\">\n<result>seven</result>\n</event>";
+        let settled = format!(
+            "{}{}\n",
+            transcript_with_result("toolu_receipt", "(dispatched #7)"),
+            json!({"type": "attachment", "uuid": uid("67"),
+                "attachment": {"type": "poll_events", "envelopes": [envelope]}}),
+        );
+        let scratch = Scratch::new("record-kinds");
+        for kind in ["user", "assistant", "attachment", "system"] {
+            let body = format!(
+                "{settled}{}",
+                result_record(kind, Some(uid("68").as_str()), "late")
+            );
+            let path = scratch.transcript("read.jsonl", &body);
+            assert_eq!(
+                tool_result_text(&path, "toolu_receipt"),
+                Some(("late".to_owned(), false)),
+                "a {kind} record with a uuid is read"
+            );
+        }
+        for (kind, uuid) in [
+            ("user", None),
+            ("user", Some(String::new())),
+            ("api-request-blob", None),
+            ("api-request-blob", Some(uid("69"))),
+            ("progress", Some(uid("6a"))),
+        ] {
+            let body = format!(
+                "{settled}{}",
+                result_record(kind, uuid.as_deref(), "(dispatched #7)")
+            );
+            let path = scratch.transcript("skipped.jsonl", &body);
+            assert_eq!(
+                tool_result_text(&path, "toolu_receipt"),
+                Some(("seven".to_owned(), false)),
+                "a {kind} record with uuid {uuid:?} is skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_blob_repeating_a_receipt_after_its_event_keeps_the_event() {
+        let blob = json!({
+            "type": "api-request-blob", "sessionId": uid("00"), "hash": "b1",
+            "message": {"role": "user", "content": [{"tool_use_id": "toolu_r3",
+                "type": "tool_result", "content": "(dispatched #156)", "is_error": false}]},
+        });
+        let mut body = String::new();
+        for line in fixture("repl").lines() {
+            body.push_str(line);
+            body.push('\n');
+            if line.contains("\"tool_use_id\":\"toolu_p1\"") {
+                body.push_str(&blob.to_string());
+                body.push('\n');
+            }
+        }
+        assert!(body.contains("api-request-blob"), "the blob was placed");
+        let scratch = Scratch::new("request-blob");
+        let path = scratch.transcript("repl.jsonl", &body);
+        assert_eq!(
+            tool_result_text(&path, "toolu_r3"),
+            Some(("status:\n## main\n\nplan:\nfive lines".to_owned(), false))
+        );
+    }
+
+    #[test]
+    fn a_persisted_output_ends_with_how_much_of_it_the_preview_left_out() {
+        let scratch = Scratch::new("persisted");
+        for (stdout, size, whole) in [
+            (
+                "h\u{e9}llo",
+                20,
+                format!("h\u{e9}llo\n{CUT_MARKER} 14 more characters"),
+            ),
+            ("h\u{e9}llo", 6, "h\u{e9}llo".to_owned()),
+        ] {
+            let call = json!({
+                "type": "assistant", "uuid": uid("6b"),
+                "message": {"id": "msg-6b", "role": "assistant", "type": "message",
+                    "content": [{"type": "tool_use", "id": "toolu_big", "name": "Bash",
+                        "input": {"command": "make"}}]},
+            });
+            let result = json!({
+                "type": "user", "uuid": uid("6c"),
+                "toolUseResult": {"stdout": stdout, "stderr": "",
+                    "persistedOutputPath": "D:\\out.txt", "persistedOutputSize": size},
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_big", "content": ""}]},
+            });
+            let body = format!("{call}\n{result}\n");
+            let path = scratch.transcript("big.jsonl", &body);
+            let (_, chat) = replay(&body);
+            assert_eq!(card_text(&chat, "toolu_big"), whole, "{size}");
+            assert_eq!(
+                tool_result_text(&path, "toolu_big"),
+                Some((whole.clone(), false)),
+                "{size}"
+            );
+        }
+    }
+
+    /// A Bash call `id` whose result block is empty and whose record's
+    /// `toolUseResult` carries `stdout` and `stderr`.
+    fn transcript_with_output(id: &str, stdout: &str, stderr: &str) -> String {
+        let call = json!({
+            "type": "assistant", "uuid": uid("65"),
+            "message": {"id": "msg-65", "role": "assistant", "type": "message",
+                "content": [{"type": "tool_use", "id": id, "name": "Bash",
+                    "input": {"command": "make"}}]},
+        });
+        let result = json!({
+            "type": "user", "uuid": uid("66"),
+            "toolUseResult": {"stdout": stdout, "stderr": stderr, "interrupted": false},
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "content": "", "is_error": false}]},
+        });
+        format!("{call}\n{result}\n")
+    }
+
+    #[test]
+    fn an_empty_result_reads_the_command_output_its_record_carries() {
+        let scratch = Scratch::new("inner-output");
+        let path = scratch.transcript("repl.jsonl", fixture("repl"));
+        let (_, chat) = replay(fixture("repl"));
+        let bash = "repl_00000000-0000-4000-8000-0000000000b1";
+        assert_eq!(card_text(&chat, bash), "ok", "the card");
+        assert_eq!(
+            tool_result_text(&path, bash),
+            Some(("ok".to_owned(), false)),
+            "Show all"
+        );
+        let skill = "repl_00000000-0000-4000-8000-0000000000c3";
+        assert_eq!(card_text(&chat, skill), "", "a Skill result stays empty");
+        assert_eq!(tool_result_text(&path, skill), Some((String::new(), false)));
+        for (stdout, stderr, whole) in [
+            ("out", "err", "out\nerr"),
+            ("", "err", "err"),
+            ("out", "", "out"),
+        ] {
+            let body = transcript_with_output("toolu_out", stdout, stderr);
+            let path = scratch.transcript("output.jsonl", &body);
+            let (_, chat) = replay(&body);
+            assert_eq!(
+                card_text(&chat, "toolu_out"),
+                whole,
+                "{stdout:?} {stderr:?}"
+            );
+            assert_eq!(
+                tool_result_text(&path, "toolu_out"),
+                Some((whole.to_owned(), false)),
+                "{stdout:?} {stderr:?}"
+            );
+        }
     }
 
     #[test]
