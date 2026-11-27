@@ -36,17 +36,11 @@ Linear: RT-530 (Connect remote clients over OpenSSH without Tailscale, with a si
 
 Each step's docs sweep updates `docs/plans/remote-access.md`, `docs/architecture.md`, `CLAUDE.md`, `docs/native-client.md`, `docs/remote-hand-checklist.md`, `CHANGELOG.md` and `README.md` as its change reaches them.
 
-## Map
-
-The explorer's map follows, as read from main at `d3fc416b`. Its open decisions are settled above.
-
-PROTOCOL: 1 overlay: none (docs/agents/explore.md absent), read CLAUDE.md; 2 README: skipped (CLAUDE.md carries the doc list; docs/README.md not opened); 3 Task Index: no row for SSH or any second remote transport (nearest: the tailnet-listener row, architecture.md:204); 4 design docs: done (docs/plans/remote-access.md whole; native-client.md searched for SSH/FetchFile only); 5 source: done; 6 tree search: done for target/net/handshake/daemon-client sites; Linear RT-530 itself not read (no fetch made); CI config not found.
-
-# RT-530: remote clients over OpenSSH (design map)
-
 ## Answer in one paragraph
 
-Build an `rustling-tulipd bridge` subcommand and a `Target::Ssh` in the native client. The client spawns `ssh -T -o BatchMode=yes -- <host> rustling-tulipd bridge` and speaks the existing protocol over its stdio. On the host the bridge runs `daemon_client::ensure_running`, proves and opens the loopback `/ws`, and puts the `daemon.json` token into the `Hello` itself. Trust is option (a): the SSH login is the owner, so there is no pairing, no new auth kind and no protocol change. The "pairing step" is the Add-host dialog's Test connection. The cost is no per-client revoke, which is cosmetic anyway (see Q2). The daemon needs no change except the new subcommand. Most of the work is in the client: a new target variant (about 39 sites in 14 files use `tailnet_host()`, `Target::Tailnet`, `is_local()`, `manages_daemon` or `TailnetHost`; count from this run's rg of non-test `apps/native/src`), a generic socket, and the picker.
+Build an `rustling-tulipd bridge` subcommand and a `Target::Ssh` in the native client. The client spawns `ssh -T -o BatchMode=yes -- <host> rustling-tulipd bridge` and speaks the existing protocol over its stdio. On the host the bridge runs `daemon_client::ensure_running`, proves and opens the loopback `/ws`, and puts the `daemon.json` token into the `Hello` itself. Trust is option (a): the SSH login is the owner, so there is no pairing, no new auth kind and no protocol change.
+
+The "pairing step" is the Add-host dialog's Test connection. The cost is no per-client revoke, which is cosmetic anyway (see Q2). The daemon needs no change except the new subcommand. Most of the work is in the client: a new target variant (many sites use `tailnet_host()`, `Target::Tailnet`, `is_local()`, `manages_daemon` or `TailnetHost`), a generic socket, and the picker.
 
 ## Facts from the code
 
@@ -98,7 +92,7 @@ Build an `rustling-tulipd bridge` subcommand and a `Target::Ssh` in the native c
 - **Client side:** make `Socket` a boxed `Stream<Item = Result<Message>> + Sink<Message>` (or generic). A small adapter turns child stdout/stdin lines into `Message::Text`. `pump` and the rest of net.rs stay unchanged, and so does the tailnet path.
 - **SSH argument safety:** the host string is argv only and must go after `--`. Refuse a host that starts with `-` (otherwise `-oProxyCommand=...` is code execution) or contains whitespace or control characters. The remote command is a fixed string, never built from user input.
 - **ssh options:** `-T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o Compression=no`, and `kill_on_drop` on the child.
-- **Host key and passphrase:** unknown host key or passphrase-protected key with no agent fails under BatchMode. Show ssh's stderr text and the hint "run `ssh <host>` once in a terminal". See OPEN DECISIONS.
+- **Host key and passphrase:** unknown host key or passphrase-protected key with no agent fails under BatchMode. Show ssh's stderr text and the hint "run `ssh <host>` once in a terminal" (decision 4).
 
 ## Q2. Pairing and trust
 
@@ -121,7 +115,7 @@ A tailnet entry of `saved_hosts` is `{name, port}` (`connection_picker.rs`, `sid
 - `Target::Ssh(SshHost)` with `name()` (the exact string handed to ssh), `short_name()` (the alias, or the part after `@`) and `address()` for display.
 - Generalise the sites that use `tailnet_host()` to a `remote_name()`. Lists of sites: `connection_picker.rs:45,60,291,310`, `connection_picker_view.rs:388`, `device_pairing_view.rs:221`, `file_fetch.rs:130`, `layout_chooser_view.rs:282`, `target.rs:168-287`. Also `host_session_counts` is keyed by lower-cased MagicDNS name, so SSH keys must not collide (prefix `ssh:`).
 - Picker row: the row keeps the host's label and carries an "SSH" tag, with "Add SSH host…" next to the tailnet typed entry. Validation lives in a new `parse_ssh`: no leading `-`, no whitespace, non-empty.
-- Optionally list `Host` aliases from `~/.ssh/config` (skip wildcards). This is a convenience, not required; see OPEN DECISIONS.
+- Optionally list `Host` aliases from `~/.ssh/config` (skip wildcards). This is a convenience, not built (decision 7).
 - Forget removes only the saved entry. There is no device token to delete for SSH (the tailnet path deletes the stored token).
 - Capabilities: `Ssh` is non-local, so local-file actions and Stop are off, as for a tailnet host.
 
@@ -133,7 +127,7 @@ A tailnet entry of `saved_hosts` is `{name, port}` (`connection_picker.rs`, `sid
    - The daemon sees a `Local` connection, so all messages are accepted, including Shutdown, ConfigureRemote and the approval set. That is the owner anyway.
    - UX policy (invariant 9) stays client-side: Stop and Restart are hidden by `Capabilities`, quit only disconnects.
    - The client must not call `ListPendingDevices` on SSH, and the pairing badge must not show: that call is currently skipped because "never on a tailnet host" (remote-access.md:16) and runs on every Local connection to the PC's own daemon. Gate it on `Target::Local`, not on "not tailnet".
-   - For a Local connection the state forwarder also pushes `PendingDevices` unprompted (`connection.rs:206`). The client should ignore them when the target is not Local, or the Settings section would show the host's waiting devices on an SSH host. That is acceptable (the owner may approve from there), but then the approval dialog works remotely too. Decide (OPEN DECISIONS 5).
+   - For a Local connection the state forwarder also pushes `PendingDevices` unprompted (`connection.rs:206`). The client should ignore them when the target is not Local, or the Settings section would show the host's waiting devices on an SSH host. That is acceptable (the owner may approve from there), but then the approval dialog works remotely too. Decision 8 settles it: the approval UI shows only on `Target::Local`.
 2. **Another local user on the host.**
    - Can reach the loopback port but not `daemon.json` (owner-only). Unchanged.
    - The bridge adds no listener, so SSH adds no new reachable surface.
@@ -201,73 +195,3 @@ Tests: `tools/e2e/fake-ssh/`, `apps/native/tests/support/live.rs`, `apps/native/
 ## Protocol change or bump
 
 None. No new message, field or feature string; the bridge speaks the current protocol with the current `Hello`. A `Welcome.features` entry is not needed. `protocol-version.json` stays `{25, [25]}`. No daemon-handshake behaviour changes. (A `bridge` subcommand is not wire-visible.)
-
-## Proposed split
-
-- **SSH.1: `rustling-tulipd bridge`** (daemon only, non-hotspot).
-  - Files: `cli_bridge.rs`, `main.rs`.
-  - Proof: daemon tests with a fake loopback daemon: relay both ways, token substituted into `Hello`, exit on stdin EOF, no stdout noise, starts a daemon when none runs.
-  - Depends on: none.
-- **SSH.2: Windows stdio proof** (hand check plus a small scripted test).
-  - Proof: `ssh localhost rustling-tulipd bridge` on Windows OpenSSH returns a `Welcome` line (the GUI-subsystem exe keeps its stdio), and the install-dir command resolves.
-  - Result decides the remote-command default (OPEN DECISIONS 2).
-  - Depends on: SSH.1.
-- **SSH.3: `Target::Ssh` and net** (hotspot: `net.rs`, `lib.rs`; central, so full suite).
-  - Files: `target.rs`, `net.rs`, new `ssh.rs`, `remote_mode.rs`, `file_fetch.rs`, `lib.rs`, UI-state in `sidebar.rs`.
-  - Proof: net.rs tests with a scripted child, capabilities, folder name, the `ListPendingDevices` gate.
-  - Depends on: SSH.1.
-- **SSH.4: picker and Add-host UX**.
-  - Files: `connection_picker*.rs`, `sidebar.rs` (`kind`), `tests/ui/ui_connections.rs`; Test connection.
-  - Proof: UI specs, `native-shot` of the picker.
-  - Depends on: SSH.3.
-- **SSH.5: live e2e with fake-ssh**.
-  - Files: `tools/e2e/fake-ssh/`, `live.rs`, `e2e_ssh.rs`, `nextest.toml`, `rt.ps1`.
-  - Proof: `.\rt.ps1 native-e2e`.
-  - Depends on: SSH.3.
-- **SSH.6: docs pass** (can go with each item, final tick last): `docs/plans/remote-access.md`, `docs/architecture.md`, `CLAUDE.md`, `docs/native-client.md`, `docs/remote-hand-checklist.md`, `CHANGELOG.md`, `README.md`.
-
-SSH.1 and SSH.3 can overlap only in review: they touch disjoint files.
-
-## Docs to update
-
-- `docs/plans/remote-access.md`: title and intro ("Tailscale-first" becomes "two ways in"), add an SSH section with the invariants (SSH arrives as `Local`, bridge holds the token, no listener, fixed remote command, option-injection rule), retire "attach from outside the tailnet" and the P6 item list gets SSH.n.
-- `docs/architecture.md:289` non-goal: delete the "SSH tunnelling" part ("internet exposure or a relay" stay non-goals). Add a "Remote (SSH) access" bullet near `:118-144` and a Task Index row. Also line 23 ("The daemon binds only loopback and ... tailnet") is still true but add the bridge.
-- `CLAUDE.md`: the last bullet ("Things that are deferred") and the project-shape line for `crates/tailnet`; the env var table (`RUSTLING_TULIP_SSH`). `docs/daemon-cli.md`: the `rustling-tulipd bridge` command. `docs/on-disk.md`: the `native-ui.json` bullet (`saved_hosts` `kind`). `docs/testing.md`: the E2E tier bullet (fake-ssh).
-- `docs/native-client.md` (picker, fetched files host folder), `docs/remote-hand-checklist.md`, `CHANGELOG.md` (Unreleased bullet), `README.md` (feature showcase at release).
-
-## DEPENDS ON
-
-- None found. Not checked: open Linear items for the same files. `apps/native/src/lib.rs` and `net.rs` are hotspots, so SSH.3 must wait for any other open item that edits them (check `docs/plans/MAIN.md` before dispatch). The Linear issue RT-530 was not read in this run.
-- SSH.2 (Windows GUI-subsystem stdio and the install-dir command) gates the remote-command default.
-
-## BRANCH
-
-`feat/ssh-remote`, no existing branch of that name (`git branch -a --list "*ssh*" "*rt-530*"` returned nothing). Base: main at `d3fc416b`. It is the release's only new feature, so one feature branch with SSH.1 to SSH.6 as stacked commits is reasonable.
-
-## OPEN DECISIONS (ranked)
-
-1. **Trust model (a) vs (b).** Recommend (a): no revoke row, because the SSH key is the real credential. The owner should confirm "no per-client revoke" is acceptable. If not, restricted `authorized_keys` command keys, documented.
-2. **Remote command default.** The installer puts the daemon in `%LOCALAPPDATA%\Programs\rustling-tulip` (`tools/installer`, line 43), not on PATH, and a Windows sshd session starts in the user profile with the system PATH. Options: add the install dir to the user PATH in the installer; or default to a full-path command per host in the saved entry (`remote_command`); or both. Recommend a per-host optional field plus the installer adding PATH. Needs SSH.2.
-3. **Host OS.** Support only Windows hosts in v1, or Linux/macOS too. The daemon's non-Windows build is unmeasured and there is no CI for it. Recommend Windows host only, stated in docs, and a separate issue for the port.
-4. **Host-key and passphrase handling in a GUI app.** BatchMode (key or agent only; host key must already be known, with a "run `ssh host` once" hint) vs `StrictHostKeyChecking=accept-new` vs askpass. Recommend BatchMode plus a clear error, no `accept-new` (silent first-contact trust is a security decision for the owner).
-5. **Approval and pending-device UI over SSH.** Since the daemon sees `Local`, the host's waiting devices and the Devices section could work remotely. Recommend: hide them on SSH (gate on `Target::Local`) and note in docs.
-6. **Framing: JSON lines (recommended) vs raw WS over stdio.** Lines need the bridge to terminate WS and edit `Hello`; raw WS needs the client to learn the token. Recommended lines.
-7. **`~/.ssh/config` alias listing** in the picker (optional, convenience).
-8. **Idle exit with no clients on an SSH-only host:** the daemon exits after 30 s with no sessions (tracer sessions survive). Accept (bridge restarts it) or hold the daemon while any SSH host is configured. Recommend accept.
-9. **Backpressure:** each session's queued output on a connection is capped at 4 MiB (`PTY_SESSION_BUDGET`); past it the session is resynced with one `Scrollback`. A loopback connection, the SSH bridge's included, never has a send timed out.
-
-## DOC DRIFT
-
-- `docs/architecture.md:289` and `CLAUDE.md:383` say SSH tunnelling is a non-goal and the tailnet listener is the one way in; the ruling (2026-10-29) reverses it. Docs are wrong after this feature lands: owner `docs/architecture.md` Non-goals, `CLAUDE.md`, `docs/plans/remote-access.md` (intro "Tailscale is a requirement for remote use").
-- `docs/architecture.md:130` calls `rustling-tulipd pair` "for an owner reached over SSH", which already presumes SSH access without a client path. Not wrong, but it links to a non-goal. Fix with the same pass.
-- `docs/plans/remote-access.md:16` says the client asks `ListPendingDevices` "never on a tailnet host", while the code gate is Local-vs-not (Connection state). Not verified against `lib.rs` in this run; recheck when adding the SSH target.
-
-## TASK INDEX GAP
-
-The answer needed about 25 reads and searches beyond the Task Index row. Row that should exist:
-
-"Add or change a way for a client to reach a daemon on another machine (a connection target such as tailnet or SSH)" → `docs/plans/remote-access.md` → `apps/native/src/target.rs` (`Target`) → `apps/native/src/net.rs` (`attempt`, `attempt_local`, `attempt_tailnet`, `pump`, `Socket`) → `apps/native/src/remote_mode.rs` (`Capabilities`) → `apps/native/src/connection_picker.rs`, `connection_picker_view.rs`, `sidebar.rs` (`saved_hosts`) → `crates/daemon/src/server/connection.rs` (`AuthKind`) → `server/handshake.rs` (`check_hello_auth`) → `server/remote.rs` (`host_only_refusal`) → `crates/daemon/src/main.rs` (subcommands: `cli_pair.rs`, `cli_shutdown.rs`) → `apps/native/tests/e2e_remote.rs`.
-
-## MISSING ENTRY POINT
-
-none (docs/architecture.md and its Task Index exist; the repo has no `docs/agents/explore.md` overlay, so CLAUDE.md was read in its place). `docs/README.md` was not opened, so a glossary gap, if any, is unmeasured.

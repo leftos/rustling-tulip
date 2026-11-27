@@ -37,23 +37,9 @@ sockets on both platforms. Everything else is either already done, a one-line
 
 ### The blockers, ranked
 
-> **Superseded:** items 1 and 2 landed on `main` (M1 and M2); item 3, the LaunchAgent arm, is on `main` in `crates/daemon-client/src/autostart.rs` (RT-246); item 4 stays deferred with local dev builds only.
+> **Landed:** the tracer IPC transport (M1, `interprocess` local sockets), Unix process-tree cleanup (M2) and the LaunchAgent autostart arm (M3, `crates/daemon-client/src/autostart.rs`, RT-246). Packaging stays deferred, with local dev builds only.
 
-1. **Tracer IPC transport (HARD).** Named pipes (`tokio::net::windows::named_pipe`)
-   in both the tracer server and the daemon client, plus the `\\.\pipe\…` name
-   derivation. macOS needs Unix domain sockets. This is the real work.
-2. **`job_object` module won't compile on macOS (COMPILE BLOCKER, trivial gate +
-   real Unix follow-up).** `crates/tracer/src/main.rs:20` declares `mod job_object;`
-   ungated; the module imports the `windows` crate (a `cfg(windows)`-only dep), so
-   a macOS build fails to compile. Gating the `mod` is one line; replacing the
-   *functionality* (kill-the-whole-descendant-tree on tracer exit, so worktree
-   cleanup isn't wedged by surviving `node`/dev-server grandchildren) needs a Unix
-   `setsid` + `killpg` equivalent.
-3. **Autostart (MODERATE).** `winreg` HKCU Run key → macOS `LaunchAgent` plist.
-4. **Packaging (TRIVIAL–MODERATE).** Bundle target + signing/notarization.
-
-Rough estimate: **3–5 focused days** for a working macOS build (the IPC port is
-~2 of those), excluding Apple Developer signing/notarization setup.
+- **Packaging (TRIVIAL–MODERATE, open).** Bundle target + signing/notarization.
 
 ---
 

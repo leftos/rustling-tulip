@@ -1,6 +1,8 @@
 # Follow dispatch runs
 
-Status: design, no step started. Linear: RT-31 ("Follow DeepSeek dispatch runs as read-only sessions"); `docs/plans/MAIN.md` is a snapshot generated from Linear, so nothing here edits it by hand. Terms this doc adds (**live-run file**, **live-run folder**, **stop marker**, **pane follow**) go into the `docs/README.md` glossary in DF.13; **dispatch run** is already there.
+Status: DF.1 to DF.11 and DF.13 have landed in the daemon, protocol and native client; DF.12, the dispatch tool's own change (user-level, outside this repo), is open. Linear: RT-31 ("Follow DeepSeek dispatch runs as read-only sessions"); `docs/plans/MAIN.md` is a snapshot generated from Linear, so nothing here edits it by hand.
+
+Terms this doc adds (**live-run file**, **live-run folder**, **stop marker**, **pane follow**) go into the `docs/README.md` glossary in DF.13; **dispatch run** is already there.
 
 ## Problem
 

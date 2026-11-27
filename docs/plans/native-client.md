@@ -10,6 +10,5 @@ The rulings the native client's open items need before they are briefed. Each it
 
 ## Phase 6 — remote and cutover
 
-- Remote mode follows steps P6.1 to P6.7 of [remote-access.md](./remote-access.md). Landed: the transport seam (P6.1), remote-mode rules and typed host paths (P6.2a, P6.2b), the host picker (P6.3) and the Remote access panel (P6.4).
-- Autostart (P6.5) has landed as `daemon_client::autostart`. Remote tests, the hand checklist and the docs pass (P6.6) have landed. The installer (P6.7) is open.
-- Cutover: the installer ships the native client, and on uninstall deletes the daemon's `rustling-tulip-daemon` login `Run` value; update CLAUDE.md.
+- Remote mode follows steps P6.1 to P6.7 of [remote-access.md](./remote-access.md), all landed: the transport seam, remote-mode rules and typed host paths, the host picker, the Remote access panel, autostart (`daemon_client::autostart`), the remote tests and hand checklist, and the installer.
+- Cutover: the installer (`tools/installer/rustling-tulip.nsi`) ships the native client, and on uninstall deletes the daemon's `rustling-tulip-daemon` login `Run` value.

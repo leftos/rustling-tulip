@@ -19,12 +19,12 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the port `remote.json` configures (default 8787), rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.
-- Revocation is a block list in rustling-tulip: Settings lists the approved tailnet devices (each with its `last_seen` and a `connected` count), and blocking one drops its live connections at once and refuses it at every pairing path until the owner forgets it (RT-96). The daemon half (RT-393), the native model (RT-391) and the Settings Devices section (RT-392) have landed.
+- Revocation is a block list in rustling-tulip: Settings lists the approved tailnet devices (each with its `last_seen` and a `connected` count), and blocking one drops its live connections at once and refuses it at every pairing path until the owner forgets it (RT-96).
 - There is no LAN listener, `/pair` or mDNS: the daemon binds loopback and, with remote access on, the host's own tailnet addresses. The six wire variants (`ConfigureLan`, `StartPairing`, `CancelPairing`, `LanStatus`, `PairingStarted`, `PairingEnded`) stay decodable and inert.
-- Placement: the daemon side (TS.1 to TS.5) lands on `main`, behind a `remote.json` switch that is off by default; the native client's remote mode (P6.1 to P6.4 and the tests) lands on `main` too. The installer and the docs pass follow.
+- Placement: the daemon side is behind a `remote.json` switch that is off by default.
 - The native client dials TLS itself inside `net.rs`; there is no loopback bridge.
 - The relay (RT-94), pinned TLS, mDNS discovery, pairing by code and add-by-pasted-code are dropped. RT-95 (Tailscale by MagicDNS name) folds into the host picker.
-- **No Windows Firewall rule** (RT-157): the owner runs Fort Firewall, whose rule must cover the content-addressed binaries-cache folder (`%LOCALAPPDATA%\leftos\rustling-tulip\data\binaries\`), not one exe path, since each build's daemon and tracer are new files; P6.7's installer needs no elevated port rule.
+- **No Windows Firewall rule** (RT-157): the owner runs Fort Firewall, whose rule must cover the content-addressed binaries-cache folder (`%LOCALAPPDATA%\leftos\rustling-tulip\data\binaries\`), not one exe path, since each build's daemon and tracer are new files; the installer needs no elevated port rule.
 
 ## Orchestrator decisions (not owner rulings; open to the owner)
 
@@ -53,33 +53,20 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 11. **The PWA's origin is stable:** the configured port and the MagicDNS name. Changing either creates a new origin, and the status says so.
 12. **A remote client is full control** (it can spawn a shell), so invariants 1 to 7 are the whole boundary; no per-message check is one.
 
-## Items, in build order
+## What landed, and the decisions it leaves
 
-Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/server.rs`, whose `dispatch` routes every message) run one at a time.
+The daemon side (the `crates/tailnet` CLI wrapper and owner rule, the tailnet listener, device tokens, `ConfigureRemote` and `RemoteStatus`, the retired LAN listener) and the native client's remote mode (transport seam, remote-mode rules, typed host paths, host manager, Remote access panel, autostart, remote tests, hand checklist and installer) are on `main`; Linear's "Remote hosts and connections" project holds any follow-up.
 
-| Id | Title | Hotspot | Depends on |
-|---|---|---|---|
-| TS.1 | `crates/tailnet`: the Tailscale CLI wrapper (typed errors for every failure) and the owner rule, table-tested. Landed, 4d18a51 | no | none |
-| TS.2 | Daemon tailnet listener module: cert, bind with rebind, whois acceptor attaching a peer identity. Landed, 6e1c847, dffb25d, 08ab90b; started by TS.3 | no | TS.1 |
-| TS.3 | Wire the listener into the daemon: boot, the auth kind per listener, a separate router, the `Origin`/`Host` check, idle exit held, `remote.json`. Landed, 77362be | yes | TS.2 |
-| TS.3b | Device tokens: a whois-authorized device without a token waits as a pending request; the token is issued once it presents the one-time approval the host PC shows (a QR code to scan, or the pairing code beside it for a device with no camera), started from a local (loopback) client; tokens are stored hashed and checked in `Hello` | yes | TS.3, TS.4 |
-| TS.4 | `ConfigureRemote` / `RemoteStatus` messages: every state (not installed, not running, other Windows user, not connected, HTTPS disabled, host tagged, serving with name, port and cert expiry). Landed, 48c9ef9 | yes | TS.3 |
-| TS.5 | Retire the LAN listener, `/pair` and mDNS; the six variants inert. Landed, 7d4556e | yes | TS.3 |
-| RT-96 | Remote devices: list the approved tailnet devices, block one and drop its connections. Landed: daemon (RT-393), native model (RT-391), Settings section (RT-392) | yes | TS.4, P6.4 (landed) |
-| P6.1 | Transport seam: `Target::{Local, Tailnet(host)}` in `net.rs` over public-CA TLS. Landed on main | no | TS.1 |
-| P6.2a | Remote-mode rules: local-file actions disabled with a reason, quit only disconnects, Stop, handshake and `daemon.log` hidden, Reconnect label, the capability table. Landed on main (RT-151) | no | P6.1 |
-| P6.2b | The typed host path in place of the pickers on a remote host. Landed on main (RT-257) | no | P6.2a |
-| P6.3 | Host manager from the tailnet's machines, a typed-name fallback, every enabled saved host connected at launch | no | P6.1, P6.2a |
-| P6.4 | Host Settings: Remote access (Tailscale) panel. Landed on main (RT-154) | no | TS.4 |
-| P6.5 | Autostart: start the daemon on login | no | none |
-| P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; the hand checklist is [docs/remote-hand-checklist.md](../remote-hand-checklist.md) (part C); part B, the eight specs of `e2e_remote.rs`, and part D, the docs pass, have landed | no | all of the above |
-| P6.7 | Cutover: installer (no firewall rule, per RT-157) | no | P6.5 |
+- **Hotspots run one at a time:** a change touching `crates/protocol/src/lib.rs` or `crates/daemon/src/server.rs`, whose `dispatch` routes every message, does not run beside another.
+- **Device tokens (TS.3b):** a whois-authorized device without a token waits as a pending request; the token is issued once it presents the one-time approval the host PC shows (a QR code to scan, or the pairing code beside it), started from a local (loopback) client. Tokens are stored hashed and checked in `Hello`.
+- **Remote devices:** the daemon, the native model and the Settings Devices section list approved tailnet devices and block one (RT-96).
+- **The transport seam (P6.1):** `Target::{Local, Tailnet(host)}` in `net.rs` over public-CA TLS. Remote-mode rules (P6.2a: local-file actions disabled with a reason, quit only disconnects, Stop hidden) live in `remote_mode.rs`, and a remote host's folders are chosen by a typed host path in place of the pickers (P6.2b).
+- **Remote tests (P6.6):** the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim, the `e2e_remote.rs` specs and the hand checklist [remote-hand-checklist.md](../remote-hand-checklist.md).
+- **File fetch** follows the transport; a host's download folder is keyed by its MagicDNS name, lower-cased.
 
-File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is keyed by its MagicDNS name, lower-cased.
+### The host manager (P6.3)
 
-### P6.3: the host manager (RT-350 to RT-354)
-
-Landed on main. One window connects This PC and every enabled saved host at once, one connection per host (`docs/native-client.md` and `docs/architecture.md`, "Several hosts"); there is no target switch, no remembered last target and no boot target.
+One window connects This PC and every enabled saved host at once, one connection per host (`docs/native-client.md` and `docs/architecture.md`, "Several hosts"); there is no target switch, no remembered last target and no boot target.
 
 - **DNS-name check.** `Target::parse_tailnet(&str, Option<u16>)` in `apps/native/src/target.rs` accepts a MagicDNS name, trims one trailing dot, lowercases it, and refuses userinfo, a path, query or fragment, a port in the name, whitespace, percent signs, empty labels, bad label edges, IP literals and a bare label; `HostNameError`'s Display is the message the host manager shows. `Target::tailnet` stays infallible for test fixtures.
 - **Saved hosts and peers.** `connection_picker.rs` holds the model: rows list This PC, then the saved hosts, then the online tailnet peers (offline, tagged and shared peers are not offered), over a `PeerSource` that runs `tailnet::Cli::locate().status()`. A typed name goes through the DNS check, and Forget removes a saved host. `saved_hosts` in `native-ui.json` stores each host's name and port, and a name that fails the check is dropped on load.

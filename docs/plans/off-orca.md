@@ -37,10 +37,10 @@ Build tooling's RT-116 (affected-crate tests per item, the full suite at checkpo
 
 ## Where things stand
 
-- **Desktop:** 109 of 150 parity lines done (`native-client-parity.md`). Open: repos/containers/presets and drag-and-drop (Phase 5a), both in Wave 2; remote (Phase 6, Wave 3); pop-outs (Phase 5b, Wave 7); a few keyboard and toast lines.
-- **Remote:** TS.1 and TS.2 landed (`crates/tailnet`, `crates/daemon/src/tailnet_listener.rs`; commits 4d18a51, 6e1c847, dffb25d, 08ab90b), with FT.1 `FetchFile` streaming.
+- **Desktop:** parity lines and their status are in [native-client-parity.md](./native-client-parity.md). Open: repos/containers/presets and drag-and-drop (Phase 5a), both in Wave 2; remote (Phase 6, Wave 3); pop-outs (Phase 5b, Wave 7); a few keyboard and toast lines.
+- **Remote:** the daemon's tailnet side (TS.1 to TS.5) and the native client's remote mode and installer (P6.1 to P6.7) have landed (`crates/tailnet`, `crates/daemon/src/tailnet_listener.rs`, `apps/native/src/net.rs`; recorded in [remote-access.md](./remote-access.md)), with FT.1 `FetchFile` streaming.
 
-  TS.3 and TS.4 start and stop the listener live from `remote.json` and `ConfigureRemote` (off by default; `{enabled, port}`), and TS.5 retires the LAN listener, `/pair` and mDNS. The native client dials only `ws://127.0.0.1` (`apps/native/src/net.rs:285`); no host profiles or remote mode yet (RT-33, RT-34). No upload direction exists at all.
+  The listener starts and stops live from `remote.json` and `ConfigureRemote` (off by default; `{enabled, port}`), and the LAN listener, `/pair` and mDNS are retired. The native client connects to This PC and to saved tailnet hosts. No upload direction exists at all.
 - **Links:** Ctrl+click only; regex over grid rows with soft-wrap and box-border stitching up to 64 rows (`links.rs:105`, `term.rs:931`); resolved client-side against the session cwd, then member worktrees (`open::resolve_link`), first existing candidate wins, except that a path found in several of the session's folders opens the PF.5 picker (`open::resolve_link_choices`) on This PC's terminal panes; remote panes and rule labels wait on RT-97.
 - **Attention:** one `Attention { reason }` message (`AwaitingInput | Stopped | Error`, heuristic-driven), one Windows toast — `Needs you`, with the session's label as its body, one toggle and the skip-when setting (TN.1/TN.2, `apps/native/src/notify.rs:142`) — and the Needs You rail (NY.1–NY.3). No click action, no sound, no phone; hook status is delivered for Claude Code sessions and opted-in Codex runs (RT-25).
 - **Transcript JSONL:** read only for resume candidates (`crates/agents/claude/src/transcripts.rs`); nothing extracts tool calls, cost or tokens for interactive sessions.
