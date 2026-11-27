@@ -7,8 +7,8 @@ use crate::support;
 
 use daemon_client::device_tokens::DeviceTokenStore as _;
 use gpui::{
-    Edges, InputHandler as _, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext,
-    TouchPhase, WindowInsets, WindowOptions, point, px,
+    BackGesturePhase, Edges, InputHandler as _, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
+    TestAppContext, TouchPhase, WindowInsets, WindowOptions, point, px,
 };
 use protocol::{
     ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, ComposerState,
@@ -18,7 +18,7 @@ use rustling_tulip_native::chat::PaneView;
 use rustling_tulip_native::keyboard::{KeyboardCall, clear_keyboard_calls, keyboard_calls};
 use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::{Connection, NetEvent, RootView};
 use serde_json::json;
 use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
 
@@ -1827,14 +1827,208 @@ fn a_tap_on_a_gutter_dot_leaves_the_keyboard_alone(cx: &mut TestAppContext) {
     draw_keyboard(&mut h, false);
     clear_keyboard_calls();
 
-    // The phone draws no dot menu: the dot's own press still stops ahead of
-    // the pane's, which keeps the keyboard as it is.
+    // The dot's own press stops ahead of the pane's: its sheet rises and
+    // the keyboard stays as it is.
     h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
 
     assert_eq!(
         keyboard_calls(),
         [],
         "a dot's tap leaves the keyboard alone"
+    );
+}
+
+/// Shell session `s` on its Terminal page with one finished `make`
+/// whose output is `out`, its dot's sheet raised by a tap.
+fn shell_sheet_up<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = on_shell_terminal(cx, dir);
+    h.host(&saved_remote())
+        .pty("s", finished_command("make", ";0").as_bytes());
+    h.cx.run_until_parked();
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+    h
+}
+
+/// The shell sheet's rows, in order.
+const SHELL_SHEET_ROWS: [&str; 5] = [
+    "phone-shell-copy-command",
+    "phone-shell-copy-output",
+    "phone-shell-copy-both",
+    "phone-shell-rerun",
+    "phone-shell-cancel",
+];
+
+#[gpui::test]
+fn a_tap_on_a_gutter_dot_raises_its_command_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_sheet_up(cx, &dir);
+
+    assert!(drawn(&mut h, "phone-shell-sheet"), "the dot's sheet is up");
+    assert!(drawn(&mut h, "phone-shell-scrim"));
+    let tooltip = h.root(|root, cx| root.pane_shell_records(&slot_id("s"), cx))[0]
+        .tooltip
+        .clone();
+    assert_eq!(
+        h.root(|root, _| root.phone_shell_sheet_header()),
+        Some(tooltip),
+        "its header is the dot's tooltip"
+    );
+    assert!(drawn(&mut h, "phone-shell-header"));
+    for row in SHELL_SHEET_ROWS {
+        assert!(drawn(&mut h, row), "{row} is in the sheet");
+        let bounds = h.bounds(row);
+        assert!(bounds.size.height >= touch_target(), "{row} is {bounds:?}");
+    }
+    assert!(
+        !h.root(|root, _| root.shell_menu_open()),
+        "the desktop's anchored menu stays shut"
+    );
+}
+
+#[gpui::test]
+fn the_shell_sheet_copies_command_and_output_and_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_sheet_up(cx, &dir);
+
+    h.tap_on("phone-shell-copy-both");
+
+    assert_eq!(h.clipboard().as_deref(), Some("make\nout"));
+    assert!(
+        !drawn(&mut h, "phone-shell-sheet"),
+        "the copy closed the sheet"
+    );
+    assert!(drawn(&mut h, "phone-session-terminal"));
+}
+
+#[gpui::test]
+fn the_shell_sheet_reruns_without_enter_and_leaves_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_sheet_up(cx, &dir);
+    draw_keyboard(&mut h, false);
+    h.host(&saved_remote()).sent();
+    clear_keyboard_calls();
+
+    h.tap_on("phone-shell-rerun");
+
+    let typed = h.host(&saved_remote()).sent_input("s");
+    assert_eq!(typed, b"make".to_vec(), "the command, with no Enter");
+    assert!(!typed.contains(&b'\r'));
+    assert!(
+        !drawn(&mut h, "phone-shell-sheet"),
+        "the re-run closed the sheet"
+    );
+    assert_eq!(keyboard_calls(), [], "the keyboard is left as it was");
+}
+
+#[gpui::test]
+fn the_shell_sheet_rerun_is_inert_for_a_stopped_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_sheet_up(cx, &dir);
+    assert!(h.root(RootView::phone_shell_can_rerun));
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: session("s")
+            .shell("C:/r1")
+            .no_agent()
+            .label("Sierra")
+            .exited(0)
+            .build(),
+        request_id: None,
+    });
+    h.cx.run_until_parked();
+    h.host(&saved_remote()).sent();
+    assert!(
+        !h.root(RootView::phone_shell_can_rerun),
+        "a stopped session's command cannot be re-run"
+    );
+
+    h.tap_on("phone-shell-rerun");
+
+    assert!(
+        h.host(&saved_remote()).sent_input("s").is_empty(),
+        "nothing was typed"
+    );
+    assert!(
+        drawn(&mut h, "phone-shell-sheet"),
+        "the dimmed row does nothing"
+    );
+}
+
+#[gpui::test]
+fn the_shell_sheet_scrim_cancel_back_and_leaving_close_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_sheet_up(cx, &dir);
+    let scrim = h.bounds("phone-shell-scrim");
+    let above = point(scrim.center().x, scrim.origin.y + px(20.0));
+    h.touch(TouchPhase::Started, above);
+    h.touch(TouchPhase::Ended, above);
+    assert!(!drawn(&mut h, "phone-shell-sheet"), "a scrim tap closes it");
+    assert_eq!(h.clipboard(), None, "and acts on no row");
+
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+    h.tap_on("phone-shell-cancel");
+    assert!(!drawn(&mut h, "phone-shell-sheet"), "Cancel closes it");
+
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+    let page = h.bounds("phone-session");
+    let at = point(page.origin.x + px(4.0), page.origin.y + px(200.0));
+    h.back_gesture(BackGesturePhase::Started, at);
+    h.back_gesture(BackGesturePhase::Committed, at);
+    assert!(!drawn(&mut h, "phone-shell-sheet"), "Back closes it");
+    assert!(drawn(&mut h, "phone-session-terminal"), "and only it");
+
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+    assert!(drawn(&mut h, "phone-shell-sheet"));
+    close_terminal(&mut h);
+    assert_eq!(
+        h.root(|root, _| root.phone_shell_sheet_header()),
+        None,
+        "leaving the Terminal page closes it"
+    );
+}
+
+/// The iPhone on its side, 874 by 402, with a `keyboard`-tall on-screen
+/// keyboard up over the home indicator's band.
+fn on_side_with_keyboard(h: &mut Harness<'_>, keyboard: f32) {
+    h.cx.simulate_resize(gpui::size(px(874.0), px(402.0)));
+    h.cx.run_until_parked();
+    let insets = WindowInsets {
+        safe_area: Edges {
+            top: px(0.0),
+            right: px(62.0),
+            bottom: px(21.0),
+            left: px(62.0),
+        },
+        ime: Edges {
+            bottom: px(keyboard),
+            ..Edges::default()
+        },
+        ..WindowInsets::default()
+    };
+    phone_update(h, |phone, cx| phone.set_insets_override(Some(insets), cx));
+}
+
+#[gpui::test]
+fn the_shell_sheet_fits_a_phone_on_its_side_with_the_keyboard_up(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_shell_terminal(cx, &dir);
+    h.host(&saved_remote())
+        .pty("s", finished_command("make", ";0").as_bytes());
+    h.cx.run_until_parked();
+    on_side_with_keyboard(&mut h, 200.0);
+
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("s")));
+
+    assert!(drawn(&mut h, "phone-shell-sheet"), "the dot's sheet is up");
+    let page = h.bounds("phone-session");
+    let header = h.bounds("phone-shell-header");
+    let cancel = h.bounds("phone-shell-cancel");
+    assert!(
+        header.origin.y >= page.origin.y,
+        "the header {header:?} stays inside the page {page:?}"
+    );
+    assert!(
+        cancel.bottom() <= page.bottom(),
+        "Cancel {cancel:?} stays inside the page {page:?}"
     );
 }
 

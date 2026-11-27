@@ -300,7 +300,7 @@ use crate::session_actions::{
     Duplicates, HEADLESS_UNSUPPORTED_TIP, HeaderStopConfirm, Prefills, self_exited,
 };
 use crate::session_menu::popover_frame;
-use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
+use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu, ShellSheet};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{
@@ -1276,6 +1276,8 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The gutter-dot command menu, while open.
     shell_menu: Option<ShellMenu>,
+    /// The phone's sheet for a gutter dot's command, while up.
+    phone_shell_sheet: Option<ShellSheet>,
     /// The menu a Ctrl+Shift+click on a path link opened, while open.
     link_menu: Option<LinkMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
@@ -2015,6 +2017,7 @@ impl RootView {
             paths,
             menu: None,
             shell_menu: None,
+            phone_shell_sheet: None,
             link_menu: None,
             menu_focus: cx.focus_handle(),
             container_menu: None,
@@ -5902,6 +5905,92 @@ impl RootView {
             .is_some_and(|anchor| anchor.pane_id == linear_card::PHONE_CARD_PANE);
         if raised {
             self.dismiss_linear_card(cx);
+        }
+    }
+
+    /// A tap on the gutter dot at `index` of the phone's terminal
+    /// `pane_id`: its command's sheet rises, its texts taken now. Nothing
+    /// when the dot stands for no command.
+    pub(crate) fn open_phone_shell_sheet(
+        &mut self,
+        pane_id: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = self.pane_shell_command(pane_id, index, cx) else {
+            return;
+        };
+        self.phone_shell_sheet = Some(ShellSheet {
+            pane_id: pane_id.to_owned(),
+            session_id: self.pane_session(pane_id),
+            header: command.header,
+            command: command.command,
+            output: command.output,
+        });
+        cx.notify();
+    }
+
+    /// Takes the phone's shell sheet down, while it is up.
+    pub(crate) fn dismiss_phone_shell_sheet(&mut self, cx: &mut Context<Self>) {
+        if self.phone_shell_sheet.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The shell sheet the phone's Terminal page draws, while one is up for
+    /// the phone's open terminal; `None` otherwise.
+    pub(crate) fn phone_shell_sheet(&self) -> Option<&ShellSheet> {
+        self.phone_shell_sheet
+            .as_ref()
+            .filter(|sheet| self.is_phone_terminal(&sheet.pane_id))
+    }
+
+    /// The header line the phone's shell sheet shows, while it is up.
+    #[must_use]
+    pub fn phone_shell_sheet_header(&self) -> Option<String> {
+        self.phone_shell_sheet().map(|sheet| sheet.header.clone())
+    }
+
+    /// Whether the phone's shell sheet's "Re-run command" acts
+    /// ([`Self::can_rerun_command`]); `false` while no sheet is up.
+    #[must_use]
+    pub fn phone_shell_can_rerun(&self, cx: &App) -> bool {
+        self.phone_shell_sheet().is_some_and(|sheet| {
+            self.can_rerun_command(
+                &sheet.pane_id,
+                sheet.session_id.as_deref(),
+                &sheet.command,
+                cx,
+            )
+        })
+    }
+
+    /// A copy row of the phone's shell sheet: `text` goes on the
+    /// clipboard, chip included, and the sheet goes down.
+    pub(crate) fn phone_shell_copy(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.copy_to_clipboard(text, cx);
+        self.dismiss_phone_shell_sheet(cx);
+    }
+
+    /// The phone's shell sheet's "Re-run command": the sheet goes down and
+    /// its command is typed at its pane with no Enter. Nothing while it
+    /// cannot be typed again ([`Self::phone_shell_can_rerun`]).
+    pub(crate) fn phone_shell_rerun(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.phone_shell_can_rerun(cx) {
+            return;
+        }
+        let Some(sheet) = self.phone_shell_sheet.take() else {
+            return;
+        };
+        cx.notify();
+        if let Some(view) = self
+            .panes
+            .get(&sheet.pane_id)
+            .map(|slot| slot.view().clone())
+        {
+            view.update(cx, |pane, cx| {
+                pane.rerun_command(&sheet.command, window, cx);
+            });
         }
     }
 

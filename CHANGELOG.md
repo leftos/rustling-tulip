@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
+
 ### Changed
 
 - The sidebar's Tabs view no longer repeats each session's tab name in a `T:` chip; unbound sessions keep their `unbound` chip.

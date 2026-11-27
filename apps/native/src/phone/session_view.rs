@@ -24,6 +24,7 @@ use super::photos;
 use super::prompt_sheet;
 use super::quick_replies::{self, ReplySet};
 use super::session::{self, BackStep, Header, Page, SessionPage};
+use super::sheet::CANCEL_LABEL;
 use super::{PhoneLayout, PhoneRoot};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame};
 use crate::chat::ComposerLine;
@@ -34,6 +35,7 @@ use crate::fonts::ui_px;
 use crate::keyboard;
 use crate::linear_card::OPEN_IN_LINEAR;
 use crate::linear_card_view::card_sheet_body;
+use crate::session_menu::{ShellAction, shell_command_rows};
 use crate::target::HostKey;
 use crate::term_input;
 use crate::text_input::SystemPaste;
@@ -61,6 +63,15 @@ enum HeaderLead {
     /// Nothing.
     None,
 }
+
+/// The phone's shell sheet's rows, in the order [`shell_command_rows`]
+/// gives them.
+const SHELL_SHEET_ROWS: [&str; 4] = [
+    "phone-shell-copy-command",
+    "phone-shell-copy-output",
+    "phone-shell-copy-both",
+    "phone-shell-rerun",
+];
 
 /// The composer's Send button's label.
 const SEND_LABEL: &str = "Send";
@@ -330,13 +341,19 @@ impl PhoneRoot {
         self.toggle_page(cx);
     }
 
-    /// One back step on the session page: the Linear card sheet goes down
-    /// while it is up, else the prompt sheet while it is up, else the
+    /// One back step on the session page: the shell sheet goes down while
+    /// it is up, else the Linear card sheet while it is up, else the prompt
+    /// sheet while it is up, else the
     /// composer's open dock closes, else the page steps
     /// back, from the Terminal page to the Chat page while the toggle shows,
     /// else back to Home: in two panes, the selection clears to the empty
     /// session pane.
     pub(super) fn session_back(&mut self, cx: &mut Context<Self>) {
+        if self.root.read(cx).phone_shell_sheet().is_some() {
+            self.root.update(cx, RootView::dismiss_phone_shell_sheet);
+            cx.notify();
+            return;
+        }
         let (mirrored, toggle) = self.session_header(cx).map_or((false, false), |header| {
             (header.chat_mirrored, header.toggle)
         });
@@ -588,8 +605,147 @@ impl PhoneRoot {
                 .relative()
                 .child(body)
                 .children(show_prompt)
-                .children(self.card_sheet_layer(px(0.0), cx)),
+                .children(self.card_sheet_layer(px(0.0), cx))
+                .children(
+                    (page == Page::Terminal)
+                        .then(|| self.shell_sheet_layer(cx))
+                        .flatten(),
+                ),
         )
+    }
+
+    /// While the phone's shell sheet is up ([`RootView::phone_shell_sheet`])
+    /// over the Terminal page: a scrim, whose tap takes it down, and a
+    /// bottom sheet over it, never taller than the page: the dot's header in
+    /// muted text, the four rows of [`shell_command_rows`], which scroll
+    /// when the page is too short for them, then Cancel. A copy row's tap copies and
+    /// takes the sheet down; Re-run types the command with no Enter and takes
+    /// it down, and is dimmed and inert while the command cannot be typed
+    /// again. A back gesture over it takes it down.
+    fn shell_sheet_layer(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let (header, rows, can_rerun) = {
+            let root = self.root.read(cx);
+            let sheet = root.phone_shell_sheet()?;
+            let rows = shell_command_rows(&sheet.command, &sheet.output);
+            (sheet.header.clone(), rows, root.phone_shell_can_rerun(cx))
+        };
+        let t = theme(cx);
+        let scrim = div()
+            .id("phone-shell-scrim")
+            .driver_id(|| "phone-shell-scrim".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(gpui::rgba(t.scrim))
+            .occlude()
+            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_shell_sheet(cx)));
+        let rows: Vec<Stateful<Div>> = rows
+            .into_iter()
+            .zip(SHELL_SHEET_ROWS)
+            .map(|((label, action), id)| Self::shell_sheet_row(id, label, action, can_rerun, cx))
+            .collect();
+        let cancel = Self::sheet_button("phone-shell-cancel", ButtonKind::Outlined, cx)
+            .flex_none()
+            .child(CANCEL_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.dismiss_shell_sheet(cx);
+            }));
+        let panel = div()
+            .id("phone-shell-sheet")
+            .driver_id(|| "phone-shell-sheet".to_owned())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(SIDE_PADDING))
+            .pt(px(16.0))
+            .pb(px(16.0))
+            // Never taller than the page, so its top stays below the page's
+            // top padding; the rows scroll when the page is short.
+            .max_h(gpui::relative(1.0))
+            .rounded_t(px(14.0))
+            .border_t_1()
+            .border_color(gpui::rgb(t.line))
+            .bg(gpui::rgb(t.raised))
+            .on_back_gesture(cx.listener(Self::session_back_gesture))
+            .child(
+                div()
+                    .driver_id(|| "phone-shell-header".to_owned())
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .min_h(px(TOUCH_TARGET))
+                    .px(px(4.0))
+                    .truncate()
+                    .text_color(gpui::rgb(t.muted))
+                    .child(header),
+            )
+            .child(
+                div()
+                    .id("phone-shell-rows")
+                    .driver_id(|| "phone-shell-rows".to_owned())
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .child(cancel);
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(scrim)
+                .child(panel),
+        )
+    }
+
+    /// A row of the shell sheet, tagged `id`: a copy row puts its text on
+    /// the clipboard, the re-run row types the command while `can_rerun`
+    /// and is dimmed with no handler otherwise. Each takes the sheet down.
+    fn shell_sheet_row(
+        id: &str,
+        label: &'static str,
+        action: ShellAction,
+        can_rerun: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let row = Self::sheet_button(id, ButtonKind::Outlined, cx).child(label);
+        match action {
+            ShellAction::Copy(text) => {
+                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.root
+                        .update(cx, |root, cx| root.phone_shell_copy(&text, cx));
+                    cx.notify();
+                }))
+            }
+            ShellAction::Rerun if can_rerun => {
+                row.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.root
+                        .update(cx, |root, cx| root.phone_shell_rerun(window, cx));
+                    cx.notify();
+                }))
+            }
+            ShellAction::Rerun => row.opacity(0.6),
+        }
+    }
+
+    /// Takes the phone's shell sheet down.
+    fn dismiss_shell_sheet(&mut self, cx: &mut Context<Self>) {
+        self.root.update(cx, RootView::dismiss_phone_shell_sheet);
+        cx.notify();
     }
 
     /// Takes the Linear card sheet down.

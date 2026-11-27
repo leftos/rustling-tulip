@@ -1150,6 +1150,7 @@ impl PhoneRoot {
             root.sidebar.clear_attention_on(&shown.0, &shown.1);
             root.mark_session_seen(Some(&shown.0), &shown.1, cx);
             root.dismiss_phone_card(cx);
+            root.dismiss_phone_shell_sheet(cx);
             root.show_phone_chat(Some(shown), cx);
             root.sync_dashboard_watch();
         });
@@ -1425,6 +1426,7 @@ impl PhoneRoot {
         self.attach = None;
         self.root.update(cx, |root, cx| {
             root.dismiss_phone_card(cx);
+            root.dismiss_phone_shell_sheet(cx);
             root.show_phone_chat(None, cx);
             root.sync_dashboard_watch();
         });
@@ -1463,6 +1465,7 @@ impl PhoneRoot {
             self.attach = None;
             self.root.update(cx, |root, cx| {
                 root.dismiss_phone_card(cx);
+                root.dismiss_phone_shell_sheet(cx);
                 root.show_phone_chat(None, cx);
                 root.sync_dashboard_watch();
             });
@@ -2064,7 +2067,8 @@ impl PhoneRoot {
 
     /// Whether something the share sheet waits under is up: Settings, the
     /// viewer, the browser, Home's sheet or sort sheet, the Attach sheet, the
-    /// Linear card sheet, the prompt sheet or the pairing layer.
+    /// Linear card sheet, the shell sheet, the prompt sheet or the pairing
+    /// layer.
     fn share_sheet_blocked(&self, cx: &App) -> bool {
         let root = self.root.read(cx);
         self.page_covered()
@@ -2072,6 +2076,7 @@ impl PhoneRoot {
             || self.sort_menu
             || self.attach.is_some()
             || root.phone_linear_card().is_some()
+            || root.phone_shell_sheet().is_some()
             || root.device_pairing_open()
             || self.prompt_sheet_up(cx)
     }
@@ -2476,6 +2481,9 @@ enum SheetLayer {
     /// The Linear card sheet Home raised, over Home while no session page
     /// draws beside it to carry the card itself.
     CardSheet,
+    /// The shell sheet a gutter dot's tap raised, over the Terminal page
+    /// from inside it.
+    ShellSheet,
     /// The share sheet, over the whole window.
     ShareSheet,
     /// The device pairing layer, over the whole window.
@@ -2488,7 +2496,9 @@ impl SheetLayer {
     const fn pane(self) -> Option<Pane> {
         match self {
             Self::HomeSheet | Self::SortSheet | Self::CardSheet => Some(Pane::List),
-            Self::BrowserSheet | Self::PromptSheet | Self::AttachSheet => Some(Pane::Session),
+            Self::BrowserSheet | Self::PromptSheet | Self::AttachSheet | Self::ShellSheet => {
+                Some(Pane::Session)
+            }
             Self::ShareSheet | Self::Pairing => None,
         }
     }
@@ -2925,8 +2935,11 @@ impl Render for PhoneRoot {
         let split = self.split(host_open, cx);
         let (layers, covers_session) = self.sheet_layers(host_open, padding, window, cx);
         let pairing_covers = pairing.is_some() && layer_covers_session(split, SheetLayer::Pairing);
-        // The Linear card sheet covers the session page from inside it.
-        let card_covers = self.root.read(cx).phone_linear_card().is_some();
+        // The Linear card sheet and the shell sheet cover the session page
+        // from inside it.
+        let card_covers = self.root.read(cx).phone_linear_card().is_some()
+            || (self.root.read(cx).phone_shell_sheet().is_some()
+                && layer_covers_session(split, SheetLayer::ShellSheet));
         let paste_end =
             Self::paste_frame_end(self, covers_session || pairing_covers || card_covers, cx);
         let padded = || {

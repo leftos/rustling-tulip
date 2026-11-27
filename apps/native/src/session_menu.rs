@@ -904,6 +904,48 @@ pub(crate) struct ShellMenu {
     max_height: Pixels,
 }
 
+/// The phone's sheet for a gutter dot's command: what the desktop's menu
+/// shows, taken when the sheet opens, with no anchor.
+pub(crate) struct ShellSheet {
+    /// The phone terminal's pane whose dot raised it.
+    pub(crate) pane_id: String,
+    /// The session that pane shows, when it shows one.
+    pub(crate) session_id: Option<String>,
+    /// The header line: the dot's tooltip.
+    pub(crate) header: String,
+    /// The command line, `""` when the shell left none.
+    pub(crate) command: String,
+    /// The command's output, `""` when there is none.
+    pub(crate) output: String,
+}
+
+/// What a row of a shell command's menu does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellAction {
+    /// Puts this text on the clipboard.
+    Copy(String),
+    /// Types the command again with no Enter.
+    Rerun,
+}
+
+/// The four rows of a shell command's menu, in order, as the desktop's
+/// gutter menu and the phone's shell sheet show them: each row's label and
+/// what it does. Copy both joins the command and a non-empty output with a
+/// newline.
+pub(crate) fn shell_command_rows(command: &str, output: &str) -> [(&'static str, ShellAction); 4] {
+    let both = if output.is_empty() {
+        command.to_owned()
+    } else {
+        format!("{command}\n{output}")
+    };
+    [
+        ("Copy command", ShellAction::Copy(command.to_owned())),
+        ("Copy output only", ShellAction::Copy(output.to_owned())),
+        ("Copy command and output", ShellAction::Copy(both)),
+        ("Re-run command", ShellAction::Rerun),
+    ]
+}
+
 /// The four rows of the gutter menu, with the selector of each.
 const SHELL_MENU_ROWS: [&str; 4] = [
     "shell-menu-copy-command",
@@ -4328,19 +4370,32 @@ impl RootView {
         self.close_link_menu(window, cx);
     }
 
-    /// Whether `menu`'s command can be typed again: it is not empty, its
-    /// session still takes input, and its pane takes the command's bytes.
+    /// Whether `menu`'s command can be typed again ([`Self::can_rerun_command`]).
     fn can_rerun(&self, menu: &ShellMenu, cx: &App) -> bool {
-        !menu.command.is_empty()
-            && menu.session_id.as_deref().is_some_and(|id| {
+        self.can_rerun_command(&menu.pane_id, menu.session_id.as_deref(), &menu.command, cx)
+    }
+
+    /// Whether `command` can be typed again at pane `pane_id`, which shows
+    /// session `session_id`: it is not empty, the session still takes
+    /// input, and the pane takes the command's bytes. The desktop's gutter
+    /// menu and the phone's shell sheet both ask it.
+    pub(crate) fn can_rerun_command(
+        &self,
+        pane_id: &str,
+        session_id: Option<&str>,
+        command: &str,
+        cx: &App,
+    ) -> bool {
+        !command.is_empty()
+            && session_id.is_some_and(|id| {
                 self.sidebar
                     .session(id)
                     .is_some_and(|session| action_state(session) == ActionState::Running)
             })
             && self
                 .panes
-                .get(&menu.pane_id)
-                .is_some_and(|slot| slot.view().read(cx).rerun_bytes(&menu.command).is_some())
+                .get(pane_id)
+                .is_some_and(|slot| slot.view().read(cx).rerun_bytes(command).is_some())
     }
 
     /// The open gutter menu over a layer that keeps a click outside it from
@@ -4376,11 +4431,14 @@ impl RootView {
     }
 
     fn shell_menu_panel(&self, menu: &ShellMenu, cx: &mut Context<Self>) -> Stateful<Div> {
-        let both = if menu.output.is_empty() {
-            menu.command.clone()
-        } else {
-            format!("{}\n{}", menu.command, menu.output)
-        };
+        let rows: Vec<AnyElement> = shell_command_rows(&menu.command, &menu.output)
+            .into_iter()
+            .zip(SHELL_MENU_ROWS)
+            .map(|((label, action), selector)| match action {
+                ShellAction::Copy(text) => Self::shell_copy_row(selector, label, text, cx),
+                ShellAction::Rerun => self.shell_rerun_row(menu, label, cx),
+            })
+            .collect();
         menu_frame(
             crate::fonts::ui_text_size(cx),
             "shell-menu",
@@ -4393,25 +4451,7 @@ impl RootView {
             &theme(cx),
         )
         .child(muted_row(menu.header.clone(), &theme(cx)))
-        .child(Self::shell_copy_row(
-            SHELL_MENU_ROWS[0],
-            "Copy command",
-            menu.command.clone(),
-            cx,
-        ))
-        .child(Self::shell_copy_row(
-            SHELL_MENU_ROWS[1],
-            "Copy output only",
-            menu.output.clone(),
-            cx,
-        ))
-        .child(Self::shell_copy_row(
-            SHELL_MENU_ROWS[2],
-            "Copy command and output",
-            both,
-            cx,
-        ))
-        .child(self.shell_rerun_row(menu, cx))
+        .children(rows)
     }
 
     /// A copy row: it puts `text` on the clipboard, chip included, and
@@ -4436,8 +4476,13 @@ impl RootView {
 
     /// The re-run row: inert and dimmed while its session is stopped, its
     /// command empty, or its session gone.
-    fn shell_rerun_row(&self, menu: &ShellMenu, cx: &mut Context<Self>) -> AnyElement {
-        let row = menu_item(SHELL_MENU_ROWS[3], "Re-run command", false, &theme(cx));
+    fn shell_rerun_row(
+        &self,
+        menu: &ShellMenu,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = menu_item(SHELL_MENU_ROWS[3], label, false, &theme(cx));
         if !self.can_rerun(menu, cx) {
             return row.opacity(0.6).cursor_default().into_any_element();
         }

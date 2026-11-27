@@ -1238,6 +1238,10 @@ impl RootView {
                 };
                 self.check_spaced_link(slot_id, &host, check.clone(), cx);
             }
+            // The phone has no anchored menu: its sheet rises instead.
+            PaneEvent::ShellDotMenu { pane_id, index, .. } if self.is_phone_terminal(slot_id) => {
+                self.open_phone_shell_sheet(pane_id, *index, cx);
+            }
             PaneEvent::ShellDotMenu { pane_id, index, at } => {
                 self.open_shell_menu(pane_id, *index, *at, window, cx);
             }
@@ -1461,13 +1465,15 @@ impl RootView {
         self.update_pane_roles(cx);
     }
 
-    /// Closes the phone's terminal: its slot goes, and its session is
-    /// detached while its host lists it and no other terminal shows it.
+    /// Closes the phone's terminal: its shell sheet goes down, its slot
+    /// goes, and its session is detached while its host lists it and no
+    /// other terminal shows it.
     /// Closing with none open does nothing.
     ///
     /// Args:
     ///     cx: The root's context.
     pub fn close_phone_terminal(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_phone_shell_sheet(cx);
         let Some(session) = self.phone_terminal.take() else {
             return;
         };
@@ -1504,15 +1510,14 @@ impl RootView {
     }
 
     /// Whether `event` from slot `slot_id` needs the desktop's UI the phone's
-    /// terminal has none of: a link menu, a shell dot's menu or an image
-    /// paste. A copy is not among them: the phone writes the clipboard and
-    /// draws the copied chip for it.
+    /// terminal has none of: a link menu or an image paste. A copy is not
+    /// among them: the phone writes the clipboard and draws the copied chip
+    /// for it; nor a shell dot's menu, which the phone shows as its shell
+    /// sheet.
     pub(crate) fn drops_phone_event(&self, slot_id: &str, event: &PaneEvent) -> bool {
         matches!(
             event,
-            PaneEvent::LinkMenu { .. }
-                | PaneEvent::ShellDotMenu { .. }
-                | PaneEvent::PasteImage { .. }
+            PaneEvent::LinkMenu { .. } | PaneEvent::PasteImage { .. }
         ) && self.is_phone_terminal(slot_id)
     }
 
