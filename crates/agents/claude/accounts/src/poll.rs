@@ -379,7 +379,7 @@ pub enum PollResult {
     Failed(FetchError),
     /// Fetched, but another process replaced the lease meanwhile, so the result was dropped.
     Fenced,
-    /// The refresh was refused because `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set; recorded as `store-unmirrored`.
+    /// The refresh was refused because `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set; recorded as `store-unmirrored`.
     StoreUnmirrored,
     /// Another refresh of the account held its consume lock; recorded as `consume-busy`.
     ConsumeBusy,

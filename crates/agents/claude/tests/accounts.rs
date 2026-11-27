@@ -1478,7 +1478,10 @@ fn login_command_runs_auth_login_in_the_scratch_dir() {
                 "CLAUDE_CONFIG_DIR".to_owned(),
                 login.to_str().expect("the scratch path is text").to_owned()
             )],
-            env_remove: vec!["CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned()],
+            env_remove: vec![
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(),
+                "CLAUDE_CODE_CUSTOM_OAUTH_URL".to_owned()
+            ],
         }
     );
 }

@@ -348,7 +348,11 @@ impl Agent for ClaudePlugin {
     }
 
     fn passthrough_vars(&self) -> &'static [&'static str] {
-        &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
+        &[
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_CUSTOM_OAUTH_URL",
+        ]
     }
 
     /// The markers Claude Code sets for a child: without their removal a
@@ -944,6 +948,18 @@ mod tests {
     use super::*;
     use protocol::OptionValues;
     use std::ffi::OsString;
+
+    #[test]
+    fn passthrough_vars_carry_the_key_the_config_dir_and_the_custom_oauth_url() {
+        assert_eq!(
+            Agent::passthrough_vars(&ClaudePlugin),
+            [
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CONFIG_DIR",
+                "CLAUDE_CODE_CUSTOM_OAUTH_URL"
+            ]
+        );
+    }
 
     #[test]
     fn the_model_label_is_the_display_name() {

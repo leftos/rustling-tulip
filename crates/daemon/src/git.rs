@@ -1200,15 +1200,112 @@ fn resolved_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// The folder the `.git` gitfile inside `worktree` names, as written: the whole file, trimmed, must start with
+/// `gitdir:`, and the rest of it, trimmed, is the path. `None` when there is no such file or it does not start so.
+fn gitfile_dir(worktree: &Path) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let raw = contents.trim().strip_prefix("gitdir:")?.trim();
+    Some(PathBuf::from(raw))
+}
+
+/// The largest admin file (`commondir`, `gitdir`) a linked worktree's gitdir is trusted to hold.
+const ADMIN_FILE_MAX: u64 = 64 * 1024;
+
+/// The text of the admin file `path` in a worktree's gitdir, trimmed: `None` when it is missing, a symbolic link, not
+/// a regular file, over [`ADMIN_FILE_MAX`] or not text.
+fn admin_file(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > ADMIN_FILE_MAX {
+        return None;
+    }
+    Some(std::fs::read_to_string(path).ok()?.trim().to_owned())
+}
+
+/// Where a folder sits in git, read from what is on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FolderRepo {
+    /// A linked worktree ([`linked_worktree_root`]); the path is the root its trust is keyed to: the main repo's root,
+    /// or the common dir itself when that is not named `.git` (a bare repo, a separate git dir, a submodule's).
+    LinkedWorktree(PathBuf),
+    /// No `.git` of its own inside a repo; the path is the nearest enclosing folder that has one.
+    Inside(PathBuf),
+    /// Anything else: a repo root with a `.git` folder, a submodule checkout, a gitfile that fails the linked worktree
+    /// checks, or a folder in no repo.
+    Other,
+}
+
+/// Where `folder` sits in git ([`FolderRepo`]), found by stat and the gitfile alone, with no git process: the enclosing
+/// repo is the nearest parent holding a `.git` entry, the walk ending at the filesystem root.
+pub(crate) fn folder_repo(folder: &Path) -> FolderRepo {
+    let dot_git = folder.join(".git");
+    if dot_git.is_file() {
+        return linked_worktree_root(folder).map_or(FolderRepo::Other, FolderRepo::LinkedWorktree);
+    }
+    if dot_git.exists() {
+        return FolderRepo::Other;
+    }
+    folder
+        .ancestors()
+        .skip(1)
+        .find(|parent| parent.join(".git").exists())
+        .map_or(FolderRepo::Other, |root| {
+            FolderRepo::Inside(root.to_path_buf())
+        })
+}
+
+/// The root a linked worktree at `worktree` keys its trust to, read as the agent reads it: the gitfile's gitdir resolved
+/// against `worktree`, the gitdir's `commondir` ([`admin_file`]) resolved against the gitdir, the gitdir's parent
+/// spelled exactly `<common>/worktrees` (compared without reading the disk, so neither a case difference nor a link
+/// passes), and its own `gitdir` file's real path `<real worktree>/.git`. The root is the common dir's parent when
+/// the common dir is named `.git`, else the common dir itself unless it holds a `.git` of its own. `None` when any
+/// of that fails.
+fn linked_worktree_root(worktree: &Path) -> Option<PathBuf> {
+    let gitdir = lexical(&worktree.join(gitfile_dir(worktree)?));
+    let common = lexical(&gitdir.join(admin_file(&gitdir.join("commondir"))?));
+    if lexical(gitdir.parent()?) != common.join("worktrees") {
+        return None;
+    }
+    let back = std::fs::canonicalize(gitdir.join(admin_file(&gitdir.join("gitdir"))?)).ok()?;
+    if back != std::fs::canonicalize(worktree).ok()?.join(".git") {
+        return None;
+    }
+    if common.file_name() == Some(".git".as_ref()) {
+        return common.parent().map(Path::to_path_buf);
+    }
+    (!common.join(".git").exists()).then_some(common)
+}
+
+/// `path` with its `.` components dropped and each `..` taking off the component before it, without reading the disk.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether `a` and `b` both exist and name the same file or folder.
+#[cfg(test)]
+fn same_path(a: &Path, b: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
 /// Read the `.git` gitfile inside `worktree` and derive the originating
 /// repo's working-tree path. Returns `None` if the file is missing,
 /// malformed, or points to a path that no longer exists.
 pub(crate) fn repo_path_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let gitfile = worktree.join(".git");
-    let contents = std::fs::read_to_string(&gitfile).ok()?;
-    let line = contents.lines().find(|l| l.starts_with("gitdir:"))?;
-    let raw = line.strip_prefix("gitdir:")?.trim();
-    let gitdir = PathBuf::from(raw);
+    let gitdir = gitfile_dir(worktree)?;
     // <repo>/.git/worktrees/<wt-name>  →  pop wt-name, pop worktrees, pop .git
     let repo_dot_git = gitdir.parent()?.parent()?;
     let repo = repo_dot_git.parent()?.to_path_buf();
@@ -1261,6 +1358,268 @@ mod tests {
         let checkout = scratch.0.join("plain");
         std::fs::create_dir_all(checkout.join(".git")).expect("the .git folder is created");
         assert_eq!(repo_path_for_worktree(&checkout), None);
+    }
+
+    /// Runs `git` with `args` in `dir`, with a fixed identity and no signing, failing the test on an error.
+    fn run_git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "protocol.file.allow=always",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo at `<scratch>/<name>` with one empty commit.
+    fn committed_repo(scratch: &Scratch, name: &str) -> PathBuf {
+        let repo = scratch.0.join(name);
+        std::fs::create_dir_all(&repo).expect("the repo folder is created");
+        run_git_in(&repo, &["init", "-q"]);
+        run_git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        repo
+    }
+
+    /// Whether `folder` is a linked worktree keyed to the same folder as `root`.
+    fn keyed_to(folder: &Path, root: &Path) -> bool {
+        matches!(folder_repo(folder), FolderRepo::LinkedWorktree(found) if same_path(&found, root))
+    }
+
+    fn text(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn folder_repo_keys_a_linked_worktree_to_its_main_repo() {
+        let scratch = Scratch::new("fr-linked");
+        let main = committed_repo(&scratch, "main");
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &main,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        assert!(keyed_to(&worktree, &main), "{:?}", folder_repo(&worktree));
+    }
+
+    #[test]
+    fn folder_repo_keys_a_bare_repos_worktree_to_the_bare_repo() {
+        let scratch = Scratch::new("fr-bare");
+        let source = committed_repo(&scratch, "src");
+        let bare = scratch.0.join("proj.git");
+        run_git_in(
+            &scratch.0,
+            &["clone", "-q", "--bare", &text(&source), &text(&bare)],
+        );
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &bare,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        assert!(keyed_to(&worktree, &bare), "{:?}", folder_repo(&worktree));
+    }
+
+    #[test]
+    fn folder_repo_keys_a_separate_git_dirs_worktree_to_the_common_dir() {
+        let scratch = Scratch::new("fr-separate");
+        let common = scratch.0.join("gitdirs").join("proj");
+        let checkout = scratch.0.join("proj");
+        std::fs::create_dir_all(scratch.0.join("gitdirs")).expect("the git dirs folder is created");
+        run_git_in(
+            &scratch.0,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                &text(&common),
+                &text(&checkout),
+            ],
+        );
+        run_git_in(&checkout, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &checkout,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        assert!(keyed_to(&worktree, &common), "{:?}", folder_repo(&worktree));
+    }
+
+    /// A superproject at `<scratch>/super` with the submodule `m`, its checkout returned.
+    fn submodule(scratch: &Scratch) -> (PathBuf, PathBuf) {
+        let source = committed_repo(scratch, "subsrc");
+        let superproject = committed_repo(scratch, "super");
+        run_git_in(
+            &superproject,
+            &["submodule", "add", "-q", &text(&source), "m"],
+        );
+        (superproject.clone(), superproject.join("m"))
+    }
+
+    #[test]
+    fn folder_repo_keys_a_submodules_worktree_to_its_common_dir() {
+        let scratch = Scratch::new("fr-submodule-wt");
+        let (superproject, checkout) = submodule(&scratch);
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &checkout,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        let common = superproject.join(".git").join("modules").join("m");
+        assert!(keyed_to(&worktree, &common), "{:?}", folder_repo(&worktree));
+    }
+
+    #[test]
+    fn folder_repo_resolves_a_relative_gitdir_against_the_worktree() {
+        let scratch = Scratch::new("fr-relative");
+        let main = committed_repo(&scratch, "main");
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &main,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        std::fs::write(worktree.join(".git"), "gitdir: ../main/.git/worktrees/f\n")
+            .expect("the gitfile is rewritten");
+        assert!(keyed_to(&worktree, &main), "{:?}", folder_repo(&worktree));
+    }
+
+    #[test]
+    fn folder_repo_refuses_a_gitdir_whose_backlink_names_another_worktree() {
+        let scratch = Scratch::new("fr-backlink");
+        let main = committed_repo(&scratch, "main");
+        let worktree = scratch.0.join("f");
+        run_git_in(
+            &main,
+            &["worktree", "add", "-q", "-b", "f", &text(&worktree)],
+        );
+        let elsewhere = scratch.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("the other folder is created");
+        std::fs::write(elsewhere.join(".git"), "").expect("the other gitfile is written");
+        let backlink = main.join(".git").join("worktrees").join("f").join("gitdir");
+        std::fs::write(&backlink, format!("{}\n", text(&elsewhere.join(".git"))))
+            .expect("the backlink is rewritten");
+        assert_eq!(folder_repo(&worktree), FolderRepo::Other);
+    }
+
+    #[test]
+    fn folder_repo_leaves_a_submodule_checkout_as_other() {
+        let scratch = Scratch::new("fr-submodule");
+        let (_, checkout) = submodule(&scratch);
+        assert_eq!(folder_repo(&checkout), FolderRepo::Other);
+    }
+
+    /// A linked worktree at `<scratch>/f` built by hand, its gitdir `<scratch>/<common>/<worktrees>/f` with a
+    /// `commondir` of `../..` and a backlink to `<scratch>/f/.git`; returns the worktree, its gitdir and the common dir.
+    fn hand_worktree(
+        scratch: &Scratch,
+        common: &str,
+        worktrees: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let common = scratch.0.join(common);
+        let gitdir = common.join(worktrees).join("f");
+        std::fs::create_dir_all(&gitdir).expect("the gitdir is created");
+        let worktree = scratch.0.join("f");
+        std::fs::create_dir_all(&worktree).expect("the worktree is created");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", text(&gitdir)),
+        )
+        .expect("the gitfile is written");
+        std::fs::write(gitdir.join("commondir"), "../..\n").expect("the commondir is written");
+        std::fs::write(
+            gitdir.join("gitdir"),
+            format!("{}\n", text(&worktree.join(".git"))),
+        )
+        .expect("the backlink is written");
+        (worktree, gitdir, common)
+    }
+
+    #[test]
+    fn folder_repo_refuses_a_common_dir_not_named_git_that_holds_a_git() {
+        let scratch = Scratch::new("fr-common-holds-git");
+        let (worktree, _, common) = hand_worktree(&scratch, "proj", "worktrees");
+        assert!(keyed_to(&worktree, &common), "{:?}", folder_repo(&worktree));
+        std::fs::create_dir_all(common.join(".git")).expect("the inner .git is created");
+        assert_eq!(folder_repo(&worktree), FolderRepo::Other);
+    }
+
+    #[test]
+    fn folder_repo_refuses_a_worktrees_folder_spelled_in_another_case() {
+        let scratch = Scratch::new("fr-case");
+        let (worktree, _, _) = hand_worktree(&scratch, "main/.git", "Worktrees");
+        assert_eq!(folder_repo(&worktree), FolderRepo::Other);
+    }
+
+    #[test]
+    fn folder_repo_takes_a_gitfile_only_when_its_whole_text_starts_with_gitdir() {
+        let scratch = Scratch::new("fr-gitfile");
+        let (worktree, gitdir, common) = hand_worktree(&scratch, "proj", "worktrees");
+        let gitfile = worktree.join(".git");
+        std::fs::write(&gitfile, format!("gitdir: {}\nextra\n", text(&gitdir))).expect("rewrite");
+        assert_eq!(folder_repo(&worktree), FolderRepo::Other);
+        std::fs::write(&gitfile, format!("extra\ngitdir: {}\n", text(&gitdir))).expect("rewrite");
+        assert_eq!(folder_repo(&worktree), FolderRepo::Other);
+        std::fs::write(&gitfile, format!("\n  gitdir: {}  \n\n", text(&gitdir))).expect("rewrite");
+        assert!(keyed_to(&worktree, &common), "{:?}", folder_repo(&worktree));
+    }
+
+    #[test]
+    fn folder_repo_refuses_an_admin_file_over_64_kib() {
+        for name in ["commondir", "gitdir"] {
+            let scratch = Scratch::new(&format!("fr-big-{name}"));
+            let (worktree, gitdir, common) = hand_worktree(&scratch, "proj", "worktrees");
+            assert!(
+                keyed_to(&worktree, &common),
+                "{name}: {:?}",
+                folder_repo(&worktree)
+            );
+            let admin = gitdir.join(name);
+            let mut body = std::fs::read_to_string(&admin).expect("read the admin file");
+            body.push_str(&" ".repeat(65 * 1024));
+            std::fs::write(&admin, body).expect("grow the admin file");
+            assert_eq!(folder_repo(&worktree), FolderRepo::Other, "{name}");
+        }
+    }
+
+    #[test]
+    fn folder_repo_refuses_an_admin_file_that_is_a_folder() {
+        for name in ["commondir", "gitdir"] {
+            let scratch = Scratch::new(&format!("fr-dir-{name}"));
+            let (worktree, gitdir, _) = hand_worktree(&scratch, "proj", "worktrees");
+            let admin = gitdir.join(name);
+            std::fs::remove_file(&admin).expect("remove the admin file");
+            std::fs::create_dir_all(&admin).expect("a folder in its place");
+            assert_eq!(folder_repo(&worktree), FolderRepo::Other, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_repo_refuses_an_admin_file_that_is_a_symlink() {
+        for name in ["commondir", "gitdir"] {
+            let scratch = Scratch::new(&format!("fr-link-{name}"));
+            let (worktree, gitdir, _) = hand_worktree(&scratch, "proj", "worktrees");
+            let admin = gitdir.join(name);
+            let target = scratch.0.join(format!("{name}-target"));
+            std::fs::rename(&admin, &target).expect("move the admin file aside");
+            std::os::unix::fs::symlink(&target, &admin).expect("link the admin file");
+            assert_eq!(folder_repo(&worktree), FolderRepo::Other, "{name}");
+        }
     }
 
     fn paths(strs: &[&str]) -> Vec<PathBuf> {

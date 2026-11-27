@@ -97,7 +97,7 @@ The trait also carries `chat_entries`, `chat_line_facts` (the chat mirror; its `
 | Binary | `program_env_var`, `default_program` | Reads the override, then runs `resolve_agent_program`; `main.rs` logs every plugin's override |
 | Environment | `passthrough_vars`, `spawn_env`, `inherited_session_vars` | The app's base keep-list plus the plugin's own variables, then the plugin's routing `set` and `remove`; `keys` is the app's `user_env` lookup, read at each spawn and never stored; the plugin lists the parent-session variables a child must not inherit (`tracer_client::inherited_session_vars()` unions them over the registry) |
 | Request validation | `check_request` | Runs in `spawn_session` after the app's schema validation, before rows are sealed and before git work |
-| Extra folders | `prepare_extra_folders` | Runs in `spawn_session` before an interactive or headless workspace spawn's child starts, off the async threads, with the registered repo paths of the members after the first (the folders the argv opens beside the start folder); an error is logged "extra folder trust not recorded" and the spawn goes on. The default does nothing; Claude records its folder trust for them |
+| Extra folders | `prepare_extra_folders` | Runs in `spawn_session` before an interactive or headless workspace spawn's child starts, off the async threads, with the folders the argv opens beside the start folder, each taken to its trust root (below); an error is logged "extra folder trust not recorded" and the spawn goes on. The default does nothing; Claude records its folder trust for them |
 | Conversation id | `conversation_plan` | Acts on the plan (below); records the id as `conversation_id` and passes it in `SpawnContext` |
 | Hooks | `hook_plan` | Writes `HookPlan::files` into `sessions/<id>/` (owning cleanup and discard), appends `HookPlan::args` with each `{file:name}` replaced by the written path; a file name must be one plain path component ending `.json`; a failed write runs without hooks |
 | Spawn argv | `interactive_args`, `headless_args` | Builds the PTY or piped spawn; `None` from `headless_args` means "no headless" |
@@ -114,6 +114,12 @@ The trait also carries `chat_entries`, `chat_line_facts` (the chat mirror; its `
 | Chat | `ChatContext`, `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries(line, known, context)`, where `context` is the agent's `ChatContext`: per-chat state the plugin owns (`()` when it reads each line alone), which `AgentPlugin` type-erases (`new_chat_context`) and the daemon's `ChatState` and `TranscriptLog` hold one of per chat, reset when the transcript restarts or switches (the Claude plugin's is `ScriptBook`, which ties a script's inner calls to it); it reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) |
 | Liveness | `liveness_tokens` | The orphan check's fallback for a sidecar with no `program_name` |
 | Fake CLI | `fake_cli` | The live harness points each plugin's override at its fake |
+
+Extra folders are the registered repo paths of a workspace spawn's members after the first, each taken to the root its trust is keyed to before `prepare_extra_folders` sees it (`trust_roots`). A linked worktree becomes its main repo's root, or the common dir itself when that is not named `.git` (a bare repo, a separate git dir, a submodule's); the gitfile, `commondir` and the gitdir's backlink must all agree, else the folder stays as given.
+
+A folder inside a repo that is not its root is left out with the warning "not trusting <folder>: the agent keys trust to its enclosing repo <root>, which was not registered".
+
+Claude writes the trust into the global config Claude Code reads (`resolve_claude_paths`): `<config home>/.config.json` when it is not empty, else `.claude.json` (`.claude-custom-oauth.json` under `CLAUDE_CODE_CUSTOM_OAUTH_URL`) in `CLAUDE_CONFIG_DIR`, or in the user's home, which is `USERPROFILE` first on Windows.
 
 The context and result types, all in `agent-api`:
 

@@ -5,7 +5,9 @@
 
 use crate::transcripts::CONFIG_DIR_VAR;
 use agent_api::{AgentError, ResolvedRows};
-use claude_accounts::{ClaudeCodeLocks, ClaudePaths, update_global_config};
+use claude_accounts::{
+    ClaudeCodeLocks, ClaudePaths, file_has_content, resolve_claude_paths, update_global_config,
+};
 use directories::UserDirs;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
@@ -83,9 +85,9 @@ fn all_trusted(bytes: &[u8], keys: &[String]) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 enum ConfigDir {
     /// `CLAUDE_CONFIG_DIR` unset or empty: `<user home>/.claude`, with the config at
-    /// `<user home>/.claude.json`.
+    /// `<user home>/.claude.json` by default ([`resolve_claude_paths`]).
     Default,
-    /// An absolute `CLAUDE_CONFIG_DIR`, holding the config as `.claude.json`.
+    /// An absolute `CLAUDE_CONFIG_DIR`, holding the config (`.claude.json` by default).
     Dir(PathBuf),
     /// A relative `CLAUDE_CONFIG_DIR`, which the daemon does not resolve.
     Relative,
@@ -111,23 +113,31 @@ fn config_dir(row: Option<&str>, process: Option<OsString>) -> ConfigDir {
     }
 }
 
-/// Claude Code's files for a spawn with resolved rows `rows`, by [`config_dir`].
+/// Claude Code's files for a spawn with resolved rows `rows`, as
+/// [`resolve_claude_paths`] finds them in the child's environment: its
+/// `CLAUDE_CONFIG_DIR` by [`config_dir`], and every other variable the
+/// spawn's row when there is one, else the daemon's own.
 fn trust_paths(rows: &ResolvedRows) -> Result<ClaudePaths, AgentError> {
-    match config_dir(rows.get(CONFIG_DIR_VAR), std::env::var_os(CONFIG_DIR_VAR)) {
-        ConfigDir::Dir(dir) => Ok(ClaudePaths::new(dir.clone(), dir.join(".claude.json"))),
-        ConfigDir::Relative => Err(AgentError::new(
-            "CLAUDE_CONFIG_DIR is relative; Claude Code's folder trust was not recorded",
-        )),
-        ConfigDir::Default => {
-            let home = UserDirs::new()
-                .map(|dirs| dirs.home_dir().to_path_buf())
-                .ok_or_else(|| AgentError::new("Claude Code's home folder could not be found"))?;
-            Ok(ClaudePaths::new(
-                home.join(".claude"),
-                home.join(".claude.json"),
-            ))
+    let dir = match config_dir(rows.get(CONFIG_DIR_VAR), std::env::var_os(CONFIG_DIR_VAR)) {
+        ConfigDir::Dir(dir) => Some(dir.into_os_string()),
+        ConfigDir::Relative => {
+            return Err(AgentError::new(
+                "CLAUDE_CONFIG_DIR is relative; Claude Code's folder trust was not recorded",
+            ));
         }
-    }
+        ConfigDir::Default => None,
+    };
+    let env = |name: &str| {
+        if name == CONFIG_DIR_VAR {
+            return dir.clone();
+        }
+        rows.get(name)
+            .map(OsString::from)
+            .or_else(|| std::env::var_os(name))
+    };
+    let os_home = || UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    resolve_claude_paths(env, os_home, file_has_content)
+        .ok_or_else(|| AgentError::new("Claude Code's home folder could not be found"))
 }
 
 /// `folder` as Claude Code spells its `projects` key: on Windows every `\` as
@@ -382,6 +392,24 @@ mod tests {
         let result = record_trust(&scratch.rows(), &[yaat_server()]);
         assert!(result.is_err(), "{result:?}");
         assert_eq!(scratch.bytes(), br#"{"projects":{"X:/dev/yaat-server":3}}"#);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_non_empty_config_json_in_the_config_home_receives_the_trust() {
+        let scratch = Scratch::new();
+        let legacy = scratch.0.join(".config.json");
+        fs::write(&legacy, r#"{"numStartups":1}"#).expect("seed the .config.json");
+        record_trust(&scratch.rows(), &[yaat_server()]).expect("trust is recorded");
+        let config: Value =
+            serde_json::from_slice(&fs::read(&legacy).expect("read the .config.json"))
+                .expect("the .config.json is JSON");
+        assert_eq!(
+            config["projects"]["X:/dev/yaat-server"][TRUST_FIELD],
+            json!(true)
+        );
+        assert_eq!(config["numStartups"], json!(1));
+        assert!(!scratch.config().exists(), ".claude.json was written");
     }
 
     #[test]

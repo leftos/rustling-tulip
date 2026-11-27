@@ -13,6 +13,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, a host that failed to connect keeps its reason while it redials, so its card no longer jumps on every retry.
 - On the phone in two panes, a Linear chip tapped on Home shows its card at once while the viewer is open.
 - On a phone on its side, the Needs you card leaves Home's rows visible with the keyboard up, and the copied chip no longer covers the terminal.
+- A workspace member registered as a linked worktree no longer stops at Claude's trust prompt; it is trusted at its main repo.
+- Folder trust and account switching find Claude Code's settings file where Claude Code does, including `.config.json` and a custom `USERPROFILE`.
 - On the phone, a notification tap's note shows in the session pane while the list pane is collapsed.
 - On the phone, a paste that arrives after its field was closed is dropped instead of landing in a hidden field.
 - On the phone, the terminal keeps its rows when Quick and the key bar overflow after a rotation, and leaves no blank band when the keyboard drops.

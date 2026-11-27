@@ -742,7 +742,9 @@ fn put_back(aside: &Path, path: &Path) {
     if let Err(error) = crate::locks::rename_exclusive(aside, path) {
         let file = match path.file_name().and_then(|name| name.to_str()) {
             Some(".credentials.json") => "Claude Code's live credential file",
-            Some(".claude.json") => "Claude Code's global config",
+            Some(".claude.json" | ".config.json" | ".claude-custom-oauth.json") => {
+                "Claude Code's global config"
+            }
             _ => "a Claude Code file",
         };
         tracing::warn!(

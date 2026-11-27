@@ -560,7 +560,7 @@ pub struct RefreshContext<'a> {
     /// The stop drain: a refresh takes a [`crate::WorkGuard`] only once its lock waits are over, just before the POST,
     /// and holds it until the successor is written or stashed, so a drain never waits out a lock wait.
     pub drain: &'a Arc<Drain>,
-    /// Whether `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set in the caller's environment: Claude Code then keeps its
+    /// Whether `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set in the caller's environment: Claude Code then keeps its
     /// credentials in a store the account store does not mirror, and the gate refuses ([`GrantError::StoreUnmirrored`]).
     pub securestorage_dir_set: bool,
     /// The time now.
@@ -610,7 +610,7 @@ impl OauthShape {
 pub enum GrantError {
     /// The stop drain has started: nothing was spent.
     Draining,
-    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set: refused before any lock.
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set: refused before any lock.
     StoreUnmirrored,
     /// Another consumer holds the account's consume lock past its 10 s wait; this pass yields.
     ConsumeBusy,
@@ -756,7 +756,7 @@ impl GrantOutcome {
 /// now-current credential. `snapshot` is the credential the caller read: the gate never spends it, only compares its
 /// access token with the store's re-read.
 ///
-/// In order: refuse when `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set; take the consume lock (10 s); under the account
+/// In order: refuse when `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set; take the consume lock (10 s); under the account
 /// lock, refuse the active account, re-read the store, adopt a stashed successor and defer an empty slot; hand back a
 /// re-read whose fresh access token differs from the snapshot's; refuse while the store would take no write (a failed
 /// canary or a later `accounts.json` schema), before the drain guard; take a drain guard, past every lock wait; POST

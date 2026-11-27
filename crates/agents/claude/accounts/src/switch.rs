@@ -131,8 +131,8 @@ pub enum SwitchErrorKind {
     StoreReadOnly,
     /// `accounts.json` was written by a later version, so the store takes no write. Nothing was written.
     UnknownSchema,
-    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set: Claude Code keeps its login in a store the account store does not
-    /// mirror.
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set: Claude Code keeps its login in a store the account store does
+    /// not mirror.
     /// Nothing was written.
     StoreUnmirrored,
     /// The live credential file exists but cannot be read or is not UTF-8, or, when the live login is a managed
@@ -235,7 +235,7 @@ impl fmt::Display for SwitchErrorKind {
                 "accounts.json was written by a later version, so the account store takes no write"
             }
             Self::StoreUnmirrored => {
-                "CLAUDE_SECURESTORAGE_CONFIG_DIR is set: Claude Code keeps its login in a store the account store does not mirror"
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR or CLAUDE_CODE_CUSTOM_OAUTH_URL is set: Claude Code keeps its login in a store the account store does not mirror"
             }
             Self::LiveUnreadable => {
                 "Claude Code's live credential file could not be read; nothing was written"

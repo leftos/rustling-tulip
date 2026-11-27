@@ -732,7 +732,9 @@ fn lock_description(path: &Path) -> &'static str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some(".oauth_refresh.lock") => "Claude Code's OAuth refresh lock",
         Some(".claude.lock") => "Claude Code's credentials lock",
-        Some(".claude.json.lock") => "Claude Code's config lock",
+        Some(".claude.json.lock" | ".config.json.lock" | ".claude-custom-oauth.json.lock") => {
+            "Claude Code's config lock"
+        }
         _ => "the lock directory",
     }
 }

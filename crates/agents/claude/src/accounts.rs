@@ -40,7 +40,8 @@ use claude_accounts::{
     StoreErrorKind, StrategyName, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,
     SwitchPrecondition, TOKEN_URL, TransportError, USAGE_BETA_HEADER, USAGE_TIMEOUT, USAGE_URL,
     UsageEntry, UsageTable, UsageTransport, UsageWindow, capture_live_login,
-    delete_live_keychain_item, poll_with_refresh, probe_outgoing,
+    delete_live_keychain_item, file_has_content, poll_with_refresh, probe_outgoing,
+    resolve_claude_paths,
 };
 use directories::UserDirs;
 use protocol::AutoSwitchStrategy;
@@ -50,7 +51,7 @@ use reqwest::redirect::Policy;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transcripts::{CONFIG_DIR_VAR, own_claude_home};
+use crate::transcripts::CONFIG_DIR_VAR;
 
 /// The most of a response body a transport reads: a longer body is not read
 /// on, and counts as one that does not parse.
@@ -59,6 +60,19 @@ pub const BODY_CAP: usize = 64 * 1024;
 /// The variable that moves Claude Code's credentials into a store the
 /// account store does not mirror.
 const SECURESTORAGE_DIR_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
+
+/// The variable that points Claude Code at another OAuth deployment, whose
+/// Keychain item and token refresh the account store does not mirror.
+const CUSTOM_OAUTH_VAR: &str = "CLAUDE_CODE_CUSTOM_OAUTH_URL";
+
+/// Whether Claude Code, in the environment `lookup` reads, keeps its login
+/// where the account store does not mirror it, so the service refuses as for
+/// an unmirrored store: `CLAUDE_SECURESTORAGE_CONFIG_DIR` set at all, or
+/// `CLAUDE_CODE_CUSTOM_OAUTH_URL` set and not empty.
+fn store_unmirrored(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    lookup(SECURESTORAGE_DIR_VAR).is_some()
+        || lookup(CUSTOM_OAUTH_VAR).is_some_and(|url| !url.is_empty())
+}
 
 /// The least wait between two polls, in seconds: the store crate's urgent
 /// cadence, the floor no planned poll is tightened below.
@@ -231,9 +245,14 @@ impl ClaudeAccounts {
             .map_err(|_| AccountsError::new("the HTTP client could not be built"))
     }
 
-    /// Claude Code's files: its home is the config's `agent_home`, else
-    /// `CLAUDE_CONFIG_DIR`, else `<user home>/.claude`; its global config is
-    /// `.claude.json` in the first two, else `<user home>/.claude.json`. Its
+    /// Claude Code's files, as [`resolve_claude_paths`] finds them in this
+    /// process's environment with the config's `agent_home`, when set, as
+    /// `CLAUDE_CONFIG_DIR`: its home is that folder, else `<user home>/.claude`,
+    /// the user home being `USERPROFILE` on Windows when it is set, else the
+    /// OS's; its global config is `<home>/.config.json` when that is not
+    /// empty, else `.claude.json` in that folder, else in the user home
+    /// (`.claude-custom-oauth.json` under `CLAUDE_CODE_CUSTOM_OAUTH_URL`, which
+    /// the service refuses, [`store_unmirrored`]). Its
     /// live login is where Claude Code keeps it on this platform
     /// ([`with_live_store`]), except under the config's `agent_home`, a
     /// test's own home, where it stays in the live credential file, so no
@@ -257,18 +276,13 @@ impl ClaudeAccounts {
             return Ok(with_live_store(paths, None, Some(scratch.as_os_str())));
         }
         let missing = || AccountsError::new("Claude Code's home folder could not be found");
-        let moved = self.cfg.agent_home.clone().or_else(|| {
-            std::env::var_os(CONFIG_DIR_VAR)
-                .filter(|dir| !dir.is_empty())
-                .map(PathBuf::from)
-        });
-        let paths = if let Some(home) = &moved {
-            ClaudePaths::new(home.clone(), home.join(".claude.json"))
-        } else {
-            let home = own_claude_home().ok_or_else(missing)?;
-            let user = UserDirs::new().ok_or_else(missing)?;
-            ClaudePaths::new(home, user.home_dir().join(".claude.json"))
+        let agent_home = self.cfg.agent_home.as_ref();
+        let env = |name: &str| match agent_home {
+            Some(home) if name == CONFIG_DIR_VAR => Some(home.clone().into_os_string()),
+            _ => std::env::var_os(name),
         };
+        let os_home = || UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+        let paths = resolve_claude_paths(env, os_home, file_has_content).ok_or_else(missing)?;
         if self.cfg.agent_home.is_some() {
             return Ok(paths);
         }
@@ -308,7 +322,7 @@ impl ClaudeAccounts {
             claude,
             transport: &refresh,
             drain: &self.drain,
-            securestorage_dir_set: std::env::var_os(SECURESTORAGE_DIR_VAR).is_some(),
+            securestorage_dir_set: store_unmirrored(|name| std::env::var_os(name)),
             clock: &jiff::Timestamp::now,
             profile: &profile,
             verdicts: &self.verdicts,
@@ -501,9 +515,13 @@ impl AccountsService for ClaudeAccounts {
         Ok(LoginCommand {
             args: ["auth", "login", "--claudeai"].map(str::to_owned).to_vec(),
             env: vec![(CONFIG_DIR_VAR.to_owned(), dir.to_owned())],
-            // Set, it would pick the Keychain item over `CLAUDE_CONFIG_DIR`,
-            // possibly the user's live one.
-            env_remove: vec![SECURESTORAGE_DIR_VAR.to_owned()],
+            // Set, the first would pick the Keychain item over
+            // `CLAUDE_CONFIG_DIR`, possibly the user's live one, and the second
+            // would log in to another OAuth deployment.
+            env_remove: vec![
+                SECURESTORAGE_DIR_VAR.to_owned(),
+                CUSTOM_OAUTH_VAR.to_owned(),
+            ],
         })
     }
 
@@ -2186,6 +2204,26 @@ mod tests {
             scratch_refusal_against(Some(&live), &user.join("data/account-login/7")),
             None
         );
+    }
+
+    #[test]
+    fn a_custom_oauth_url_or_a_securestorage_dir_leaves_the_store_unmirrored() {
+        let cases: [(&[(&str, &str)], bool); 5] = [
+            (&[], false),
+            (&[(SECURESTORAGE_DIR_VAR, "")], true),
+            (&[(CUSTOM_OAUTH_VAR, "https://auth.example")], true),
+            (&[(CUSTOM_OAUTH_VAR, "")], false),
+            (&[(CONFIG_DIR_VAR, "/cfg")], false),
+        ];
+        for (pairs, expected) in cases {
+            let lookup = |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            };
+            assert_eq!(store_unmirrored(lookup), expected, "{pairs:?}");
+        }
     }
 
     #[test]

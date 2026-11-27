@@ -63,7 +63,7 @@ const CLAUDE_CONFIG_DIR_SET: &str = "CLAUDE_CONFIG_DIR is set, so Claude Code re
 const SYSTEMIC: [(&str, &str); 5] = [
     (
         "store-unmirrored",
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR is set; unset it or run from a normal shell",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR or CLAUDE_CODE_CUSTOM_OAUTH_URL is set; unset it or run from a normal shell",
     ),
     (
         "store-unwritable",

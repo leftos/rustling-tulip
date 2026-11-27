@@ -233,8 +233,8 @@ pub enum LiveStore {
     },
 }
 
-/// Claude Code's own files: its config home (`~/.claude`) and its global config file (`~/.claude.json`), and where it
-/// keeps its live login ([`LiveStore`]).
+/// Claude Code's own files: its config home (`~/.claude`) and its global config file (`~/.claude.json` by default,
+/// found by [`resolve_claude_paths`]), and where it keeps its live login ([`LiveStore`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaudePaths {
     config_home: PathBuf,
@@ -279,7 +279,8 @@ impl ClaudePaths {
         &self.live
     }
 
-    /// Claude Code's global config file, `~/.claude.json`: its `oauthAccount` names the account logged in now.
+    /// Claude Code's global config file, `~/.claude.json` by default ([`resolve_claude_paths`]): its `oauthAccount`
+    /// names the account logged in now.
     #[must_use]
     pub fn global_config(&self) -> &Path {
         &self.global_config
@@ -305,11 +306,77 @@ impl ClaudePaths {
         sibling_lock(&self.config_home)
     }
 
-    /// Claude Code's global config lock, `~/.claude.json.lock`.
+    /// Claude Code's global config lock, `<global config>.lock`: `~/.claude.json.lock` by default, and beside whichever
+    /// file [`resolve_claude_paths`] chose.
     #[must_use]
     pub fn config_lock(&self) -> PathBuf {
         sibling_lock(&self.global_config)
     }
+}
+
+/// The variable that moves Claude Code's config home, and its global config with it.
+const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// The variable that points Claude Code at a custom OAuth server, which gives its global config its own name.
+const CUSTOM_OAUTH_VAR: &str = "CLAUDE_CODE_CUSTOM_OAUTH_URL";
+
+/// The variable Claude Code reads its home from on Windows before the OS's own home folder.
+const USER_PROFILE_VAR: &str = "USERPROFILE";
+
+/// Claude Code's config home and global config as Claude Code finds them, from `env`, the environment it runs with,
+/// `os_home`, the OS's home folder, and `has_content`, whether a file exists and is not empty ([`file_has_content`] on
+/// disk). An empty variable counts as unset.
+///
+/// - The config home is `CLAUDE_CONFIG_DIR` when it is set, else `<home>/.claude`, where home is `USERPROFILE` on
+///   Windows when it is set, else `os_home`. With `CLAUDE_CONFIG_DIR` set neither `USERPROFILE` nor `os_home` is
+///   consulted, and `has_content` is only asked about a file inside it.
+/// - The global config is `<config home>/.config.json` when that file is not empty, else `.claude.json` in
+///   `CLAUDE_CONFIG_DIR`, or in home when it is unset; `.claude-custom-oauth.json` in its place when
+///   `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set.
+///
+/// The config lock follows the chosen file ([`ClaudePaths::config_lock`]). The live login is kept in the live
+/// credential file ([`LiveStore::File`]). `None` when no home is found.
+pub fn resolve_claude_paths(
+    env: impl Fn(&str) -> Option<OsString>,
+    os_home: impl FnOnce() -> Option<PathBuf>,
+    has_content: impl Fn(&Path) -> bool,
+) -> Option<ClaudePaths> {
+    resolve_paths_on(cfg!(windows), env, os_home, has_content)
+}
+
+/// [`resolve_claude_paths`] with `windows` saying whether `USERPROFILE` is read.
+fn resolve_paths_on(
+    windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+    os_home: impl FnOnce() -> Option<PathBuf>,
+    has_content: impl Fn(&Path) -> bool,
+) -> Option<ClaudePaths> {
+    let set = |name: &str| env(name).filter(|value| !value.is_empty());
+    let (config_home, config_folder) = if let Some(dir) = set(CONFIG_DIR_VAR) {
+        let dir = PathBuf::from(dir);
+        (dir.clone(), dir)
+    } else {
+        let profile = if windows { set(USER_PROFILE_VAR) } else { None };
+        let home = profile.map(PathBuf::from).or_else(os_home)?;
+        (home.join(".claude"), home)
+    };
+    let legacy = config_home.join(".config.json");
+    if has_content(&legacy) {
+        return Some(ClaudePaths::new(config_home, legacy));
+    }
+    let suffix = if set(CUSTOM_OAUTH_VAR).is_some() {
+        "-custom-oauth"
+    } else {
+        ""
+    };
+    let global_config = config_folder.join(format!(".claude{suffix}.json"));
+    Some(ClaudePaths::new(config_home, global_config))
+}
+
+/// Whether `path` is a file holding at least one byte.
+#[must_use]
+pub fn file_has_content(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
 }
 
 /// `<parent>/<name>.lock` for `<parent>/<name>`, a trailing separator ignored.
@@ -324,5 +391,237 @@ fn sibling_lock(path: &Path) -> PathBuf {
     match path.parent() {
         Some(parent) => parent.join(lock_name),
         None => PathBuf::from(lock_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// An absolute folder on this platform.
+    fn absolute(name: &str) -> PathBuf {
+        let root = if cfg!(windows) { r"X:\" } else { "/" };
+        Path::new(root).join(name)
+    }
+
+    /// An environment of `pairs`, every other variable unset.
+    fn env_of<'a>(pairs: &'a [(&'static str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone().into_os_string())
+        }
+    }
+
+    /// The paths resolved on Windows from `pairs`, an OS home of `os`, and the files in `full` the only ones with
+    /// content.
+    fn resolve(
+        pairs: &[(&'static str, PathBuf)],
+        os: &str,
+        full: &[PathBuf],
+    ) -> Option<ClaudePaths> {
+        resolve_paths_on(
+            true,
+            env_of(pairs),
+            || Some(absolute(os)),
+            |path| full.iter().any(|file| file == path),
+        )
+    }
+
+    #[test]
+    fn config_dir_names_its_claude_json() {
+        let dir = absolute("cfg");
+        let paths = resolve(&[(CONFIG_DIR_VAR, dir.clone())], "os", &[]);
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(dir.clone(), dir.join(".claude.json")))
+        );
+    }
+
+    #[test]
+    fn config_dir_with_custom_oauth_names_the_custom_oauth_file() {
+        let dir = absolute("cfg");
+        let pairs = [
+            (CONFIG_DIR_VAR, dir.clone()),
+            (CUSTOM_OAUTH_VAR, PathBuf::from("https://auth.example")),
+        ];
+        let paths = resolve(&pairs, "os", &[]);
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(
+                dir.clone(),
+                dir.join(".claude-custom-oauth.json")
+            ))
+        );
+    }
+
+    #[test]
+    fn config_dir_with_a_non_empty_config_json_names_it() {
+        let dir = absolute("cfg");
+        let paths = resolve(
+            &[(CONFIG_DIR_VAR, dir.clone())],
+            "os",
+            &[dir.join(".config.json"), dir.join(".claude.json")],
+        );
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(dir.clone(), dir.join(".config.json")))
+        );
+    }
+
+    #[test]
+    fn config_dir_with_an_empty_config_json_names_claude_json() {
+        let dir = absolute("cfg");
+        let paths = resolve(
+            &[(CONFIG_DIR_VAR, dir.clone())],
+            "os",
+            &[dir.join(".claude.json")],
+        );
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(dir.clone(), dir.join(".claude.json")))
+        );
+    }
+
+    #[test]
+    fn user_profile_names_its_claude_json_and_config_home() {
+        let profile = absolute("profile");
+        let paths = resolve(&[(USER_PROFILE_VAR, profile.clone())], "os", &[]);
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(
+                profile.join(".claude"),
+                profile.join(".claude.json")
+            ))
+        );
+    }
+
+    #[test]
+    fn user_profile_config_json_under_its_claude_folder_wins_when_not_empty() {
+        let profile = absolute("profile");
+        let legacy = profile.join(".claude").join(".config.json");
+        let paths = resolve(
+            &[(USER_PROFILE_VAR, profile.clone())],
+            "os",
+            std::slice::from_ref(&legacy),
+        );
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(profile.join(".claude"), legacy))
+        );
+    }
+
+    #[test]
+    fn unset_everything_falls_back_to_the_os_home() {
+        let os = absolute("os");
+        let empty = [
+            (CONFIG_DIR_VAR, PathBuf::new()),
+            (USER_PROFILE_VAR, PathBuf::new()),
+        ];
+        let paths = resolve(&empty, "os", &[]);
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(
+                os.join(".claude"),
+                os.join(".claude.json")
+            ))
+        );
+    }
+
+    #[test]
+    fn off_windows_user_profile_is_ignored() {
+        let os = absolute("os");
+        let pairs = [(USER_PROFILE_VAR, absolute("profile"))];
+        let paths = resolve_paths_on(false, env_of(&pairs), || Some(os.clone()), |_| false);
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(
+                os.join(".claude"),
+                os.join(".claude.json")
+            ))
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test fails loudly on a broken scratch dir"
+    )]
+    fn file_has_content_needs_a_file_of_at_least_one_byte() {
+        let dir = std::env::temp_dir().join(format!("rt-paths-content-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create the scratch dir");
+        let (empty, one, missing) = (dir.join("empty"), dir.join("one"), dir.join("missing"));
+        fs::write(&empty, b"").expect("write the empty file");
+        fs::write(&one, b"x").expect("write the one-byte file");
+        let seen = (
+            file_has_content(&empty),
+            file_has_content(&one),
+            file_has_content(&missing),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(seen, (false, true, false));
+    }
+
+    #[test]
+    fn the_config_lock_follows_the_chosen_file() {
+        let dir = absolute("cfg");
+        let plain =
+            resolve(&[(CONFIG_DIR_VAR, dir.clone())], "os", &[]).map(|paths| paths.config_lock());
+        assert_eq!(plain, Some(dir.join(".claude.json.lock")));
+        let legacy = resolve(
+            &[(CONFIG_DIR_VAR, dir.clone())],
+            "os",
+            &[dir.join(".config.json")],
+        )
+        .map(|paths| paths.config_lock());
+        assert_eq!(legacy, Some(dir.join(".config.json.lock")));
+    }
+
+    #[test]
+    fn config_dir_never_reads_user_profile_the_os_home_or_a_file_outside_it() {
+        let dir = absolute("cfg");
+        let pairs = [
+            (CONFIG_DIR_VAR, dir.clone()),
+            (USER_PROFILE_VAR, absolute("profile")),
+        ];
+        let asked = RefCell::new(Vec::new());
+        let probed = RefCell::new(Vec::new());
+        let os_home_read = RefCell::new(false);
+        let paths = resolve_paths_on(
+            true,
+            |name| {
+                asked.borrow_mut().push(name.to_owned());
+                env_of(&pairs)(name)
+            },
+            || {
+                *os_home_read.borrow_mut() = true;
+                Some(absolute("os"))
+            },
+            |path| {
+                probed.borrow_mut().push(path.to_path_buf());
+                false
+            },
+        );
+        assert_eq!(
+            paths,
+            Some(ClaudePaths::new(dir.clone(), dir.join(".claude.json")))
+        );
+        assert!(
+            !asked.borrow().iter().any(|name| name == USER_PROFILE_VAR),
+            "{:?}",
+            asked.borrow()
+        );
+        assert!(!*os_home_read.borrow(), "the OS home was read");
+        assert!(
+            !probed.borrow().is_empty(),
+            "the config dir's .config.json was not probed"
+        );
+        assert!(
+            probed.borrow().iter().all(|path| path.starts_with(&dir)),
+            "{:?}",
+            probed.borrow()
+        );
     }
 }

@@ -78,7 +78,9 @@ pub use locks::{
     CREDENTIALS_STALENESS, ClaudeCodeLocks, ClaudeCredentialsGuard, ConsumeLock, ConsumeLockGuard,
     DirLock, DirLockGuard, FileLock, FileLockGuard, LockError, LockTiming, TOUCH_INTERVAL,
 };
-pub use paths::{AccountsRoot, ClaudePaths, Email, LiveStore};
+pub use paths::{
+    AccountsRoot, ClaudePaths, Email, LiveStore, file_has_content, resolve_claude_paths,
+};
 pub use poll::{
     BalanceReadError, CLAIM_TTL_S, Claims, DeferReason, FetchError, FetchMode, FetchResult,
     FetchScope, PlanContext, PlanRequest, PollError, PollOutcome, PollPlan, PollResult,

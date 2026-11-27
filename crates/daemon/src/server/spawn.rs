@@ -917,8 +917,30 @@ fn extra_trust_folders(
         .collect()
 }
 
+/// `folders` as the agent keys their trust, to the root of the repo it opens: a linked worktree becomes its main repo's
+/// root, a folder inside a repo that is not its root is left out with a warning (the agent would key it to the
+/// enclosing repo, which was not registered, so trusting it would widen trust), and every other folder stays as given.
+fn trust_roots(folders: Vec<PathBuf>) -> Vec<PathBuf> {
+    folders
+        .into_iter()
+        .filter_map(|folder| match crate::git::folder_repo(&folder) {
+            crate::git::FolderRepo::LinkedWorktree(main) => Some(main),
+            crate::git::FolderRepo::Inside(root) => {
+                warn!(
+                    "not trusting {}: the agent keys trust to its enclosing repo {}, which was not registered",
+                    folder.display(),
+                    root.display(),
+                );
+                None
+            }
+            crate::git::FolderRepo::Other => Some(folder),
+        })
+        .collect()
+}
+
 /// Lets `backend` prepare for a spawn that opens `folders` as extra
-/// folders, off the async runtime since it may wait on a lock. A failure is
+/// folders, each taken to its trust root first ([`trust_roots`]), off the
+/// async runtime since it reads the disk and may wait on a lock. A failure is
 /// logged and the spawn goes on.
 async fn prepare_trust_folders(
     backend: &'static dyn AgentPlugin,
@@ -931,11 +953,17 @@ async fn prepare_trust_folders(
     }
     let (options, rows, task_folders) = (options.clone(), rows.clone(), folders.clone());
     let prepared = tokio::task::spawn_blocking(move || {
-        backend.prepare_extra_folders(&options, &rows, &task_folders)
+        let roots = trust_roots(task_folders);
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        backend
+            .prepare_extra_folders(&options, &rows, &roots)
+            .map(|()| roots.len())
     })
     .await;
     match prepared {
-        Ok(Ok(())) => info!(count = folders.len(), "extra folder trust ensured"),
+        Ok(Ok(count)) => info!(count, "extra folder trust ensured"),
         Ok(Err(err)) => warn!(folders = ?folders, error = %err, "extra folder trust not recorded"),
         Err(err) => warn!(folders = ?folders, error = %err, "extra folder trust not recorded"),
     }
@@ -8158,5 +8186,78 @@ mod tests {
             &members,
         );
         assert_eq!(folders, [PathBuf::from(r"X:\dev\server")]);
+    }
+
+    /// A scratch folder under the temp dir for a trust-root case, removed on drop.
+    struct TrustScratch(PathBuf);
+
+    impl TrustScratch {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("rt-trust-root-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).expect("the scratch folder is created");
+            Self(root)
+        }
+
+        /// A repo root at `name` with a `.git` folder.
+        fn repo(&self, name: &str) -> PathBuf {
+            let repo = self.0.join(name);
+            std::fs::create_dir_all(repo.join(".git")).expect("the repo is created");
+            repo
+        }
+
+        /// A folder at `name` with no `.git`.
+        fn folder(&self, name: &str) -> PathBuf {
+            let folder = self.0.join(name);
+            std::fs::create_dir_all(&folder).expect("the folder is created");
+            folder
+        }
+    }
+
+    impl Drop for TrustScratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn trust_roots_resolve_a_linked_worktree_to_its_main_repo() {
+        let scratch = TrustScratch::new();
+        let main = scratch.repo("main");
+        let gitdir = main.join(".git").join("worktrees").join("feat");
+        std::fs::create_dir_all(&gitdir).expect("the worktree's gitdir is created");
+        let worktree = scratch.folder("feat");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .expect("the gitfile is written");
+        std::fs::write(gitdir.join("commondir"), "../..\n").expect("the commondir is written");
+        std::fs::write(
+            gitdir.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .expect("the backlink is written");
+        assert_eq!(trust_roots(vec![worktree]), [main]);
+    }
+
+    #[test]
+    fn trust_roots_skip_a_subfolder_of_a_repo() {
+        let scratch = TrustScratch::new();
+        let repo = scratch.repo("repo");
+        let sub = repo.join("sub").join("deeper");
+        std::fs::create_dir_all(&sub).expect("the subfolder is created");
+        let plain = scratch.folder("plain");
+        assert_eq!(trust_roots(vec![sub, plain.clone()]), [plain]);
+    }
+
+    #[test]
+    fn trust_roots_keep_a_plain_repo_and_a_non_git_folder() {
+        let scratch = TrustScratch::new();
+        let repo = scratch.repo("repo");
+        let plain = scratch.folder("plain");
+        assert_eq!(
+            trust_roots(vec![repo.clone(), plain.clone()]),
+            [repo, plain]
+        );
     }
 }
