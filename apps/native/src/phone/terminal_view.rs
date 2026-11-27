@@ -165,6 +165,11 @@ pub(super) struct TerminalHeights {
     rest: Cell<Option<f32>>,
     /// The clip box's height on the last frame.
     clip: Cell<f32>,
+    /// The page's height on the last frame: the clip box, the Quick dock and
+    /// the key bar's row.
+    page: Cell<f32>,
+    /// The key bar's row height when it last drew.
+    key_bar: Cell<f32>,
     /// The Quick dock's height when it last drew.
     dock: Cell<f32>,
     /// The Show prompt row's height when it last drew.
@@ -200,6 +205,11 @@ impl TerminalFrame {
 /// Which row under or beside the clip box a measure records.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum HeightSlot {
+    /// The Terminal page: its clip box, the Quick dock and the key bar's
+    /// row.
+    Page,
+    /// The key bar's row.
+    KeyBar,
     /// The Quick dock.
     Dock,
     /// The Show prompt row.
@@ -232,32 +242,36 @@ impl TerminalHeights {
     }
 
     /// Records the height the raised keyboard covers, and returns how much
-    /// of the terminal its clip box hides: below the rest height once that
-    /// is known, else the keyboard's cover.
-    pub(super) fn hidden(&self, cover: f32) -> f32 {
+    /// of the terminal this frame's box hides: nothing at rest, else the
+    /// keyboard's cover plus the open Quick dock's height, capped at the
+    /// rest height. The frame decides it, never the last frame's box, so a
+    /// keyboard that just dropped hides nothing.
+    fn hidden(&self, cover: f32, frame: TerminalFrame) -> f32 {
         self.cover.set(cover);
-        self.rest.get().map_or(cover, |rest| {
-            terminal_fit::hidden_below(rest, self.clip.get())
-        })
+        let dock = if frame.quick { self.dock.get() } else { 0.0 };
+        let covered = frame.cover + dock;
+        self.rest.get().map_or(covered, |rest| covered.min(rest))
     }
 
-    /// Records one frame's clip box height: a frame at rest takes it as the
-    /// rest height, and a frame with no rest height yet seeds one from it
-    /// and what took room from it.
+    /// Records one frame's clip box height. A frame at rest takes it as the
+    /// rest height. Any other frame seeds the rest height afresh from the
+    /// height the page leaves the box, which goes below zero when the key
+    /// bar and the dock overflow it rather than being floored away, back
+    /// plus what took room from it, so a text-size change reaches the rest
+    /// height without waiting for a frame at rest.
     ///
     /// Returns:
     ///     Whether the rest height or the clip box's height changed, so the
     ///     page must draw again.
     fn record(&self, clip: f32, frame: TerminalFrame) -> bool {
         let clip = clip.max(0.0);
-        let rest = match self.rest.get() {
-            _ if frame.at_rest() => clip,
-            Some(rest) => rest,
-            None => {
-                let dock = if frame.quick { self.dock.get() } else { 0.0 };
-                let prompt = if frame.prompt { self.prompt.get() } else { 0.0 };
-                terminal_fit::seed_rest(clip, frame.cover, dock, prompt)
-            }
+        let rest = if frame.at_rest() {
+            clip
+        } else {
+            let dock = if frame.quick { self.dock.get() } else { 0.0 };
+            let prompt = if frame.prompt { self.prompt.get() } else { 0.0 };
+            let box_height = self.page.get() - self.key_bar.get() - dock;
+            terminal_fit::seed_rest(box_height, frame.cover, dock, prompt)
         };
         let moved = |from: f32, to: f32| (from - to).abs() > f32::EPSILON;
         let changed =
@@ -294,6 +308,8 @@ impl TerminalHeights {
             move |bounds, _, _| {
                 let height = f32::from(bounds.size.height);
                 match slot {
+                    HeightSlot::Page => heights.page.set(height),
+                    HeightSlot::KeyBar => heights.key_bar.set(height),
                     HeightSlot::Dock => heights.dock.set(height),
                     HeightSlot::Prompt => heights.prompt.set(height),
                 }
@@ -313,12 +329,14 @@ impl PhoneRoot {
     /// the keyboard's focus and the bar's sticky Ctrl for typed text. While
     /// it is open, the terminal records whether the keyboard is up, which
     /// decides whether a tap puts it away, and keeps the height its clip
-    /// box hides for the page to draw it at its rest height: `cover`, the
-    /// height the keyboard covers, until a frame measured the rest height,
-    /// then what the clip box falls short of it. Neither the keyboard, the
-    /// Quick dock nor Show prompt re-sizes it. The rest height is measured
-    /// again when the page opens. The pan over the hidden rows starts over
-    /// when the page opens or closes and while nothing is hidden.
+    /// box hides for the page to draw it at its rest height: nothing at
+    /// rest, else the keyboard's cover plus the open Quick dock's height,
+    /// capped at the rest height. Neither the keyboard, the Quick dock nor
+    /// Show prompt re-sizes the terminal: every frame off rest seeds the
+    /// rest height afresh from the page's own measures, so a text-size
+    /// change reaches it. The rest height is measured again when the page
+    /// opens. The pan over the hidden rows starts over when the page opens
+    /// or closes and while nothing is hidden.
     pub(super) fn sync_terminal(
         &mut self,
         keyboard_up: bool,
@@ -370,7 +388,8 @@ impl PhoneRoot {
             }
         }
         self.claim_on_resize(window, cx);
-        let hidden = self.terminal_heights.hidden(cover);
+        let frame = self.current_frame(keyboard_up, cover, cx);
+        let hidden = self.terminal_heights.hidden(cover, frame);
         self.terminal_hidden = hidden;
         // Nothing hidden clamps the pan to none.
         self.terminal_pan = self.terminal_pan.clamped(hidden);
@@ -453,6 +472,16 @@ impl PhoneRoot {
         })
     }
 
+    /// The frame this render draws, from what takes room from the clip box.
+    fn current_frame(&self, keyboard_up: bool, cover: f32, cx: &App) -> TerminalFrame {
+        TerminalFrame {
+            keyboard_up,
+            quick: self.terminal_quick,
+            prompt: self.show_prompt_drawn(cx),
+            cover,
+        }
+    }
+
     /// The Terminal page's body: the terminal filling it, the Quick replies
     /// while they are open, and the key bar. The terminal sits in a clip
     /// box at its rest height, anchored by its bottom, so a raised
@@ -482,12 +511,7 @@ impl PhoneRoot {
                 .flex_col()
                 .children(self.terminal_pane(cx))
         });
-        let frame = TerminalFrame {
-            keyboard_up,
-            quick: self.terminal_quick,
-            prompt: self.show_prompt_drawn(cx),
-            cover: self.terminal_heights.cover.get(),
-        };
+        let frame = self.current_frame(keyboard_up, self.terminal_heights.cover.get(), cx);
         let screen = div()
             .driver_id(|| "phone-session-terminal".to_owned())
             .relative()
@@ -515,14 +539,28 @@ impl PhoneRoot {
                     HeightSlot::Dock,
                 ))
         });
+        // The bar's own box is borderless, so the measure takes its rows in.
+        let bar = div()
+            .relative()
+            .flex_none()
+            .child(self.key_bar_row(keyboard_up, cx))
+            .child(TerminalHeights::measure(
+                &self.terminal_heights,
+                HeightSlot::KeyBar,
+            ));
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(screen)
             .children(quick)
-            .child(self.key_bar_row(keyboard_up, cx))
+            .child(bar)
+            .child(TerminalHeights::measure(
+                &self.terminal_heights,
+                HeightSlot::Page,
+            ))
     }
 
     /// An empty layer over the terminal's clip box that, before the
@@ -773,5 +811,165 @@ impl PhoneRoot {
         }
         self.terminal_quick = false;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame of the page that drew what the arguments name.
+    fn frame(keyboard_up: bool, quick: bool, prompt: bool, cover: f32) -> TerminalFrame {
+        TerminalFrame {
+            keyboard_up,
+            quick,
+            prompt,
+            cover,
+        }
+    }
+
+    /// Heights whose terminal was measured at rest with `rest` points of
+    /// clip box, the page 56 points taller for its key bar.
+    fn resting_at(rest: f32) -> TerminalHeights {
+        let heights = TerminalHeights::default();
+        heights.page.set(rest + 56.0);
+        heights.key_bar.set(56.0);
+        heights.record(rest, frame(false, false, false, 0.0));
+        assert_eq!(heights.rest(), Some(rest));
+        heights
+    }
+
+    /// An 800-point page with a 56-point key bar: the terminal at rest is
+    /// 744 points tall.
+    const REST: f32 = 744.0;
+
+    #[test]
+    fn a_frame_at_rest_records_the_clip_box_as_the_rest_height() {
+        let heights = TerminalHeights::default();
+        heights.page.set(800.0);
+        heights.key_bar.set(56.0);
+        heights.record(744.0, frame(false, false, false, 0.0));
+        assert_eq!(heights.rest(), Some(REST));
+    }
+
+    #[test]
+    fn a_frame_whose_rows_fit_the_page_seeds_the_rest_height() {
+        // The keyboard's 336 points and the Show prompt row's 44 leave 420
+        // of the page, 244 of them the clip box once the 120-point dock and
+        // the 56-point key bar took theirs.
+        let heights = TerminalHeights::default();
+        heights.page.set(420.0);
+        heights.key_bar.set(56.0);
+        heights.dock.set(120.0);
+        heights.prompt.set(44.0);
+        heights.record(244.0, frame(true, true, true, 336.0));
+        assert_eq!(heights.rest(), Some(REST));
+    }
+
+    #[test]
+    fn a_frame_whose_rows_overflow_the_page_seeds_the_rest_height() {
+        let at_rest = resting_at(REST);
+
+        // The dock, the key bar and the prompt overflow the 420-point page
+        // by 36 points, so the clip box measures none of itself at all.
+        let overflow = TerminalHeights::default();
+        overflow.page.set(420.0);
+        overflow.key_bar.set(56.0);
+        overflow.dock.set(400.0);
+        overflow.prompt.set(44.0);
+        overflow.record(0.0, frame(true, true, true, 336.0));
+
+        assert_eq!(overflow.rest(), at_rest.rest());
+        assert_eq!(
+            overflow.rest(),
+            Some(REST),
+            "not the page plus the overflow"
+        );
+    }
+
+    #[test]
+    fn a_frame_off_rest_moves_the_rest_height_to_its_seed() {
+        // A text-size change shrinks the key bar from 56 to 40 points while
+        // the keyboard stays up, and the page grows by what the bar lost.
+        let heights = TerminalHeights::default();
+        heights.page.set(420.0);
+        heights.key_bar.set(56.0);
+        heights.record(364.0, frame(true, false, false, 336.0));
+        assert_eq!(heights.rest(), Some(700.0));
+
+        heights.page.set(436.0);
+        heights.key_bar.set(40.0);
+        heights.record(396.0, frame(true, false, false, 336.0));
+        assert_eq!(heights.rest(), Some(732.0), "the new metrics' seed");
+    }
+
+    #[test]
+    fn a_frame_at_rest_hides_nothing() {
+        let heights = resting_at(600.0);
+        let hidden = heights.hidden(0.0, frame(false, false, false, 0.0));
+        assert!(hidden.abs() < f32::EPSILON, "{hidden}");
+    }
+
+    #[test]
+    fn a_raised_keyboard_hides_its_cover() {
+        let heights = resting_at(600.0);
+        let hidden = heights.hidden(302.0, frame(true, false, false, 302.0));
+        assert!((hidden - 302.0).abs() < f32::EPSILON, "{hidden}");
+    }
+
+    #[test]
+    fn a_raised_keyboard_over_the_dock_hides_both() {
+        let heights = resting_at(600.0);
+        heights.dock.set(120.0);
+        let hidden = heights.hidden(302.0, frame(true, true, false, 302.0));
+        assert!((hidden - 422.0).abs() < f32::EPSILON, "{hidden}");
+    }
+
+    #[test]
+    fn a_dropped_keyboard_over_the_dock_hides_the_dock_alone() {
+        // The keyboard up over the open dock: 100 of the page's points go
+        // to the dock, so the rest height seeds 600 from a 354-point page.
+        let heights = TerminalHeights::default();
+        heights.dock.set(100.0);
+        heights.page.set(354.0);
+        heights.key_bar.set(56.0);
+        heights.record(198.0, frame(true, true, false, 302.0));
+        assert_eq!(heights.rest(), Some(600.0));
+        let up = heights.hidden(302.0, frame(true, true, false, 302.0));
+        assert!((up - 402.0).abs() < f32::EPSILON, "{up}");
+
+        // It drops with the dock still open: the dock alone hides rows now.
+        let down = heights.hidden(0.0, frame(false, true, false, 0.0));
+        assert!(
+            (down - 100.0).abs() < f32::EPSILON,
+            "not the last frame's cover: {down}"
+        );
+    }
+
+    #[test]
+    fn a_keyboard_down_frame_hides_nothing_after_a_raised_keyboard_frame() {
+        // A 656-point page under a 302-point keyboard: the box is 298 tall,
+        // and the rest height the frame seeds is 600.
+        let heights = TerminalHeights::default();
+        heights.page.set(354.0);
+        heights.key_bar.set(56.0);
+        heights.record(298.0, frame(true, false, false, 302.0));
+        assert_eq!(heights.rest(), Some(600.0));
+        let up = heights.hidden(302.0, frame(true, false, false, 302.0));
+        assert!((up - 302.0).abs() < f32::EPSILON, "{up}");
+
+        let down = heights.hidden(0.0, frame(false, false, false, 0.0));
+        assert!(
+            down.abs() < f32::EPSILON,
+            "not the last frame's box: {down}"
+        );
+    }
+
+    #[test]
+    fn the_hidden_height_never_passes_the_rest_height() {
+        let heights = resting_at(200.0);
+        heights.dock.set(120.0);
+        let hidden = heights.hidden(302.0, frame(true, true, false, 302.0));
+        assert!((hidden - 200.0).abs() < f32::EPSILON, "{hidden}");
     }
 }

@@ -164,7 +164,9 @@ pub(crate) fn bar_origin(
     // The lowest top the bar takes while clear of the keyboard.
     let lowest = (window.height / unit - keyboard / unit - height).max(0.0);
     let above = selection.top / unit - BAR_GAP - height;
-    let below = selection.bottom / unit + BAR_GAP;
+    // A selection scrolled above the window's top hangs the bar from no row
+    // of its own, so the window's top is the least its bottom row gives.
+    let below = (selection.bottom / unit + BAR_GAP).max(0.0);
     let y = if above >= 0.0 && above <= lowest {
         above
     } else if below <= lowest {
@@ -369,6 +371,20 @@ mod tests {
             px(0.0),
         );
         assert_eq!(origin, point(px(150.0), px(300.0 - BAR_GAP - 50.0)));
+    }
+
+    #[test]
+    fn the_edit_bar_never_draws_above_the_window() {
+        // A selection scrolled up out of the window: its bottom sits 40
+        // points above the window's top, so the bar has no bottom row to
+        // hang from and takes the window's top.
+        let origin = bar_origin(
+            sel(-90.0, -40.0, 200.0),
+            size(px(100.0), px(50.0)),
+            size(px(400.0), px(800.0)),
+            px(0.0),
+        );
+        assert_eq!(origin.y, px(0.0));
     }
 
     #[test]

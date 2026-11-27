@@ -18,24 +18,14 @@ pub(super) fn hidden_height(safe_bottom: f32, ime_bottom: f32) -> f32 {
     (ime_bottom - safe_bottom).max(0.0)
 }
 
-/// The height of the terminal its clip box cannot show: how much shorter
-/// the box is than the terminal's rest height.
-///
-/// Args:
-///     rest: The terminal's rest height, in points.
-///     clip: The clip box's measured height, in points.
-///
-/// Returns:
-///     `rest - clip`, never below zero.
-pub(super) fn hidden_below(rest: f32, clip: f32) -> f32 {
-    (rest - clip).max(0.0)
-}
-
 /// The terminal's rest height worked out from a frame not at rest: the
-/// clip box's height and back what took room from it.
+/// height the page left the clip box and back what took room from it.
 ///
 /// Args:
-///     clip: The clip box's measured height, in points.
+///     clip: The height the page left the clip box, in points: the page's
+///         height less the key bar's row and the Quick dock. It goes below
+///         zero when those rows overflow the page, which keeps the seed
+///         below the page's own height rather than above it.
 ///     `keyboard_cover`: The height the raised keyboard covers, from
 ///         [`hidden_height`].
 ///     dock: The Quick dock's measured height, zero while it is closed.
@@ -219,22 +209,6 @@ mod tests {
     }
 
     const REST: f32 = 600.0;
-
-    #[test]
-    fn the_hidden_height_is_what_the_clip_box_lost() {
-        assert!((hidden_below(REST, 298.0) - 302.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn a_clip_box_with_no_height_hides_the_whole_terminal() {
-        assert!((hidden_below(REST, 0.0) - REST).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn a_clip_box_taller_than_the_rest_height_hides_nothing() {
-        let hidden = hidden_below(500.0, 600.0);
-        assert!(hidden.abs() < f32::EPSILON, "{hidden}");
-    }
 
     #[test]
     fn the_seeded_rest_height_adds_back_what_took_the_room() {
