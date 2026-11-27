@@ -1989,6 +1989,52 @@
         "crates/push-crypto/**"
       ],
       "filter": "package(rustling-tulip-ios-notify) | package(push-crypto) | (package(daemon) & (test(/^push::/) | test(/^server::push::/)))"
+    },
+    {
+      "paths": [
+        "apps/native/src/chat_full_result.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^chat_full_result::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/follow_tab_view.rs",
+        "apps/native/tests/ui/ui_follow_tab.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_follow_tab::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/linear_card.rs",
+        "apps/native/src/linear_card_view.rs",
+        "apps/native/tests/ui/ui_phone_linear.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^linear_card::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_links|ui_phone_linear|ui_dashboard)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/tab_close.rs",
+        "apps/native/src/tab_close_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^tab_close::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_tabs|ui_popout|ui_dashboard|ui_notifications)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_phone_landscape.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_phone_landscape::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_phone_rotation.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_phone_rotation::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_phone_two_pane.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_phone_two_pane::/))"
     }
   ]
 }
