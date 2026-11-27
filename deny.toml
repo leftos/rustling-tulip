@@ -50,7 +50,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/leftos/gate",
-    # The pinned gpui: Zed d2a4fb6 plus the owner's fork commits 2640ed9 (first mouse) and 80c66b8 (register the iOS delegate classes).
+    # The pinned gpui: Zed d2a4fb6 plus the owner's fork commits on its rustling-tulip/first-mouse branch.
     "https://github.com/leftos/zed",
     # These arrive with the pinned gpui and go when it moves back to a crates.io release.
     "https://github.com/gfx-rs/wgpu",

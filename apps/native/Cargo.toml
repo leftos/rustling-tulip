@@ -63,9 +63,9 @@ chrono = { workspace = true }
 # dependencies are target-gated in its own manifest.
 rustling-tulip-ios-notify = { path = "../ios-notify" }
 
-gpui = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989" }
+gpui = { git = "https://github.com/leftos/zed", rev = "eb44e196488fb689487756bed11a811280c4a66d" }
 # gpui 0.2.2 turned these on by default; without `font-kit` macOS draws no text.
-gpui_platform = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989", features = [
+gpui_platform = { git = "https://github.com/leftos/zed", rev = "eb44e196488fb689487756bed11a811280c4a66d", features = [
     "font-kit",
     "wayland",
     "x11",
@@ -346,7 +346,7 @@ agent-api = { workspace = true, features = ["test-support"] }
 agent-registry = { workspace = true, features = ["test-support"] }
 # The live tier's isolated daemon, which `tests/support/live.rs` wraps.
 dev-daemon = { workspace = true }
-gpui = { git = "https://github.com/leftos/zed", rev = "4f49b52668790d8a9e253aaa12c24a85f5974989", features = ["test-support"] }
+gpui = { git = "https://github.com/leftos/zed", rev = "eb44e196488fb689487756bed11a811280c4a66d", features = ["test-support"] }
 png = "0.18"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.
 tokio = { workspace = true, features = ["test-util"] }

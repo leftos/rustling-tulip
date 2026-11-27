@@ -32,6 +32,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A workspace session no longer stops at Claude's trust prompt for its other repos on every start; registering a repo counts as trusting it.
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
 - A workspace session starts when the agent's command is a `.cmd` shim, such as npm's `claude.cmd`, instead of failing on the workspace note.
+- On the phone, a tap on the Needs you tray right after a fast swipe reaches the card instead of being ignored for a moment.
 
 ## v0.19.0-alpha
 

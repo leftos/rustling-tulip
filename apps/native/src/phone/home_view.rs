@@ -937,7 +937,13 @@ impl PhoneRoot {
                 } else {
                     f32::from(window.viewport_size().width)
                 };
-                self.tray.touch_ended(dx, at, list - 2.0 * SIDE_PADDING);
+                let lift = self.tray.touch_ended(dx, at, list - 2.0 * SIDE_PADDING);
+                if lift.swiped {
+                    // The release starts a fling's coast, and a touch that
+                    // lands during one is caught: it could never be a tap.
+                    // Stopping it here leaves the next touch free to tap.
+                    window.stop_touch_momentum();
+                }
             }
             TouchPhase::Cancelled => self.tray.touch_cancelled(),
         }

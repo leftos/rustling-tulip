@@ -211,6 +211,19 @@ impl Swipe {
     }
 }
 
+/// What lifting a touch off the tray did: whether the shown card changed,
+/// and whether the touch travelled far enough sideways to be a swipe
+/// rather than a tap.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lift {
+    /// The shown card changed: the lift moved to another card.
+    pub(crate) changed: bool,
+    /// The touch travelled at least [`FLICK_MIN_TRAVEL`] sideways, whether
+    /// or not a card changed: at the last card a sideways swipe moves on
+    /// past nothing and snaps back, but it is still a swipe.
+    pub(crate) swiped: bool,
+}
+
 /// Which way a lift moves: `1` to the next card, `-1` to the one before,
 /// `0` to snap back. A finger moving left (`travel` below zero) brings the
 /// next card in. A swipe past a third of the card's `width` moves the way
@@ -313,13 +326,14 @@ impl Tray {
     /// The touch lifted after a last `dx` at `at` over a card `width`
     /// wide: it moves one card when it travelled past a third of the
     /// width or was released at a fling's velocity, else snaps back. The
-    /// ends do not wrap. Returns whether the shown card changed.
-    pub(crate) fn touch_ended(&self, dx: f32, at: Instant, width: f32) -> bool {
+    /// ends do not wrap.
+    pub(crate) fn touch_ended(&self, dx: f32, at: Instant, width: f32) -> Lift {
         let mut state = self.state.borrow_mut();
         let Some(mut swipe) = state.swipe.take() else {
-            return false;
+            return Lift::default();
         };
         swipe.travel += dx;
+        let swiped = swipe.travel.abs() >= FLICK_MIN_TRAVEL;
         let towards = step(swipe.travel, swipe.velocity(at), width);
         let from = state.index;
         let to = match towards {
@@ -329,7 +343,10 @@ impl Tray {
         };
         state.index = to;
         state.shown = state.order.get(to).cloned();
-        to != from
+        Lift {
+            changed: to != from,
+            swiped,
+        }
     }
 
     /// The system took the touch: the card snaps back.
@@ -532,7 +549,7 @@ mod tests {
 
     /// A slow drag: `steps` movements of `dx` 200 ms apart, then a lift
     /// 200 ms later, so no fling.
-    fn slow_swipe(tray: &Tray, dx: f32, steps: u32) -> bool {
+    fn slow_swipe(tray: &Tray, dx: f32, steps: u32) -> Lift {
         let start = Instant::now();
         let gap = Duration::from_millis(200);
         tray.touch_started(0.0, start);
@@ -563,7 +580,7 @@ mod tests {
     #[test]
     fn the_shown_card_is_kept_when_another_card_arrives() {
         let (tray, _) = tray_of(2);
-        assert!(slow_swipe(&tray, -60.0, 2), "moved to b");
+        assert!(slow_swipe(&tray, -60.0, 2).changed, "moved to b");
         let arranged = tray.arrange(listed(&["x", "a", "b"]));
         assert_eq!(shown(&arranged), "b", "b stays shown");
         assert_eq!(arranged.header().as_deref(), Some("Needs you · 3 of 3"));
@@ -572,7 +589,7 @@ mod tests {
     #[test]
     fn the_shown_card_falls_back_to_its_place_when_it_leaves() {
         let (tray, _) = tray_of(3);
-        assert!(slow_swipe(&tray, -60.0, 2), "moved to b");
+        assert!(slow_swipe(&tray, -60.0, 2).changed, "moved to b");
         assert_eq!(
             shown(&tray.arrange(listed(&["a", "c"]))),
             "c",
@@ -718,9 +735,9 @@ mod tests {
     #[test]
     fn a_swipe_past_a_third_moves_a_card() {
         let (tray, cards) = tray_of(2);
-        assert!(slow_swipe(&tray, -60.0, 2), "120 of 300 moves");
+        assert!(slow_swipe(&tray, -60.0, 2).changed, "120 of 300 moves");
         assert_eq!(shown(&tray.arrange(cards.clone())), "b");
-        assert!(slow_swipe(&tray, 60.0, 2), "and back the other way");
+        assert!(slow_swipe(&tray, 60.0, 2).changed, "and back the other way");
         assert_eq!(shown(&tray.arrange(cards)), "a");
     }
 
@@ -734,14 +751,18 @@ mod tests {
             (tray.offset() + 40.0).abs() < f32::EPSILON,
             "drawn off by the travel"
         );
-        assert!(!tray.touch_ended(0.0, start + Duration::from_millis(400), WIDTH));
+        assert!(
+            !tray
+                .touch_ended(0.0, start + Duration::from_millis(400), WIDTH)
+                .changed
+        );
         assert!(tray.offset().abs() < f32::EPSILON, "snapped back");
         assert_eq!(shown(&tray.arrange(cards)), "a");
     }
 
     /// A touch down at 0 ms, each of `moves` (ms, dx) in turn, then the
     /// lift at `lift` ms; the clock is the test's own.
-    fn drag(tray: &Tray, moves: &[(u64, f32)], lift: u64) -> bool {
+    fn drag(tray: &Tray, moves: &[(u64, f32)], lift: u64) -> Lift {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
         tray.touch_started(0.0, start);
@@ -756,7 +777,7 @@ mod tests {
         let (tray, cards) = tray_of(2);
         let moves: Vec<(u64, f32)> = (1..=6).map(|n| (n * 50, -10.0)).collect();
         assert!(
-            !drag(&tray, &moves, 360),
+            !drag(&tray, &moves, 360).changed,
             "60 px over 300 ms, then a 60 ms pause"
         );
         assert_eq!(shown(&tray.arrange(cards)), "a");
@@ -765,7 +786,7 @@ mod tests {
     #[test]
     fn an_eased_back_drag_does_not_move_backwards() {
         let (tray, cards) = tray_of(2);
-        assert!(slow_swipe(&tray, -60.0, 2), "on b");
+        assert!(slow_swipe(&tray, -60.0, 2).changed, "on b");
         let moves = [
             (100, -40.0),
             (200, -40.0),
@@ -774,7 +795,7 @@ mod tests {
             (250, 2.0),
         ];
         assert!(
-            !drag(&tray, &moves, 250),
+            !drag(&tray, &moves, 250).changed,
             "-80 px, then +6 px in the last 30 ms: no move either way"
         );
         assert_eq!(shown(&tray.arrange(cards)), "b");
@@ -784,7 +805,7 @@ mod tests {
     fn a_fast_flick_moves() {
         let (tray, cards) = tray_of(2);
         assert!(
-            drag(&tray, &[(10, -10.0), (30, -10.0), (50, -10.0)], 50),
+            drag(&tray, &[(10, -10.0), (30, -10.0), (50, -10.0)], 50).changed,
             "30 px in 50 ms"
         );
         assert_eq!(shown(&tray.arrange(cards)), "b");
@@ -803,10 +824,36 @@ mod tests {
     #[test]
     fn the_ends_do_not_wrap() {
         let (tray, cards) = tray_of(2);
-        assert!(!slow_swipe(&tray, 60.0, 2), "nothing before the first");
+        assert!(
+            !slow_swipe(&tray, 60.0, 2).changed,
+            "nothing before the first"
+        );
         assert_eq!(shown(&tray.arrange(cards.clone())), "a");
-        assert!(slow_swipe(&tray, -60.0, 2));
-        assert!(!slow_swipe(&tray, -60.0, 2), "nothing after the last");
+        assert!(slow_swipe(&tray, -60.0, 2).changed);
+        assert!(
+            !slow_swipe(&tray, -60.0, 2).changed,
+            "nothing after the last"
+        );
         assert_eq!(shown(&tray.arrange(cards)), "b");
+    }
+
+    #[test]
+    fn a_lift_after_a_sideways_swipe_says_it_swiped() {
+        let (tray, cards) = tray_of(2);
+        assert!(slow_swipe(&tray, -60.0, 2).changed, "moved to b");
+        let lift = slow_swipe(&tray, -60.0, 2);
+        assert!(!lift.changed, "the last card has nowhere to go");
+        assert!(lift.swiped, "120 px sideways is a swipe, not a tap");
+        assert_eq!(shown(&tray.arrange(cards)), "b");
+    }
+
+    #[test]
+    fn a_lift_with_little_sideways_travel_did_not_swipe() {
+        let (tray, _) = tray_of(2);
+        let start = Instant::now();
+        tray.touch_started(0.0, start);
+        let lift = tray.touch_ended(-10.0, start + Duration::from_millis(400), WIDTH);
+        assert!(!lift.changed, "10 px moves nothing");
+        assert!(!lift.swiped, "10 px is a tap's jitter");
     }
 }

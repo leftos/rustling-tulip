@@ -1255,6 +1255,43 @@ fn a_swipe_past_a_third_moves_to_the_next_card(cx: &mut TestAppContext) {
     assert_eq!(header(&mut h).as_deref(), Some("Needs you · 2 of 2"));
 }
 
+#[gpui::test]
+fn a_tap_right_after_a_fast_sideways_swipe_opens_its_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let pending = question(&["main", "dev"]);
+    let mut h = waiting_phone(
+        cx,
+        &dir,
+        vec![waiting("b", 5, pending.clone()), waiting("c", 2, pending)],
+    );
+    let start = h.center("phone-tray-card");
+    let gap = std::time::Duration::from_millis(10);
+
+    h.touch(TouchPhase::Started, start);
+    for step in 1..=3u8 {
+        h.touch(
+            TouchPhase::Moved,
+            start - point(px(40.0 * f32::from(step)), px(0.0)),
+        );
+        h.advance(gap);
+    }
+    h.touch(TouchPhase::Ended, start - point(px(120.0), px(0.0)));
+    assert_eq!(
+        header(&mut h).as_deref(),
+        Some("Needs you · 2 of 2"),
+        "the swipe brought in c"
+    );
+
+    h.tap_on("phone-tray-open");
+
+    assert_eq!(
+        shown(&mut h).as_deref(),
+        Some("c"),
+        "the tap right after the swipe reached its card"
+    );
+    assert!(drawn(&mut h, "phone-session"), "Open shows the session");
+}
+
 /// The id of the session whose sheet is open.
 fn sheet(h: &mut Harness<'_>) -> Option<String> {
     h.cx.update(|window, cx| {
