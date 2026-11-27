@@ -135,7 +135,7 @@ The context and result types, all in `agent-api`:
 - `ReadySignal { min_output_bytes, quiet_for }` (the default is Claude's 1024 bytes and 1.5 s). `ScreenRules { rules }` is described under "Status rules"; `file_reference(repo_relative)` returns the prompt text naming a file (default the bare path, Claude's `@<path>`). `ImportedRun<O> { program_name, extra_dirs, options: O }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }`.
 - `hook_vocabulary`: a helper mapping Claude Code's hook event names and payload fields (`SessionStart`, `PreToolUse` with `AskUserQuestion` / `ExitPlanMode`, `Notification`, `Stop`, …) to a `HookReport`, so any agent whose hooks speak that vocabulary (Claude; Codex's `-c` hooks; the DeepSeek Harness bridge in [plans/agent-harnesses.md](./plans/agent-harnesses.md)) calls it instead of copying it.
 
-`workspace_prelude` is an `agent-api` helper that takes the instruction-file names to mention, so the plugin passes "CLAUDE.md".
+`workspace_prelude` is an `agent-api` helper that takes the instruction-file names to mention, so the plugin passes "CLAUDE.md". The note is one line with no LF and no `->` (member paths as `name: path` joined by `; `), so a `.cmd` agent started through cmd.exe takes it as an argument; a member path that holds a cmd metacharacter still gets the named refusal.
 
 ### What the app runs for a plugin
 

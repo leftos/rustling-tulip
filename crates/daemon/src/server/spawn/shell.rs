@@ -2563,6 +2563,40 @@ mod launch_command_tests {
     }
 
     #[test]
+    fn a_cmd_shim_direct_spawn_takes_a_workspace_prelude() {
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        let chosen =
+            choose_agent_command(plugin, &command("", ""), &no_env).expect("the command splits");
+        let members = [
+            session_member("a", r"C:\wt\a"),
+            session_member("b", r"C:\wt\b"),
+        ];
+        let prelude = agent_api::workspace_prelude(&members, &["AGENTS.md"]).expect("two members");
+        let plugin_args = vec!["--append-system-prompt".to_owned(), prelude];
+        let shim = vec![
+            "/d".to_owned(),
+            "/c".to_owned(),
+            r"C:\npm\claude.cmd".to_owned(),
+        ];
+        assert!(
+            chosen
+                .direct_args("cmd.exe", shim, plugin_args, None)
+                .is_ok(),
+            "cmd.exe takes the one-line workspace prelude as it is"
+        );
+    }
+
+    fn session_member(name: &str, path: &str) -> protocol::SessionMember {
+        protocol::SessionMember {
+            repo_id: format!("id-{name}"),
+            repo_name: name.to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: path.to_owned(),
+        }
+    }
+
+    #[test]
     fn a_cmd_shim_path_holding_an_ampersand_is_named_in_full() {
         let plugin =
             agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");

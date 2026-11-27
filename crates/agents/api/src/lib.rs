@@ -1948,33 +1948,23 @@ fn describe(value: &OptionValue) -> String {
 /// the session has 2+ members. The note maps each member's repo name to its
 /// per-session worktree path so the agent doesn't try to navigate to
 /// original-repo paths referenced in its `instruction_files` that no longer
-/// match where the session is rooted.
+/// match where the session is rooted. The note is one line holding no LF and
+/// no `->`, so a program run through cmd.exe can take it as an argument.
 #[must_use]
 pub fn workspace_prelude(members: &[SessionMember], instruction_files: &[&str]) -> Option<String> {
     if members.len() < 2 {
         return None;
     }
-    let mut out = format!(
-        "Workspace member paths for this session (use these for cross-repo \
-         file access — they override any absolute paths referenced in \
-         {}):\n",
+    let member_paths = members
+        .iter()
+        .map(|m| format!("{}: {}", m.repo_name, m.worktree_path))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Workspace member paths for this session (use these for cross-repo file access, as they \
+         override any absolute paths referenced in {}): {member_paths}",
         instruction_files.join(" / ")
-    );
-    let name_width = members.iter().map(|m| m.repo_name.len()).max().unwrap_or(0);
-    for m in members {
-        use std::fmt::Write as _;
-        // Width-padded for visual alignment in the agent's view; failure
-        // here would mean OOM during string formatting, which we treat as
-        // unreachable for a few dozen members at most.
-        let _ = writeln!(
-            out,
-            "  {name:<width$}  ->  {path}",
-            name = m.repo_name,
-            width = name_width,
-            path = m.worktree_path,
-        );
-    }
-    Some(out)
+    ))
 }
 
 #[cfg(test)]
@@ -2521,9 +2511,9 @@ mod tests {
         assert_eq!(
             workspace_prelude(&two, &files).as_deref(),
             Some(
-                "Workspace member paths for this session (use these for cross-repo file access \
-                 — they override any absolute paths referenced in CLAUDE.md / AGENTS.md):\n  \
-                 a       ->  X:/wt/a\n  longer  ->  X:/wt/longer\n"
+                "Workspace member paths for this session (use these for cross-repo file access, \
+                 as they override any absolute paths referenced in CLAUDE.md / AGENTS.md): a: \
+                 X:/wt/a; longer: X:/wt/longer"
             )
         );
         assert_eq!(workspace_prelude(&two[..1], &files), None);
