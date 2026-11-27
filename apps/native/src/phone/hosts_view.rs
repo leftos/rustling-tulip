@@ -16,7 +16,7 @@ use super::home_view::TOUCH_TARGET;
 use super::pasteboard::PasteSpot;
 use super::push::{NOTIFICATIONS_LABEL, SwitchView, switch_view};
 use super::session_view::record_paste_bounds;
-use super::settings::Page;
+use super::settings::{Page, Settings, SubPage};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::connection::{Connection, State};
 use crate::connection_picker::{
@@ -519,23 +519,20 @@ fn field_paste(
 
 impl PhoneRoot {
     /// The input of the phone field tagged `selector` while its page draws
-    /// it: the hosts form's fields of the form's mode, the key editor's
-    /// label and its picker's character while the editor is open, the
-    /// quick replies editor's field while it is open; `None` for any other.
-    pub(super) fn field_input(&self, selector: &str) -> Option<Entity<TextInput>> {
+    /// it: the hosts form's fields of the form's mode while the form shows
+    /// on the hosts screen or Settings' Hosts page, the key editor's label
+    /// and its picker's character while each draws, the quick replies
+    /// editor's field while it is open; `None` for any other, or for one
+    /// whose page a later frame covers.
+    pub(super) fn field_input(&self, selector: &str, cx: &App) -> Option<Entity<TextInput>> {
         let hosts = &self.hosts;
         match (selector, hosts.mode()) {
-            ("phone-host-name", HostMode::Tailnet) => Some(hosts.name.clone()),
-            ("phone-host-port", HostMode::Tailnet) => Some(hosts.port.clone()),
-            ("phone-host-ssh", HostMode::Ssh) => Some(hosts.ssh.clone()),
-            ("phone-host-command", HostMode::Ssh) => Some(hosts.command.clone()),
-            ("phone-key-editor-label", _) => {
-                self.key_editor.as_ref().map(|editor| editor.label.clone())
-            }
-            ("phone-key-picker-char", _) => self
-                .key_editor
-                .as_ref()
-                .and_then(|editor| editor.picker.clone()),
+            ("phone-host-name", HostMode::Tailnet) => self.host_field(&hosts.name, cx),
+            ("phone-host-port", HostMode::Tailnet) => self.host_field(&hosts.port, cx),
+            ("phone-host-ssh", HostMode::Ssh) => self.host_field(&hosts.ssh, cx),
+            ("phone-host-command", HostMode::Ssh) => self.host_field(&hosts.command, cx),
+            ("phone-key-editor-label", _) => self.key_editor_label(),
+            ("phone-key-picker-char", _) => self.key_picker_char(),
             ("phone-edit-field", _) => self
                 .reply_editor
                 .as_ref()
@@ -544,10 +541,56 @@ impl PhoneRoot {
         }
     }
 
+    /// `input` while the add form draws its fields ([`Self::host_form_shown`]).
+    fn host_field(&self, input: &Entity<TextInput>, cx: &App) -> Option<Entity<TextInput>> {
+        self.host_form_shown(cx).then(|| input.clone())
+    }
+
+    /// Whether the add form draws this frame: the hosts screen or Settings'
+    /// Hosts page is on screen, and the form shows there, with no host saved
+    /// being the form itself.
+    fn host_form_shown(&self, cx: &App) -> bool {
+        let on_page = self
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.page == Some(Page::Hosts))
+            || self.hosts_screen_shown(cx);
+        on_page && (self.hosts.form_open || !self.a_host_is_saved(cx))
+    }
+
+    /// Whether the hosts screen draws this frame: no Settings, no session,
+    /// viewer or browser, and no host open, so every page falls through to it.
+    fn hosts_screen_shown(&self, cx: &App) -> bool {
+        self.settings.is_none()
+            && self.shown.is_none()
+            && self.viewer.is_none()
+            && self.browser.is_none()
+            && !any_host_open(self.root.read(cx))
+    }
+
+    /// The key editor's label while the editor draws, and none while its key
+    /// picker covers it.
+    fn key_editor_label(&self) -> Option<Entity<TextInput>> {
+        let editor = self.key_editor.as_ref()?;
+        let sub = self.settings.as_ref().and_then(Settings::top);
+        matches!(sub, Some(SubPage::KeyEditor { .. })).then(|| editor.label.clone())
+    }
+
+    /// The picker's one-character field while the key picker draws.
+    fn key_picker_char(&self) -> Option<Entity<TextInput>> {
+        let sub = self.settings.as_ref().and_then(Settings::top);
+        if !matches!(sub, Some(SubPage::KeyPicker { .. })) {
+            return None;
+        }
+        self.key_editor
+            .as_ref()
+            .and_then(|editor| editor.picker.clone())
+    }
+
     /// The text of the phone field tagged `selector`, while its page draws
     /// it ([`Self::field_input`]).
     pub fn field_text(&self, selector: &str, cx: &App) -> Option<String> {
-        self.field_input(selector)
+        self.field_input(selector, cx)
             .map(|input| input.read(cx).text().to_owned())
     }
 
@@ -625,21 +668,13 @@ impl PhoneRoot {
         let t = theme(cx);
         let marked = self.root.read(cx).push_hosts().any_hint();
         let header = Self::home_header_row(true, marked, &t, cx);
-        let tap_lines = self.tap_lines(&t);
-        let over = (!tap_lines.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .px(px(16.0))
-                .pt(px(12.0))
-                .children(tap_lines)
-        });
+        let tap_lines = self.tap_lines_over(&t);
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(header)
-            .children(over)
+            .children(tap_lines)
             .child(
                 // No padding, so the pinned header sits on the list's top.
                 div()
@@ -670,6 +705,22 @@ impl PhoneRoot {
                 .child(note.clone())
         });
         pending.into_iter().chain(note).collect()
+    }
+
+    /// The tap's lines over a pane's content ([`Self::tap_lines`]), for a
+    /// pane that draws them itself: Home's list, or the session pane while
+    /// the list is collapsed.
+    pub(super) fn tap_lines_over(&self, t: &UiTheme) -> Option<Div> {
+        let lines = self.tap_lines(t);
+        (!lines.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .px(px(16.0))
+                .pt(px(12.0))
+                .children(lines)
+        })
     }
 
     /// One line per saved host with a Notifications switch: its name and

@@ -990,7 +990,8 @@ impl PhoneRoot {
                 self.pending_open = None;
                 // On one pane the viewer, a session page or Settings hides
                 // the line, so the note returns Home; in two panes the list
-                // shows it beside them, and only Settings covers it.
+                // shows it beside them, or the session pane's top while the
+                // list is collapsed, and only Settings covers it.
                 if self.one_pane(cx) {
                     self.close_viewer(cx);
                     self.close_browser(cx);
@@ -1005,8 +1006,9 @@ impl PhoneRoot {
         }
     }
 
-    /// Closes Settings for a tap's line, which only Home and the hosts
-    /// screen draw: Settings covers them.
+    /// Closes Settings for a tap's line, which Home, the hosts screen and,
+    /// while the list is collapsed, the session pane draw: Settings covers
+    /// them.
     fn close_settings_for_tap(&mut self, cx: &mut Context<Self>) {
         self.leave_hosts_page(cx);
         self.settings = None;
@@ -2649,15 +2651,21 @@ impl PhoneRoot {
     }
 
     /// Home's list in its pane, a line, then the session pane; the session
-    /// pane alone while [`Self::list_collapsed`].
+    /// pane alone while [`Self::list_collapsed`], with the tap's lines over
+    /// it since the list is not there to draw them.
     fn two_pane_body(&mut self, keyboard_up: bool, cx: &mut Context<Self>) -> Div {
         if self.list_collapsed(cx) {
+            let over = self.tap_lines_over(&theme(cx));
             let pane = self.session_pane(keyboard_up, cx);
-            return div()
-                .size_full()
-                .flex()
-                .flex_row()
-                .child(div().flex_1().min_w_0().h_full().child(pane));
+            return div().size_full().flex().flex_col().children(over).child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .child(div().flex_1().min_w_0().h_full().child(pane)),
+            );
         }
         let t = theme(cx);
         let list = div()

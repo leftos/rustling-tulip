@@ -10,6 +10,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- On the phone, a notification tap's note shows in the session pane while the list pane is collapsed.
+- On the phone, a paste that arrives after its field was closed is dropped instead of landing in a hidden field.
 - The file viewer's header shows the whole file name whenever it fits, hiding the folder first instead of cutting the name or drawing a lone dot.
 - In Chat, Show all on a cut tool result is a compact button again, not a bar across the whole card.
 - In Chat, box-drawing characters in a message bubble line up, drawn in the terminal font at the bubble's text size.

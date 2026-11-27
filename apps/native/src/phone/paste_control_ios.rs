@@ -621,7 +621,7 @@ fn page_left(this: &PhoneRoot, pasted: &Pasted) -> bool {
 /// edit bar's Paste pastes, after giving it the keyboard; dropped when that
 /// field is no longer drawn.
 fn apply_field(this: &PhoneRoot, selector: &str, text: &str, cx: &mut Context<PhoneRoot>) {
-    let Some(input) = this.field_input(selector) else {
+    let Some(input) = this.field_input(selector, cx) else {
         tracing::info!(
             selector,
             "phone: a paste for a field no longer drawn was dropped"

@@ -86,6 +86,12 @@ fn shown(h: &mut Harness<'_>) -> Option<String> {
     })
 }
 
+/// Why the phone could not open the session a notification named, while it
+/// says so.
+fn open_note(h: &mut Harness<'_>) -> Option<String> {
+    phone(h, |phone, _| phone.open_note().map(str::to_owned))
+}
+
 /// Resizes the window to `width` by `height` points.
 fn resize(h: &mut Harness<'_>, width: f32, height: f32) {
     h.cx.simulate_resize(gpui::size(px(width), px(height)));
@@ -842,6 +848,18 @@ fn collapsed<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     h
 }
 
+/// [`collapsed`] with the phone's push through `platform`.
+fn collapsed_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    platform: Arc<FakePushPlatform>,
+) -> Harness<'a> {
+    let mut h = ipad_with(cx, dir, platform);
+    h.click_on(&row("a"));
+    h.click_on("phone-list-toggle");
+    h
+}
+
 #[gpui::test]
 fn hide_list_gives_the_session_the_full_width(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -908,6 +926,33 @@ fn a_collapsed_list_draws_again_with_no_session(cx: &mut TestAppContext) {
         true,
         "the choice is kept"
     );
+}
+
+#[gpui::test]
+fn a_tap_note_shows_in_the_session_pane_while_the_list_is_collapsed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let platform = Arc::new(FakePushPlatform::default());
+    let mut h = collapsed_with(cx, &dir, platform.clone());
+    assert!(!drawn(&mut h, "phone-list-pane"), "the list is collapsed");
+
+    platform.tap(REMOTE, "gone");
+    h.cx.run_until_parked();
+
+    assert_eq!(shown(&mut h), Some("a".to_owned()), "the selection is kept");
+    assert_eq!(
+        open_note(&mut h),
+        Some(format!("That session is no longer on {REMOTE}."))
+    );
+    let note = h.bounds("phone-open-note");
+    assert!(note.size.width > px(0.0), "the note draws: {note:?}");
+    let session = h.bounds("phone-session");
+    assert!(
+        note.bottom_right().y <= session.top(),
+        "the note sits over the session page: {note:?} {session:?}"
+    );
+    assert_eq!(note.origin.x, px(16.0), "at the pane's padding: {note:?}");
+    let width = window_width(&mut h);
+    assert!(note.bottom_right().x <= width, "inside the pane: {note:?}");
 }
 
 #[gpui::test]

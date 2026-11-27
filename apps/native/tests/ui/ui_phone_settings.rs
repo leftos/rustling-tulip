@@ -665,6 +665,64 @@ fn the_hosts_screen_still_offers_add_a_host_with_no_host_open(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn the_hosts_screen_fields_answer_only_while_the_add_form_draws(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    assert_eq!(
+        field_text(&mut h, "phone-host-name"),
+        None,
+        "the form waits for a tap"
+    );
+    h.click_on("phone-host-add-another");
+    assert_eq!(
+        field_text(&mut h, "phone-host-name").as_deref(),
+        Some(""),
+        "the drawn form answers"
+    );
+
+    h.click_on("phone-settings-open");
+    assert!(
+        drawn(&mut h, "phone-settings"),
+        "Settings covers the screen"
+    );
+    assert_eq!(
+        field_text(&mut h, "phone-host-name"),
+        None,
+        "a field Settings covers answers nothing"
+    );
+}
+
+#[gpui::test]
+fn the_hosts_page_fields_answer_only_while_the_add_form_draws(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir, Arc::new(FakePushPlatform::default()));
+
+    open_hosts(&mut h);
+    assert_eq!(
+        field_text(&mut h, "phone-host-name"),
+        None,
+        "the form waits for a tap"
+    );
+    h.click_on("phone-host-add-another");
+    assert_eq!(
+        field_text(&mut h, "phone-host-name").as_deref(),
+        Some(""),
+        "the drawn form answers"
+    );
+
+    h.click_on("phone-settings-back");
+    assert_eq!(
+        field_text(&mut h, "phone-host-name"),
+        None,
+        "the category list covers it"
+    );
+    h.click_on("phone-settings-row-hosts");
+    assert!(!drawn(&mut h, "phone-host-name"), "the form closed");
+    assert_eq!(field_text(&mut h, "phone-host-name"), None);
+}
+
+#[gpui::test]
 fn a_host_connecting_while_the_add_form_is_open_keeps_the_form_on_screen(cx: &mut TestAppContext) {
     const TYPED: &str = "den.tail1234.ts.net";
     let dir = TestDir::new();

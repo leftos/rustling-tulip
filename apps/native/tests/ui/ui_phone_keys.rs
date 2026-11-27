@@ -14,6 +14,7 @@ use gpui::{
     point, px,
 };
 use protocol::{ChatScreen, ClientMessage, ComposerState, DaemonMessage, SessionSnapshot};
+use rustling_tulip_native::phone::PhoneRoot;
 use rustling_tulip_native::phone::push::FakePushPlatform;
 use rustling_tulip_native::target::HostKey;
 use serde_json::{Value, json};
@@ -27,6 +28,17 @@ fn touch_target() -> Pixels {
 /// Whether the last frame drew what `selector` tags.
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).size.width > px(0.0)
+}
+
+/// The text of the phone field tagged `selector`, while it is drawn.
+fn field_text(h: &mut Harness<'_>, selector: &str) -> Option<String> {
+    h.cx.update(|window, cx| {
+        let phone = window
+            .root::<PhoneRoot>()
+            .flatten()
+            .expect("the window's root is the phone's");
+        phone.read(cx).field_text(selector, cx)
+    })
 }
 
 /// A phone with [`REMOTE`] saved and paired and `ui`'s fields beside it, no
@@ -709,6 +721,38 @@ fn the_picker_refuses_two_characters(cx: &mut TestAppContext) {
     assert!(
         drawn(&mut h, "phone-key-picker-char"),
         "the picker stays open"
+    );
+}
+
+#[gpui::test]
+fn the_key_fields_answer_only_while_each_draws(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = phone(cx, &dir);
+    open_keys(&mut h);
+
+    assert_eq!(
+        field_text(&mut h, "phone-key-editor-label"),
+        None,
+        "no editor draws"
+    );
+    assert_eq!(field_text(&mut h, "phone-key-picker-char"), None);
+
+    add_key_with_a_press(&mut h);
+    h.click_on("phone-key-editor-step-0-key");
+    assert!(drawn(&mut h, "phone-key-picker-char"), "the picker shows");
+    assert_eq!(
+        field_text(&mut h, "phone-key-editor-label"),
+        None,
+        "the picker covers the label"
+    );
+    assert!(field_text(&mut h, "phone-key-picker-char").is_some());
+
+    h.click_on("phone-settings-back");
+    assert!(!drawn(&mut h, "phone-key-picker-char"), "the picker closed");
+    assert_eq!(field_text(&mut h, "phone-key-picker-char"), None);
+    assert!(
+        field_text(&mut h, "phone-key-editor-label").is_some(),
+        "the drawn editor's label answers"
     );
 }
 
