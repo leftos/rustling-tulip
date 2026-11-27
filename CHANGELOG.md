@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- On the phone, a host that failed to connect keeps its reason while it redials, so its card no longer jumps on every retry.
 - On the phone, a notification tap's note shows in the session pane while the list pane is collapsed.
 - On the phone, a paste that arrives after its field was closed is dropped instead of landing in a hidden field.
 - On the phone, the terminal keeps its rows when Quick and the key bar overflow after a rotation, and leaves no blank band when the keyboard drops.

@@ -126,6 +126,9 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 )]
 pub struct Connection {
     state: State,
+    /// Why the last attempt failed, kept while the connection redials so a
+    /// host row can show it until a connect clears it.
+    last_error: Option<String>,
     stop_requested: bool,
     has_ever_connected: bool,
     attempt: u32,
@@ -155,6 +158,7 @@ impl Connection {
     pub fn for_target(target: Target) -> Self {
         Self {
             state: State::Init,
+            last_error: None,
             stop_requested: false,
             has_ever_connected: false,
             attempt: 0,
@@ -213,9 +217,21 @@ impl Connection {
         }
     }
 
+    /// Moves the connection to `state`, applying the rule every transition
+    /// follows for [`Connection::last_error`]: an error records its reason, a
+    /// redial keeps it, and every other state clears it.
+    fn set_state(&mut self, state: State) {
+        match &state {
+            State::Error { reason } => self.last_error = Some(reason.clone()),
+            State::Connecting => {}
+            _ => self.last_error = None,
+        }
+        self.state = state;
+    }
+
     /// A WebSocket connect is starting.
     pub fn on_connecting(&mut self) {
-        self.state = State::Connecting;
+        self.set_state(State::Connecting);
     }
 
     /// The WebSocket to the daemon on `port` opened; `Hello` goes next.
@@ -232,12 +248,12 @@ impl Connection {
         features: Vec<String>,
         origin: Option<ConnectionOrigin>,
     ) {
-        self.state = State::Open {
+        self.set_state(State::Open {
             negotiated,
             features,
             origin,
             build_version: None,
-        };
+        });
         self.attempt = 0;
         self.has_ever_connected = true;
     }
@@ -262,13 +278,13 @@ impl Connection {
 
     /// The daemon rejected the auth token.
     pub fn on_auth_failed(&mut self, reason: String) {
-        self.state = State::AuthFailed { reason };
+        self.set_state(State::AuthFailed { reason });
     }
 
     /// The tailnet host has not approved this device (see
     /// [`State::NotApproved`]). Never counts as a connect.
     pub fn on_not_approved(&mut self, reason: String, had_token: bool) {
-        self.state = State::NotApproved { reason, had_token };
+        self.set_state(State::NotApproved { reason, had_token });
     }
 
     /// Whether the daemon refused this client (auth failed, or not
@@ -288,7 +304,7 @@ impl Connection {
         if self.refused() {
             return None;
         }
-        self.state = State::Closed { reason };
+        self.set_state(State::Closed { reason });
         self.schedule_reconnect()
     }
 
@@ -299,7 +315,7 @@ impl Connection {
         if self.refused() {
             return None;
         }
-        self.state = State::Error { reason };
+        self.set_state(State::Error { reason });
         self.schedule_reconnect()
     }
 
@@ -321,7 +337,7 @@ impl Connection {
         let dead = self.refused() || matches!(self.state, State::Error { .. });
         if dead || self.stop_requested || !self.socket_live || !self.target.is_local() {
             self.stop_requested = false;
-            self.state = State::Connecting;
+            self.set_state(State::Connecting);
             self.attempt = 0;
             RestartAction::FreshConnect
         } else {
@@ -345,6 +361,13 @@ impl Connection {
             | State::Error { reason } => Some(reason),
             State::Init | State::Connecting | State::Open { .. } => None,
         }
+    }
+
+    /// Why the last connect attempt failed, kept while the connection redials
+    /// and until a connect clears it; `None` before any failure.
+    #[must_use]
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 
     fn label_and_dot(&self, session_count: usize) -> (String, DotKind) {
@@ -896,5 +919,65 @@ mod tests {
             !conn.supports(FEATURE_AGENT_COMMANDS),
             "cleared on a fresh connect"
         );
+    }
+
+    #[test]
+    fn a_redial_after_an_error_keeps_its_reason() {
+        let mut conn = Connection::new();
+        conn.on_error("no binary".to_owned());
+        assert_eq!(conn.last_error(), Some("no binary"));
+        conn.on_connecting();
+        assert_eq!(
+            conn.last_error(),
+            Some("no binary"),
+            "a redial keeps the reason it failed with"
+        );
+    }
+
+    #[test]
+    fn a_welcome_clears_the_last_error() {
+        let mut conn = Connection::new();
+        conn.on_error("no binary".to_owned());
+        conn.on_connecting();
+        conn.on_socket_open(51418);
+        conn.on_welcome(26, Vec::new(), None);
+        assert_eq!(conn.last_error(), None);
+    }
+
+    #[test]
+    fn a_restart_after_an_error_keeps_its_reason() {
+        let mut conn = Connection::new();
+        conn.on_error("no binary".to_owned());
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert_eq!(conn.state(), &State::Connecting);
+        assert_eq!(conn.last_error(), Some("no binary"));
+    }
+
+    #[test]
+    fn a_close_clears_the_last_error() {
+        let mut conn = open(26);
+        conn.on_error("handshake timed out".to_owned());
+        conn.on_closed("bridge exited".to_owned());
+        assert_eq!(
+            conn.last_error(),
+            None,
+            "a closed connection keeps no reason from before"
+        );
+    }
+
+    #[test]
+    fn an_auth_failure_clears_the_last_error() {
+        let mut conn = Connection::new();
+        conn.on_error("no binary".to_owned());
+        conn.on_auth_failed("the token was refused".to_owned());
+        assert_eq!(conn.last_error(), None);
+    }
+
+    #[test]
+    fn a_not_approved_host_clears_the_last_error() {
+        let mut conn = Connection::new();
+        conn.on_error("no binary".to_owned());
+        conn.on_not_approved("this device is not paired".to_owned(), false);
+        assert_eq!(conn.last_error(), None);
     }
 }

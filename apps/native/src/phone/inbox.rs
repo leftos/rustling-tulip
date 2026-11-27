@@ -410,7 +410,7 @@ fn read_item(dir: &Path, path: &Path) -> Found {
 /// The bytes of the manifest at `path`, opened once: the open file must be
 /// a regular file, and at most [`MANIFEST_MAX_BYTES`] are read.
 fn read_manifest(path: &Path) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let file = open_manifest(path)?;
     let meta = file.metadata().map_err(|err| err.to_string())?;
     if !meta.is_file() {
         return Err("the manifest is not a regular file".to_owned());
@@ -423,6 +423,27 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, String> {
         return Err(format!("the manifest is over {MANIFEST_MAX_BYTES} bytes"));
     }
     Ok(bytes)
+}
+
+/// The manifest at `path`, opened for reading. On macOS and iOS the open
+/// refuses a link (`O_NOFOLLOW`) and never waits on a FIFO (`O_NONBLOCK`), so
+/// a path swapped for either after the scan's check is refused rather than
+/// followed or blocked on.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn open_manifest(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| err.to_string())
+}
+
+/// The manifest at `path`, opened for reading.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn open_manifest(path: &Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(path).map_err(|err| err.to_string())
 }
 
 /// Removes `item` from the inbox: its payload first, its manifest last, so
@@ -1123,5 +1144,50 @@ mod tests {
         record.stamp("h/b", at_ms(NOW_MS));
         record.save(&path).expect("a corrupt file is replaced");
         assert_eq!(LastUsed::load(&path).sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_plain_manifest_still_reads() {
+        let dir = TestDir::new("plain-manifest");
+        let path = dir.0.join("a1.json");
+        std::fs::write(&path, file_json("a1", 5)).expect("write the manifest");
+        assert_eq!(
+            read_manifest(&path).expect("a plain manifest reads"),
+            file_json("a1", 5).as_bytes()
+        );
+    }
+
+    /// A manifest path swapped for a link to a real manifest is refused, so
+    /// nothing outside the inbox folder reaches the app through it.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn a_manifest_reached_through_a_link_is_refused() {
+        let dir = TestDir::new("linked-manifest");
+        let real = dir.0.join("a1.json");
+        std::fs::write(&real, file_json("a1", 5)).expect("write the manifest");
+        let link = dir.0.join("b2.json");
+        std::os::unix::fs::symlink(&real, &link).expect("link the manifest");
+        assert!(
+            read_manifest(&link).is_err(),
+            "a manifest reached through a link is refused"
+        );
+    }
+
+    /// A FIFO at the manifest path is refused, and the open does not wait for
+    /// a writer that would never come.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn a_fifo_at_the_manifest_path_is_refused() {
+        let dir = TestDir::new("fifo-manifest");
+        let path = dir.0.join("a1.json");
+        let name = std::ffi::CString::new(path.to_str().expect("a UTF-8 path")).expect("no NUL");
+        // SAFETY: mkfifo(3) only reads its NUL-terminated path and its mode,
+        // and holds no state.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        assert!(
+            read_manifest(&path).is_err(),
+            "a FIFO is refused without blocking"
+        );
     }
 }

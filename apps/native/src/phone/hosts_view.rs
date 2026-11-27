@@ -250,14 +250,20 @@ pub(super) struct RowParts {
 
 impl RowParts {
     /// The parts of a row for `state`, with `pending` the fingerprint the
-    /// user has not answered for. A pending host key takes the place of the
-    /// reason line and Retry: the prompt is the row's one answer.
-    fn of(state: Option<&State>, pending: Option<&str>) -> Self {
+    /// user has not answered for and `last_error` the reason the host last
+    /// failed with. A pending host key takes the place of the reason line and
+    /// Retry: the prompt is the row's one answer.
+    fn of(state: Option<&State>, pending: Option<&str>, last_error: Option<&str>) -> Self {
         let state_word = state_words(state);
         let parts = match state {
             Some(State::AuthFailed { reason }) => Some((Some(reason.clone()), true, false)),
             Some(State::Error { reason }) => Some((Some(reason.clone()), false, true)),
             Some(State::Closed { .. }) => Some((None, false, true)),
+            // A host redialling after a failure keeps its reason line, so its
+            // card holds one height through the attempt.
+            Some(State::Connecting) => {
+                last_error.map(|reason| (Some(reason.to_owned()), false, false))
+            }
             _ => None,
         };
         let Some((reason, retry, redial)) = parts else {
@@ -292,9 +298,11 @@ impl RowParts {
 /// besides its name: the parts its connection's state and any host key
 /// still waiting on the user call for.
 pub(super) fn row_parts(root: &RootView, key: &HostKey) -> RowParts {
+    let conn = root.conn_of(key);
     RowParts::of(
-        root.conn_of(key).map(Connection::state),
+        conn.map(Connection::state),
         root.unverified_fingerprint(key),
+        conn.and_then(Connection::last_error),
     )
 }
 
@@ -1200,7 +1208,7 @@ mod tests {
         let state = State::AuthFailed {
             reason: "box refused this phone's key".to_owned(),
         };
-        let parts = RowParts::of(Some(&state), None);
+        let parts = RowParts::of(Some(&state), None, None);
         assert_eq!(parts.state_word, "Stopped");
         assert_eq!(
             parts.reason.as_deref(),
@@ -1216,7 +1224,7 @@ mod tests {
         let state = State::Error {
             reason: "no handshake".to_owned(),
         };
-        let parts = RowParts::of(Some(&state), None);
+        let parts = RowParts::of(Some(&state), None, None);
         assert_eq!(parts.state_word, "Offline");
         assert_eq!(parts.reason.as_deref(), Some("no handshake"));
         assert!(parts.prompt.is_none());
@@ -1232,7 +1240,7 @@ mod tests {
         let state = State::Closed {
             reason: "gone".to_owned(),
         };
-        let parts = RowParts::of(Some(&state), None);
+        let parts = RowParts::of(Some(&state), None, None);
         assert_eq!(parts.state_word, "Offline");
         assert!(parts.reason.is_none(), "a closed host shows no reason");
         assert!(parts.prompt.is_none());
@@ -1246,7 +1254,7 @@ mod tests {
     #[test]
     fn a_connecting_row_offers_no_retry() {
         for state in [State::Init, State::Connecting] {
-            let parts = RowParts::of(Some(&state), None);
+            let parts = RowParts::of(Some(&state), None, None);
             assert!(
                 !parts.retry && !parts.redial,
                 "{state:?} offers no Retry: it is dialling already"
@@ -1255,11 +1263,55 @@ mod tests {
     }
 
     #[test]
+    fn a_redialling_host_keeps_the_reason_it_failed_with() {
+        let parts = RowParts::of(Some(&State::Connecting), None, Some("no handshake"));
+        assert_eq!(parts.state_word, "Connecting…");
+        assert_eq!(
+            parts.reason.as_deref(),
+            Some("no handshake"),
+            "the reason line stays while the host redials, so its card keeps one height"
+        );
+        assert!(parts.prompt.is_none());
+        assert!(
+            !parts.retry && !parts.redial,
+            "a dialling host offers no Retry"
+        );
+    }
+
+    #[test]
+    fn a_connecting_host_that_never_failed_shows_no_reason() {
+        for state in [State::Init, State::Connecting] {
+            let parts = RowParts::of(Some(&state), None, None);
+            assert!(parts.reason.is_none(), "{state:?} shows no reason line");
+        }
+    }
+
+    #[test]
+    fn a_connected_host_shows_no_reason() {
+        let state = State::Open {
+            negotiated: 26,
+            features: Vec::new(),
+            origin: None,
+            build_version: None,
+        };
+        let parts = RowParts::of(Some(&state), None, Some("no handshake"));
+        assert_eq!(parts.state_word, "Online");
+        assert!(
+            parts.reason.is_none(),
+            "an online host shows no reason, whatever it failed with before"
+        );
+        assert!(
+            !parts.retry && !parts.redial,
+            "an online host offers no Retry"
+        );
+    }
+
+    #[test]
     fn a_pending_host_key_shows_the_prompt_instead_of_the_reason() {
         let state = State::AuthFailed {
             reason: "box offered a host key this phone has not seen: SHA256:abc".to_owned(),
         };
-        let parts = RowParts::of(Some(&state), Some("SHA256:abc"));
+        let parts = RowParts::of(Some(&state), Some("SHA256:abc"), None);
         assert_eq!(parts.state_word, "Stopped");
         assert_eq!(parts.prompt.as_deref(), Some("SHA256:abc"));
         assert!(

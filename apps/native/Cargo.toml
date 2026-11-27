@@ -243,6 +243,13 @@ dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "o
 # The app's own toasts reach their window through its native handle.
 raw-window-handle = "0.6"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# The start guard asks whether another client's run still goes (`kill(pid, 0)`),
+# and the share inbox opens a manifest with `O_NOFOLLOW | O_NONBLOCK`, so a
+# path swapped for a link or a FIFO after the scan's check is refused rather
+# than followed or blocked on.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The app's own toasts: the screen's visible frame (`NSScreen`), keeping a
 # toast's panel up and off the keyboard (`NSPanel`) and moving it (`NSView`
@@ -255,8 +262,6 @@ raw-window-handle = "0.6"
 # when `NSWorkspace` names an app for a `linear:` address (`NSURL`).
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
-# The start guard asks whether another client's run still goes (`kill(pid, 0)`).
-libc = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
