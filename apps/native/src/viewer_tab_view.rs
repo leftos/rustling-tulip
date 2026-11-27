@@ -12,7 +12,7 @@ use std::time::Instant;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
     HighlightStyle, Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
+    MouseUpEvent, Pixels, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
     UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, relative, uniform_list,
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
@@ -44,6 +44,12 @@ const HEADER_PAD_LEFT: f32 = 14.0;
 const HEADER_PAD_RIGHT: f32 = 10.0;
 /// The room between the file name and its folder, in px.
 const PATH_GAP: f32 = 6.0;
+/// The narrowest the header's folder box draws at, in ems of the header's
+/// text size: room for a character, a kept `/` and `…` at any UI weight;
+/// with less room it wraps out of sight.
+const PATH_FOLDER_MIN: f32 = 2.5;
+/// The header path's line height, as a multiple of its text size.
+const PATH_LINE_HEIGHT: f32 = 1.625;
 /// The gutter's line numbers' size and the room right of them, the diff
 /// view's.
 const GUTTER_TEXT_SIZE: f32 = 11.0;
@@ -1327,8 +1333,7 @@ fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> D
         .bg(gpui::rgb(t.surface))
         .border_b_1()
         .border_color(gpui::rgb(t.line))
-        .child(path_box(tab.path(), &t))
-        .child(div().flex_1())
+        .child(path_box(tab.path(), &t, fonts::ui_px(cx, UI_TEXT_SIZE)))
         .children(markdown_toggle(tab_id, tab, cx))
         .children(buttons)
 }
@@ -1362,8 +1367,15 @@ fn header_button(
 }
 
 /// The file name whole, then its folder, which gives up its end to an
-/// ellipsis as room runs out; the full path is the tooltip.
-fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
+/// ellipsis as room runs out; the full path is the tooltip over either text.
+/// The box takes the header's free room. The folder's slot wraps to a
+/// second, clipped line once less than `PATH_FOLDER_MIN` ems of it would
+/// fit beside the name, so it never shows a lone `…`; only then is the name
+/// cut at its end, as it never grows past the box. `text` is the header's
+/// text size.
+fn path_box(path: &str, t: &UiTheme, text: Pixels) -> Div {
+    let line = text * PATH_LINE_HEIGHT;
+    let folder_min = text * PATH_FOLDER_MIN;
     let (name, folder) = split_path(path);
     let ellipsis_box = || {
         div()
@@ -1373,6 +1385,8 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
             .whitespace_nowrap()
     };
     let name = ellipsis_box()
+        .driver_id(|| PATH_NAME.to_owned())
+        .id("viewer-path-name")
         .flex_none()
         .max_w(relative(1.0))
         .text_color(gpui::rgb(t.text))
@@ -1380,27 +1394,44 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
             PATH_NAME,
             SharedString::from(name.to_owned()),
             StyledText::new(name.to_owned()),
-        ));
+        ))
+        .tooltip(tooltip(path.to_owned()));
     div()
-        .id("viewer-path")
+        .driver_id(|| "viewer-path".to_owned())
         .flex()
+        .flex_1()
+        .flex_wrap()
+        .h(line)
+        .line_height(line)
         .gap(px(PATH_GAP))
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap()
         .child(name)
-        .when(!folder.is_empty(), |path| {
-            path.child(
-                ellipsis_box()
-                    .text_color(gpui::rgb(t.subtle))
-                    .children(ellipsized(
-                        PATH_FOLDER,
-                        SharedString::from(folder.to_owned()),
-                        StyledText::new(folder.to_owned()),
-                    )),
+        .when(!folder.is_empty(), |row| {
+            row.child(
+                div()
+                    .driver_id(|| PATH_FOLDER.to_owned())
+                    .flex()
+                    .flex_1()
+                    .flex_basis(folder_min)
+                    .min_w(folder_min)
+                    .overflow_hidden()
+                    .child(
+                        ellipsis_box()
+                            .id("viewer-path-folder")
+                            .flex_none()
+                            .max_w(relative(1.0))
+                            .text_color(gpui::rgb(t.subtle))
+                            .children(ellipsized(
+                                PATH_FOLDER,
+                                SharedString::from(folder.to_owned()),
+                                StyledText::new(folder.to_owned()),
+                            ))
+                            .tooltip(tooltip(path.to_owned())),
+                    ),
             )
         })
-        .tooltip(tooltip(path.to_owned()))
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
-use gpui::{Modifiers, ScrollStrategy, TestAppContext, px};
+use gpui::{Modifiers, Pixels, ScrollStrategy, TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::LinkAction;
 use rustling_tulip_native::file_fetch::FetchRequest;
@@ -483,6 +483,87 @@ fn the_viewer_header_grows_but_its_body_text_does_not(cx: &mut TestAppContext) {
         line,
         "the body keeps the terminal font's size"
     );
+}
+
+/// The width the viewer's file name box is painted at in a `width` px
+/// window.
+fn name_width_at(h: &mut Harness<'_>, width: f32) -> Pixels {
+    h.cx.simulate_resize(gpui::size(px(width), px(601.0)));
+    h.bounds("viewer-path-name").size.width
+}
+
+/// The folder slot's narrowest width at the default 12 px header text:
+/// 2.5 ems.
+const FOLDER_MIN: f32 = 30.0;
+
+/// The header's gap between the path box and the toggle.
+const HEADER_GAP: f32 = 8.0;
+
+/// Whether the folder slot `folder` is painted on the path box's one line.
+fn on_line_one(folder: gpui::Bounds<Pixels>, path: gpui::Bounds<Pixels>) -> bool {
+    folder.origin.x >= px(0.0) && folder.top() < path.bottom() - px(0.5)
+}
+
+#[gpui::test]
+fn a_viewer_header_cuts_the_file_name_only_when_the_bar_has_no_room_for_it(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes/README.md", b"# Readme\n");
+    let mut h = showing(cx, &dir, &file);
+    let whole = name_width_at(&mut h, 1920.0);
+    assert!(whole > px(0.0), "the name is painted at 1920 px");
+    assert!(
+        h.bounds("viewer-md-rendered-v1").origin.x > px(0.0),
+        "the toggle is painted at 1920 px"
+    );
+    let mut folder_yielded = false;
+    for width in (100_u16..=480).map(|n| f32::from(n) * 4.0) {
+        let name = name_width_at(&mut h, width);
+        let path = h.bounds("viewer-path");
+        let folder = h.bounds("viewer-path-folder");
+        let room = h.bounds("viewer-md-rendered-v1").origin.x - px(HEADER_GAP) - path.origin.x;
+        let name_whole = (name - whole).abs() <= px(0.5);
+        let folder_seen = on_line_one(folder, path);
+        if room >= whole - px(0.5) {
+            assert!(
+                name_whole,
+                "at {width} px the bar has {room:?} for the {whole:?} name, drawn {name:?}"
+            );
+        }
+        if name < whole - px(0.5) {
+            assert!(
+                !folder_seen,
+                "at {width} px the name is cut to {name:?} while the folder {folder:?} shows in {path:?}"
+            );
+        }
+        folder_yielded |= name_whole && !folder_seen;
+    }
+    assert!(
+        folder_yielded,
+        "some width shows the whole name with the folder gone"
+    );
+}
+
+#[gpui::test]
+fn a_viewer_header_never_draws_a_lone_folder_ellipsis(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes/README.md", b"# Readme\n");
+    let mut h = showing(cx, &dir, &file);
+    h.cx.simulate_resize(gpui::size(px(1920.0), px(601.0)));
+    let (folder, path) = (h.bounds("viewer-path-folder"), h.bounds("viewer-path"));
+    assert!(
+        on_line_one(folder, path),
+        "at 1920 px the folder {folder:?} shows in {path:?}"
+    );
+    for width in (100_u16..=300).map(|n| f32::from(n) * 4.0) {
+        h.cx.simulate_resize(gpui::size(px(width), px(601.0)));
+        let (folder, path) = (h.bounds("viewer-path-folder"), h.bounds("viewer-path"));
+        assert!(
+            !on_line_one(folder, path) || folder.size.width >= px(FOLDER_MIN - 0.5),
+            "at {width} px the folder {folder:?} shows in {path:?}, narrower than {FOLDER_MIN} px"
+        );
+    }
 }
 
 #[gpui::test]
