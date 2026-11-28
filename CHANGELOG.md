@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.19.1-alpha
+
+### Highlights
+
+- On the iPhone, Rustling Tulip appears in the share sheet, taking files, links and text shared from other apps.
+- On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
+- A workspace session no longer stops at Claude's trust prompt for its repos: registering one trusts it, a linked worktree at its main repo.
+- On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
+
 ### Added
 
 - On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
@@ -19,7 +28,6 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On the phone, a host that failed to connect keeps its reason while it redials, so its card no longer jumps on every retry.
 - On the phone in two panes, a Linear chip tapped on Home shows its card at once while the viewer is open.
 - On a phone on its side, the Needs you card leaves Home's rows visible with the keyboard up, and the copied chip no longer covers the terminal.
-- A workspace member registered as a linked worktree no longer stops at Claude's trust prompt; it is trusted at its main repo.
 - Folder trust and account switching find Claude Code's settings file where Claude Code does, including `.config.json` and a custom `USERPROFILE`.
 - On the phone, a notification tap's note shows in the session pane while the list pane is collapsed.
 - On the phone, a paste that arrives after its field was closed is dropped instead of landing in a hidden field.
@@ -30,7 +38,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - In Chat, Show all on a cut tool result is a compact button again, not a bar across the whole card.
 - In Chat, box-drawing characters in a message bubble line up, drawn in the terminal font at the bubble's text size.
 - In Chat, picking a message in Rewind no longer marks its card "Answered elsewhere", and a restored chat drops that line.
-- A workspace session no longer stops at Claude's trust prompt for its other repos on every start; registering a repo counts as trusting it.
+- A workspace session no longer stops at Claude's trust prompt for its repos: registering one trusts it, a linked worktree at its main repo.
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
 - A workspace session starts when the agent's command is a `.cmd` shim, such as npm's `claude.cmd`, instead of failing on the workspace note.
 - On the phone, a tap on the Needs you tray right after a fast swipe reaches the card instead of being ignored for a moment.
