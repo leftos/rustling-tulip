@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
+- On the iPhone, Rustling Tulip appears in the share sheet, taking files, links and text shared from other apps.
 
 ### Changed
 

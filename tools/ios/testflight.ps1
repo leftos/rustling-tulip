@@ -36,30 +36,38 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $MacBuilder = 'builder@mac-mini'
 $SigningDir = 'G:\My Drive\Private Config\rustling-tulip\secrets\ios-signing'
-$Names = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64', 'IOS_NOTIFY_PROFILE_GZ_BASE64',
+$Names = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PROFILES_TGZ_BASE64',
 'IOS_ASC_API_KEY_P8_BASE64', 'IOS_TEAM_ID', 'IOS_ASC_API_KEY_ID', 'IOS_ASC_API_ISSUER_ID', 'IOS_BUILD_NUMBER'
 
 function Assert-LastExit([string] $Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)" }
 }
 
-# A provisioning profile gzipped, then base64: two profiles in plain base64 put the forwarded
-# variables past the gate's --env cap of 32 KiB.
-function ConvertTo-GzipBase64([string] $Path) {
-    $buffer = [IO.MemoryStream]::new()
-    $gzip = [IO.Compression.GZipStream]::new($buffer, [IO.Compression.CompressionLevel]::Optimal)
+# The provisioning profiles as one gzipped tar, then base64, each entry named for its bundle: one
+# variable per profile puts the forwarded variables past the gate's --env cap of 32 KiB.
+function ConvertTo-ProfileTgzBase64 {
+    $tarBuffer = [IO.MemoryStream]::new()
+    $tar = [System.Formats.Tar.TarWriter]::new($tarBuffer, [System.Formats.Tar.TarEntryFormat]::Ustar, $true)
     try {
-        $bytes = [IO.File]::ReadAllBytes($Path)
-        $gzip.Write($bytes, 0, $bytes.Length)
+        foreach ($pair in @(@('phone.mobileprovision', 'phone-appstore.mobileprovision'),
+                @('notify.mobileprovision', 'notify-appstore.mobileprovision'), @('share.mobileprovision', 'share-appstore.mobileprovision'))) {
+            $entry = [System.Formats.Tar.UstarTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile, $pair[0])
+            $entry.DataStream = [IO.MemoryStream]::new([IO.File]::ReadAllBytes((Join-Path $SigningDir $pair[1])))
+            $tar.WriteEntry($entry)
+        }
     }
-    finally { $gzip.Dispose() }
+    finally { $tar.Dispose() }
+    $buffer = [IO.MemoryStream]::new()
+    $gzip = [IO.Compression.GZipStream]::new($buffer, [IO.Compression.CompressionLevel]::SmallestSize)
+    try { $gzip.Write($tarBuffer.ToArray(), 0, [int] $tarBuffer.Length) } finally { $gzip.Dispose() }
     return [Convert]::ToBase64String($buffer.ToArray())
 }
 
 # Reads the files of the signing set it needs, and nothing else in the folder.
 function Read-SigningSet {
     if (-not (Test-Path -LiteralPath $SigningDir -PathType Container)) { throw "no signing folder at $SigningDir (is Google Drive mounted as G:?)" }
-    foreach ($file in 'apple-distribution.p12', 'p12-password.txt', 'phone-appstore.mobileprovision', 'notify-appstore.mobileprovision', 'ids.env') {
+    foreach ($file in 'apple-distribution.p12', 'p12-password.txt', 'phone-appstore.mobileprovision', 'notify-appstore.mobileprovision',
+            'share-appstore.mobileprovision', 'ids.env') {
         if (-not (Test-Path -LiteralPath (Join-Path $SigningDir $file) -PathType Leaf)) { throw "missing $file in $SigningDir" }
     }
     $p8 = @(Get-ChildItem -LiteralPath $SigningDir -Filter 'AuthKey_*.p8' -File)
@@ -75,8 +83,7 @@ function Read-SigningSet {
         if (($end -gt 0) -and ($password[$end - 1] -eq 13)) { $end-- }
     }
     $env:IOS_DIST_CERT_PASSWORD_BASE64 = [Convert]::ToBase64String($password, 0, $end)
-    $env:IOS_PHONE_PROFILE_GZ_BASE64 = ConvertTo-GzipBase64 (Join-Path $SigningDir 'phone-appstore.mobileprovision')
-    $env:IOS_NOTIFY_PROFILE_GZ_BASE64 = ConvertTo-GzipBase64 (Join-Path $SigningDir 'notify-appstore.mobileprovision')
+    $env:IOS_PROFILES_TGZ_BASE64 = ConvertTo-ProfileTgzBase64
     $env:IOS_ASC_API_KEY_P8_BASE64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p8[0].FullName))
     foreach ($line in Get-Content -LiteralPath (Join-Path $SigningDir 'ids.env')) {
         if ($line -match '^\s*(TEAM_ID|ASC_API_KEY_ID|ASC_API_ISSUER_ID)\s*=\s*(.+?)\s*$') {
@@ -192,8 +199,7 @@ function Invoke-OnMac([switch] $SkipUpload) {
     finally {
         $env:IOS_DIST_CERT_P12_BASE64 = $null
         $env:IOS_DIST_CERT_PASSWORD_BASE64 = $null
-        $env:IOS_PHONE_PROFILE_GZ_BASE64 = $null
-        $env:IOS_NOTIFY_PROFILE_GZ_BASE64 = $null
+        $env:IOS_PROFILES_TGZ_BASE64 = $null
         $env:IOS_TEAM_ID = $null
     }
     Assert-LastExit 'tools/ios/build.ps1 -Target device -Sign'

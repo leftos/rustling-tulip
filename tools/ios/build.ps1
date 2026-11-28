@@ -9,7 +9,6 @@
 # PlugIns/RustlingTulipShare.appex likewise, and the fallback alert texts as
 # en.lproj/Localizable.strings. A simulator bundle is signed ad hoc, the
 # extensions first; a device bundle is left unsigned unless -Sign is given.
-# A -Sign build leaves the share extension out.
 #
 #   pwsh -NoProfile -File tools/ios/build.ps1 [-Target sim|device] [-Release]
 #   pwsh -NoProfile -File tools/ios/build.ps1 -Target device -Sign -BuildNumber <n>
@@ -17,12 +16,12 @@
 # -Sign (device only; it forces the release build) signs the bundle for the App
 # Store and writes target/ios/aarch64-apple-ios/RustlingTulip.ipa: it sets
 # CFBundleVersion to -BuildNumber and stamps the build-machine keys in the app
-# and the extension, compiles the app icon, checks both provisioning profiles,
-# embeds each in its bundle, codesigns the extension with its own entitlements
+# and both extensions, compiles the app icon, checks the three provisioning profiles,
+# embeds each in its bundle, codesigns each extension with its own entitlements
 # and then the app, with the distribution identity from a temporary keychain,
 # and verifies each signature. It needs IOS_DIST_CERT_P12_BASE64,
-# IOS_DIST_CERT_PASSWORD_BASE64, IOS_PHONE_PROFILE_GZ_BASE64, IOS_NOTIFY_PROFILE_GZ_BASE64
-# (each profile gzipped, then base64) and IOS_TEAM_ID (tools/installer/README.md "iOS signing"), which it moves out of
+# IOS_DIST_CERT_PASSWORD_BASE64, IOS_PROFILES_TGZ_BASE64 (the profiles in one gzipped tar, then base64)
+# and IOS_TEAM_ID (tools/installer/README.md "iOS signing"), which it moves out of
 # the environment before the build runs. No signing value is put on a command
 # line except the .p12 password, which `security import -P` takes as an
 # argument, as the macOS signing path does.
@@ -52,8 +51,9 @@ $ShareBundle = 'PlugIns/RustlingTulipShare.appex'
 $ShareExecutable = 'RustlingTulipShare'
 $PlistBuddy = '/usr/libexec/PlistBuddy'
 $AppId = 'dev.leftos.rustling-tulip.phone'
-$SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PHONE_PROFILE_GZ_BASE64',
-    'IOS_NOTIFY_PROFILE_GZ_BASE64', 'IOS_TEAM_ID'
+$SigningNames = 'IOS_DIST_CERT_P12_BASE64', 'IOS_DIST_CERT_PASSWORD_BASE64', 'IOS_PROFILES_TGZ_BASE64', 'IOS_TEAM_ID'
+# The App Group the app and the share extension share (the share inbox).
+$AppGroup = 'group.dev.leftos.rustling-tulip.phone'
 # -Sign's variables, moved out of the environment before the build (see the end of this script).
 $Signing = @{}
 
@@ -75,8 +75,7 @@ function Get-WorkspaceVersion {
 function Invoke-CargoBuild([string] $Triple) {
     & rustup target add $Triple
     Assert-LastExit "rustup target add $Triple"
-    $cargoArgs = @('build', '-p', $BinaryName, '-p', $NotifyBinaryName, '--target', $Triple)
-    if ($EmbedShare) { $cargoArgs += '-p', $ShareBinaryName }
+    $cargoArgs = @('build', '-p', $BinaryName, '-p', $NotifyBinaryName, '-p', $ShareBinaryName, '--target', $Triple)
     if ($Release) { $cargoArgs += '--release' }
     $env:IPHONEOS_DEPLOYMENT_TARGET = '15.0'
     & cargo @cargoArgs
@@ -127,7 +126,7 @@ function Build-AppBundle([string] $Triple) {
     Write-PlistValue $plist 'CFBundleShortVersionString' $numeric
     Write-PlistValue $plist 'CFBundleVersion' $numeric
     Build-NotifyExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$NotifyBinaryName") $numeric
-    if ($EmbedShare) { Build-ShareExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$ShareBinaryName") $numeric }
+    Build-ShareExtension $app (Join-Path $RepoRoot "target/$Triple/$profileDir/$ShareBinaryName") $numeric
     return $app
 }
 
@@ -275,6 +274,15 @@ function Test-ProfileEntitlement([string] $ProfilePath, [string] $WorkDir) {
     $beta = Get-PlistEntry $decoded 'Entitlements:beta-reports-active'
     if ($null -eq $beta) { throw "the provisioning profile has no beta-reports-active entitlement" }
     if ($beta -ne 'true') { throw "the provisioning profile's beta-reports-active is not true" }
+    if (@(Get-PlistArray $decoded 'Entitlements:com.apple.security.application-groups') -notcontains $AppGroup) {
+        throw "the provisioning profile's com.apple.security.application-groups does not contain $AppGroup"
+    }
+}
+
+# A plist array entry's items, one per string; none when the key is missing.
+function Get-PlistArray([string] $Plist, [string] $Key) {
+    $raw = Get-PlistEntry $Plist $Key
+    return @(if ($raw) { $raw -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -ne 'Array {') -and ($_ -ne '}') } })
 }
 
 # The extension's profile must allow its own application-identifier and the keychain group it shares
@@ -297,19 +305,41 @@ function Test-NotifyProfileEntitlement([string] $ProfilePath, [string] $WorkDir)
     }
 }
 
-# A signing variable that holds a file gzipped, then base64 (testflight.ps1 packs each profile so),
-# written out as the file's own bytes. The error names the variable, never its value.
-function Write-GzipBase64File([string] $Name, [string] $Destination) {
+# The share extension's profile must allow its own application-identifier and the App Group it shares
+# with the app (the exact entry).
+function Test-ShareProfileEntitlement([string] $ProfilePath, [string] $WorkDir) {
+    $decoded = Join-Path $WorkDir 'share-profile.plist'
+    & security cms -D -i $ProfilePath -o $decoded
+    Assert-LastExit 'security cms -D (share profile)'
+    $team = $Signing['IOS_TEAM_ID']
+    if ((Get-PlistEntry $decoded 'Entitlements:application-identifier') -ne "$team.$AppId.share") {
+        throw "the share extension's provisioning profile's application-identifier does not match $AppId.share on the team in IOS_TEAM_ID"
+    }
+    if ((Get-PlistEntry $decoded 'Entitlements:beta-reports-active') -ne 'true') {
+        throw "the share extension's provisioning profile does not allow beta-reports-active"
+    }
+    if (@(Get-PlistArray $decoded 'Entitlements:com.apple.security.application-groups') -notcontains $AppGroup) {
+        throw "the share extension's provisioning profile's com.apple.security.application-groups does not contain $AppGroup"
+    }
+}
+
+# IOS_PROFILES_TGZ_BASE64, the profiles as one gzipped tar, then base64 (testflight.ps1 packs them so),
+# unpacked into $Destination. The errors name the variable or the entry, never a value.
+function Expand-ProfileSet([string] $Destination) {
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     try {
-        $source = [IO.MemoryStream]::new([Convert]::FromBase64String($Signing[$Name]))
+        $source = [IO.MemoryStream]::new([Convert]::FromBase64String($Signing['IOS_PROFILES_TGZ_BASE64']))
         $gzip = [IO.Compression.GZipStream]::new($source, [IO.Compression.CompressionMode]::Decompress)
-        $plain = [IO.MemoryStream]::new()
-        try { $gzip.CopyTo($plain) } finally { $gzip.Dispose() }
+        try { [System.Formats.Tar.TarFile]::ExtractToDirectory($gzip, $Destination, $false) } finally { $gzip.Dispose() }
     }
     catch {
-        throw "$Name is not gzip-compressed base64"
+        throw 'IOS_PROFILES_TGZ_BASE64 is not a gzipped tar in base64'
     }
-    [IO.File]::WriteAllBytes($Destination, $plain.ToArray())
+    foreach ($entry in 'phone.mobileprovision', 'notify.mobileprovision', 'share.mobileprovision') {
+        if (-not (Test-Path -LiteralPath (Join-Path $Destination $entry) -PathType Leaf)) {
+            throw "IOS_PROFILES_TGZ_BASE64 has no $entry entry"
+        }
+    }
 }
 
 # A repo entitlements template with the team filled in, LF-terminated.
@@ -318,17 +348,28 @@ function Write-Entitlement([string] $Template, [string] $Destination) {
     [IO.File]::WriteAllText($Destination, $text.Replace('__TEAM_ID__', $Signing['IOS_TEAM_ID']).Replace("`r`n", "`n"))
 }
 
-# Inside out: the extension is signed with its own entitlements before the app's signature seals it.
-function Set-ExtensionSignature([string] $Appex, [string] $Identity, [string] $Keychain, [string] $Entitlements) {
+# Inside out: an extension is signed with its own entitlements before the app's signature seals it.
+# $Name is the bundle's folder name (RustlingTulipNotify.appex), for the messages.
+function Set-ExtensionSignature([string] $Appex, [string] $Name, [string] $Identity, [string] $Keychain, [string] $Entitlements) {
     codesign --force --sign $Identity --keychain $Keychain --entitlements $Entitlements $Appex
-    Assert-LastExit 'codesign RustlingTulipNotify.appex'
+    Assert-LastExit "codesign $Name"
     codesign --verify --strict --verbose=2 $Appex
-    Assert-LastExit 'codesign --verify RustlingTulipNotify.appex'
-    Write-Output 'codesign --verify --strict passed for RustlingTulipNotify.appex'
-    $signed = @(codesign -d --entitlements :- $Appex 2>$null | ForEach-Object { "$_" })
-    Assert-LastExit 'codesign -d --entitlements RustlingTulipNotify.appex'
-    $keys = @([regex]::Matches(($signed -join ''), '<key>([^<]+)</key>') | ForEach-Object { $_.Groups[1].Value })
-    Write-Output "RustlingTulipNotify.appex entitlement keys: $($keys -join ', ')"
+    Assert-LastExit "codesign --verify $Name"
+    Write-Output "codesign --verify --strict passed for $Name"
+    Write-SignedEntitlementKey $Appex $Name
+}
+
+# Prints the entitlement keys a signed bundle carries, and its App Group entries when it has any.
+function Write-SignedEntitlementKey([string] $Bundle, [string] $Name) {
+    $signed = @(codesign -d --entitlements :- $Bundle 2>$null | ForEach-Object { "$_" }) -join ''
+    Assert-LastExit "codesign -d --entitlements $Name"
+    $keys = @([regex]::Matches($signed, '<key>([^<]+)</key>') | ForEach-Object { $_.Groups[1].Value })
+    Write-Output "$Name entitlement keys: $($keys -join ', ')"
+    $groups = [regex]::Match($signed, '<key>com\.apple\.security\.application-groups</key>\s*<array>(.*?)</array>')
+    if ($groups.Success) {
+        $entries = @([regex]::Matches($groups.Groups[1].Value, '<string>([^<]+)</string>') | ForEach-Object { $_.Groups[1].Value })
+        Write-Output "$Name application-groups: $($entries -join ', ')"
+    }
 }
 
 # The distribution .p12 into a temporary keychain added first in the user's keychain search list.
@@ -371,8 +412,9 @@ function Get-SigningIdentity([string] $Keychain) {
 
 function Invoke-AppStoreSigning([string] $App) {
     $appex = Join-Path $App $NotifyBundle
-    # App and extension carry the same build number; every plist edit lands before a signature seals it.
-    foreach ($plist in (Join-Path $App 'Info.plist'), (Join-Path $appex 'Info.plist')) {
+    $shareAppex = Join-Path $App $ShareBundle
+    # App and extensions carry the same build number; every plist edit lands before a signature seals it.
+    foreach ($plist in (Join-Path $App 'Info.plist'), (Join-Path $appex 'Info.plist'), (Join-Path $shareAppex 'Info.plist')) {
         Write-PlistValue $plist 'CFBundleVersion' "$BuildNumber"
         Write-BuildMachineKey $plist
     }
@@ -385,28 +427,35 @@ function Invoke-AppStoreSigning([string] $App) {
         $keychain = Join-Path (Resolve-RealPath $workDir) 'signing.keychain-db'
         Build-AppIcon $App $workDir
         # The profile stays in the work folder until it is checked; it ships inside the signed app.
-        $profilePath = Join-Path $workDir 'phone-appstore.mobileprovision'
-        Write-GzipBase64File 'IOS_PHONE_PROFILE_GZ_BASE64' $profilePath
+        $profileDir = Join-Path $workDir 'profiles'
+        Expand-ProfileSet $profileDir
+        $profilePath = Join-Path $profileDir 'phone.mobileprovision'
         $entitlements = Join-Path $workDir 'app.entitlements'
         Write-Entitlement 'apps/ios/app.entitlements' $entitlements
         Test-ProfileEntitlement $profilePath $workDir
-        $notifyProfile = Join-Path $workDir 'notify-appstore.mobileprovision'
-        Write-GzipBase64File 'IOS_NOTIFY_PROFILE_GZ_BASE64' $notifyProfile
+        $notifyProfile = Join-Path $profileDir 'notify.mobileprovision'
         $notifyEntitlements = Join-Path $workDir 'notify.entitlements'
         Write-Entitlement 'apps/ios-notify/notify.entitlements' $notifyEntitlements
         Test-NotifyProfileEntitlement $notifyProfile $workDir
+        $shareProfile = Join-Path $profileDir 'share.mobileprovision'
+        $shareEntitlements = Join-Path $workDir 'share.entitlements'
+        Write-Entitlement 'apps/ios-share/share.entitlements' $shareEntitlements
+        Test-ShareProfileEntitlement $shareProfile $workDir
 
         Import-SigningIdentity $workDir $keychain
         Import-WwdrIntermediate $workDir $keychain
         $identity = Get-SigningIdentity $keychain
         Copy-Item -LiteralPath $notifyProfile -Destination (Join-Path $appex 'embedded.mobileprovision')
+        Copy-Item -LiteralPath $shareProfile -Destination (Join-Path $shareAppex 'embedded.mobileprovision')
         Copy-Item -LiteralPath $profilePath -Destination (Join-Path $App 'embedded.mobileprovision')
-        Set-ExtensionSignature $appex $identity $keychain $notifyEntitlements
+        Set-ExtensionSignature $appex 'RustlingTulipNotify.appex' $identity $keychain $notifyEntitlements
+        Set-ExtensionSignature $shareAppex 'RustlingTulipShare.appex' $identity $keychain $shareEntitlements
         codesign --force --sign $identity --keychain $keychain --entitlements $entitlements $App
         Assert-LastExit 'codesign RustlingTulip.app'
         codesign --verify --strict --verbose=2 $App
         Assert-LastExit 'codesign --verify RustlingTulip.app'
         Write-Output 'codesign --verify --strict passed'
+        Write-SignedEntitlementKey $App 'RustlingTulip.app'
 
         $payload = Join-Path $workDir 'Payload'
         New-Item -ItemType Directory -Path $payload | Out-Null
@@ -437,8 +486,6 @@ if ($Sign) {
     }
 }
 
-# A -Sign build does not sign the share extension yet, so it leaves it out.
-$EmbedShare = -not $Sign
 $triple = if ($Target -eq 'sim') { 'aarch64-apple-ios-sim' } else { 'aarch64-apple-ios' }
 # Only a simulator build links entitlements into its binaries; a device build is signed with them.
 $env:RUSTLING_TULIP_IOS_SIM_ENTITLEMENTS = if ($Target -eq 'sim') { Write-SimEntitlement } else { $null }
