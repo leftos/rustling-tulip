@@ -498,12 +498,12 @@
 - [ ] RT-1967 Show the decrypted alert when the phone extension's prune runs out of time
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
-- [/] RT-2136 Let a tap through right after a fast swipe on the phone's Needs you tray · release vNext
 - [ ] RT-2177 Give the phone's remaining buttons the narrower phone padding
 - [ ] RT-2240 Phone: sweep stale .json.tmp leftovers from the share inbox
 - [ ] RT-2241 Phone share extension: open a shared file URL as a security-scoped resource
 - [ ] RT-2243 Phone: route the share and notify extensions' log lines to the unified log
 - [ ] RT-2244 Phone: read share inbox payloads without following links
+- [ ] RT-2254 Let a tap through after a short sideways flick on the phone tray
 
 ## Dashboard, Gates and Linear
 
@@ -697,7 +697,6 @@
 - [ ] RT-1615 Read every processor group's CPU times on Windows hosts with more than 64 logical processors
 - [ ] RT-1616 Raise a popped-out destination instead of showing its card after a move empties the active tab
 - [ ] RT-1617 Consume a Replace move's follow only on the update that shows the moved session
-- [/] RT-2221 Let a .cmd agent take a workspace session's multi-line prelude argument · release vNext
 - [ ] RT-1618 Focus the moved session after a drag drops it into an empty pane of another tab
 - [ ] RT-1619 Show a tracked duplicate host's CPU and RAM from the connection that kept it
 - [ ] RT-1621 Close an open footer menu when a shortcut opens a dialog
@@ -801,8 +800,9 @@
 - [ ] RT-2206 gpui fork: count an iOS pinch's first step once
 - [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy
 - [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload
-- [/] RT-2224 Keep a Rewind's dropped turns out of the chat after a daemon restart · release vNext
 - [ ] RT-2237 Send the unanswered /btw screen as btw_pending in the desktop Chat spec
+- [ ] RT-2252 Start a .cmd agent whose path holds a space when an argument is quoted
+- [ ] RT-2253 Apply a rewind's fork when other prompts land before its marker
 
 ## Design files
 
