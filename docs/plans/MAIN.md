@@ -475,7 +475,7 @@
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
-  - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone
+  - [/] RT-369 PW.8: Install guide and hand checklist on the iPhone · release vNext
 - [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
 - [ ] RT-1268 Bring the phone's chat to the desktop's: Compact fold, Summary, stacked cards
 - [ ] RT-1379 Check the phone's Home row fits 'Working in the background' at 375 px
@@ -504,6 +504,9 @@
 - [ ] RT-2243 Phone: route the share and notify extensions' log lines to the unified log
 - [ ] RT-2244 Phone: read share inbox payloads without following links
 - [ ] RT-2254 Let a tap through after a short sideways flick on the phone tray
+- [ ] RT-2259 Phone: open the app for a share write that straddles the 30 s deadline
+- [ ] RT-2261 Phone share: clear a payload still being written by an earlier share
+- [ ] RT-2262 Phone share: an over-cap file alone must not clear the waiting share
 
 ## Dashboard, Gates and Linear
 
