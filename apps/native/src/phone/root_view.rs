@@ -2082,7 +2082,8 @@ impl PhoneRoot {
     }
 
     /// The share sheet's rows: every session Home lists that can show its
-    /// chat now, in Home's order, with its host's name for a remote host.
+    /// chat now, in Home's order, with the repo or workspace it sits under
+    /// and its host's name for a remote host.
     fn share_rows(&self, cx: &App) -> Vec<inbox::ShareRow> {
         let root = self.root.read(cx);
         let home = self.home(cx);
@@ -2093,6 +2094,7 @@ impl PhoneRoot {
                 session_id: row.session_id.clone(),
                 label: row.label.clone(),
                 host_name: (row.host != HostKey::Local).then(|| root.host_label_of(&row.host)),
+                container: row.container.clone().filter(|name| *name != row.label),
             })
             .collect()
     }
@@ -2109,6 +2111,14 @@ impl PhoneRoot {
                 .map(|row| row.session_id.clone())
                 .collect(),
         )
+    }
+
+    /// The share sheet's rows' detail lines (repo or workspace, then host),
+    /// in the order it draws them, while it is open.
+    #[must_use]
+    pub fn share_sheet_row_details(&self) -> Option<Vec<Option<String>>> {
+        let sheet = self.share_inbox.sheet.as_ref()?;
+        Some(sheet.rows.iter().map(Self::share_row_detail).collect())
     }
 
     /// The share sheet's item count line, while it is open.
@@ -2376,24 +2386,37 @@ impl PhoneRoot {
         )
     }
 
-    /// The share sheet's row `n`, `row`'s session: its title, its host's
-    /// name under it for a remote host.
+    /// The share sheet's row `n`, `row`'s session: its title, and under it
+    /// [`Self::share_row_detail`]'s line where it has one.
     fn share_row(n: usize, row: &inbox::ShareRow, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
-        let host = row.host_name.clone().map(|name| {
+        let detail = Self::share_row_detail(row).map(|text| {
+            let tag = format!("phone-share-row-detail-{n}");
             div()
+                .driver_id(move || tag)
                 .text_size(px(STATUS_TEXT_SIZE))
                 .text_color(gpui::rgb(t.muted))
-                .child(name)
+                .child(text)
         });
         Self::sheet_button(&format!("phone-share-row-{n}"), ButtonKind::Outlined, cx)
             .flex_col()
             .child(row.label.clone())
-            .children(host)
+            .children(detail)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.share_pick(n, cx);
             }))
+    }
+
+    /// The detail line `row` draws: the repo or workspace it sits under,
+    /// then its host's name, each left out where it is absent.
+    fn share_row_detail(row: &inbox::ShareRow) -> Option<String> {
+        match (row.container.as_deref(), row.host_name.as_deref()) {
+            (Some(container), Some(host)) => Some(format!("{container} · {host}")),
+            (Some(container), None) => Some(container.to_owned()),
+            (None, Some(host)) => Some(host.to_owned()),
+            (None, None) => None,
+        }
     }
 }
 

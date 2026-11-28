@@ -20,7 +20,7 @@ use rustling_tulip_native::target::HostKey;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session};
+use support::{Harness, REMOTE, TestDir, repo, saved_remote, seed_ui, session, workspace};
 
 /// The saved host's wire key.
 fn wire() -> String {
@@ -146,14 +146,27 @@ fn sheet_rows(h: &mut Harness<'_>) -> Option<Vec<String>> {
     phone(h, PhoneRoot::share_sheet_rows)
 }
 
+/// The share sheet's index of session `id`'s row.
+fn sheet_index(h: &mut Harness<'_>, id: &str) -> usize {
+    let rows = sheet_rows(h).expect("the share sheet is open");
+    rows.iter()
+        .position(|row| row == id)
+        .expect("the sheet offers the session")
+}
+
 /// The share sheet's row for session `id`.
 fn sheet_row(h: &mut Harness<'_>, id: &str) -> String {
-    let rows = sheet_rows(h).expect("the share sheet is open");
-    let at = rows
-        .iter()
-        .position(|row| row == id)
-        .expect("the sheet offers the session");
-    format!("phone-share-row-{at}")
+    format!("phone-share-row-{}", sheet_index(h, id))
+}
+
+/// The detail line under session `id`'s share row.
+fn sheet_detail(h: &mut Harness<'_>, id: &str) -> String {
+    format!("phone-share-row-detail-{}", sheet_index(h, id))
+}
+
+/// The share sheet's rows' detail lines, while it is open.
+fn sheet_details(h: &mut Harness<'_>) -> Option<Vec<Option<String>>> {
+    phone(h, PhoneRoot::share_sheet_row_details)
 }
 
 /// Whether the last frame drew what `selector` tags.
@@ -616,4 +629,94 @@ fn no_share_sheet_over_a_pending_question(cx: &mut TestAppContext) {
 
     assert_eq!(sheet_rows(&mut h), None, "no share sheet over the question");
     assert!(kept(&dir, "f1.json"), "the item waits");
+}
+
+#[gpui::test]
+fn a_share_row_names_its_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("a")
+                .label("Alpha")
+                .in_repo("r1")
+                .status("working")
+                .build(),
+        ],
+    });
+    h.cx.run_until_parked();
+    share_file(&dir, "f1", "notes.txt", b"hello");
+
+    foreground(&mut h);
+
+    assert_eq!(
+        sheet_details(&mut h),
+        Some(vec![Some(format!("r1 · {REMOTE}"))]),
+        "the row names the repo it sits under, then its host"
+    );
+    let selector = sheet_detail(&mut h, "a");
+    assert!(drawn(&mut h, &selector), "{selector} is drawn");
+}
+
+#[gpui::test]
+fn a_share_row_names_its_workspace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.host(&saved_remote()).send(DaemonMessage::Workspaces {
+        workspaces: vec![workspace("ws1", &[])],
+    });
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("w")
+                .label("Whiskey")
+                .in_workspace("ws1")
+                .status("working")
+                .build(),
+        ],
+    });
+    h.cx.run_until_parked();
+    share_file(&dir, "f1", "notes.txt", b"hello");
+
+    foreground(&mut h);
+
+    assert_eq!(
+        sheet_details(&mut h),
+        Some(vec![Some(format!("ws1 · {REMOTE}"))]),
+        "the row names the workspace it sits under, then its host"
+    );
+    let selector = sheet_detail(&mut h, "w");
+    assert!(drawn(&mut h, &selector), "{selector} is drawn");
+}
+
+#[gpui::test]
+fn a_share_row_whose_repo_repeats_its_title_has_no_detail(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("r1")
+                .label("r1")
+                .in_repo("r1")
+                .status("working")
+                .build(),
+        ],
+    });
+    h.cx.run_until_parked();
+    share_file(&dir, "f1", "notes.txt", b"hello");
+
+    foreground(&mut h);
+
+    let details = sheet_details(&mut h).expect("the share sheet is open");
+    let detail = details
+        .first()
+        .cloned()
+        .flatten()
+        .expect("a remote row still names its host");
+    assert!(
+        !detail.contains("r1"),
+        "a repo that only repeats the title is left out: {detail}"
+    );
+    assert_eq!(detail, REMOTE, "the row names its host alone");
+    let selector = sheet_detail(&mut h, "r1");
+    assert!(drawn(&mut h, &selector), "{selector} is drawn");
 }

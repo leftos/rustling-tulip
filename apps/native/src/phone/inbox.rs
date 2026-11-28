@@ -305,6 +305,9 @@ pub struct ShareRow {
     /// The host's name, drawn under the title, for a session on a remote
     /// host.
     pub host_name: Option<String>,
+    /// The repo or workspace the session sits under, as Home lists it; None
+    /// when it only repeats the title or the session has none.
+    pub container: Option<String>,
 }
 
 impl ShareRow {
