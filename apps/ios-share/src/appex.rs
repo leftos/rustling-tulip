@@ -7,26 +7,29 @@
 //! [`FILE_MAX_BYTES`](rustling_tulip_ios_share::FILE_MAX_BYTES) is skipped.
 //! The request completes once, when every provider has answered or after
 //! [`DEADLINE_SECS`], whichever comes first; a later answer writes nothing.
-//! The app is not opened: it reads the inbox when it comes to the
-//! foreground.
+//! Once at least one item is written, it asks iOS to open the app
+//! ([`OPEN_APP_URL`](rustling_tulip_ios_share::OPEN_APP_URL)) through the
+//! responder chain, as an extension cannot reach `UIApplication` directly;
+//! the app reads the inbox when it comes to the foreground.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use block2::Block;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{ClassType, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::{AnyObject, Bool, NSObjectProtocol, ProtocolObject};
+use objc2::{ClassType, MainThreadOnly, Message, define_class, msg_send};
 use objc2_foundation::{
-    NSData, NSError, NSExtensionContext, NSExtensionItem, NSFileManager, NSItemProvider, NSObject,
-    NSSecureCoding, NSString, NSURL,
+    NSData, NSDictionary, NSError, NSExtensionContext, NSExtensionItem, NSFileManager,
+    NSItemProvider, NSObject, NSSecureCoding, NSString, NSURL,
 };
-use objc2_ui_kit::{UIResponder, UIViewController};
+use objc2_ui_kit::{UIApplication, UIResponder, UIViewController};
 use rustling_tulip_ios_share::{
-    Countdown, DEADLINE_SECS, FILE_URL_TYPE, GROUP_FOLDER, GROUP_ID, Inbox, ItemKind, TEXT_TYPE,
-    TextKind, URL_TYPE, WriteError, classify, file_type, now_ms,
+    Countdown, DEADLINE_SECS, FILE_URL_TYPE, GROUP_FOLDER, GROUP_ID, Inbox, ItemKind, OPEN_APP_URL,
+    TEXT_TYPE, TextKind, URL_TYPE, WriteError, Written, classify, file_type, now_ms,
 };
 
 define_class!(
@@ -63,7 +66,9 @@ impl RTShareViewController {
         let providers = providers(&context);
         let pending = Arc::new(Pending {
             countdown: Countdown::new(providers.len()),
+            written: Written::default(),
             context: MainThreadBound::new(context, self.mtm()),
+            controller: MainThreadBound::new(self.retain(), self.mtm()),
         });
         let Some(dir) = group_inbox() else {
             tracing::warn!("share: the App Group container is not available");
@@ -100,10 +105,12 @@ fn start_deadline(pending: &Arc<Pending>) {
 }
 
 /// The request and its [`Countdown`]: it completes once, on the main
-/// thread.
+/// thread, opening the app first when an item was [`Written`].
 struct Pending {
     countdown: Countdown,
+    written: Written,
     context: MainThreadBound<Retained<NSExtensionContext>>,
+    controller: MainThreadBound<Retained<RTShareViewController>>,
 }
 
 impl Pending {
@@ -113,26 +120,71 @@ impl Pending {
     }
 
     /// One provider has answered; the last completes the request.
-    fn answer(&self) {
+    fn answer(self: &Arc<Self>) {
         if self.countdown.answer() {
             self.complete();
         }
     }
 
     /// The deadline passed, or there is nothing to wait for.
-    fn expire(&self) {
+    fn expire(self: &Arc<Self>) {
         if self.countdown.expire() {
             self.complete();
         }
     }
 
-    /// Completes the request, returning no items.
-    fn complete(&self) {
-        self.context.get_on_main(|context| {
-            // SAFETY: no items are returned and no completion is asked for.
-            unsafe { context.completeRequestReturningItems_completionHandler(None, None) };
+    /// On a later turn of the main queue, never inside the caller (which may
+    /// be `viewDidLoad`, before the view is in a window and its responder
+    /// chain reaches the app): asks iOS to open the app when an item was
+    /// written, then completes the request, returning no items.
+    fn complete(self: &Arc<Self>) {
+        let pending = Arc::clone(self);
+        DispatchQueue::main().exec_async(move || {
+            pending.controller.get_on_main(|controller| {
+                if pending.written.any() {
+                    open_app(controller);
+                }
+                let context = pending.context.get(controller.mtm());
+                // SAFETY: no items are returned and no completion is asked for.
+                unsafe { context.completeRequestReturningItems_completionHandler(None, None) };
+            });
         });
     }
+}
+
+/// Asks iOS to open [`OPEN_APP_URL`] through the `UIApplication` found up
+/// `controller`'s responder chain, as an extension cannot call
+/// `sharedApplication`.
+fn open_app(controller: &RTShareViewController) {
+    let Some(app) = application(controller) else {
+        tracing::warn!("share: no UIApplication in the responder chain; the app is not opened");
+        return;
+    };
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(OPEN_APP_URL)) else {
+        tracing::warn!("share: the app's URL does not parse; the app is not opened");
+        return;
+    };
+    let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
+    let handler: Option<&Block<dyn Fn(Bool)>> = None;
+    // SAFETY: `app` is a UIApplication, which answers openURL:options:completionHandler:
+    // with a URL, an options dictionary (empty, so no key or value can be of the wrong type)
+    // and a nullable completion block, and returns nothing; this runs on the main thread.
+    unsafe {
+        let () = msg_send![&*app, openURL: &*url, options: &*options, completionHandler: handler];
+    }
+    tracing::info!("share: asked iOS to open the app");
+}
+
+/// The first responder up `controller`'s chain that is the `UIApplication`.
+fn application(controller: &RTShareViewController) -> Option<Retained<UIResponder>> {
+    let mut next = controller.nextResponder();
+    while let Some(responder) = next {
+        if responder.isKindOfClass(UIApplication::class()) {
+            return Some(responder);
+        }
+        next = responder.nextResponder();
+    }
+    None
 }
 
 /// Every attachment of every input item.
@@ -192,7 +244,12 @@ fn load_file(provider: &NSItemProvider, kind: &str, inbox: Arc<Inbox>, pending: 
         if pending.is_done() {
             tracing::warn!("share: a file answered after the request completed; it is dropped");
         } else if let Some(path) = url.and_then(NSURL::path) {
-            copy_in(&inbox, Path::new(&path.to_string()), suggested.as_deref());
+            copy_in(
+                &inbox,
+                Path::new(&path.to_string()),
+                suggested.as_deref(),
+                &pending.written,
+            );
         } else {
             let why = error.map(|error| error.localizedDescription().to_string());
             tracing::warn!(error = ?why, "share: a shared file could not be loaded");
@@ -210,14 +267,18 @@ fn load_file(provider: &NSItemProvider, kind: &str, inbox: Arc<Inbox>, pending: 
 }
 
 /// Writes the file at `path` into the inbox, named as its own file name or
-/// else `suggested`; a file over the cap is skipped.
-fn copy_in(inbox: &Inbox, path: &Path, suggested: Option<&str>) {
+/// else `suggested`, and records it in `written`; a file over the cap is
+/// skipped.
+fn copy_in(inbox: &Inbox, path: &Path, suggested: Option<&str>, written: &Written) {
     let own = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
     let name = own.as_deref().or(suggested).unwrap_or_default();
     match inbox.write_file(path, name, now_ms()) {
-        Ok(id) => tracing::info!(id, "share: a file is in the inbox"),
+        Ok(id) => {
+            written.record();
+            tracing::info!(id, "share: a file is in the inbox");
+        }
         Err(WriteError::TooLarge(bytes)) => {
             tracing::warn!(
                 bytes,
@@ -247,7 +308,7 @@ fn load_item(
                     "share: an item answered after the request completed; it is dropped"
                 );
             } else {
-                write_loaded(&inbox, kind, item, error);
+                write_loaded(&inbox, kind, item, error, &pending.written);
             }
             pending.answer();
         },
@@ -265,9 +326,15 @@ fn load_item(
 }
 
 /// Writes what a load gave, `item`, into the inbox: a file URL's file as a
-/// file item, anything else holding text as a `kind` item; with no item,
-/// `error` says why.
-fn write_loaded(inbox: &Inbox, kind: TextKind, item: Option<&AnyObject>, error: Option<&NSError>) {
+/// file item, anything else holding text as a `kind` item, each recorded in
+/// `written`; with no item, `error` says why.
+fn write_loaded(
+    inbox: &Inbox,
+    kind: TextKind,
+    item: Option<&AnyObject>,
+    error: Option<&NSError>,
+    written: &Written,
+) {
     let Some(item) = item else {
         let why = error.map(|error| error.localizedDescription().to_string());
         tracing::warn!(error = ?why, "share: a link or text could not be loaded");
@@ -277,7 +344,7 @@ fn write_loaded(inbox: &Inbox, kind: TextKind, item: Option<&AnyObject>, error: 
         && url.isFileURL()
     {
         if let Some(path) = url.path() {
-            copy_in(inbox, Path::new(&path.to_string()), None);
+            copy_in(inbox, Path::new(&path.to_string()), None, written);
         } else {
             tracing::warn!("share: a shared file URL has no path");
         }
@@ -288,7 +355,10 @@ fn write_loaded(inbox: &Inbox, kind: TextKind, item: Option<&AnyObject>, error: 
         return;
     };
     match inbox.write_text(kind, &text, now_ms()) {
-        Ok(id) => tracing::info!(id, "share: a link or text is in the inbox"),
+        Ok(id) => {
+            written.record();
+            tracing::info!(id, "share: a link or text is in the inbox");
+        }
         Err(err) => tracing::warn!(error = %err, "share: a link or text could not be written"),
     }
 }

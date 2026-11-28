@@ -8,7 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Highlights
 
-- On the iPhone, Rustling Tulip appears in the share sheet, taking files, links and text shared from other apps.
+- On the iPhone, share files, links and text from other apps to Rustling Tulip, which opens to send them to a session.
 - On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
 - A workspace session no longer stops at Claude's trust prompt for its repos: registering one trusts it, a linked worktree at its main repo.
 - On the phone, tapping an HTML page opens it in the viewer and the share sheet, instead of doing nothing.
@@ -16,7 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - On the phone, tapping a command's dot on the Terminal page opens its menu: copy the command or its output, or re-run it.
-- On the iPhone, Rustling Tulip appears in the share sheet, taking files, links and text shared from other apps.
+- On the iPhone, share files, links and text from other apps to Rustling Tulip, which opens to send them to a session.
 
 ### Changed
 

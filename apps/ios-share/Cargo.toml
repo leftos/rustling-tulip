@@ -38,6 +38,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "block2",
     "NSArray",
     "NSData",
+    "NSDictionary",
     "NSError",
     "NSExtensionContext",
     "NSExtensionItem",
@@ -52,6 +53,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # brings the shared items.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "UIApplication",
     "UIResponder",
     "UIViewController",
 ] }

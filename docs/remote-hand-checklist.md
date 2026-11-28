@@ -282,7 +282,7 @@ These need a TestFlight build from this work, an iPhone at iOS's default "Paste 
 
 These need TestFlight build 202611280121 or later, which carries the share extension, and a host with a working Claude session.
 
-- [ ] In Safari, open a page and tap Share. **Expect:** Rustling Tulip is among the share targets. Pick it. **Expect:** the share finishes and the sheet closes without opening the app.
-- [ ] Open Rustling Tulip. **Expect:** a share sheet lists the sessions, the one you used last first; pick a session. **Expect:** the page's link lands in that session's message box.
+- [ ] In Safari, open a page and tap Share. **Expect:** Rustling Tulip is among the share targets. Pick it. **Expect:** the share finishes and iOS asks "Open in Rustling Tulip?"; allow it. The app comes to the front.
+- [ ] In the app, with no other tap. **Expect:** a share sheet lists the sessions, the one you used last first; pick a session. **Expect:** the page's link lands in that session's message box.
 - [ ] In Photos, share two photos to Rustling Tulip, then open the app and pick a session. **Expect:** both photos are sent into the session, and their host paths appear in the message box.
 - [ ] Share selected text from Notes to Rustling Tulip, then open the app and pick a session. **Expect:** the text lands in the message box.

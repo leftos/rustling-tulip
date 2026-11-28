@@ -10,6 +10,12 @@
 # folder and present the share sheet for it. It waits up to 60 s for the app's
 # "phone app started" line, then up to 60 s for "phone: share sheet presented",
 # which the app logs once UIKit has shown the sheet, and fails without either.
+# It then sends the app to the background (it launches Settings) and opens
+# `rustling-tulip://share`, which fails unless the app registers the scheme,
+# checks that the app is still running, and screenshots the simulator into
+# .tmp/ios/share-open.png, which shows iOS asking to open Rustling Tulip. This
+# proves the scheme resolves to the app; it does not prove the app comes to the
+# front, as simctl cannot answer the prompt.
 # Then it stops the app and shuts the simulator down again if this run booted
 # it.
 #
@@ -36,7 +42,7 @@ $PresentedLine = 'phone: share sheet presented'
 # The app's other share lines, shown when the sheet never comes.
 $ShareLines = @($PresentedLine, 'phone: share self-test file written', 'phone: no view controller', 'phone: the share')
 $OutDir = Join-Path $RepoRoot '.tmp/ios'
-$RunFiles = @('share-app.log', 'share-app-err.log')
+$RunFiles = @('share-app.log', 'share-app-err.log', 'share-open.png')
 
 function Assert-LastExit([string] $Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)" }
@@ -146,6 +152,17 @@ function Invoke-OnMac {
         Wait-ForLine $logs $launch @($ReadyLine)
         Wait-ForLine $logs $launch @($PresentedLine)
         Write-Output "the share sheet presented"
+        # Settings sends the app to the background, so the URL must bring it back.
+        & xcrun simctl launch $udid com.apple.Preferences
+        Assert-LastExit "xcrun simctl launch $udid com.apple.Preferences"
+        Start-Sleep -Seconds 2
+        & xcrun simctl openurl $udid rustling-tulip://share
+        Assert-LastExit "xcrun simctl openurl $udid rustling-tulip://share"
+        Start-Sleep -Seconds 3
+        if ($launch.HasExited) { throw 'the app exited after the URL open' }
+        & xcrun simctl io $udid screenshot (Join-Path $OutDir 'share-open.png')
+        Assert-LastExit "xcrun simctl io $udid screenshot"
+        Write-Output "rustling-tulip://share resolves to the app (iOS asks to open it; see .tmp/ios/share-open.png)"
     }
     finally {
         Stop-Run $udid $launch $booted

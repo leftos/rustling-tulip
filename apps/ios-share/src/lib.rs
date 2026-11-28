@@ -45,6 +45,11 @@ pub const TEXT_TYPE: &str = "public.plain-text";
 /// these, and the `public.utf8` and `public.utf16` text variants.
 const TEXT_OR_URL_TYPES: [&str; 3] = [URL_TYPE, TEXT_TYPE, "public.text"];
 
+/// The URL the extension asks iOS to open once it has written a shared
+/// item, which brings the app to the front; its scheme is the one
+/// apps/ios/Info.plist registers.
+pub const OPEN_APP_URL: &str = "rustling-tulip://share";
+
 /// How long the extension waits for its providers before it completes the
 /// request anyway: 30 s.
 pub const DEADLINE_SECS: u64 = 30;
@@ -212,6 +217,24 @@ impl Countdown {
     /// Marks the request complete; true only for the first call.
     fn close(&self) -> bool {
         !self.done.swap(true, Ordering::AcqRel)
+    }
+}
+
+/// Whether the share wrote at least one item into the inbox, so the
+/// extension asks iOS to open the app once it completes.
+#[derive(Debug, Default)]
+pub struct Written(AtomicBool);
+
+impl Written {
+    /// Notes that an item was written into the inbox.
+    pub fn record(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether an item was written into the inbox.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -644,6 +667,34 @@ mod tests {
         assert!(written.is_err(), "{written:?}");
         assert!(matches!(missing, Err(WriteError::Io(_))), "{missing:?}");
         assert_eq!(dir.names(), Vec::<String>::new(), "nothing is left behind");
+    }
+
+    #[test]
+    fn open_app_url_uses_the_scheme_the_app_registers() {
+        let plist = include_str!("../../ios/Info.plist");
+        let key = plist
+            .find("<key>CFBundleURLSchemes</key>")
+            .expect("the app registers URL schemes");
+        let rest = &plist[key..];
+        let end = rest.find("</array>").expect("the schemes array closes");
+        assert!(
+            rest[..end].contains("<string>rustling-tulip</string>"),
+            "the app registers the rustling-tulip scheme"
+        );
+        assert!(
+            OPEN_APP_URL.starts_with("rustling-tulip://"),
+            "{OPEN_APP_URL}"
+        );
+    }
+
+    #[test]
+    fn written_is_false_until_an_item_is_recorded() {
+        let written = Written::default();
+        assert!(!written.any(), "nothing is written yet");
+        written.record();
+        assert!(written.any(), "an item was written");
+        written.record();
+        assert!(written.any(), "a second item keeps it set");
     }
 
     #[test]
