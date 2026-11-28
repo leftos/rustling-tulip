@@ -37,6 +37,9 @@ pub struct SessionContext {
     /// The session's agent is up, by a descriptor of the host's agents; a
     /// shell, or an agent not running yet, is not.
     pub agent_up: bool,
+    /// The session's agent has ended and left its shell in the pane (the
+    /// sidebar's rule): the pane keeps a gutter for command dots then.
+    pub agent_exited: bool,
 }
 
 impl SessionContext {
@@ -49,6 +52,7 @@ impl SessionContext {
             shift_enter: up.map_or(ShiftEnter::BackslashCr, |descriptor| descriptor.shift_enter),
             image_paste: up.map_or(ImagePaste::CtrlV, |descriptor| descriptor.image_paste),
             agent_up: up.is_some(),
+            agent_exited: crate::sidebar::agent_exited(session, agents),
         }
     }
 
@@ -56,6 +60,14 @@ impl SessionContext {
     /// reports and terminal replies are all dropped.
     pub fn accepts_input(self) -> bool {
         !matches!(self.status, SessionStatus::Stopped | SessionStatus::Error)
+    }
+
+    /// Whether the pane keeps a terminal that records its shell's command
+    /// marks: a plain shell's does, and so does an agent session's once its
+    /// agent has exited back to its shell. The pane's gutter follows the
+    /// same rule.
+    pub fn keeps_marks(self) -> bool {
+        self.mode == SessionMode::PlainShell || self.agent_exited
     }
 
     /// Agents get a bar cursor, shells and everything else a block. A
@@ -238,6 +250,7 @@ mod tests {
             shift_enter: ShiftEnter::BackslashCr,
             image_paste: ImagePaste::CtrlV,
             agent_up: mode == SessionMode::Interactive,
+            agent_exited: false,
         }
     }
 
@@ -645,6 +658,7 @@ mod tests {
                 shift_enter: ShiftEnter::BackslashCr,
                 image_paste: ImagePaste::CtrlV,
                 agent_up: false,
+                agent_exited: false,
             }
         );
     }

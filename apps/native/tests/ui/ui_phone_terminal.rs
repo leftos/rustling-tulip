@@ -2755,3 +2755,73 @@ fn a_tapped_folder_in_the_sessions_repo_opens_the_browser_and_fetches_nothing(
         "the browser opens at the folder"
     );
 }
+
+#[gpui::test]
+fn a_tap_on_a_dot_in_an_exited_agent_sessions_shell_raises_its_sheet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    // "a"'s agent has ended and left its shell in the pane.
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("working")
+        .program_name("pwsh")
+        .build();
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+    h.cx.run_until_parked();
+    h.click_on(&row("a"));
+    assert!(
+        drawn(&mut h, "phone-session-terminal"),
+        "an ended agent's session opens on its Terminal page"
+    );
+    h.host(&saved_remote())
+        .pty("a", finished_command("make", ";0").as_bytes());
+    h.cx.run_until_parked();
+
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("a")));
+
+    assert!(drawn(&mut h, "phone-shell-sheet"), "the dot's sheet is up");
+}
+
+/// The host's session list with `a`'s program `program`: a shell's keeps the
+/// pane's gutter, the agent's own takes it away.
+fn listing_with(program: &str) -> Vec<SessionSnapshot> {
+    let mut sessions = listed();
+    sessions[0] = session("a")
+        .label("Alpha")
+        .in_repo("r1")
+        .status("working")
+        .program_name(program)
+        .build();
+    sessions
+}
+
+#[gpui::test]
+fn the_shell_sheet_closes_when_the_agent_runs_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = open_phone(cx, &dir);
+    // "a"'s agent has ended and left its shell in the pane.
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: listing_with("pwsh"),
+    });
+    h.cx.run_until_parked();
+    h.click_on(&row("a"));
+    h.host(&saved_remote())
+        .pty("a", finished_command("make", ";0").as_bytes());
+    h.cx.run_until_parked();
+    h.tap_on(&format!("shell-dot-{}-0", slot_id("a")));
+    assert!(drawn(&mut h, "phone-shell-sheet"), "the dot's sheet is up");
+
+    // The agent runs again: the pane loses its gutter, and its sheet with it.
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: listing_with("claude"),
+    });
+    h.cx.run_until_parked();
+
+    assert!(
+        !drawn(&mut h, "phone-shell-sheet"),
+        "a running agent's pane closes the sheet"
+    );
+}

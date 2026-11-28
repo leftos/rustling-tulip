@@ -4370,6 +4370,24 @@ impl RootView {
         self.close_link_menu(window, cx);
     }
 
+    /// Closes the gutter menu and the phone's shell sheet when the pane each
+    /// was opened on no longer draws a gutter: its session's agent runs
+    /// again, and there is no command of a shell to re-run there.
+    pub(crate) fn close_shell_menus_without_gutter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let desktop = self.shell_menu.as_ref().map(|menu| menu.pane_id.clone());
+        if desktop.is_some_and(|pane_id| !self.pane_shows_gutter(&pane_id, cx)) {
+            self.close_shell_menu(window, cx);
+        }
+        let sheet = self.phone_shell_sheet().map(|sheet| sheet.pane_id.clone());
+        if sheet.is_some_and(|pane_id| !self.pane_shows_gutter(&pane_id, cx)) {
+            self.dismiss_phone_shell_sheet(cx);
+        }
+    }
+
     /// Whether `menu`'s command can be typed again ([`Self::can_rerun_command`]).
     fn can_rerun(&self, menu: &ShellMenu, cx: &App) -> bool {
         self.can_rerun_command(&menu.pane_id, menu.session_id.as_deref(), &menu.command, cx)

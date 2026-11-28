@@ -3649,6 +3649,14 @@ impl RootView {
             .shell_command(index)
     }
 
+    /// Whether pane `pane_id` draws a gutter for command dots.
+    #[must_use]
+    pub(crate) fn pane_shows_gutter(&self, pane_id: &str, cx: &App) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|slot| slot.view().read(cx).shows_gutter())
+    }
+
     /// The text of the link pane `pane_id` underlines: the one under the
     /// mouse while Ctrl is held.
     #[must_use]
@@ -6953,11 +6961,18 @@ impl RootView {
     ) {
         let session = reply.session;
         let shown = SessionRef::new(reply.host.clone(), session.id.clone());
+        let mut flipped = false;
         for view in self.pane_views_of(&shown) {
             view.update(cx, |pane, _| {
-                pane.update_session(session, self.sidebar.agents(reply.host));
+                flipped |= pane.update_session(session, self.sidebar.agents(reply.host));
             });
         }
+        if flipped {
+            self.rebuild_flipped_panes(&shown, cx);
+        }
+        // The agent running again takes the gutter away: no dot's menu of it
+        // stays open to type a command into the agent's prompt.
+        self.close_shell_menus_without_gutter(window, cx);
         let own_change = request_id.is_some_and(|request_id| {
             self.pending_appearance
                 .answered(reply.host, &session.id, request_id)
@@ -6998,11 +7013,25 @@ impl RootView {
                 self.reset_host_panes(host, cx);
             }
         }
+        let mut flipped: Vec<SessionRef> = Vec::new();
         for view in self.pane_views_on(host) {
             view.update(cx, |pane, _| {
-                pane.refresh_sessions(sessions, self.sidebar.agents(host));
+                if !pane.refresh_sessions(sessions, self.sidebar.agents(host)) {
+                    return;
+                }
+                let Some(id) = pane.session_id() else {
+                    return;
+                };
+                let target = SessionRef::new(host.clone(), id.to_owned());
+                if !flipped.contains(&target) {
+                    flipped.push(target);
+                }
             });
         }
+        for target in &flipped {
+            self.rebuild_flipped_panes(target, cx);
+        }
+        self.close_shell_menus_without_gutter(window, cx);
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);

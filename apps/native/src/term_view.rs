@@ -915,9 +915,13 @@ impl TerminalPane {
     }
 
     /// The dots the gutter draws: the finished commands whose prompt row is
-    /// on screen, top first.
+    /// on screen, top first, and none for a pane with no gutter.
     pub fn shell_dots(&self) -> Vec<ShellDot> {
-        self.term.shell_dots()
+        if self.has_gutter() {
+            self.term.shell_dots()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Whether the prompt button for `dir` has somewhere to scroll.
@@ -963,11 +967,17 @@ impl TerminalPane {
         self.term.shell_command(index)
     }
 
-    /// Whether the pane keeps a gutter for command dots: only a plain
-    /// shell's does.
+    /// Whether the pane keeps a gutter for command dots: a plain shell's
+    /// does, and so does an agent session's once its agent has exited back
+    /// to its shell.
     fn has_gutter(&self) -> bool {
-        self.session
-            .is_some_and(|session| session.mode == SessionMode::PlainShell)
+        self.session.is_some_and(SessionContext::keeps_marks)
+    }
+
+    /// Whether the pane draws a gutter for command dots.
+    #[must_use]
+    pub fn shows_gutter(&self) -> bool {
+        self.has_gutter()
     }
 
     /// Whether `position` is in the gutter left of the grid.
@@ -1175,10 +1185,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         let context = SessionContext::of(session, agents);
-        self.fresh_terminal(
-            context.default_cursor_shape(),
-            context.mode == SessionMode::PlainShell,
-        );
+        self.fresh_terminal(context.default_cursor_shape(), context.keeps_marks());
         self.session = Some(context);
         self.base_dirs = open::base_dirs(session);
         self.attachment.attach(session.id.clone(), (self.now)());
@@ -1194,17 +1201,28 @@ impl TerminalPane {
     fn reattach_for_resync(&mut self) {
         if let Some(context) = &self.session {
             let cursor = context.default_cursor_shape();
-            let plain_shell = context.mode == SessionMode::PlainShell;
-            self.fresh_terminal(cursor, plain_shell);
+            let keep_marks = context.keeps_marks();
+            self.fresh_terminal(cursor, keep_marks);
         }
         self.attachment.load = Some(ScrollbackLoad::start((self.now)()));
     }
 
+    /// Starts over for a session whose gutter rule has flipped: a terminal
+    /// built for the pane's new mode, which waits for a fresh scrollback
+    /// load, as a resync's does, so the replay records the shell's marks or
+    /// stops recording them from the start.
+    pub(crate) fn rebuild_for_gutter_flip(&mut self, cx: &mut Context<Self>) {
+        self.reattach_for_resync();
+        self.schedule_load_tick(cx);
+        cx.notify();
+    }
+
     /// Replaces the terminal, dropping any selection or mouse gesture on the
-    /// old one. A plain shell's terminal keeps the commands the shell marks.
-    fn fresh_terminal(&mut self, cursor: CursorShape, plain_shell: bool) {
+    /// old one. A terminal built with `keep_marks` records the commands its
+    /// shell marks; the pane's gutter rule decides it.
+    fn fresh_terminal(&mut self, cursor: CursorShape, keep_marks: bool) {
         let size = self.term.size();
-        self.term = if plain_shell {
+        self.term = if keep_marks {
             Terminal::with_shell_marks(size, cursor, self.now.clone())
         } else {
             Terminal::new(size, cursor)
@@ -1322,25 +1340,42 @@ impl TerminalPane {
     }
 
     /// Take in a newer snapshot of the attached session (its status).
-    pub fn update_session(&mut self, session: &SessionSnapshot, agents: &[AgentDescriptor]) {
-        if self.session_id() == Some(session.id.as_str()) {
-            self.session = Some(SessionContext::of(session, agents));
-            self.base_dirs = open::base_dirs(session);
-            self.drop_marked_unless_accepting();
+    /// Returns whether the pane's gutter rule flipped, so the caller starts
+    /// it over in the new mode.
+    pub fn update_session(
+        &mut self,
+        session: &SessionSnapshot,
+        agents: &[AgentDescriptor],
+    ) -> bool {
+        if self.session_id() != Some(session.id.as_str()) {
+            return false;
         }
+        let before = self.has_gutter();
+        self.session = Some(SessionContext::of(session, agents));
+        self.base_dirs = open::base_dirs(session);
+        self.drop_marked_unless_accepting();
+        before != self.has_gutter()
     }
 
     /// Take in a full session list: the attached session's entry, if listed.
-    pub fn refresh_sessions(&mut self, sessions: &[SessionSnapshot], agents: &[AgentDescriptor]) {
+    /// Returns whether the pane's gutter rule flipped, as
+    /// [`Self::update_session`] does.
+    pub fn refresh_sessions(
+        &mut self,
+        sessions: &[SessionSnapshot],
+        agents: &[AgentDescriptor],
+    ) -> bool {
         let Some(session) = self
             .session_id()
             .and_then(|id| sessions.iter().find(|session| session.id == id))
         else {
-            return;
+            return false;
         };
+        let before = self.has_gutter();
         self.session = Some(SessionContext::of(session, agents));
         self.base_dirs = open::base_dirs(session);
         self.drop_marked_unless_accepting();
+        before != self.has_gutter()
     }
 
     /// Forget the attached session. The caller sends `Detach` once no pane
@@ -1693,8 +1728,8 @@ impl TerminalPane {
             return false;
         };
         let cursor = context.default_cursor_shape();
-        let plain_shell = context.mode == SessionMode::PlainShell;
-        self.fresh_terminal(cursor, plain_shell);
+        let keep_marks = context.keeps_marks();
+        self.fresh_terminal(cursor, keep_marks);
         for payload in payloads {
             self.term.feed_history(&payload);
         }

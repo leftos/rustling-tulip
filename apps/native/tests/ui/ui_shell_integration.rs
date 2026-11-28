@@ -622,3 +622,204 @@ fn a_font_key_closes_the_menu(cx: &mut TestAppContext) {
     h.keys("ctrl-=");
     assert!(!h.in_model("shell-menu"), "Ctrl+= closed the menu");
 }
+
+/// The last `Resize`'s column count for session `id` in `sent`.
+fn last_cols(sent: &[ClientMessage], id: &str) -> u16 {
+    sent.iter()
+        .rev()
+        .find_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, cols, ..
+            } if session_id == id => Some(*cols),
+            _ => None,
+        })
+        .expect("the pane sized its session")
+}
+
+/// Plain shell `s1` and agent session `s2` side by side, `s2`'s agent up as
+/// `program`, their scrollback answered.
+fn agent_panes<'a>(cx: &'a mut TestAppContext, dir: &TestDir, program: &str) -> Harness<'a> {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![shell(), session("s2").program_name(program).build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    h
+}
+
+/// Whether `sent` holds a `LoadScrollback` for session `id`.
+fn loads_scrollback(sent: &[ClientMessage], id: &str) -> bool {
+    sent.iter().any(
+        |msg| matches!(msg, ClientMessage::LoadScrollback { session_id, .. } if session_id == id),
+    )
+}
+
+/// `s2`'s agent has ended and left its shell in the pane: its history is
+/// replayed from `history` in a terminal that records the shell's marks, and
+/// then one live `dir` command finishes.
+fn exited_agent(h: &mut Harness<'_>, history: &[u8]) {
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").program_name("pwsh").build(),
+        request_id: None,
+    });
+    h.answer_scrollback("s2", history);
+    h.pty("s2", command("dir", ";1").as_bytes());
+}
+
+#[gpui::test]
+fn an_agent_session_gets_dots_once_its_agent_exits_to_its_shell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = agent_panes(cx, &dir, "claude");
+    h.pty("s2", command("ls", ";0").as_bytes());
+    assert_eq!(
+        dots(&mut h, "p2"),
+        [],
+        "a running agent's marks make no dots"
+    );
+    assert!(!h.in_model("shell-dot-p2-0"), "and it has no gutter");
+
+    let sent = h.sent();
+    let agent_cols = last_cols(&sent, "s2");
+    assert!(
+        agent_cols > last_cols(&sent, "s1"),
+        "the agent's pane keeps the columns the gutter takes: {agent_cols}"
+    );
+
+    // The agent exits: the pane starts over for the gutter and loads the
+    // session's history again, so its replay records the shell's marks,
+    // including the command from before the flip.
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").program_name("pwsh").build(),
+        request_id: None,
+    });
+    assert!(
+        loads_scrollback(&h.sent(), "s2"),
+        "the flip asks for the history again"
+    );
+    let history = format!("{}{}", command("ls", ";0"), command("dir", ";1"));
+    h.answer_scrollback("s2", history.as_bytes());
+
+    let found = dots(&mut h, "p2");
+    let rows: Vec<(usize, Option<i32>)> = found.iter().map(|dot| (dot.row, dot.exit)).collect();
+    assert_eq!(
+        rows,
+        [(0, Some(0)), (2, Some(1))],
+        "both replayed commands have a dot"
+    );
+    assert!(
+        h.in_model("shell-dot-p2-1"),
+        "the exited agent's shell draws its dots"
+    );
+
+    h.pty("s2", command("cd", ";0").as_bytes());
+    let found = dots(&mut h, "p2");
+    let rows: Vec<(usize, Option<i32>)> = found.iter().map(|dot| (dot.row, dot.exit)).collect();
+    assert_eq!(
+        rows,
+        [(0, Some(0)), (2, Some(1)), (4, Some(0))],
+        "a live command gets the third dot"
+    );
+    let cols = last_cols(&h.sent(), "s2");
+    assert!(
+        cols < agent_cols,
+        "the gutter takes columns: {cols} vs {agent_cols}"
+    );
+}
+
+#[gpui::test]
+fn an_agent_session_loses_its_gutter_when_the_agent_runs_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = agent_panes(cx, &dir, "claude");
+    let agent_cols = last_cols(&h.sent(), "s2");
+    exited_agent(&mut h, b"");
+    assert!(h.in_model("shell-dot-p2-0"), "its dot draws");
+    let gutter_cols = last_cols(&h.sent(), "s2");
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").program_name("claude").build(),
+        request_id: None,
+    });
+    assert!(
+        loads_scrollback(&h.sent(), "s2"),
+        "the flip loads the history again"
+    );
+    h.answer_scrollback("s2", b"");
+
+    assert_eq!(dots(&mut h, "p2"), [], "the agent running makes no dots");
+    assert!(!h.in_model("shell-dot-p2-0"), "and no gutter");
+    let cols = last_cols(&h.sent(), "s2");
+    assert!(
+        cols > gutter_cols,
+        "the columns come back: {cols} vs {gutter_cols}"
+    );
+    assert_eq!(cols, agent_cols, "back to the agent's own");
+}
+
+#[gpui::test]
+fn a_running_agent_pane_holds_a_synchronized_frame_across_a_history_clear(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").program_name("claude").build(), b"");
+    h.pty("s1", b"\x1b[?2026h\x1b[2J\x1b[3Jhalf-drawn");
+    let text = h.grid_text("p1").join("\n");
+    assert!(
+        !text.contains("half-drawn"),
+        "a synchronized frame is not drawn mid-update: {text:?}"
+    );
+
+    h.pty("s1", b"\x1b[?2026l");
+    let text = h.grid_text("p1").join("\n");
+    assert!(
+        text.contains("half-drawn"),
+        "the frame lands when the update ends: {text:?}"
+    );
+}
+
+#[gpui::test]
+fn a_dot_menu_closes_when_the_agent_runs_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = agent_panes(cx, &dir, "claude");
+    exited_agent(&mut h, b"");
+    h.click_on("shell-dot-p2-0");
+    assert!(
+        h.root(|root, _| root.shell_menu_open()),
+        "the dot's menu is open"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").program_name("claude").build(),
+        request_id: None,
+    });
+
+    assert!(
+        !h.root(|root, _| root.shell_menu_open()),
+        "the agent running again closes the menu no gutter opened"
+    );
+}
+
+#[gpui::test]
+fn a_dot_in_an_exited_agent_session_opens_its_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = agent_panes(cx, &dir, "claude");
+    exited_agent(&mut h, b"");
+
+    h.click_on("shell-dot-p2-0");
+
+    assert!(h.in_model("shell-menu"), "the dot's menu opened");
+    assert!(h.in_model("shell-menu-copy-command"));
+    let tooltip = h.root(|root, cx| root.pane_shell_records("p2", cx))[0]
+        .tooltip
+        .clone();
+    assert_eq!(
+        h.root(|root, _| root.shell_menu_header()),
+        Some(tooltip),
+        "its header is the dot's tooltip"
+    );
+}

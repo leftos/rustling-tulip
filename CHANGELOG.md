@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - The sidebar's Tabs view no longer repeats each session's tab name in a `T:` chip; unbound sessions keep their `unbound` chip.
+- A Claude session's pane that has returned to its shell marks each command's result, with its copy and re-run menu, as a plain shell does.
 
 ### Fixed
 

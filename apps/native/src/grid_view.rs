@@ -634,6 +634,21 @@ impl RootView {
         );
     }
 
+    /// Starts every terminal showing `target` over in its new mode, as an
+    /// attach does: a fresh terminal for the pane's gutter rule and a new
+    /// `LoadScrollback`, so the session's replay is rebuilt in that mode.
+    pub(crate) fn rebuild_flipped_panes(&mut self, target: &SessionRef, cx: &mut Context<Self>) {
+        let mut rebuilt = false;
+        for slot in self.panes.values_mut().filter(|slot| slot.shows(target)) {
+            slot.view.update(cx, TerminalPane::rebuild_for_gutter_flip);
+            rebuilt = true;
+        }
+        if rebuilt {
+            let request_id = self.retries.start(target);
+            self.request_scrollback(target, request_id, cx);
+        }
+    }
+
     /// Tells every terminal whether it drives its session's PTY size and
     /// whether it answers the session's terminal queries: a pane open in a
     /// pop-out, or a session pop-out's terminal, does both for its session,

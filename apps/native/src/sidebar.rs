@@ -4983,7 +4983,7 @@ pub(crate) fn agent_up<'a>(
 /// program of its own there, and that program is not the agent's tag. A
 /// session whose program the daemon does not know, or whose agent the
 /// descriptor list does not hold, is not one.
-fn agent_exited(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
+pub(crate) fn agent_exited(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
     s.mode == SessionMode::Interactive
         && s.agent.is_some()
         && non_empty(s.program_name.as_deref()).is_some()
