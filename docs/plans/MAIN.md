@@ -155,6 +155,7 @@
 - [ ] RT-2242 Keep this PC's and the Mac builder's stable Rust toolchains in step
 - [ ] RT-2248 Re-read docs/DRIVING_CONVENTIONS.md against the 24 commits on its named native files
 - [ ] RT-2251 Re-read docs/tracer-abi.md against the tracer client changes
+- [ ] RT-2255 Split testflight.ps1 Read-SigningSet under the complexity limit
 
 ## Elevated daemon and security
 
@@ -470,7 +471,6 @@
 
 ## Phone app
 
-- [!] RT-2204 Phone: a share extension that hands shared items to the app · release vNext
 - [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-112 PW.13: Accounts screen on the phone
