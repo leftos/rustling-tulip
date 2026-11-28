@@ -207,9 +207,9 @@
 - [ ] RT-1988 Answer an effort step at the end of the range at once, not after 3 s
 - [ ] RT-2175 Settle a pasted image's pending send when its upload path is quoted
 - [ ] RT-2176 Leave no Answered elsewhere line when an overlay card closes in the terminal
-- [ ] RT-2199 Read a preview question's wrapped option label whole
-- [ ] RT-2220 Read a running script row whose wrapped description breaks after a #number
-- [ ] RT-2231 Read live script cards under bare claude, not only ui-themes
+- [ ] RT-2199 Read a preview question's wrapped option label whole · release vNext
+- [ ] RT-2220 Read a running script row whose wrapped description breaks after a #number · release vNext
+- [ ] RT-2231 Read live script cards under bare claude, not only ui-themes · release vNext
 
 ## Settings and themes
 
@@ -399,8 +399,8 @@
 - [ ] RT-1851 Keep Settings › Accounts usage lines readable beside a row's alias and buttons
 - [ ] RT-1972 Split press_accounts_control under the complexity limit
 - [ ] RT-1973 Draw a refused account row's Log in again button at full strength
-- [ ] RT-2245 Find Claude's transcripts and commands in the config home the resolver picks
-- [ ] RT-2246 Match Claude Code's .config.json edge rules in the config resolver
+- [ ] RT-2245 Find Claude's transcripts and commands in the config home the resolver picks · release vNext
+- [ ] RT-2246 Match Claude Code's .config.json edge rules in the config resolver · release vNext
 
 ## Attention: toasts and Needs you
 
@@ -466,8 +466,8 @@
 - [ ] RT-1847 Show a plain Windows path, not the \?\ form, in TailFile and FetchFile refusal messages
 - [ ] RT-1854 Fetch an HTML page's media when the page is fetched by host path
 - [ ] RT-1855 Keep host-path copies apart from a repo named C, unc or root in the remote-files folder
-- [ ] RT-2238 Hide the diff tab header's folder instead of drawing a lone ellipsis
-- [ ] RT-2239 Compact the viewer header's buttons so the file name shows in a narrow window
+- [ ] RT-2238 Hide the diff tab header's folder instead of drawing a lone ellipsis · release vNext
+- [ ] RT-2239 Compact the viewer header's buttons so the file name shows in a narrow window · release vNext
 
 ## Phone app
 
@@ -499,14 +499,14 @@
 - [ ] RT-2039 Use iOS's own edit menu and magnifier in the phone composer through the GPUI fork
 - [ ] RT-2119 Phone: give the session header's Linear chip a finger-sized tap target
 - [ ] RT-2177 Give the phone's remaining buttons the narrower phone padding
-- [ ] RT-2240 Phone: sweep stale .json.tmp leftovers from the share inbox
-- [ ] RT-2241 Phone share extension: open a shared file URL as a security-scoped resource
-- [ ] RT-2243 Phone: route the share and notify extensions' log lines to the unified log
-- [ ] RT-2244 Phone: read share inbox payloads without following links
-- [ ] RT-2254 Let a tap through after a short sideways flick on the phone tray
-- [ ] RT-2259 Phone: open the app for a share write that straddles the 30 s deadline
-- [ ] RT-2261 Phone share: clear a payload still being written by an earlier share
-- [ ] RT-2262 Phone share: an over-cap file alone must not clear the waiting share
+- [ ] RT-2240 Phone: sweep stale .json.tmp leftovers from the share inbox · release vNext
+- [ ] RT-2241 Phone share extension: open a shared file URL as a security-scoped resource · release vNext
+- [ ] RT-2243 Phone: route the share and notify extensions' log lines to the unified log · release vNext
+- [ ] RT-2244 Phone: read share inbox payloads without following links · release vNext
+- [ ] RT-2254 Let a tap through after a short sideways flick on the phone tray · release vNext
+- [ ] RT-2259 Phone: open the app for a share write that straddles the 30 s deadline · release vNext
+- [ ] RT-2261 Phone share: clear a payload still being written by an earlier share · release vNext
+- [ ] RT-2262 Phone share: an over-cap file alone must not clear the waiting share · release vNext
 
 ## Dashboard, Gates and Linear
 
@@ -793,19 +793,19 @@
 - [ ] RT-2167 Report Claude's 2.1.330 sessions list as an overlay in the chat reader
 - [ ] RT-2168 Read session status while Claude Code's file panel is open
 - [ ] RT-2169 Keep quoted heads-up text from reading as a heads-up overlay
-- [ ] RT-2186 Stop the phone holding fetch toasts it never draws
-- [ ] RT-2191 Say why a tapped folder fails on a host too old to send folders, on the phone
+- [ ] RT-2186 Stop the phone holding fetch toasts it never draws · release vNext
+- [ ] RT-2191 Say why a tapped folder fails on a host too old to send folders, on the phone · release vNext
 - [ ] RT-2192 Open a tapped .html page on the phone
-- [ ] RT-2193 Say why a tapped path failed when the connection closes before its stat answers, on the phone
-- [ ] RT-2196 Spare Claude Code older than 2.1.152 the Settings Warning about MessageDisplay
-- [ ] RT-2198 Recheck instead of showing push off when a grace re-register cannot read its keys
-- [ ] RT-2205 Phone viewer: pan a zoomed image diagonally, not along one axis
-- [ ] RT-2206 gpui fork: count an iOS pinch's first step once
-- [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy
-- [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload
-- [ ] RT-2237 Send the unanswered /btw screen as btw_pending in the desktop Chat spec
-- [ ] RT-2252 Start a .cmd agent whose path holds a space when an argument is quoted
-- [ ] RT-2253 Apply a rewind's fork when other prompts land before its marker
+- [ ] RT-2193 Say why a tapped path failed when the connection closes before its stat answers, on the phone · release vNext
+- [ ] RT-2196 Spare Claude Code older than 2.1.152 the Settings Warning about MessageDisplay · release vNext
+- [ ] RT-2198 Recheck instead of showing push off when a grace re-register cannot read its keys · release vNext
+- [ ] RT-2205 Phone viewer: pan a zoomed image diagonally, not along one axis · release vNext
+- [ ] RT-2206 gpui fork: count an iOS pinch's first step once · release vNext
+- [ ] RT-2208 Chat: a Rewind restore to an earlier copy of a repeated prompt drops from the later copy · release vNext
+- [ ] RT-2209 Chat: record a Rewind restore whose screen repaints late, and keep the drop across a reload · release vNext
+- [ ] RT-2237 Send the unanswered /btw screen as btw_pending in the desktop Chat spec · release vNext
+- [ ] RT-2252 Start a .cmd agent whose path holds a space when an argument is quoted · release vNext
+- [ ] RT-2253 Apply a rewind's fork when other prompts land before its marker · release vNext
 
 ## Design files
 
