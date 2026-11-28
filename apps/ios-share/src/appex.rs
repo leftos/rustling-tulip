@@ -28,8 +28,8 @@ use objc2_foundation::{
 };
 use objc2_ui_kit::{UIApplication, UIResponder, UIViewController};
 use rustling_tulip_ios_share::{
-    Countdown, DEADLINE_SECS, FILE_URL_TYPE, GROUP_FOLDER, GROUP_ID, Inbox, ItemKind, OPEN_APP_URL,
-    TEXT_TYPE, TextKind, URL_TYPE, WriteError, Written, classify, file_type, now_ms,
+    ClearOnce, Countdown, DEADLINE_SECS, FILE_URL_TYPE, GROUP_FOLDER, GROUP_ID, Inbox, ItemKind,
+    OPEN_APP_URL, TEXT_TYPE, TextKind, URL_TYPE, WriteError, Written, classify, file_type, now_ms,
 };
 
 define_class!(
@@ -67,6 +67,7 @@ impl RTShareViewController {
         let pending = Arc::new(Pending {
             countdown: Countdown::new(providers.len()),
             written: Written::default(),
+            cleared: ClearOnce::default(),
             context: MainThreadBound::new(context, self.mtm()),
             controller: MainThreadBound::new(self.retain(), self.mtm()),
         });
@@ -104,11 +105,13 @@ fn start_deadline(pending: &Arc<Pending>) {
     }
 }
 
-/// The request and its [`Countdown`]: it completes once, on the main
-/// thread, opening the app first when an item was [`Written`].
+/// The request, its [`Countdown`] and the [`ClearOnce`] that empties an
+/// earlier share before this share's first write: it completes once, on the
+/// main thread, opening the app first when an item was [`Written`].
 struct Pending {
     countdown: Countdown,
     written: Written,
+    cleared: ClearOnce,
     context: MainThreadBound<Retained<NSExtensionContext>>,
     controller: MainThreadBound<Retained<RTShareViewController>>,
 }
@@ -248,7 +251,7 @@ fn load_file(provider: &NSItemProvider, kind: &str, inbox: Arc<Inbox>, pending: 
                 &inbox,
                 Path::new(&path.to_string()),
                 suggested.as_deref(),
-                &pending.written,
+                &pending,
             );
         } else {
             let why = error.map(|error| error.localizedDescription().to_string());
@@ -266,17 +269,32 @@ fn load_file(provider: &NSItemProvider, kind: &str, inbox: Arc<Inbox>, pending: 
     };
 }
 
+/// Clears an earlier share from the inbox before this share's first write;
+/// a later write clears nothing, so this share's own items are kept.
+fn clear_earlier(inbox: &Inbox, pending: &Pending) {
+    match pending.cleared.clear(inbox) {
+        Ok(Some(removed)) if removed > 0 => {
+            tracing::info!(removed, "share: an earlier pending share is replaced");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "share: the earlier pending share could not be cleared");
+        }
+    }
+}
+
 /// Writes the file at `path` into the inbox, named as its own file name or
-/// else `suggested`, and records it in `written`; a file over the cap is
+/// else `suggested`, and records it in `pending`; a file over the cap is
 /// skipped.
-fn copy_in(inbox: &Inbox, path: &Path, suggested: Option<&str>, written: &Written) {
+fn copy_in(inbox: &Inbox, path: &Path, suggested: Option<&str>, pending: &Pending) {
     let own = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
     let name = own.as_deref().or(suggested).unwrap_or_default();
+    clear_earlier(inbox, pending);
     match inbox.write_file(path, name, now_ms()) {
         Ok(id) => {
-            written.record();
+            pending.written.record();
             tracing::info!(id, "share: a file is in the inbox");
         }
         Err(WriteError::TooLarge(bytes)) => {
@@ -308,7 +326,7 @@ fn load_item(
                     "share: an item answered after the request completed; it is dropped"
                 );
             } else {
-                write_loaded(&inbox, kind, item, error, &pending.written);
+                write_loaded(&inbox, kind, item, error, &pending);
             }
             pending.answer();
         },
@@ -327,13 +345,13 @@ fn load_item(
 
 /// Writes what a load gave, `item`, into the inbox: a file URL's file as a
 /// file item, anything else holding text as a `kind` item, each recorded in
-/// `written`; with no item, `error` says why.
+/// `pending`; with no item, `error` says why.
 fn write_loaded(
     inbox: &Inbox,
     kind: TextKind,
     item: Option<&AnyObject>,
     error: Option<&NSError>,
-    written: &Written,
+    pending: &Pending,
 ) {
     let Some(item) = item else {
         let why = error.map(|error| error.localizedDescription().to_string());
@@ -344,7 +362,7 @@ fn write_loaded(
         && url.isFileURL()
     {
         if let Some(path) = url.path() {
-            copy_in(inbox, Path::new(&path.to_string()), None, written);
+            copy_in(inbox, Path::new(&path.to_string()), None, pending);
         } else {
             tracing::warn!("share: a shared file URL has no path");
         }
@@ -354,9 +372,10 @@ fn write_loaded(
         tracing::warn!("share: a shared link or text holds no string");
         return;
     };
+    clear_earlier(inbox, pending);
     match inbox.write_text(kind, &text, now_ms()) {
         Ok(id) => {
-            written.record();
+            pending.written.record();
             tracing::info!(id, "share: a link or text is in the inbox");
         }
         Err(err) => tracing::warn!(error = %err, "share: a link or text could not be written"),

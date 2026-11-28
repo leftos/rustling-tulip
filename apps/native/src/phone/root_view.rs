@@ -2027,14 +2027,21 @@ impl PhoneRoot {
 }
 
 impl PhoneRoot {
-    /// Reads the share inbox: stale, bad and orphaned files are removed, and
+    /// Reads the share inbox: a sheet or pick whose items a newer share
+    /// replaced is dropped, stale, bad and orphaned files are removed, and
     /// ready items open the share sheet. Nothing while the sheet is open or a
-    /// pick waits; ready items wait for the next read while Settings, the
-    /// viewer, the browser or another sheet is up. With no session to offer
-    /// it marks the inbox waiting, so the next root change reads it again.
+    /// pick waits and its items are still there; ready items wait for the next
+    /// read while Settings, the viewer, the browser or another sheet is up.
+    /// With no session to offer it marks the inbox waiting, so the next root
+    /// change reads it again.
     fn read_inbox(&mut self, cx: &mut Context<Self>) {
         if self.share_inbox.sheet.is_some() || self.share_inbox.pending.is_some() {
-            return;
+            if self.pending_share_survives() {
+                return;
+            }
+            tracing::info!("phone: the pending share was replaced; it is dropped");
+            self.share_inbox.sheet = None;
+            self.share_inbox.pending = None;
         }
         let Some(dir) = self.share_inbox.dir.clone() else {
             return;
@@ -2063,6 +2070,18 @@ impl PhoneRoot {
         let sheet = inbox::ShareSheet::new(scan.ready, rows, &self.share_inbox.last_used);
         self.share_inbox.sheet = Some(sheet);
         cx.notify();
+    }
+
+    /// Whether the open sheet's or the waiting pick's items are all still on
+    /// disk; one gone means a newer share replaced them, so they are dropped
+    /// without anything being removed.
+    fn pending_share_survives(&self) -> bool {
+        let items = match (&self.share_inbox.sheet, &self.share_inbox.pending) {
+            (Some(sheet), _) => sheet.items.as_slice(),
+            (None, Some(pending)) => pending.items.as_slice(),
+            (None, None) => return true,
+        };
+        items.iter().all(|item| item.json_path.exists())
     }
 
     /// Whether something the share sheet waits under is up: Settings, the
@@ -2130,10 +2149,19 @@ impl PhoneRoot {
             .map(inbox::ShareSheet::count_label)
     }
 
-    /// Closes the share sheet; its items stay in the inbox.
+    /// Closes the share sheet, discarding its items: each is removed from the
+    /// inbox, so the app asks again only for a new share.
     fn close_share_sheet(&mut self, cx: &mut Context<Self>) {
-        tracing::debug!("phone: share sheet closed; the items stay");
-        self.share_inbox.sheet = None;
+        let Some(sheet) = self.share_inbox.sheet.take() else {
+            return;
+        };
+        for item in &sheet.items {
+            remove_inbox_item(item);
+        }
+        tracing::info!(
+            count = sheet.items.len(),
+            "phone: share cancelled; its items are removed"
+        );
         cx.notify();
     }
 
@@ -2320,9 +2348,9 @@ impl PhoneRoot {
     }
 
     /// The share sheet over a scrim: "Send to", the item count, then a row
-    /// per session, its bottom clear of `bottom`'s home indicator. A row
-    /// sends the items to its session; a tap on the scrim closes the sheet
-    /// and keeps them. `None` while it is closed.
+    /// per session and a Cancel button, its bottom clear of `bottom`'s home
+    /// indicator. A row sends the items to its session; Cancel or a tap on
+    /// the scrim discards them. `None` while it is closed.
     fn share_layer(&self, bottom: Pixels, cx: &mut Context<Self>) -> Option<Div> {
         let sheet = self.share_inbox.sheet.as_ref()?;
         let t = theme(cx);
@@ -2355,6 +2383,12 @@ impl PhoneRoot {
             .max_h(px(SHARE_ROWS_MAX_HEIGHT))
             .overflow_y_scroll()
             .children(rows);
+        let cancel = Self::sheet_button("phone-share-cancel", ButtonKind::Outlined, cx)
+            .child(SHARE_CANCEL_LABEL)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.close_share_sheet(cx);
+            }));
         let panel = div()
             .id("phone-share-sheet")
             .driver_id(|| "phone-share-sheet".to_owned())
@@ -2371,7 +2405,8 @@ impl PhoneRoot {
             .bg(gpui::rgb(t.raised))
             .child(title)
             .child(count)
-            .child(list);
+            .child(list)
+            .child(cancel);
         Some(
             div()
                 .absolute()
@@ -2422,6 +2457,9 @@ impl PhoneRoot {
 
 /// The share sheet's title.
 const SHARE_TITLE: &str = "Send to";
+
+/// The share sheet's Cancel button label.
+const SHARE_CANCEL_LABEL: &str = "Cancel";
 
 /// Removes `item` from the share inbox, logging a failure.
 fn remove_inbox_item(item: &inbox::Item) {

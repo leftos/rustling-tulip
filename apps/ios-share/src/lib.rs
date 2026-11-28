@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -238,12 +239,38 @@ impl Written {
     }
 }
 
+/// Clears an earlier share from the inbox once: the first item this share
+/// writes clears it, and every later item leaves the inbox alone.
+#[derive(Debug, Default)]
+pub struct ClearOnce(Mutex<bool>);
+
+impl ClearOnce {
+    /// Clears `inbox` of every item an earlier share left, the first time it
+    /// is asked only, and gives how many manifests that removed; `None` on
+    /// every later call, so this share's own items are never cleared.
+    ///
+    /// Every write asks before it writes, and the lock is held across the
+    /// first clear, so a later item of this share's never lands inside it.
+    ///
+    /// # Errors
+    ///
+    /// The inbox's clear error, which the caller logs before it writes its
+    /// item anyway.
+    pub fn clear(&self, inbox: &Inbox) -> io::Result<Option<usize>> {
+        let mut cleared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if *cleared {
+            return Ok(None);
+        }
+        *cleared = true;
+        inbox.clear().map(Some)
+    }
+}
+
 /// Whether a file of `len` bytes is written: at most [`FILE_MAX_BYTES`].
 #[must_use]
 pub fn fits(len: u64) -> bool {
     len <= FILE_MAX_BYTES
 }
-
 /// A fresh item id: a random UUID as 32 lowercase hex digits, one plain
 /// file name.
 #[must_use]
@@ -417,6 +444,55 @@ impl Inbox {
         }
         Ok(())
     }
+
+    /// Removes every item an earlier share left, so the share being written
+    /// is the only one pending; a write still in flight (a `.tmp` file) is
+    /// left alone. Returns how many manifests were removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first file that could not be removed, after removing
+    /// the other files.
+    pub fn clear(&self) -> io::Result<usize> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err),
+        };
+        let mut failure = None;
+        let mut removed = 0;
+        for (path, manifest) in finished_files(entries) {
+            match fs::remove_file(&path) {
+                Ok(()) => removed += usize::from(manifest),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
+            }
+        }
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(removed),
+        }
+    }
+}
+
+/// The files an earlier share left among `entries`, each with whether it is
+/// a manifest: every regular file that is not a `.tmp` write in flight, a
+/// payload before the manifest that names it.
+fn finished_files(entries: fs::ReadDir) -> Vec<(PathBuf, bool)> {
+    let mut files: Vec<(PathBuf, bool)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let extension = path.extension();
+        let write_in_flight = extension.is_some_and(|ext| ext == "tmp");
+        let manifest = extension.is_some_and(|ext| ext == "json");
+        if !write_in_flight && fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+            files.push((path, manifest));
+        }
+    }
+    files.sort_by_key(|(_, manifest)| *manifest);
+    files
 }
 
 /// Copies the file at `source` into a new file at `dest` and flushes it
@@ -731,5 +807,67 @@ mod tests {
         assert_ne!(file, link, "each item has its own id");
         assert_eq!(file.len(), 32);
         assert!(file.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn clear_removes_earlier_items_and_their_payloads() {
+        let dir = TestDir::new("clear");
+        let inbox = Inbox::new(dir.0.clone());
+        let file = inbox
+            .write_with("notes.txt", 3, |payload| fs::write(payload, b"hello"))
+            .expect("write the file item");
+        let text = inbox
+            .write_text(TextKind::Text, "hi", 4)
+            .expect("write the text item");
+
+        let removed = inbox.clear().expect("clear the inbox");
+
+        assert_eq!(removed, 2, "{file} and {text} are removed");
+        assert_eq!(
+            dir.names(),
+            Vec::<String>::new(),
+            "no manifest or payload is left"
+        );
+    }
+
+    #[test]
+    fn clear_leaves_a_write_in_flight() {
+        let dir = TestDir::new("clear-tmp");
+        let inbox = Inbox::new(dir.0.clone());
+        fs::write(dir.0.join("w1.json.tmp"), b"{}").expect("write a tmp manifest");
+
+        let removed = inbox.clear().expect("clear the inbox");
+
+        assert_eq!(removed, 0, "no manifest is removed");
+        assert_eq!(
+            dir.names(),
+            vec!["w1.json.tmp".to_owned()],
+            "the write in flight is left alone"
+        );
+    }
+
+    #[test]
+    fn clear_once_clears_only_the_first_time() {
+        let dir = TestDir::new("clear-once");
+        let inbox = Inbox::new(dir.0.clone());
+        inbox
+            .write_with("notes.txt", 3, |payload| fs::write(payload, b"hello"))
+            .expect("write the earlier file item");
+        let once = ClearOnce::default();
+
+        let first = once.clear(&inbox).expect("the first call clears");
+
+        assert_eq!(first, Some(1), "the earlier item is removed");
+        let own = inbox
+            .write_text(TextKind::Text, "hi", 4)
+            .expect("write this share's item");
+        let second = once.clear(&inbox).expect("a later call does not fail");
+
+        assert_eq!(second, None, "a later call clears nothing");
+        assert_eq!(
+            dir.names(),
+            vec![format!("{own}.json")],
+            "this share's own item is left alone"
+        );
     }
 }

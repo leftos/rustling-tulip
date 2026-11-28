@@ -446,7 +446,7 @@ fn a_shared_file_over_the_cap_is_removed_with_the_too_large_toast(cx: &mut TestA
 }
 
 #[gpui::test]
-fn closing_the_sheet_keeps_the_items(cx: &mut TestAppContext) {
+fn a_tap_outside_the_sheet_discards_the_shared_items(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     share_file(&dir, "f1", "notes.txt", b"hello");
     let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
@@ -458,13 +458,42 @@ fn closing_the_sheet_keeps_the_items(cx: &mut TestAppContext) {
     assert_eq!(sheet_rows(&mut h), None, "the sheet closes");
     assert!(!drawn(&mut h, "phone-share-sheet"));
     assert!(
-        kept(&dir, "f1.json") && kept(&dir, "f1.bin"),
-        "the item stays"
+        !kept(&dir, "f1.json") && !kept(&dir, "f1.bin"),
+        "the items are discarded"
     );
     assert!(
         uploads_in(&h.host(&saved_remote()).sent()).is_empty(),
         "nothing goes up"
     );
+    foreground(&mut h);
+    assert_eq!(sheet_rows(&mut h), None, "the app does not ask again");
+    assert!(!drawn(&mut h, "phone-share-sheet"));
+}
+
+#[gpui::test]
+fn cancel_discards_the_shared_items_and_the_app_does_not_ask_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    share_file(&dir, "f1", "notes.txt", b"hello");
+    share_text(&dir, "t1", "text", "hi", 1);
+    let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    foreground(&mut h);
+    assert!(drawn(&mut h, "phone-share-sheet"), "the sheet shows");
+
+    h.click_on("phone-share-cancel");
+
+    assert_eq!(sheet_rows(&mut h), None, "the sheet closes");
+    assert!(!drawn(&mut h, "phone-share-sheet"));
+    assert!(
+        !kept(&dir, "f1.json") && !kept(&dir, "f1.bin") && !kept(&dir, "t1.json"),
+        "the inbox holds no manifest left"
+    );
+    assert!(
+        uploads_in(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing goes up"
+    );
+    foreground(&mut h);
+    assert_eq!(sheet_rows(&mut h), None, "the app does not ask again");
+    assert!(!drawn(&mut h, "phone-share-sheet"));
 }
 
 #[gpui::test]
@@ -507,6 +536,36 @@ fn a_second_foreground_with_the_sheet_open_adds_no_rows(cx: &mut TestAppContext)
         Some("1 item"),
         "the open sheet takes no new items"
     );
+}
+
+#[gpui::test]
+fn a_new_share_replaces_the_sheet_already_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    share_file(&dir, "a1", "first.txt", b"one");
+    share_text(&dir, "a2", "text", "hello", 1);
+    let mut h = open_phone(cx, &dir, &[FEATURE_UPLOAD_FILE]);
+    foreground(&mut h);
+    assert_eq!(
+        phone(&mut h, PhoneRoot::share_sheet_count).as_deref(),
+        Some("2 items"),
+        "the first share's sheet shows"
+    );
+
+    // The extension replaces the pending share: its files go, the new
+    // share's arrive.
+    for name in ["a1.json", "a1.bin", "a2.json"] {
+        std::fs::remove_file(inbox(&dir).join(name)).expect("remove the earlier share's file");
+    }
+    share_file(&dir, "b1", "second.txt", b"two");
+
+    foreground(&mut h);
+
+    assert_eq!(
+        phone(&mut h, PhoneRoot::share_sheet_count).as_deref(),
+        Some("1 item"),
+        "the sheet holds the new share alone"
+    );
+    assert!(drawn(&mut h, "phone-share-sheet"));
 }
 
 #[gpui::test]
